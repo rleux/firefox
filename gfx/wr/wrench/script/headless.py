@@ -5,11 +5,11 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 # Build and run wrench with off-screen software rendering (OSMesa/LLVMpipe)
-# for platform-independent results. This is good for running reference tests.
+# for platform-independent results, or the experimental HAL/Vulkan bootstrap.
 #
 # Usage: headless.py ARGS
 #
-# Pass ARGS through to wrench, after '--headless' and '--no-scissor'.
+# Pass ARGS through to wrench, after '--headless' and, for GL, '--no-scissor'.
 #
 # Environment variables:
 #
@@ -18,6 +18,9 @@
 #     for running a cross-compiled wrench.
 #
 # CARGOFLAGS: Extra flags to be passed to 'cargo build'. Split on whitespace.
+#
+# WRENCH_VULKAN_ICD: Optional ICD manifest for '--backend hal'. Overrides
+#     VK_DRIVER_FILES. Without it, the Vulkan loader's selection is retained.
 #
 # OPTIMIZED: This script uses the release build by default, but if this variable
 #     is set to '0' or 'false', the script uses the debug build.
@@ -33,6 +36,7 @@
 
 from __future__ import print_function
 import contextlib
+import argparse
 import os
 import subprocess
 import sys
@@ -123,6 +127,20 @@ def set_osmesa_env(bin_path):
 extra_flags = os.getenv('CARGOFLAGS', None)
 extra_flags = extra_flags.split(' ') if extra_flags else []
 
+backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+backend_parser.add_argument('--backend', choices=('gl', 'hal'), default='gl')
+backend_parser.add_argument('--hal-backend', choices=('vulkan',))
+backend_args, _ = backend_parser.parse_known_args()
+use_hal = backend_args.backend == 'hal'
+if backend_args.hal_backend and not use_hal:
+    backend_parser.error('--hal-backend requires --backend hal')
+if use_hal:
+    icd = os.getenv('WRENCH_VULKAN_ICD')
+    if icd:
+        if not path.isfile(icd):
+            sys.exit('WRENCH_VULKAN_ICD must name an existing ICD manifest')
+        os.environ['VK_DRIVER_FILES'] = path.abspath(icd)
+
 wrench_headless_target = os.getenv('WRENCH_HEADLESS_TARGET', None)
 
 if wrench_headless_target:
@@ -139,7 +157,7 @@ else:
 # This environment variable is used to point to the location of a cross-compiled
 # wrench for the CI on some platforms.
 if not wrench_headless_target:
-    build_cmd = ['cargo', 'build'] + extra_flags + ['--verbose', '--features', 'headless']
+    build_cmd = ['cargo', 'build'] + extra_flags + ['--verbose', '--features', 'hal-vulkan' if use_hal else 'headless']
     if optimized_build():
         build_cmd += ['--release']
     subprocess.check_call(build_cmd)
@@ -153,12 +171,14 @@ elif debugger():
     print("Unknown debugger: " + debugger())
     sys.exit(1)
 
-set_osmesa_env(target_folder)
+if not use_hal:
+    set_osmesa_env(target_folder)
 # TODO(gw): We have an occasional accuracy issue or bug (could be WR or OSMesa)
 #           where the output of a previous test that uses intermediate targets can
 #           cause 1.0 / 255.0 pixel differences in a subsequent test. For now, we
 #           run tests with no-scissor mode, which ensures a complete target clear
 #           between test runs. But we should investigate this further...
-cmd = dbg_cmd + [target_folder + 'wrench', '--no-scissor', '--headless'] + sys.argv[1:]
+headless_flags = ['--headless'] if use_hal else ['--no-scissor', '--headless']
+cmd = dbg_cmd + [target_folder + 'wrench'] + headless_flags + sys.argv[1:]
 print('Running: `' + ' '.join(cmd) + '`')
 subprocess.check_call(cmd, stderr=subprocess.STDOUT)

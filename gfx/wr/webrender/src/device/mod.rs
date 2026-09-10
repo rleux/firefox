@@ -4,6 +4,8 @@
 
 mod common;
 mod gl;
+#[cfg(feature = "hal")]
+pub mod hal;
 pub mod query_gl;
 
 pub use self::common::*;

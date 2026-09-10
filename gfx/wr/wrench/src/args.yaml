@@ -4,6 +4,28 @@ author: Vladimir Vukicevic <vladimir@pobox.com>
 about: WebRender testing and debugging utility
 
 args:
+  - backend:
+      long: backend
+      takes_value: true
+      possible_values: [gl, hal]
+      default_value: gl
+      global: true
+      help: Select the GL renderer or experimental HAL bootstrap
+  - hal_backend:
+      long: hal-backend
+      takes_value: true
+      possible_values: [vulkan]
+      global: true
+      help: Select the HAL graphics API (currently Vulkan)
+  - hal_adapter:
+      long: hal-adapter
+      takes_value: true
+      global: true
+      help: Select exactly one HAL adapter by name substring
+  - hal_validation:
+      long: hal-validation
+      global: true
+      help: Require the Vulkan validation layer
   - precache:
       short: c
       long: precache
@@ -88,6 +110,8 @@ args:
       help: A string describing what to show on in the profiler HUD (See https://github.com/servo/webrender/wiki/Debugging-WebRender#anchor_6).
 
 subcommands:
+    - test_hal:
+        about: Check HAL color/depth readback and same-device native-image ownership
     - png:
         about: render frame described by YAML and save it to a png file
         args:
