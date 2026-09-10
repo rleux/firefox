@@ -328,9 +328,43 @@ impl Default for WebRenderOptions {
 pub fn create_webrender_instance(
     gl: Rc<dyn gl::Gl>,
     notifier: Box<dyn RenderNotifier>,
-    mut options: WebRenderOptions,
+    options: WebRenderOptions,
     shaders: Option<&SharedShaders>,
 ) -> Result<(Renderer, RenderApiSender), RendererError> {
+    create_webrender_instance_with_device(
+        |options| {
+            Ok(Device::new(
+                gl,
+                DeviceOptions {
+                crash_annotator: options.crash_annotator.clone(),
+                resource_override_path: options.resource_override_path.clone(),
+                use_optimized_shaders: options.use_optimized_shaders,
+                upload_method: options.upload_method.clone(),
+                batched_upload_threshold: options.batched_upload_threshold,
+                cached_programs: options.cached_programs.take(),
+                allow_texture_storage_support: options.allow_texture_storage_support,
+                allow_texture_swizzling: options.allow_texture_swizzling,
+                dump_shader_source: options.dump_shader_source.take(),
+                surface_origin_is_top_left: options.surface_origin_is_top_left,
+                panic_on_gl_error: options.panic_on_gl_error,
+            }
+            ))
+        },
+        notifier,
+        options,
+        shaders,
+    )
+}
+
+fn create_webrender_instance_with_device<F>(
+    create_device: F,
+    notifier: Box<dyn RenderNotifier>,
+    mut options: WebRenderOptions,
+    shaders: Option<&SharedShaders>,
+) -> Result<(Renderer, RenderApiSender), RendererError>
+where
+    F: FnOnce(&mut WebRenderOptions) -> Result<Device, RendererError>,
+{
     if !wr_has_been_initialized() {
         // If the tracy feature is enabled, try to load the shared library
         // if the path was provided.
@@ -360,22 +394,7 @@ pub fn create_webrender_instance(
     // the result channel is created here, since the renderer owns its rx end.
     let (result_tx, result_rx) = unbounded_channel();
 
-    let mut device = Device::new(
-        gl,
-        DeviceOptions {
-            crash_annotator: options.crash_annotator.clone(),
-            resource_override_path: options.resource_override_path.clone(),
-            use_optimized_shaders: options.use_optimized_shaders,
-            upload_method: options.upload_method.clone(),
-            batched_upload_threshold: options.batched_upload_threshold,
-            cached_programs: options.cached_programs.take(),
-            allow_texture_storage_support: options.allow_texture_storage_support,
-            allow_texture_swizzling: options.allow_texture_swizzling,
-            dump_shader_source: options.dump_shader_source.take(),
-            surface_origin_is_top_left: options.surface_origin_is_top_left,
-            panic_on_gl_error: options.panic_on_gl_error,
-        },
-    );
+    let mut device = create_device(&mut options)?;
 
     let color_cache_formats = device.preferred_color_formats();
     let swizzle_settings = device.swizzle_settings();

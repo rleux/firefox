@@ -8,24 +8,13 @@ use std::rc::Rc;
 
 use crate::device::GpuFrameId;
 use crate::profiler::GpuProfileTag;
+pub use super::common::{GpuSampler, GpuTimer};
 
 #[derive(Copy, Clone, Debug)]
 pub enum GpuDebugMethod {
     None,
     MarkerEXT,
     KHR,
-}
-
-#[derive(Debug, Clone)]
-pub struct GpuTimer {
-    pub tag: GpuProfileTag,
-    pub time_ns: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct GpuSampler {
-    pub tag: GpuProfileTag,
-    pub count: u64,
 }
 
 pub struct QuerySet<T> {
