@@ -23,6 +23,7 @@ mod blob;
 #[cfg(target_os = "windows")]
 mod composite;
 mod egl;
+mod hal;
 mod parse_function;
 mod perf;
 mod png;
@@ -1519,6 +1520,12 @@ pub fn main() {
     }
 
     let args = parse_args();
+    if let Some(exit_code) = hal::dispatch(&args) {
+        if exit_code != 0 {
+            process::exit(exit_code);
+        }
+        return;
+    }
     let exit_code = if args.is_present("headless") {
         run_headless(args)
     } else {
@@ -1577,13 +1584,20 @@ fn android_main(app: AndroidApp) {
         });
     }
 
+    let args = parse_args();
+    if let Some(exit_code) = hal::dispatch(&args) {
+        if exit_code != 0 {
+            process::exit(exit_code);
+        }
+        return;
+    }
+
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoop::builder()
         .with_android_app(app)
         .build()
         .expect("failed to create event loop");
 
-    let args = parse_args();
     let exit_code = run(event_loop, args);
     process::exit(exit_code);
 }

@@ -234,6 +234,8 @@ pub use crate::composite::{MappableCompositor, MappedTileInfo, SWGLCompositeSurf
 pub use crate::device::{UploadMethod, VertexUsageHint, get_unoptimized_shader_source};
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, ShaderError};
 pub use crate::device::{Device, DeviceOptions, GraphicsApi, GraphicsApiInfo};
+#[cfg(feature = "hal")]
+pub use crate::device::hal;
 pub use crate::profiler::{ProfilerHooks, set_profiler_hooks};
 pub use crate::renderer::{
     CpuProfile, DebugFlags, GpuProfile,
