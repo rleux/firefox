@@ -18,7 +18,7 @@ use webrender::api::*;
 use webrender::render_api::*;
 use webrender::api::units::*;
 use webrender::api::FillRule;
-use crate::wrench::{FontDescriptor, FontInstanceDescriptor, Wrench, WrenchThing, DisplayList};
+use crate::wrench::{FontDescriptor, FontInstanceDescriptor, Wrench, WrenchThing, DisplayList, SceneRenderer};
 use crate::yaml_helper::{StringEnum, YamlHelper, make_perspective};
 use yaml_rust::{Yaml, YamlLoader};
 use crate::PLATFORM_DEFAULT_FACE_NAME;
@@ -438,7 +438,7 @@ impl YamlFrameReader {
     // Fonts are not torn down here: they live on `Wrench` so that an identical
     // font keeps its instance key across yaml files, which is what lets content
     // interning dedup a run that two files share.
-    pub fn deinit(self, _wrench: &mut Wrench) {
+    pub fn deinit<R: SceneRenderer>(self, _wrench: &mut Wrench<R>) {
     }
 
     fn top_space(&self) -> SpatialId {
@@ -492,7 +492,7 @@ impl YamlFrameReader {
         }
     }
 
-    fn build(&mut self, wrench: &mut Wrench) {
+    fn build<R: SceneRenderer>(&mut self, wrench: &mut Wrench<R>) {
         let yaml = YamlLoader::load_from_str(&self.yaml_string)
             .map(|mut yaml| {
                 assert_eq!(yaml.len(), 1);
@@ -544,13 +544,16 @@ impl YamlFrameReader {
         // If replaying the same frame during interactive use, the frame gets rebuilt,
         // but the external image handler has already been consumed by the renderer.
         if let Some(external_image_handler) = self.external_image_handler.take() {
-            wrench.renderer.set_external_image_handler(external_image_handler);
+            if wrench.renderer.gl_device().is_some() || !external_image_handler.texture_ids.is_empty() {
+                wrench.renderer.install_external_images(external_image_handler)
+                    .expect("External images are unavailable for the selected backend");
+            }
         }
     }
 
-    fn build_pipeline(
+    fn build_pipeline<R: SceneRenderer>(
         &mut self,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         builder: &mut DisplayListBuilder,
         pipeline_id: PipelineId,
         send_transaction: bool,
@@ -711,12 +714,12 @@ impl YamlFrameReader {
 
     }
 
-    fn add_or_get_image(
+    fn add_or_get_image<R: SceneRenderer>(
         &mut self,
         file: &Path,
         tiling: Option<i64>,
         item: &Yaml,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
     ) -> (ImageKey, LayoutSize) {
         let key = (file.to_owned(), tiling);
         if let Some(k) = self.image_map.get(&key) {
@@ -887,7 +890,7 @@ impl YamlFrameReader {
         val
     }
 
-    fn get_or_create_font(&mut self, desc: FontDescriptor, wrench: &mut Wrench) -> FontKey {
+    fn get_or_create_font<R: SceneRenderer>(&mut self, desc: FontDescriptor, wrench: &mut Wrench<R>) -> FontKey {
         let list_resources = self.list_resources;
         wrench.get_or_create_font(desc, |wrench, desc| match *desc {
             FontDescriptor::Path {
@@ -923,13 +926,13 @@ impl YamlFrameReader {
         self.font_render_mode = render_mode;
     }
 
-    fn get_or_create_font_instance(
+    fn get_or_create_font_instance<R: SceneRenderer>(
         &mut self,
         font_key: FontKey,
         size: f32,
         flags: FontInstanceFlags,
         synthetic_italics: SyntheticItalics,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
     ) -> FontInstanceKey {
         wrench.get_or_create_font_instance(FontInstanceDescriptor {
             font_key,
@@ -940,7 +943,7 @@ impl YamlFrameReader {
         })
     }
 
-    fn as_image_mask(&mut self, item: &Yaml, wrench: &mut Wrench) -> Option<ImageMask> {
+    fn as_image_mask<R: SceneRenderer>(&mut self, item: &Yaml, wrench: &mut Wrench<R>) -> Option<ImageMask> {
         item.as_hash()?;
 
         let tiling = item["tile-size"].as_i64();
@@ -1156,10 +1159,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_border(
+    fn handle_border<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1401,10 +1404,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_yuv_image(
+    fn handle_yuv_image<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1498,10 +1501,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_image(
+    fn handle_image<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1575,10 +1578,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_text(
+    fn handle_text<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1736,10 +1739,10 @@ impl YamlFrameReader {
         item["type"].as_str().unwrap_or("unknown")
     }
 
-    fn add_display_list_items_from_yaml(
+    fn add_display_list_items_from_yaml<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml_items: &[Yaml],
     ) {
         // A very large number (but safely far away from finite limits of f32)
@@ -1816,10 +1819,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_scroll_frame(
+    fn handle_scroll_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let clip_rect = yaml["bounds"]
@@ -1893,10 +1896,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_sticky_frame(
+    fn handle_sticky_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let bounds = yaml["bounds"].as_rect().expect("sticky frame must have a bounds");
@@ -2011,7 +2014,7 @@ impl YamlFrameReader {
         self.add_clip_chain_id_mapping(numeric_id as u64, real_id);
     }
 
-    fn handle_clip(&mut self, dl: &mut DisplayListBuilder, wrench: &mut Wrench, yaml: &Yaml) {
+    fn handle_clip<R: SceneRenderer>(&mut self, dl: &mut DisplayListBuilder, wrench: &mut Wrench<R>, yaml: &Yaml) {
         let numeric_id = yaml["id"].as_i64();
         let spatial_id = self.top_space();
         let complex_clips = yaml["complex"].as_complex_clip_regions();
@@ -2138,10 +2141,10 @@ impl YamlFrameReader {
         reference_frame_id
     }
 
-    fn handle_reference_frame(
+    fn handle_reference_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let default_bounds = || LayoutRect::from_size(wrench.window_size_f32());
@@ -2184,10 +2187,10 @@ impl YamlFrameReader {
         reference_frame_id
     }
 
-    fn handle_computed_frame(
+    fn handle_computed_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let default_bounds = || LayoutRect::from_size(wrench.window_size_f32());
@@ -2202,10 +2205,10 @@ impl YamlFrameReader {
         dl.pop_reference_frame();
     }
 
-    fn add_stacking_context_from_yaml(
+    fn add_stacking_context_from_yaml<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
         IsRoot(is_root): IsRoot,
         info: &mut CommonItemProperties,
@@ -2349,8 +2352,8 @@ impl YamlFrameReader {
     }
 }
 
-impl WrenchThing for YamlFrameReader {
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+impl YamlFrameReader {
+    pub fn build_frame<R: SceneRenderer>(&mut self, wrench: &mut Wrench<R>) -> u32 {
         let mut should_build_yaml = false;
 
         // If YAML isn't read yet, or watching source file, reload from disk.
@@ -2385,6 +2388,13 @@ impl WrenchThing for YamlFrameReader {
         }
 
         self.frame_count
+    }
+
+ }
+
+impl WrenchThing for YamlFrameReader {
+    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+        YamlFrameReader::build_frame(self, wrench)
     }
 
     fn next_frame(&mut self) {

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::submission::{Submission, SubmissionQueue};
 use std::cell::Cell;
 use std::rc::Rc;
 use api::{ImageFormat, units::DeviceIntRect};
@@ -11,6 +12,7 @@ pub(super) struct Owned<A: hal::Api, T> {
     owner: Rc<Device<A>>,
     raw: Option<T>,
     destroy: unsafe fn(&A::Device, T),
+    memory: Option<(bool, u64)>,
 }
 
 impl<A: hal::Api, T> Owned<A, T> {
@@ -19,7 +21,21 @@ impl<A: hal::Api, T> Owned<A, T> {
             owner: owner.clone(),
             raw: Some(raw),
             destroy,
+            memory: None,
         }
+    }
+    fn accounted(mut self, texture: bool, bytes: u64) -> Self {
+        let mut memory = self.owner.memory.get();
+        if texture {
+            memory.textures += 1;
+            memory.texture_bytes += bytes;
+        } else {
+            memory.buffers += 1;
+            memory.buffer_bytes += bytes;
+        }
+        self.owner.memory.set(memory);
+        self.memory = Some((texture, bytes));
+        self
     }
 }
 impl<A: hal::Api, T> Deref for Owned<A, T> {
@@ -31,18 +47,33 @@ impl<A: hal::Api, T> Deref for Owned<A, T> {
 impl<A: hal::Api, T> Drop for Owned<A, T> {
     fn drop(&mut self) {
         unsafe { (self.destroy)(&self.owner.open.device, self.raw.take().unwrap()) }
+        if let Some((texture, bytes)) = self.memory {
+            let mut memory = self.owner.memory.get();
+            if texture {
+                memory.textures -= 1;
+                memory.texture_bytes -= bytes;
+            } else {
+                memory.buffers -= 1;
+                memory.buffer_bytes -= bytes;
+            }
+            self.owner.memory.set(memory);
+        }
     }
 }
 
 pub(super) struct Buffer<A: hal::Api> {
     pub raw: Owned<A, A::Buffer>,
     pub size: u64,
+    pub allocation_id: u64,
+    pub usage: wgt::BufferUses,
+    used_size: Cell<u64>,
     state: Cell<wgt::BufferUses>,
+    committed_state: Cell<wgt::BufferUses>,
 }
 
 impl<A: hal::Api> Buffer<A> {
-    pub fn new(owner: &Rc<Device<A>>, bytes: &[u8], usage: wgt::BufferUses) -> Result<Self> {
-        let size = (bytes.len() as u64).max(4);
+    pub fn new(owner: &Rc<Device<A>>, bytes: &[u8], usage: wgt::BufferUses) -> Result<Rc<Self>> {
+        let size = (bytes.len() as u64).max(4).next_power_of_two();
         if size > owner.capabilities.limits.max_buffer_size {
             return Err("HAL buffer exceeds device limit".into());
         }
@@ -56,7 +87,7 @@ impl<A: hal::Api> Buffer<A> {
             })
         }
         .map_err(|e| format!("Creating buffer: {e:?}"))?;
-        let raw = Owned::new(owner, raw, A::Device::destroy_buffer);
+        let raw = Owned::new(owner, raw, A::Device::destroy_buffer).accounted(false, size);
         unsafe {
             let mapping = device
                 .map_buffer(&raw, 0..size)
@@ -68,37 +99,115 @@ impl<A: hal::Api> Buffer<A> {
             }
             device.unmap_buffer(&raw);
         }
-        Ok(Self {
+        let allocation_id = owner.next_texture_id.get();
+        owner.next_texture_id.set(
+            allocation_id
+                .checked_add(1)
+                .ok_or("HAL buffer identity overflow")?,
+        );
+        Ok(Rc::new(Self {
+            allocation_id,
             raw,
             size,
+            usage: usage | wgt::BufferUses::MAP_WRITE,
+            used_size: Cell::new((bytes.len() as u64).max(4)),
             state: Cell::new(wgt::BufferUses::MAP_WRITE),
-        })
+            committed_state: Cell::new(wgt::BufferUses::MAP_WRITE),
+        }))
     }
 
-    pub fn transition(&self, encoder: &mut A::CommandEncoder, to: wgt::BufferUses) {
+    pub fn readback(owner: &Rc<Device<A>>, layout: &ReadbackLayout) -> Result<Rc<Self>> {
+        let raw = unsafe {
+            owner.open.device.create_buffer(&hal::BufferDescriptor {
+                label: Some("WR readback"),
+                size: layout.size,
+                usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::MAP_READ,
+                memory_flags: hal::MemoryFlags::PREFER_COHERENT,
+            })
+        }
+        .map_err(|e| format!("Creating readback: {e:?}"))?;
+        let allocation_id = owner.next_texture_id.get();
+        owner.next_texture_id.set(
+            allocation_id
+                .checked_add(1)
+                .ok_or("HAL buffer identity overflow")?,
+        );
+        Ok(Rc::new(Self {
+            allocation_id,
+            raw: Owned::new(owner, raw, A::Device::destroy_buffer).accounted(false, layout.size),
+            size: layout.size,
+            usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::MAP_READ,
+            used_size: Cell::new(layout.size),
+            state: Cell::new(wgt::BufferUses::COPY_DST),
+            committed_state: Cell::new(wgt::BufferUses::COPY_DST),
+        }))
+    }
+
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() as u64 > self.size {
+            return Err("HAL pooled buffer is too small".into());
+        }
+        let device = &self.raw.owner.open.device;
+        unsafe {
+            let mapping = device
+                .map_buffer(&self.raw, 0..self.size)
+                .map_err(|e| format!("Mapping pooled upload: {e:?}"))?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
+            if !mapping.is_coherent {
+                device.flush_mapped_ranges(&self.raw, std::iter::once(0..self.size));
+            }
+            device.unmap_buffer(&self.raw);
+        }
+        self.used_size.set((bytes.len() as u64).max(4));
+        self.state.set(wgt::BufferUses::MAP_WRITE);
+        self.committed_state.set(wgt::BufferUses::MAP_WRITE);
+        Ok(())
+    }
+
+    pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::BufferUses) {
+        commands.keep(self.clone());
+        let resource = self.clone();
+        commands.commit(move || resource.committed_state.set(to));
         let from = self.state.replace(to);
         if from != to {
             unsafe {
-                encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
-                    buffer: &*self.raw,
-                    usage: hal::StateTransition { from, to },
-                }))
+                commands
+                    .encoder()
+                    .transition_buffers(std::iter::once(hal::BufferBarrier {
+                        buffer: &*self.raw,
+                        usage: hal::StateTransition { from, to },
+                    }))
             }
         }
     }
     pub fn binding(&self) -> hal::BufferBinding<'_, A::Buffer> {
-        hal::BufferBinding::new_unchecked(&*self.raw, 0, std::num::NonZeroU64::new(self.size))
+        hal::BufferBinding::new_unchecked(
+            &*self.raw,
+            0,
+            std::num::NonZeroU64::new(self.used_size.get()),
+        )
     }
+}
+
+struct TextureState {
+    usage: Cell<wgt::TextureUses>,
+    committed: Cell<wgt::TextureUses>,
+    initialized: Cell<bool>,
+    committed_initialized: Cell<bool>,
 }
 
 pub(super) struct Texture<A: hal::Api> {
     pub view: Owned<A, A::TextureView>,
     pub target: Option<Owned<A, A::TextureView>>,
-    pub raw: Owned<A, A::Texture>,
+    pub raw: Rc<Owned<A, A::Texture>>,
     pub size: wgt::Extent3d,
     pub format: wgt::TextureFormat,
     pub filter: crate::device::TextureFilter,
-    pub state: Cell<wgt::TextureUses>,
+    pub allocation_id: u64,
+    pub transient: Cell<bool>,
+    pub base_mip: u32,
+    pub mip_count: u32,
+    states: Rc<Vec<TextureState>>,
 }
 
 pub(super) fn texture_format(format: ImageFormat) -> Result<wgt::TextureFormat> {
@@ -106,15 +215,19 @@ pub(super) fn texture_format(format: ImageFormat) -> Result<wgt::TextureFormat> 
         ImageFormat::RGBA8 => wgt::TextureFormat::Rgba8Unorm,
         ImageFormat::BGRA8 => wgt::TextureFormat::Bgra8Unorm,
         ImageFormat::R8 => wgt::TextureFormat::R8Unorm,
+        ImageFormat::RG8 => wgt::TextureFormat::Rg8Unorm,
+        ImageFormat::R16 => wgt::TextureFormat::R16Unorm,
+        ImageFormat::RG16 => wgt::TextureFormat::Rg16Unorm,
         ImageFormat::RGBAF32 => wgt::TextureFormat::Rgba32Float,
         ImageFormat::RGBAI32 => wgt::TextureFormat::Rgba32Sint,
-        _ => return Err(format!("Unsupported HAL image format {format:?}")),
     })
 }
 
 pub(super) fn bytes_per_pixel(format: wgt::TextureFormat) -> usize {
     match format {
         wgt::TextureFormat::R8Unorm => 1,
+        wgt::TextureFormat::Rg8Unorm | wgt::TextureFormat::R16Unorm => 2,
+        wgt::TextureFormat::Rg16Unorm => 4,
         wgt::TextureFormat::Rgba32Float | wgt::TextureFormat::Rgba32Sint => 16,
         _ => 4,
     }
@@ -130,9 +243,15 @@ impl<A: hal::Api> Texture<A> {
         renderable: bool,
     ) -> Result<Rc<Self>> {
         owner.layout(width, height)?;
-        if filter == crate::device::TextureFilter::Trilinear {
-            return Err("HAL mipmaps are not implemented".into());
+        if !owner.features.contains(format.required_features()) {
+            return Err(format!("HAL device lacks features for {format:?}"));
         }
+        let mip_count = if filter == crate::device::TextureFilter::Trilinear {
+            32 - width.max(height).leading_zeros()
+        } else {
+            1
+        };
+        let renderable = renderable || mip_count > 1;
         let depth = format == wgt::TextureFormat::Depth32Float;
         let target_usage = if depth {
             wgt::TextureUses::DEPTH_STENCIL_WRITE
@@ -159,7 +278,7 @@ impl<A: hal::Api> Texture<A> {
                     | hal::TextureFormatCapabilities::COLOR_ATTACHMENT_BLEND
             };
         }
-        if filter == crate::device::TextureFilter::Linear {
+        if filter != crate::device::TextureFilter::Nearest {
             required |= hal::TextureFormatCapabilities::SAMPLED_LINEAR;
         }
         let caps = owner
@@ -179,10 +298,20 @@ impl<A: hal::Api> Texture<A> {
             depth_or_array_layers: 1,
         };
         let device = &owner.open.device;
-        let raw = unsafe { device.create_texture(&texture_descriptor(size, format, usage)) }
+        let mut descriptor = texture_descriptor(size, format, usage);
+        descriptor.mip_level_count = mip_count;
+        let raw = unsafe { device.create_texture(&descriptor) }
             .map_err(|e| format!("Creating {format:?} texture: {e:?}"))?;
-        let raw = Owned::new(owner, raw, A::Device::destroy_texture);
-        let view = |usage| -> Result<_> {
+        let bytes = (0..mip_count)
+            .map(|level| {
+                u64::from((width >> level).max(1))
+                    * u64::from((height >> level).max(1))
+                    * bytes_per_pixel(format) as u64
+            })
+            .sum();
+        let raw =
+            Rc::new(Owned::new(owner, raw, A::Device::destroy_texture).accounted(true, bytes));
+        let view = |usage, levels| -> Result<_> {
             let raw_view = unsafe {
                 device.create_texture_view(
                     &raw,
@@ -191,44 +320,200 @@ impl<A: hal::Api> Texture<A> {
                         format,
                         dimension: wgt::TextureViewDimension::D2,
                         usage,
-                        range: wgt::ImageSubresourceRange::default(),
+                        range: wgt::ImageSubresourceRange {
+                            mip_level_count: Some(levels),
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        },
                     },
                 )
             }
             .map_err(|e| format!("Creating view: {e:?}"))?;
             Ok(Owned::new(owner, raw_view, A::Device::destroy_texture_view))
         };
-        let sample_view = view(if depth {
-            target_usage
-        } else {
-            wgt::TextureUses::RESOURCE
-        })?;
+        let sample_view = view(
+            if depth {
+                target_usage
+            } else {
+                wgt::TextureUses::RESOURCE
+            },
+            mip_count,
+        )?;
         let target = if renderable {
-            Some(view(target_usage)?)
+            Some(view(target_usage, 1)?)
         } else {
             None
         };
+        let allocation_id = owner.next_texture_id.get();
+        owner.next_texture_id.set(
+            allocation_id
+                .checked_add(1)
+                .ok_or("HAL texture identity overflow")?,
+        );
         Ok(Rc::new(Self {
+            allocation_id,
+            transient: Cell::new(false),
             view: sample_view,
             target,
             raw,
             size,
             format,
             filter,
-            state: Cell::new(wgt::TextureUses::UNINITIALIZED),
+            base_mip: 0,
+            mip_count,
+            states: Rc::new(
+                (0..mip_count)
+                    .map(|_| TextureState {
+                        usage: Cell::new(wgt::TextureUses::UNINITIALIZED),
+                        committed: Cell::new(wgt::TextureUses::UNINITIALIZED),
+                        initialized: Cell::new(false),
+                        committed_initialized: Cell::new(false),
+                    })
+                    .collect(),
+            ),
         }))
     }
 
-    pub fn transition(&self, encoder: &mut A::CommandEncoder, to: wgt::TextureUses) {
-        let from = self.state.replace(to);
-        if from != to {
-            unsafe { encoder.transition_textures(std::iter::once(barrier(&*self.raw, from, to))) }
+    pub fn mip_view(self: &Rc<Self>, level: u32) -> Result<Rc<Self>> {
+        if self.target.is_none() {
+            return Err("HAL mip views require renderable texture storage".into());
+        }
+        if level >= self.mip_count {
+            return Err("Invalid HAL mip view".into());
+        }
+        let base_mip = self.base_mip + level;
+        let owner = &self.raw.owner;
+        let view = |usage| {
+            let raw = unsafe {
+                owner.open.device.create_texture_view(
+                    &self.raw,
+                    &hal::TextureViewDescriptor {
+                        label: Some("WR mip view"),
+                        format: self.format,
+                        dimension: wgt::TextureViewDimension::D2,
+                        usage,
+                        range: wgt::ImageSubresourceRange {
+                            base_mip_level: base_mip,
+                            mip_level_count: Some(1),
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        },
+                    },
+                )
+            }
+            .map_err(|e| format!("Creating mip view: {e:?}"))?;
+            Ok::<_, String>(Owned::new(owner, raw, A::Device::destroy_texture_view))
+        };
+        Ok(Rc::new(Self {
+            view: view(wgt::TextureUses::RESOURCE)?,
+            target: Some(view(wgt::TextureUses::COLOR_TARGET)?),
+            raw: self.raw.clone(),
+            size: wgt::Extent3d {
+                width: (self.size.width >> level).max(1),
+                height: (self.size.height >> level).max(1),
+                depth_or_array_layers: 1,
+            },
+            format: self.format,
+            filter: crate::device::TextureFilter::Linear,
+            allocation_id: self.allocation_id,
+            transient: Cell::new(self.transient.get()),
+            base_mip,
+            mip_count: 1,
+            states: self.states.clone(),
+        }))
+    }
+
+    pub fn overlaps(&self, target: &Self) -> bool {
+        Rc::ptr_eq(&self.raw, &target.raw)
+            && target.base_mip >= self.base_mip
+            && target.base_mip < self.base_mip + self.mip_count
+    }
+
+    pub fn initialized(&self) -> bool {
+        self.states[self.base_mip as usize].initialized.get()
+    }
+
+    pub fn sample_initialized(&self) -> bool {
+        (self.base_mip..self.base_mip + self.mip_count)
+            .all(|level| self.states[level as usize].initialized.get())
+    }
+
+    pub fn invalidate(self: &Rc<Self>, commands: &mut Submission<A>) {
+        for level in self.base_mip..self.base_mip + self.mip_count {
+            self.states[level as usize].initialized.set(false);
+            let texture = self.clone();
+            commands.commit(move || {
+                texture.states[level as usize]
+                    .committed_initialized
+                    .set(false)
+            });
         }
     }
 
+    pub fn initialize(self: &Rc<Self>, commands: &mut Submission<A>) {
+        self.states[self.base_mip as usize].initialized.set(true);
+        let texture = self.clone();
+        commands.commit(move || {
+            texture.states[texture.base_mip as usize]
+                .committed_initialized
+                .set(true)
+        });
+    }
+
+    #[cfg(test)]
+    pub fn committed_usage(&self) -> wgt::TextureUses {
+        self.states[self.base_mip as usize].committed.get()
+    }
+
+    pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::TextureUses) {
+        commands.keep(self.clone());
+        let count = if to == wgt::TextureUses::RESOURCE {
+            self.mip_count
+        } else {
+            1
+        };
+        for level in self.base_mip..self.base_mip + count {
+            let resource = self.clone();
+            commands.commit(move || resource.states[level as usize].committed.set(to));
+            let from = self.states[level as usize].usage.replace(to);
+            if from != to {
+                unsafe {
+                    commands
+                        .encoder()
+                        .transition_textures(std::iter::once(hal::TextureBarrier {
+                            texture: &**self.raw,
+                            range: wgt::ImageSubresourceRange {
+                                base_mip_level: level,
+                                mip_level_count: Some(1),
+                                array_layer_count: Some(1),
+                                ..Default::default()
+                            },
+                            usage: hal::StateTransition { from, to },
+                        }));
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub fn upload(
-        &self,
+        self: &Rc<Self>,
         owner: &Rc<Device<A>>,
+        rect: DeviceIntRect,
+        data: &[u8],
+        stride: Option<i32>,
+        offset: i32,
+        source_format: Option<ImageFormat>,
+    ) -> Result<()> {
+        let queue = SubmissionQueue::new(owner, 3, false);
+        self.upload_recorded(owner, &queue, rect, data, stride, offset, source_format)?;
+        queue.wait()
+    }
+
+    pub fn upload_recorded(
+        self: &Rc<Self>,
+        owner: &Rc<Device<A>>,
+        queue: &SubmissionQueue<A>,
         rect: DeviceIntRect,
         data: &[u8],
         stride: Option<i32>,
@@ -283,9 +568,17 @@ impl<A: hal::Api> Texture<A> {
             return Err("Unsupported HAL upload conversion".into());
         }
         let alignment = owner.capabilities.alignments.buffer_copy_pitch.get() as usize;
-        let pitch = row_bytes.div_ceil(alignment) * alignment;
+        let destination = if self.initialized() {
+            rect
+        } else {
+            DeviceIntRect::from_size(api::units::DeviceIntSize::new(
+                self.size.width as i32,
+                self.size.height as i32,
+            ))
+        };
+        let pitch = (destination.width() as usize * bpp).div_ceil(alignment) * alignment;
         let packed_size = pitch
-            .checked_mul(rect.height() as usize)
+            .checked_mul(destination.height() as usize)
             .ok_or("HAL upload size overflow")?;
         if packed_size as u64 > owner.capabilities.limits.max_buffer_size
             || packed_size > isize::MAX as usize
@@ -295,7 +588,9 @@ impl<A: hal::Api> Texture<A> {
         let mut packed = vec![0; packed_size];
         for y in 0..rect.height() as usize {
             let src = offset as usize + y * source_stride;
-            let dst = &mut packed[y * pitch..y * pitch + row_bytes];
+            let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
+                + (rect.min.x - destination.min.x) as usize * bpp;
+            let dst = &mut packed[start..start + row_bytes];
             dst.copy_from_slice(&data[src..src + row_bytes]);
             if swizzle {
                 for pixel in dst.chunks_exact_mut(4) {
@@ -303,10 +598,10 @@ impl<A: hal::Api> Texture<A> {
                 }
             }
         }
-        let staging = Buffer::new(owner, &packed, wgt::BufferUses::COPY_SRC)?;
-        let mut commands = Commands::<A>::new(&owner.open)?;
-        staging.transition(commands.encoder(), wgt::BufferUses::COPY_SRC);
-        self.transition(commands.encoder(), wgt::TextureUses::COPY_DST);
+        let staging = queue.upload(&packed, wgt::BufferUses::COPY_SRC)?;
+        let mut commands = queue.recording()?;
+        staging.transition(&mut commands, wgt::BufferUses::COPY_SRC);
+        self.transition(&mut commands, wgt::TextureUses::COPY_DST);
         unsafe {
             commands.encoder().copy_buffer_to_texture(
                 &staging.raw,
@@ -315,29 +610,30 @@ impl<A: hal::Api> Texture<A> {
                     buffer_layout: wgt::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(pitch as u32),
-                        rows_per_image: Some(rect.height() as u32),
+                        rows_per_image: Some(destination.height() as u32),
                     },
                     texture_base: hal::TextureCopyBase {
-                        mip_level: 0,
+                        mip_level: self.base_mip,
                         array_layer: 0,
                         origin: wgt::Origin3d {
-                            x: rect.min.x as u32,
-                            y: rect.min.y as u32,
+                            x: destination.min.x as u32,
+                            y: destination.min.y as u32,
                             z: 0,
                         },
                         aspect: hal::FormatAspects::COLOR,
                     },
                     size: wgt::Extent3d {
-                        width: rect.width() as u32,
-                        height: rect.height() as u32,
+                        width: destination.width() as u32,
+                        height: destination.height() as u32,
                         depth_or_array_layers: 1,
                     }
                     .into(),
                 }),
             );
         }
-        self.transition(commands.encoder(), wgt::TextureUses::RESOURCE);
-        commands.submit_and_wait()
+        self.transition(&mut commands, wgt::TextureUses::RESOURCE);
+        self.initialize(&mut commands);
+        Ok(())
     }
 }
 
@@ -373,6 +669,69 @@ mod tests {
         assert!(texture
             .upload(&first, rect, &[0; 16], None, -1, None)
             .is_err());
-        assert_eq!(texture.state.get(), wgt::TextureUses::UNINITIALIZED);
+        assert_eq!(
+            texture.states[0].usage.get(),
+            wgt::TextureUses::UNINITIALIZED
+        );
+    }
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn first_partial_upload_initializes_padding() {
+        let owner = Rc::new(
+            create_vulkan_device(&Options {
+                validation: true,
+                ..Options::default()
+            })
+            .unwrap(),
+        );
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        let texture = Texture::new(
+            &owner,
+            7,
+            5,
+            wgt::TextureFormat::Rgba8Unorm,
+            crate::device::TextureFilter::Nearest,
+            false,
+        )
+        .unwrap();
+        let rect = DeviceIntRect::from_origin_and_size(
+            api::units::DeviceIntPoint::new(2, 1),
+            api::units::DeviceIntSize::new(1, 1),
+        );
+        texture
+            .upload_recorded(&owner, &queue, rect, &[10, 20, 30, 255], None, 0, None)
+            .unwrap();
+        assert!(texture.initialized());
+        assert!(!texture.states[0].committed_initialized.get());
+        let layout = owner.layout(7, 5).unwrap();
+        let readback = Buffer::readback(&owner, &layout).unwrap();
+        let mut commands = queue.recording().unwrap();
+        commands.keep(readback.clone());
+        texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+        unsafe {
+            copy_readback::<wgpu_hal::api::Vulkan>(
+                commands.encoder(),
+                &texture.raw,
+                &readback.raw,
+                &layout,
+                texture.size,
+                hal::FormatAspects::COLOR,
+            );
+        }
+        readback.transition(&mut commands, wgt::BufferUses::MAP_READ);
+        drop(commands);
+        queue.wait().unwrap();
+        assert!(texture.states[0].committed_initialized.get());
+        let pixels = owner.map_readback(&readback.raw, &layout).unwrap();
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            assert_eq!(
+                pixel,
+                if index == 9 {
+                    &[10, 20, 30, 255]
+                } else {
+                    &[0; 4]
+                }
+            );
+        }
     }
 }

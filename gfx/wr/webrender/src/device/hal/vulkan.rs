@@ -11,6 +11,8 @@ use std::sync::{
 };
 
 pub fn create_vulkan_device(options: &Options) -> Result<Device<hal::api::Vulkan>> {
+    #[cfg(test)]
+    super::validation_logging();
     if options.validation {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Loading Vulkan: {e}"))?;
         let layers = unsafe { entry.enumerate_instance_layer_properties() }

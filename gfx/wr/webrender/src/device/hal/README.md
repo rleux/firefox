@@ -1,89 +1,107 @@
-# HAL bootstrap
+# Experimental HAL renderer
 
-This experimental module uses `wgpu-hal` 30.0.0 directly. It initializes a device,
-clears offscreen RGBA8 and D32 targets, and synchronously reads their contents.
-It does not yet execute WebRender display lists or replace the GL `Device` used
-by `Renderer`. The existing GL constructor, caches, and default features retain
-their existing behavior.
+The optional `hal-vulkan` feature provides a Vulkan bootstrap and a staged WR
+frame executor using `wgpu-hal` 30.0.0 directly. The original GL Renderer remains
+the default and retains its constructor and resource/cache interfaces. Only Linux
+has been built and executed; this is not a completed replacement renderer.
 
-`hal` enables the generic resource/command implementation; `hal-vulkan` also
-enables Vulkan construction and its native-image probe. HAL types stay within
-this module and its diagnostic entry point. No Vulkan handles enter scene or
-frame construction. Metal and D3D12 constructors are future work; only Linux
-Vulkan has been built and executed.
+## Current scene path
 
-## Wrench
+`create_vulkan_renderer` returns an additive HAL renderer and a normal
+`RenderApiSender`. GL and HAL share backend/pool construction. Both use the current
+scene builder, preparation, batches, task graph, texture-cache updates and GPU data
+layouts. Wrench's renderer-independent YAML client works with either renderer;
+there is no GL context or GL fallback in the HAL route.
 
-From `gfx/wr/wrench`, in the prescribed Linux reference container with a Vulkan
-loader, ICD, and validation layer installed:
+The executor covers ordinary owned-image transfers and mipmaps, color/alpha
+targets, masks, gradients/repetition, borders/lines/shadows, blur/scaling, text,
+SVG filters, owned YUV planes, split composition and backdrop readbacks/resolves.
+It retains WR's current tasks, instance layouts and GLSL algorithms. Stage 5
+acceptance remains open: some selected Vulkan pixel comparisons exceed the
+existing tolerances. Standard native filtering is retained; legacy Mesa filtering
+is not emulated. Native targets and OS external-image resolution remain later
+work. Unsupported operations fail. Full Vulkan Wrench acceptance remains Stage 7.
 
-```sh
-WRENCH_VULKAN_ICD=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
-  python3 script/headless.py --backend hal --hal-backend vulkan --hal-validation test_hal
-```
+## Wrench commands
 
-ICD filenames depend on the distribution. `WRENCH_VULKAN_ICD` sets
-`VK_DRIVER_FILES`; without it, existing loader environment/configuration applies.
-The launcher builds `hal-vulkan`, skips OSMesa setup, and forwards the arguments.
-`--hal-adapter NAME` requires exactly one case-insensitive substring match. Without
-a filter, selection prefers discrete, integrated, virtual, then CPU adapters.
-Failure to open the selected adapter is an error. Backend and adapter identity,
-device type, driver, requested validation, and explicit ICD selection are logged.
-Requested validation requires `VK_LAYER_KHRONOS_validation` to be discoverable.
-
-`test_init` performs a color/depth clear and readback; `test_hal` adds differently
-sized targets, invalid-size rejection, and native-image tests. `--size WIDTHxHEIGHT`
-sets the initial target. HAL selection requires `--headless` and rejects GL-only
-construction options. Reftest, rawtest, shader, invalidation, capture, and windowed
-HAL rendering are not implemented yet and fail explicitly. No GL fallback occurs.
-
-GL remains the default:
+Inside the prescribed reference container, from `gfx/wr/wrench`:
 
 ```sh
-python3 script/headless.py reftest
+python3 script/headless.py --backend hal --hal-validation test_hal
+python3 script/headless.py --backend hal --hal-validation reftest reftests/image/tile-size.yaml
+python3 script/headless.py --backend hal --hal-validation png scene.yaml output.png
 ```
 
-A build with both `headless,hal-vulkan` can exercise both bootstrap selectors.
-The HAL command needs no GL context even when GL support is compiled in.
-`python3 script/test_headless.py` checks launcher routing without a GPU.
+GL remains `python3 script/headless.py reftest`. A dual-feature build can use both
+selectors. The launcher builds `hal-vulkan` for HAL and bypasses OSMesa setup.
+`WRENCH_VULKAN_ICD` optionally selects an ICD manifest through `VK_DRIVER_FILES`;
+otherwise the loader environment/configuration applies. `--hal-adapter NAME`
+requires one case-insensitive substring match. Without a filter, selection prefers
+discrete, integrated, virtual, then CPU devices. Opening a selected device never
+falls back to another backend. Validation requires the Khronos layer.
 
-## Ownership and target contract
+HAL PNG/reftest dimensions default to 1920x1080, matching GL. `--size` overrides
+this. Reftests retain the original comparator, scales and per-test tolerances;
+an explicit `.list` manifest is also accepted. Empty selections fail. Use an
+explicit output path for diagnostic PNGs to preserve reference assets.
 
-The bootstrap owns its device, queue, and instance. Resources borrow that device;
-command ownership ends only after GPU completion, before resources are destroyed.
-One synchronous submission/fence is used per readback. CPU frame numbers and GL
-resource IDs are not completion tokens or HAL handles.
+`test_init` checks bootstrap clear/readback; `test_hal` also checks native-image
+ownership. The ignored Wrench tests under `hal::tests` exercise real frame
+construction and persistent image updates/resizing. The supplemental fixtures in
+`wrench/reftests/hal` have a separate GL/Vulkan precision check: alpha/depth,
+nearest-filtered pixels and geometry are exact; the designated linear-image RGB
+region permits 2/255 variation. Existing reftest tolerances are unchanged.
 
-Targets have positive, device-limited dimensions, one mip and sample, and no
-window-system surface. Transitions explicitly cover attachment writes, transfer
-reads, and host reads. Readback removes aligned row padding and returns packed
-RGBA8 and native `f32` depth rows from texture coordinate y=0 onward. No GL-style
-vertical flip is applied. Native-image tests vary both x and y to check this
-boundary. Shader projection and final framebuffer coordinates remain Stage 4 work.
+## Shader and resource contract
 
-The Vulkan probe allocates an image and upload memory through a raw producer path
-on the same logical device and queue family. The producer uploads patterned pixels,
-transitions to transfer-source layout, and signals an acquire semaphore. HAL wraps
-the borrowed image with external memory ownership, waits for acquisition, reads it,
-and signals release. The producer waits for release; destroying the HAL wrapper
-invokes its callback without destroying the producer's allocation. Error cleanup
-removes unsubmitted semaphore hooks and waits before freeing resources.
+HAL builds preprocess current GLSL, derive a bounded catalog from
+`get_shader_features`, split texture/sampler bindings, add projection storage and
+locations, and compile/validate SPIR-V. GLSLANG_VALIDATOR and SPIRV_VAL can override
+build-tool paths. GL-only builds do not run these tools. Shader bytes and typed
+metadata are embedded; runtime needs neither generated files nor shader tools.
+Per-shader reflection checks descriptor types/stages, dense native binding numbers,
+vertex layouts and stage interfaces. Native SPIR-V input is Vulkan-specific. Metal/D3D12 shader outputs and
+constructors remain unimplemented.
 
-This proves same-device image wrapping and GPU semaphore handoff. It does not
-prove DMA-BUF, cross-process/device import, queue-family transfer, video planes,
-or native compositor integration. The later external-image/target interfaces must
-represent device identity, format/planes, extent, subresources, valid/dirty region,
-ownership, initial/final usage, and acquire/release synchronization. Platform
-adapters own OS handles and handle conversion. The existing GL external-image
-contract remains unchanged; this probe is not an implementation of that contract.
+Pipeline layouts are checked against the existing WR vertex descriptors. Current
+GpuBufferF/GpuBufferI, transform and task textures keep their layouts and texture
+width. Persistent resources retain their creating device/instance through ordinary
+reference ownership. Uploads validate bounds, pitch, formats and owner identity.
+Buffers/views/bindings and encoders remain alive through GPU completion, including
+cleanup. Cached descriptor identity includes physical allocation/view, sampler and
+pipeline identity; reset/free operations invalidate affected cached bindings.
 
-## Integration limits
+One graphics queue uses at most three in-flight contexts with completion-based
+retirement and backpressure. Transfers and passes share submissions. Upload and
+intermediate pools each cache at most 64 MiB, with count limits of 256 and 128;
+oversized or busy allocations retire without entering the cache. Pipeline,
+descriptor and projection caches are bounded. Readback remains synchronous;
+offscreen work and resource updates do not wait per pass. `WR_HAL_SYNC` enables
+diagnostic synchronization. Execution failure poisons the executor and requires
+recreation rather than reusing planned states from discarded commands.
 
-Standalone `gfx/wr/Cargo.lock` pins the released HAL 30.0.0 dependency graph while
-retaining the pre-existing HAL 27 GUI dependencies. Firefox's root workspace
-patches HAL 30.0.0 to a Git revision; its lockfile records the new optional edges,
-but full Gecko resolution/build and API compatibility with that patched source
-require the full checkout and are unverified here. Non-Linux builds are unverified.
+Frame publication is consumed in order, including required superseded cache work,
+offscreen/no-present frames and resource-only updates. Readiness notifications
+coalesce, and pipeline information has a public drain. Texture/render checkpoints
+follow command submission, while readback waits for GPU completion.
+The embedding/capture/profiling interfaces are incomplete. FrameOutput pixels are
+packed top-down RGBA8; the Wrench-compatible read_pixels_rgba8 adapter accepts
+framebuffer rectangles and returns bottom-up rows for the existing comparator.
+The projection accounts for HAL Vulkan's negative-height viewport once.
 
-Stage 4 must integrate actual WR shaders, resources, and draws through the selected
-device seam. Passing `test_hal` is a bootstrap gate, not a Vulkan Wrench reftest pass.
+## Native image probe and integration limits
+
+The bootstrap's raw producer allocates an image on the same logical Vulkan device
+and queue family, uploads a pattern, signals acquisition, and lends the image to
+HAL. HAL waits, reads it, and signals release. A release callback verifies borrowed
+ownership; the producer frees its allocation after completion. This does not prove
+DMA-BUF, cross-process/device imports, video planes, queue-family ownership transfer
+or native compositor integration. Those adapters must retain explicit device,
+format/plane, subresource, valid/dirty-region and acquire/release contracts.
+
+Standalone Cargo.lock pins released HAL/types 30.0.0 while retaining HAL 27 GUI
+dependencies. Firefox's root workspace patches 30.0.0 to a distinct Git revision;
+full Gecko resolution, patched-source compatibility, bindings and linking remain
+unverified in the partial checkout. GL/GLES behavior on non-Linux platforms also
+requires native verification. No global enablement or production-readiness claim
+is made by this staged Linux result.

@@ -8,10 +8,20 @@ use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Queue as _};
 use wgpu_types as wgt;
 
+mod pool;
+#[cfg(feature = "hal-vulkan")]
+pub(crate) mod render;
+#[cfg(feature = "hal-vulkan")]
+mod resources;
+mod submission;
 #[cfg(feature = "hal-vulkan")]
 mod vulkan;
 #[cfg(feature = "hal-vulkan")]
 pub use self::vulkan::create_vulkan_device;
+#[cfg(feature = "hal-vulkan")]
+pub use crate::renderer::hal::{create_vulkan_renderer, PreparedFrameInfo, Renderer};
+#[cfg(feature = "hal-vulkan")]
+pub use self::render::{DrawStats, FrameOutput};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -26,7 +36,27 @@ pub struct Device<A: hal::Api> {
     open: hal::OpenDevice<A>,
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
+    features: wgt::Features,
+    next_texture_id: std::cell::Cell<u64>,
+    memory: std::cell::Cell<MemoryStats>,
+    formats: Vec<(wgt::TextureFormat, hal::TextureFormatCapabilities)>,
     _instance: A::Instance,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryStats {
+    pub buffers: usize,
+    pub buffer_bytes: u64,
+    pub textures: usize,
+    pub texture_bytes: u64,
+    pub cached_buffer_bytes: u64,
+    pub cached_texture_bytes: u64,
+    pub pipelines: usize,
+    pub descriptors: usize,
+    pub in_flight: usize,
+    pub retained_references: usize,
+    pub pending_notifications: usize,
+    pub pipeline_epochs: usize,
 }
 
 pub struct Readback {
@@ -256,9 +286,29 @@ impl<A: hal::Api> Device<A> {
                 ));
             }
         }
+        let formats = [
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::TextureFormat::Bgra8Unorm,
+            wgt::TextureFormat::R8Unorm,
+            wgt::TextureFormat::Rg8Unorm,
+            wgt::TextureFormat::R16Unorm,
+            wgt::TextureFormat::Rg16Unorm,
+            wgt::TextureFormat::Rgba32Float,
+            wgt::TextureFormat::Rgba32Sint,
+            wgt::TextureFormat::Depth32Float,
+        ]
+        .iter()
+        .map(|&format| {
+            (format, unsafe {
+                exposed.adapter.texture_format_capabilities(format)
+            })
+        })
+        .collect();
+        let features = exposed.features
+            & (wgt::Features::DUAL_SOURCE_BLENDING | wgt::Features::TEXTURE_FORMAT_16BIT_NORM);
         let open = unsafe {
             exposed.adapter.open(
-                wgt::Features::empty(),
+                features,
                 &exposed.capabilities.limits,
                 &wgt::MemoryHints::default(),
             )
@@ -268,12 +318,27 @@ impl<A: hal::Api> Device<A> {
             open,
             info: exposed.info,
             capabilities: exposed.capabilities,
+            features,
+            next_texture_id: std::cell::Cell::new(1),
+            memory: std::cell::Cell::new(MemoryStats::default()),
+            formats,
             _instance: instance,
         })
     }
 
     pub fn info(&self) -> &wgt::AdapterInfo {
         &self.info
+    }
+
+    pub(crate) fn supports_dual_source_blending(&self) -> bool {
+        self.features.contains(wgt::Features::DUAL_SOURCE_BLENDING)
+    }
+
+    pub(crate) fn max_texture_size(&self) -> i32 {
+        self.capabilities
+            .limits
+            .max_texture_dimension_2d
+            .min(i32::MAX as u32) as i32
     }
 
     fn layout(&self, width: u32, height: u32) -> Result<ReadbackLayout> {
@@ -482,6 +547,20 @@ impl<A: hal::Api> Device<A> {
                 hal::FormatAspects::DEPTH,
             );
         }
+        unsafe {
+            commands.encoder().transition_buffers(
+                [&*color_buffer, &*depth_buffer]
+                    .iter()
+                    .copied()
+                    .map(|buffer| hal::BufferBarrier {
+                        buffer,
+                        usage: hal::StateTransition {
+                            from: wgt::BufferUses::COPY_DST,
+                            to: wgt::BufferUses::MAP_READ,
+                        },
+                    }),
+            );
+        }
         commands.submit_and_wait()?;
         let color = self.map_readback(&color_buffer, &layout)?;
         let depth_bytes = self.map_readback(&depth_buffer, &layout)?;
@@ -554,13 +633,6 @@ unsafe fn copy_readback<A: hal::Api>(
             size: extent.into(),
         }),
     );
-    encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
-        buffer,
-        usage: hal::StateTransition {
-            from: wgt::BufferUses::COPY_DST,
-            to: wgt::BufferUses::MAP_READ,
-        },
-    }));
 }
 
 #[cfg(test)]
@@ -577,4 +649,33 @@ mod tests {
         assert!(ReadbackLayout::new(u32::MAX, 2, 256).is_err());
         assert!(ReadbackLayout::new(1, 1, 0).is_err());
     }
+}
+
+#[cfg(test)]
+fn validation_logging() {
+    struct Logger;
+    impl log::Log for Logger {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.target().starts_with("wgpu_hal") && metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{} {}: {}",
+                    record.level(),
+                    record.target(),
+                    record.args()
+                );
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: Logger = Logger;
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
 }

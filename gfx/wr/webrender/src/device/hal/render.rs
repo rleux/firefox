@@ -3,14 +3,15 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::submission::SubmissionQueue;
 use super::resources::{Buffer, Owned, Texture, texture_format};
-use std::{collections::HashMap, mem, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, mem, rc::Rc};
 use api::{ColorF, ImageBufferKind, PremultipliedColorF, units::*};
-use crate::batch::{AlphaBatchContainer, BatchKind};
+use crate::batch::{AlphaBatchContainer, BatchKind, BatchTextures, ClipMaskInstanceList};
 use crate::composite::{CompositeTileSurface, ResolvedExternalSurfaceColorData};
 use crate::device::{BlendMode, TextureFilter, VertexAttributeKind, VertexDescriptor};
 use crate::frame_builder::Frame;
-use crate::gpu_types::{ClearInstance, CompositeInstance, PrimitiveInstanceData};
+use crate::gpu_types::{ClearInstance, CompositeInstance, PrimitiveInstanceData, ScalingInstance};
 use crate::internal_types::{
     CacheTextureId, ResourceUpdateList, Swizzle, TextureCacheAllocationKind, TextureSource,
     TextureUpdateSource,
@@ -34,6 +35,30 @@ unsafe impl GpuData for PrimitiveInstanceData {
 }
 unsafe impl GpuData for CompositeInstance {
     const SIZE: usize = 152;
+}
+unsafe impl GpuData for crate::gpu_types::MaskInstance {
+    const SIZE: usize = 32;
+}
+unsafe impl GpuData for crate::gpu_types::BlurInstance {
+    const SIZE: usize = 28;
+}
+unsafe impl GpuData for crate::gpu_types::BorderInstance {
+    const SIZE: usize = 48;
+}
+unsafe impl GpuData for crate::render_target::LineDecorationJob {
+    const SIZE: usize = 36;
+}
+unsafe impl GpuData for crate::gpu_types::PrimitiveHeaderF {
+    const SIZE: usize = 32;
+}
+unsafe impl GpuData for crate::gpu_types::PrimitiveHeaderI {
+    const SIZE: usize = 32;
+}
+unsafe impl GpuData for crate::gpu_types::SVGFEFilterInstance {
+    const SIZE: usize = 64;
+}
+unsafe impl GpuData for ScalingInstance {
+    const SIZE: usize = 36;
 }
 unsafe impl GpuData for ClearInstance {
     const SIZE: usize = 32;
@@ -61,6 +86,7 @@ enum Shader {
     Quad,
     Composite,
     Clear,
+    Other(&'static str, &'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -69,14 +95,21 @@ struct PipelineKey {
     blend: u8,
     depth: u8,
     format: wgt::TextureFormat,
+    shader_digest: u64,
+    vertex_layout: u64,
+    samples: u32,
+    depth_format: Option<wgt::TextureFormat>,
 }
 
 #[derive(Default, Debug)]
 pub struct DrawStats {
     pub draw_calls: usize,
+    pub wr_draw_calls: usize,
+    pub native_passes: usize,
     pub primitive_instances: usize,
     pub composite_tiles: usize,
     pub color_targets: usize,
+    pub alpha_targets: usize,
 }
 
 pub struct FrameOutput {
@@ -85,25 +118,59 @@ pub struct FrameOutput {
     pub stats: DrawStats,
 }
 
+struct DrawTextures<A: hal::Api> {
+    colors: [Rc<Texture<A>>; 3],
+    clip: Rc<Texture<A>>,
+}
+
 struct Draw<A: hal::Api> {
     shader: Shader,
     blend: u8,
     depth: u8,
     count: u32,
     instances: Vec<u8>,
-    source: Rc<Texture<A>>,
+    textures: DrawTextures<A>,
+    filter: Option<TextureFilter>,
+    clear_color: Option<ColorF>,
+    count_in_stats: bool,
+    readback: Option<crate::batch::InlineReadback>,
     scissor: DeviceIntRect,
+}
+
+struct Pipeline<A: hal::Api> {
+    raw: Owned<A, A::RenderPipeline>,
+    layout: Owned<A, A::PipelineLayout>,
+    bindings: Owned<A, A::BindGroupLayout>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DescriptorKey {
+    pipeline: PipelineKey,
+    uniform: u64,
+    textures: Vec<(u64, u32, u32, wgt::TextureFormat, u8)>,
+}
+
+struct Descriptor<A: hal::Api> {
+    raw: Owned<A, A::BindGroup>,
+    _uniform: Rc<Buffer<A>>,
+    _textures: Vec<Rc<Texture<A>>>,
+    _pipeline: Rc<Pipeline<A>>,
 }
 
 pub(crate) struct FrameRenderer<A: hal::Api> {
     owner: Rc<Device<A>>,
     textures: HashMap<CacheTextureId, Rc<Texture<A>>>,
-    pipelines: HashMap<PipelineKey, Owned<A, A::RenderPipeline>>,
-    layout: Owned<A, A::PipelineLayout>,
-    bindings: Owned<A, A::BindGroupLayout>,
-    samplers: [Owned<A, A::Sampler>; 2],
-    quad: Buffer<A>,
+    pipelines: HashMap<PipelineKey, Rc<Pipeline<A>>>,
+    descriptors: RefCell<HashMap<DescriptorKey, Rc<Descriptor<A>>>>,
+    samplers: [Owned<A, A::Sampler>; 3],
+    quad: Rc<Buffer<A>>,
+    submissions: SubmissionQueue<A>,
     dummy: Rc<Texture<A>>,
+    dither: Option<Rc<Texture<A>>>,
+    depths: HashMap<(u64, u32), Rc<Texture<A>>>,
+    texture_pool: super::pool::TexturePool<A>,
+    data_textures: RefCell<HashMap<&'static str, Rc<Texture<A>>>>,
+    uniforms: HashMap<[u32; 16], Rc<Buffer<A>>>,
     failed: bool,
 }
 
@@ -111,72 +178,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     pub fn new(device: Device<A>) -> Result<Self> {
         let owner = Rc::new(device);
         let native = &owner.open.device;
-        let mut entries = vec![wgt::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgt::ShaderStages::VERTEX,
-            ty: wgt::BindingType::Buffer {
-                ty: wgt::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: std::num::NonZeroU64::new(64),
-            },
-            count: None,
-        }];
-        for binding in shaders::TEXTURE_BINDINGS {
-            let filtering = binding.name.starts_with("sColor");
-            let sample_type = match binding.scalar {
-                ScalarType::Float => wgt::TextureSampleType::Float {
-                    filterable: filtering,
-                },
-                ScalarType::Sint => wgt::TextureSampleType::Sint,
-                ScalarType::Uint => wgt::TextureSampleType::Uint,
-            };
-            entries.push(wgt::BindGroupLayoutEntry {
-                binding: binding.binding,
-                visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgt::BindingType::Texture {
-                    sample_type,
-                    view_dimension: wgt::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            });
-            entries.push(wgt::BindGroupLayoutEntry {
-                binding: binding.binding + 1,
-                visibility: wgt::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgt::BindingType::Sampler(if filtering {
-                    wgt::SamplerBindingType::Filtering
-                } else {
-                    wgt::SamplerBindingType::NonFiltering
-                }),
-                count: None,
-            });
-        }
-        let bindings = Owned::new(
-            &owner,
-            unsafe {
-                native.create_bind_group_layout(&hal::BindGroupLayoutDescriptor {
-                    label: Some("WR bindings"),
-                    flags: hal::BindGroupLayoutFlags::empty(),
-                    entries: &entries,
-                })
-            }
-            .map_err(|e| format!("Creating binding layout: {e:?}"))?,
-            A::Device::destroy_bind_group_layout,
-        );
-        let layout = Owned::new(
-            &owner,
-            unsafe {
-                native.create_pipeline_layout(&hal::PipelineLayoutDescriptor {
-                    label: Some("WR pipelines"),
-                    flags: hal::PipelineLayoutFlags::empty(),
-                    bind_group_layouts: &[Some(&*bindings)],
-                    immediate_size: 0,
-                })
-            }
-            .map_err(|e| format!("Creating pipeline layout: {e:?}"))?,
-            A::Device::destroy_pipeline_layout,
-        );
-        let sampler = |filter| -> Result<_> {
+        let sampler = |filter, mipmap| -> Result<_> {
             Ok(Owned::new(
                 &owner,
                 unsafe {
@@ -185,8 +187,12 @@ impl<A: hal::Api> FrameRenderer<A> {
                         address_modes: [wgt::AddressMode::ClampToEdge; 3],
                         mag_filter: filter,
                         min_filter: filter,
-                        mipmap_filter: wgt::MipmapFilterMode::Nearest,
-                        lod_clamp: 0.0..0.0,
+                        mipmap_filter: mipmap,
+                        lod_clamp: 0.0..if mipmap == wgt::MipmapFilterMode::Linear {
+                            32.0
+                        } else {
+                            0.0
+                        },
                         compare: None,
                         anisotropy_clamp: 1,
                         border_color: None,
@@ -197,8 +203,9 @@ impl<A: hal::Api> FrameRenderer<A> {
             ))
         };
         let samplers = [
-            sampler(wgt::FilterMode::Nearest)?,
-            sampler(wgt::FilterMode::Linear)?,
+            sampler(wgt::FilterMode::Nearest, wgt::MipmapFilterMode::Nearest)?,
+            sampler(wgt::FilterMode::Linear, wgt::MipmapFilterMode::Nearest)?,
+            sampler(wgt::FilterMode::Linear, wgt::MipmapFilterMode::Linear)?,
         ];
         let quad = Buffer::new(
             &owner,
@@ -213,25 +220,43 @@ impl<A: hal::Api> FrameRenderer<A> {
             TextureFilter::Nearest,
             false,
         )?;
-        dummy.upload(
+        let submissions =
+            SubmissionQueue::new(&owner, 3, std::env::var_os("WR_HAL_SYNC").is_some());
+        dummy.upload_recorded(
             &owner,
+            &submissions,
             DeviceIntRect::from_size(DeviceIntSize::new(1, 1)),
             &[255; 4],
             None,
             0,
             None,
         )?;
+        let texture_pool = super::pool::TexturePool::new(&owner);
         Ok(Self {
             owner,
             textures: HashMap::new(),
             pipelines: HashMap::new(),
-            layout,
-            bindings,
+            descriptors: RefCell::new(HashMap::new()),
             samplers,
             quad,
+            submissions,
             dummy,
+            dither: None,
+            depths: HashMap::new(),
+            texture_pool,
+            data_textures: RefCell::new(HashMap::new()),
+            uniforms: HashMap::new(),
             failed: false,
         })
+    }
+
+    pub fn memory_stats(&self) -> MemoryStats {
+        let mut stats = self.owner.memory.get();
+        self.submissions.memory(&mut stats);
+        stats.cached_texture_bytes = self.texture_pool.bytes();
+        stats.pipelines = self.pipelines.len();
+        stats.descriptors = self.descriptors.borrow().len();
+        stats
     }
 
     pub fn info(&self) -> &wgt::AdapterInfo {
@@ -250,6 +275,98 @@ impl<A: hal::Api> FrameRenderer<A> {
         }
     }
 
+    pub fn enable_dithering(&mut self) -> Result<()> {
+        let matrix: [u8; 64] = [
+            0, 48, 12, 60, 3, 51, 15, 63, 32, 16, 44, 28, 35, 19, 47, 31, 8, 56, 4, 52, 11, 59, 7,
+            55, 40, 24, 36, 20, 43, 27, 39, 23, 2, 50, 14, 62, 1, 49, 13, 61, 34, 18, 46, 30, 33,
+            17, 45, 29, 10, 58, 6, 54, 9, 57, 5, 53, 42, 26, 38, 22, 41, 25, 37, 21,
+        ];
+        let texture = Texture::new(
+            &self.owner,
+            8,
+            8,
+            wgt::TextureFormat::R8Unorm,
+            TextureFilter::Nearest,
+            false,
+        )?;
+        texture.upload_recorded(
+            &self.owner,
+            &self.submissions,
+            DeviceIntRect::from_size(DeviceIntSize::new(8, 8)),
+            &matrix,
+            None,
+            0,
+            None,
+        )?;
+        self.dither = Some(texture);
+        Ok(())
+    }
+
+    fn quad_shader(&self, pattern: PatternKind) -> Result<Shader> {
+        Ok(match pattern {
+            PatternKind::ColorOrTexture => Shader::Quad,
+            PatternKind::Gradient => Shader::Other(
+                "ps_quad_gradient",
+                if self.dither.is_some() {
+                    "DITHERING"
+                } else {
+                    ""
+                },
+            ),
+            PatternKind::Repeat => Shader::Other("ps_quad_repeat", ""),
+            PatternKind::Blend => Shader::Other("ps_quad_blend", "TEXTURE_2D"),
+            PatternKind::Yuv => Shader::Other("ps_quad_yuv", "TEXTURE_2D"),
+            PatternKind::Backdrop => Shader::Other("ps_quad_backdrop", "TEXTURE_2D"),
+            PatternKind::MixBlend => Shader::Other("ps_quad_mix_blend", "TEXTURE_2D"),
+            PatternKind::BoxShadow => Shader::Other("ps_quad_box_shadow", ""),
+            PatternKind::BoxShadowSuperellipse => {
+                Shader::Other("ps_quad_box_shadow", "SUPERELLIPSE")
+            }
+            _ => return Err(format!("Unsupported HAL pattern {pattern:?}")),
+        })
+    }
+
+    fn single_texture(&self, source: Rc<Texture<A>>) -> DrawTextures<A> {
+        DrawTextures {
+            colors: [source, self.dummy.clone(), self.dummy.clone()],
+            clip: self.dummy.clone(),
+        }
+    }
+
+    fn batch_textures(&self, textures: &BatchTextures) -> Result<DrawTextures<A>> {
+        Ok(DrawTextures {
+            colors: [
+                self.source(textures.input.colors[0])?,
+                self.source(textures.input.colors[1])?,
+                self.source(textures.input.colors[2])?,
+            ],
+            clip: self.source(textures.clip_mask)?,
+        })
+    }
+
+    fn task_draw<T: GpuData>(
+        &self,
+        shader: Shader,
+        blend: u8,
+        instances: &[T],
+        textures: &BatchTextures,
+        scissor: DeviceIntRect,
+    ) -> Result<Draw<A>> {
+        Ok(Draw {
+            shader,
+            blend,
+            depth: 0,
+            count: u32::try_from(instances.len()).map_err(|_| "Too many HAL instances")?,
+            instances: bytes(instances).to_vec(),
+            textures: self.batch_textures(textures)?,
+            filter: None,
+            clear_color: None,
+            count_in_stats: true,
+            readback: None,
+            scissor,
+        })
+    }
+
     fn surface(&self, surface: &ResolvedSurfaceTexture) -> Result<Rc<Texture<A>>> {
         match *surface {
             ResolvedSurfaceTexture::TextureCache { texture } => self.source(texture),
@@ -262,15 +379,24 @@ impl<A: hal::Api> FrameRenderer<A> {
             return Err("HAL native surface updates are not implemented".into());
         }
         let updates = updates.texture_updates;
+        if !updates.allocations.is_empty() {
+            self.descriptors.borrow_mut().clear();
+        }
         for ((src, dst), copies) in updates.copies {
-            let source = self.textures.get(&src).ok_or("Missing HAL copy source")?;
+            let source = self
+                .textures
+                .get(&src)
+                .cloned()
+                .ok_or("Missing HAL copy source")?;
             let destination = self
                 .textures
                 .get(&dst)
+                .cloned()
                 .ok_or("Missing HAL copy destination")?;
             for copy in copies {
-                self.copy(source, destination, copy.src_rect, copy.dst_rect)?;
+                self.copy(&source, &destination, copy.src_rect, copy.dst_rect)?;
             }
+            self.generate_mips(&destination)?;
         }
         for allocation in updates.allocations {
             match allocation.kind {
@@ -285,7 +411,12 @@ impl<A: hal::Api> FrameRenderer<A> {
                         info.height as u32,
                         texture_format(info.format)?,
                         info.filter,
-                        true,
+                        matches!(
+                            info.format,
+                            api::ImageFormat::RGBA8
+                                | api::ImageFormat::BGRA8
+                                | api::ImageFormat::R8
+                        ),
                     )?;
                     self.textures.insert(allocation.id, texture);
                 }
@@ -298,33 +429,202 @@ impl<A: hal::Api> FrameRenderer<A> {
             let texture = self
                 .textures
                 .get(&id)
+                .cloned()
                 .ok_or("Updating unknown HAL texture")?;
             for update in updates {
                 match update.source {
-                    TextureUpdateSource::Bytes { data } => texture.upload(
+                    TextureUpdateSource::Bytes { data } => texture.upload_recorded(
                         &self.owner,
+                        &self.submissions,
                         update.rect,
                         &data,
                         update.stride,
                         update.offset,
                         update.format_override,
                     )?,
-                    _ => return Err("Unsupported HAL external/debug texture update".into()),
+                    TextureUpdateSource::DebugClear => {
+                        let c = crate::renderer::TEXTURE_CACHE_DBG_CLEAR_COLOR;
+                        let draw = self.clear(update.rect, ColorF::new(c[0], c[1], c[2], c[3]));
+                        self.draw_pass(
+                            &texture,
+                            &[draw],
+                            &HashMap::new(),
+                            &mut DrawStats::default(),
+                        )?;
+                    }
+                    _ => return Err("HAL external texture updates require an image adapter".into()),
                 }
             }
+            self.generate_mips(&texture)?;
+        }
+        Ok(())
+    }
+
+    fn record_blit(
+        &mut self,
+        src: &Rc<Texture<A>>,
+        dst: &Rc<Texture<A>>,
+        src_rect: DeviceIntRect,
+        dst_rect: DeviceIntRect,
+        filter: TextureFilter,
+        stats: &mut DrawStats,
+    ) -> Result<()> {
+        if !src.initialized() {
+            return Err("Sampling uninitialized HAL blit source".into());
+        }
+        for format in [src.format, dst.format] {
+            if !matches!(
+                format,
+                wgt::TextureFormat::Rgba8Unorm
+                    | wgt::TextureFormat::Bgra8Unorm
+                    | wgt::TextureFormat::R8Unorm
+            ) {
+                return Err(format!("Unsupported HAL blit conversion for {format:?}"));
+            }
+        }
+        if src.overlaps(dst) {
+            let scratch =
+                self.texture_pool
+                    .acquire(src.size.width, src.size.height, src.format, false)?;
+            {
+                let mut commands = self.submissions.recording()?;
+                scratch.invalidate(&mut commands);
+            }
+            let full = DeviceIntRect::from_size(DeviceIntSize::new(
+                src.size.width as i32,
+                src.size.height as i32,
+            ));
+            self.copy_native(src, &scratch, full, full)?;
+            return self.record_blit(&scratch, dst, src_rect, dst_rect, filter, stats);
+        }
+        let mut source_rect = src_rect.to_f32();
+        let mut target_rect = dst_rect.to_f32();
+        if source_rect.is_empty() || target_rect.is_empty() {
+            return Ok(());
+        }
+        let clip = |s0: f32, s1: f32, d0: f32, d1: f32, sw: f32, dw: f32| {
+            let lo = 0.0f32.max(-s0 / (s1 - s0)).max(-d0 / (d1 - d0));
+            let hi = 1.0f32.min((sw - s0) / (s1 - s0)).min((dw - d0) / (d1 - d0));
+            (
+                s0 + lo * (s1 - s0),
+                s0 + hi * (s1 - s0),
+                d0 + lo * (d1 - d0),
+                d0 + hi * (d1 - d0),
+            )
+        };
+        (
+            source_rect.min.x,
+            source_rect.max.x,
+            target_rect.min.x,
+            target_rect.max.x,
+        ) = clip(
+            source_rect.min.x,
+            source_rect.max.x,
+            target_rect.min.x,
+            target_rect.max.x,
+            src.size.width as f32,
+            dst.size.width as f32,
+        );
+        (
+            source_rect.min.y,
+            source_rect.max.y,
+            target_rect.min.y,
+            target_rect.max.y,
+        ) = clip(
+            source_rect.min.y,
+            source_rect.max.y,
+            target_rect.min.y,
+            target_rect.max.y,
+            src.size.height as f32,
+            dst.size.height as f32,
+        );
+        if source_rect.is_empty() || target_rect.is_empty() {
+            return Ok(());
+        }
+        let instance = ScalingInstance::new(target_rect, source_rect, false);
+
+        let draw = Draw {
+            shader: Shader::Other("cs_scale", "TEXTURE_2D"),
+            blend: 0,
+            depth: 0,
+            count: 1,
+            instances: bytes(&[instance]).to_vec(),
+            textures: self.single_texture(src.clone()),
+            filter: Some(filter),
+            clear_color: None,
+            count_in_stats: false,
+            readback: None,
+            scissor: dst_rect,
+        };
+        self.draw_pass(dst, &[draw], &HashMap::new(), stats)
+    }
+
+    fn generate_mips(&mut self, texture: &Rc<Texture<A>>) -> Result<()> {
+        for level in 1..texture.mip_count {
+            let source = texture.mip_view(level - 1)?;
+            let target = texture.mip_view(level)?;
+            self.record_blit(
+                &source,
+                &target,
+                DeviceIntRect::from_size(DeviceIntSize::new(
+                    source.size.width as i32,
+                    source.size.height as i32,
+                )),
+                DeviceIntRect::from_size(DeviceIntSize::new(
+                    target.size.width as i32,
+                    target.size.height as i32,
+                )),
+                TextureFilter::Linear,
+                &mut DrawStats::default(),
+            )?;
         }
         Ok(())
     }
 
     fn copy(
-        &self,
-        src: &Texture<A>,
-        dst: &Texture<A>,
+        &mut self,
+        src: &Rc<Texture<A>>,
+        dst: &Rc<Texture<A>>,
         src_rect: DeviceIntRect,
         dst_rect: DeviceIntRect,
     ) -> Result<()> {
-        if src.format != dst.format || src_rect.size() != dst_rect.size() || std::ptr::eq(src, dst)
-        {
+        if Rc::ptr_eq(&src.raw, &dst.raw) && src.base_mip == dst.base_mip {
+            let scratch = self.texture_pool.acquire(
+                src_rect.width() as u32,
+                src_rect.height() as u32,
+                src.format,
+                false,
+            )?;
+            {
+                let mut commands = self.submissions.recording()?;
+                scratch.invalidate(&mut commands);
+            }
+            let rect = DeviceIntRect::from_size(src_rect.size());
+            self.copy_native(src, &scratch, src_rect, rect)?;
+            return self.copy(&scratch, dst, rect, dst_rect);
+        }
+        if src.format == dst.format && src_rect.size() == dst_rect.size() {
+            self.copy_native(src, dst, src_rect, dst_rect)
+        } else {
+            self.record_blit(
+                src,
+                dst,
+                src_rect,
+                dst_rect,
+                TextureFilter::Nearest,
+                &mut DrawStats::default(),
+            )
+        }
+    }
+
+    fn copy_native(
+        &self,
+        src: &Rc<Texture<A>>,
+        dst: &Rc<Texture<A>>,
+        src_rect: DeviceIntRect,
+        dst_rect: DeviceIntRect,
+    ) -> Result<()> {
+        if src.format != dst.format || src_rect.size() != dst_rect.size() || Rc::ptr_eq(src, dst) {
             return Err("Unsupported HAL texture copy".into());
         }
         for (texture, rect) in [(src, src_rect), (dst, dst_rect)] {
@@ -337,8 +637,40 @@ impl<A: hal::Api> FrameRenderer<A> {
                 return Err("Invalid HAL texture copy bounds".into());
             }
         }
-        let base = |rect: DeviceIntRect| hal::TextureCopyBase {
-            mip_level: 0,
+        if !src.initialized() {
+            return Err("Copying uninitialized HAL texture contents".into());
+        }
+        if !dst.initialized()
+            && dst_rect
+                != DeviceIntRect::from_size(DeviceIntSize::new(
+                    dst.size.width as i32,
+                    dst.size.height as i32,
+                ))
+        {
+            let size = (dst.size.width as usize)
+                .checked_mul(dst.size.height as usize)
+                .and_then(|n| n.checked_mul(super::resources::bytes_per_pixel(dst.format)))
+                .ok_or("HAL initialization size overflow")?;
+            if size as u64 > self.owner.capabilities.limits.max_buffer_size
+                || size > isize::MAX as usize
+            {
+                return Err("HAL initialization exceeds buffer limits".into());
+            }
+            dst.upload_recorded(
+                &self.owner,
+                &self.submissions,
+                DeviceIntRect::from_size(DeviceIntSize::new(
+                    dst.size.width as i32,
+                    dst.size.height as i32,
+                )),
+                &vec![0; size],
+                None,
+                0,
+                None,
+            )?;
+        }
+        let base = |rect: DeviceIntRect, mip_level| hal::TextureCopyBase {
+            mip_level,
             array_layer: 0,
             origin: wgt::Origin3d {
                 x: rect.min.x as u32,
@@ -347,17 +679,17 @@ impl<A: hal::Api> FrameRenderer<A> {
             },
             aspect: hal::FormatAspects::COLOR,
         };
-        let mut commands = Commands::<A>::new(&self.owner.open)?;
-        src.transition(commands.encoder(), wgt::TextureUses::COPY_SRC);
-        dst.transition(commands.encoder(), wgt::TextureUses::COPY_DST);
+        let mut commands = self.submissions.recording()?;
+        src.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+        dst.transition(&mut commands, wgt::TextureUses::COPY_DST);
         unsafe {
             commands.encoder().copy_texture_to_texture(
                 &src.raw,
                 wgt::TextureUses::COPY_SRC,
                 &dst.raw,
                 std::iter::once(hal::TextureCopy {
-                    src_base: base(src_rect),
-                    dst_base: base(dst_rect),
+                    src_base: base(src_rect, src.base_mip),
+                    dst_base: base(dst_rect, dst.base_mip),
                     size: wgt::Extent3d {
                         width: src_rect.width() as u32,
                         height: src_rect.height() as u32,
@@ -367,13 +699,15 @@ impl<A: hal::Api> FrameRenderer<A> {
                 }),
             );
         }
-        src.transition(commands.encoder(), wgt::TextureUses::RESOURCE);
-        dst.transition(commands.encoder(), wgt::TextureUses::RESOURCE);
-        commands.submit_and_wait()
+        src.transition(&mut commands, wgt::TextureUses::RESOURCE);
+        dst.transition(&mut commands, wgt::TextureUses::RESOURCE);
+        dst.initialize(&mut commands);
+        Ok(())
     }
 
     fn data_texture<T: GpuData>(
         &self,
+        name: &'static str,
         values: &[T],
         format: wgt::TextureFormat,
     ) -> Result<Rc<Texture<A>>> {
@@ -393,16 +727,33 @@ impl<A: hal::Api> FrameRenderer<A> {
         }
         let mut data = vec![0; size];
         data[..source.len()].copy_from_slice(source);
-        let texture = Texture::new(
+        let mut cache = self.data_textures.borrow_mut();
+        let texture = match cache.get(name) {
+            Some(texture) if texture.size.height >= height_u32 && texture.format == format => {
+                texture.clone()
+            }
+            _ => {
+                let texture = Texture::new(
+                    &self.owner,
+                    width as u32,
+                    height_u32.next_power_of_two(),
+                    format,
+                    TextureFilter::Nearest,
+                    false,
+                )?;
+                self.descriptors.borrow_mut().clear();
+                if u64::from(texture.size.width) * u64::from(texture.size.height) * 16
+                    <= 16 * 1024 * 1024
+                {
+                    cache.insert(name, texture.clone());
+                }
+                texture
+            }
+        };
+        drop(cache);
+        texture.upload_recorded(
             &self.owner,
-            width as u32,
-            height as u32,
-            format,
-            TextureFilter::Nearest,
-            false,
-        )?;
-        texture.upload(
-            &self.owner,
+            &self.submissions,
             DeviceIntRect::from_size(DeviceIntSize::new(width as i32, height as i32)),
             &data,
             None,
@@ -417,6 +768,7 @@ impl<A: hal::Api> FrameRenderer<A> {
             Shader::Quad => ("ps_quad_textured", "TEXTURE_2D"),
             Shader::Composite => ("composite", "TEXTURE_2D"),
             Shader::Clear => ("ps_clear", ""),
+            Shader::Other(name, features) => (name, features),
         };
         shaders::SHADERS
             .iter()
@@ -424,16 +776,144 @@ impl<A: hal::Api> FrameRenderer<A> {
             .unwrap()
     }
 
+    fn descriptor(shader: Shader) -> &'static VertexDescriptor {
+        match Self::artifact(shader).name {
+            "cs_blur" => &desc::BLUR,
+            "cs_scale" => &desc::SCALE,
+            "cs_line_decoration" => &desc::LINE,
+            "cs_border_segment" | "cs_border_solid" => &desc::BORDER,
+            "cs_svg_filter_node" => &desc::SVG_FILTER_NODE,
+            "ps_quad_mask" => &desc::MASK,
+            "composite" => &desc::COMPOSITE,
+            "ps_clear" => &desc::CLEAR,
+            "ps_copy" => &desc::COPY,
+            _ => &desc::PRIM_INSTANCES,
+        }
+    }
+
+    fn key(
+        shader: Shader,
+        blend: u8,
+        depth: u8,
+        format: wgt::TextureFormat,
+    ) -> Result<PipelineKey> {
+        use std::hash::{Hash, Hasher};
+        let artifact = Self::artifact(shader);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        vertex_layouts(Self::descriptor(shader), artifact)?.hash(&mut hash);
+        Ok(PipelineKey {
+            shader,
+            blend,
+            depth,
+            format,
+            shader_digest: artifact.digest,
+            vertex_layout: hash.finish(),
+            samples: 1,
+            depth_format: if depth == 0 {
+                None
+            } else {
+                Some(wgt::TextureFormat::Depth32Float)
+            },
+        })
+    }
+
+    fn layouts(
+        owner: &Rc<Device<A>>,
+        artifact: &ShaderArtifact,
+    ) -> Result<(Owned<A, A::PipelineLayout>, Owned<A, A::BindGroupLayout>)> {
+        let native = &owner.open.device;
+        let mut entries = Vec::new();
+        if artifact.projection_stages != 0 {
+            entries.push(wgt::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgt::ShaderStages::from_bits_retain(artifact.projection_stages),
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(64),
+                },
+                count: None,
+            });
+        }
+        for binding in artifact.textures {
+            let filtering = binding.name.starts_with("sColor");
+            let sample_type = match binding.scalar {
+                ScalarType::Float => wgt::TextureSampleType::Float {
+                    filterable: filtering,
+                },
+                ScalarType::Sint => wgt::TextureSampleType::Sint,
+                ScalarType::Uint => wgt::TextureSampleType::Uint,
+            };
+            entries.push(wgt::BindGroupLayoutEntry {
+                binding: binding.binding,
+                visibility: wgt::ShaderStages::from_bits_retain(binding.stages),
+                ty: wgt::BindingType::Texture {
+                    sample_type,
+                    view_dimension: wgt::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            if binding.sampler_stages != 0 {
+                entries.push(wgt::BindGroupLayoutEntry {
+                    binding: binding.binding + 1,
+                    visibility: wgt::ShaderStages::from_bits_retain(binding.sampler_stages),
+                    ty: wgt::BindingType::Sampler(if filtering {
+                        wgt::SamplerBindingType::Filtering
+                    } else {
+                        wgt::SamplerBindingType::NonFiltering
+                    }),
+                    count: None,
+                });
+            }
+        }
+        let bindings = Owned::new(
+            owner,
+            unsafe {
+                native.create_bind_group_layout(&hal::BindGroupLayoutDescriptor {
+                    label: Some("WR bindings"),
+                    flags: hal::BindGroupLayoutFlags::empty(),
+                    entries: &entries,
+                })
+            }
+            .map_err(|e| format!("Creating binding layout: {e:?}"))?,
+            A::Device::destroy_bind_group_layout,
+        );
+        let layout = Owned::new(
+            owner,
+            unsafe {
+                native.create_pipeline_layout(&hal::PipelineLayoutDescriptor {
+                    label: Some("WR pipelines"),
+                    flags: hal::PipelineLayoutFlags::empty(),
+                    bind_group_layouts: &[Some(&*bindings)],
+                    immediate_size: 0,
+                })
+            }
+            .map_err(|e| format!("Creating pipeline layout: {e:?}"))?,
+            A::Device::destroy_pipeline_layout,
+        );
+        Ok((layout, bindings))
+    }
+
     fn pipeline(&mut self, key: PipelineKey) -> Result<()> {
         if self.pipelines.contains_key(&key) {
             return Ok(());
         }
+        if self.pipelines.len() >= 128 {
+            self.pipelines.clear();
+            self.descriptors.borrow_mut().clear();
+        }
         let artifact = Self::artifact(key.shader);
-        let descriptor = match key.shader {
-            Shader::Quad => &desc::PRIM_INSTANCES,
-            Shader::Composite => &desc::COMPOSITE,
-            Shader::Clear => &desc::CLEAR,
-        };
+        if artifact.features.contains("DUAL_SOURCE_BLENDING")
+            && !self
+                .owner
+                .features
+                .contains(wgt::Features::DUAL_SOURCE_BLENDING)
+        {
+            return Err("HAL adapter has no dual-source blending support".into());
+        }
+        let (layout, bindings) = Self::layouts(&self.owner, artifact)?;
+        let descriptor = Self::descriptor(key.shader);
         let (vertex, instances, stride) = vertex_layouts(descriptor, artifact)?;
         let vertex_buffers = [
             Some(hal::VertexBufferLayout {
@@ -478,16 +958,46 @@ impl<A: hal::Api> FrameRenderer<A> {
             constants: &constants,
             zero_initialize_workgroup_memory: false,
         };
+        let component = |src_factor, dst_factor| wgt::BlendComponent {
+            src_factor,
+            dst_factor,
+            operation: wgt::BlendOperation::Add,
+        };
+        use wgt::BlendFactor as Factor;
         let blend = match key.blend {
             0 => None,
             1 => Some(wgt::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
             2 => Some(wgt::BlendState::ALPHA_BLENDING),
+            3 => Some(wgt::BlendState {
+                color: component(Factor::Zero, Factor::Src),
+                alpha: component(Factor::Zero, Factor::SrcAlpha),
+            }),
+            4 => Some(wgt::BlendState {
+                color: component(Factor::Zero, Factor::OneMinusSrcAlpha),
+                alpha: component(Factor::Zero, Factor::OneMinusSrcAlpha),
+            }),
+            5 => Some(wgt::BlendState {
+                color: component(Factor::One, Factor::OneMinusSrc1),
+                alpha: component(Factor::One, Factor::OneMinusSrc1Alpha),
+            }),
+            6 => Some(wgt::BlendState {
+                color: component(Factor::One, Factor::OneMinusSrc),
+                alpha: component(Factor::One, Factor::OneMinusSrcAlpha),
+            }),
+            7 => Some(wgt::BlendState {
+                color: component(Factor::OneMinusDst, Factor::OneMinusSrc),
+                alpha: component(Factor::One, Factor::OneMinusSrcAlpha),
+            }),
+            8 => Some(wgt::BlendState {
+                color: component(Factor::One, Factor::One),
+                alpha: component(Factor::One, Factor::One),
+            }),
             _ => unreachable!(),
         };
         let pipeline = unsafe {
             native.create_render_pipeline(&hal::RenderPipelineDescriptor {
                 label: Some(artifact.name),
-                layout: &self.layout,
+                layout: &layout,
                 vertex_processor: hal::VertexProcessor::Standard {
                     vertex_buffers: &vertex_buffers,
                     vertex_stage: stage(&*vs),
@@ -501,7 +1011,7 @@ impl<A: hal::Api> FrameRenderer<A> {
                     None
                 } else {
                     Some(wgt::DepthStencilState {
-                        format: wgt::TextureFormat::Depth32Float,
+                        format: key.depth_format.unwrap(),
                         depth_write_enabled: Some(key.depth == 1),
                         depth_compare: Some(if key.depth == 3 {
                             wgt::CompareFunction::Always
@@ -512,7 +1022,10 @@ impl<A: hal::Api> FrameRenderer<A> {
                         bias: Default::default(),
                     })
                 },
-                multisample: Default::default(),
+                multisample: wgt::MultisampleState {
+                    count: key.samples,
+                    ..Default::default()
+                },
                 color_targets: &[Some(wgt::ColorTargetState {
                     format: key.format,
                     blend,
@@ -526,7 +1039,11 @@ impl<A: hal::Api> FrameRenderer<A> {
         println!("HAL pipeline {:?} shader={:016x}", key, artifact.digest);
         self.pipelines.insert(
             key,
-            Owned::new(&self.owner, pipeline, A::Device::destroy_render_pipeline),
+            Rc::new(Pipeline {
+                raw: Owned::new(&self.owner, pipeline, A::Device::destroy_render_pipeline),
+                layout,
+                bindings,
+            }),
         );
         Ok(())
     }
@@ -538,20 +1055,52 @@ impl<A: hal::Api> FrameRenderer<A> {
         data: &HashMap<&str, Rc<Texture<A>>>,
         stats: &mut DrawStats,
     ) -> Result<()> {
+        self.draw_pass_at(target, draws, data, stats, DeviceIntPoint::zero())
+    }
+
+    fn draw_pass_at(
+        &mut self,
+        target: &Rc<Texture<A>>,
+        draws: &[Draw<A>],
+        data: &HashMap<&str, Rc<Texture<A>>>,
+        stats: &mut DrawStats,
+        origin: DeviceIntPoint,
+    ) -> Result<()> {
         let size = target.size;
+        let full_rect = DeviceIntRect::from_origin_and_size(
+            origin,
+            DeviceIntSize::new(size.width as i32, size.height as i32),
+        );
+        let load_clear = draws
+            .first()
+            .filter(|draw| draw.scissor == full_rect)
+            .and_then(|draw| draw.clear_color);
+        let draws = if load_clear.is_some() {
+            &draws[1..]
+        } else {
+            draws
+        };
         let has_depth = draws.iter().any(|draw| draw.depth != 0);
         let depth = if has_depth {
-            Some(Texture::new(
-                &self.owner,
-                size.width,
-                size.height,
-                wgt::TextureFormat::Depth32Float,
-                TextureFilter::Nearest,
-                true,
-            )?)
+            let id = (target.allocation_id, target.base_mip);
+            if !self.depths.contains_key(&id) {
+                let depth = self.texture_pool.acquire(
+                    size.width,
+                    size.height,
+                    wgt::TextureFormat::Depth32Float,
+                    true,
+                )?;
+                let mut commands = self.submissions.recording()?;
+                depth.invalidate(&mut commands);
+                self.depths.insert(id, depth);
+            }
+            Some(self.depths[&id].clone())
         } else {
             None
         };
+        // Convert GL's [-N, N-1] near/far planes to Vulkan's [0, 1] clip depth.
+        let depth_ids = crate::renderer::hal::MAX_DEPTH_IDS as f32;
+        let depth_span = 2.0 * depth_ids - 1.0;
         let matrix: [f32; 16] = [
             2.0 / size.width as f32,
             0.0,
@@ -563,47 +1112,82 @@ impl<A: hal::Api> FrameRenderer<A> {
             0.0,
             0.0,
             0.0,
-            -1.0 / crate::renderer::hal::MAX_DEPTH_IDS as f32,
+            -1.0 / depth_span,
             0.0,
-            -1.0,
-            1.0,
-            1.0,
+            -1.0 - 2.0 * origin.x as f32 / size.width as f32,
+            1.0 + 2.0 * origin.y as f32 / size.height as f32,
+            depth_ids / depth_span,
             1.0,
         ];
         let matrix_bytes: Vec<_> = matrix.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let uniform = Buffer::new(&self.owner, &matrix_bytes, wgt::BufferUses::UNIFORM)?;
+        let matrix_key = matrix.map(f32::to_bits);
+        let uniform = if let Some(buffer) = self.uniforms.get(&matrix_key) {
+            buffer.clone()
+        } else {
+            let buffer = Buffer::new(&self.owner, &matrix_bytes, wgt::BufferUses::UNIFORM)?;
+            if self.uniforms.len() >= 64 {
+                self.uniforms.clear();
+            }
+            self.uniforms.insert(matrix_key, buffer.clone());
+            buffer
+        };
         let mut resources = Vec::new();
+        let mut sampled = Vec::new();
         for draw in draws {
             let depth_mode = if has_depth && draw.depth == 0 {
                 3
             } else {
                 draw.depth
             };
-            let key = PipelineKey {
-                shader: draw.shader,
-                blend: draw.blend,
-                depth: depth_mode,
-                format: target.format,
-            };
+            let key = Self::key(draw.shader, draw.blend, depth_mode, target.format)?;
             self.pipeline(key)?;
-            let buffer = Buffer::new(&self.owner, &draw.instances, wgt::BufferUses::VERTEX)?;
-            let mut entries = vec![hal::BindGroupEntry {
-                binding: 0,
-                resource_index: 0,
-                count: 1,
-            }];
+            let pipeline = self.pipelines[&key].clone();
+            let buffer = self
+                .submissions
+                .upload(&draw.instances, wgt::BufferUses::VERTEX)?;
+            let artifact = Self::artifact(draw.shader);
+            let mut entries = Vec::new();
+            if artifact.projection_stages != 0 {
+                entries.push(hal::BindGroupEntry {
+                    binding: 0,
+                    resource_index: 0,
+                    count: 1,
+                });
+            }
             let mut textures = Vec::new();
+            let mut texture_owners = Vec::new();
+            let mut identities = Vec::new();
             let mut samplers = Vec::new();
-            for binding in shaders::TEXTURE_BINDINGS {
-                let texture = if binding.name == "sColor0" {
-                    &draw.source
-                } else if binding.name.starts_with("sColor") {
-                    &self.dummy
-                } else {
-                    data.get(binding.name)
-                        .ok_or_else(|| format!("Missing HAL binding {}", binding.name))?
+            for binding in artifact.textures {
+                let texture = match binding.name {
+                    "sColor0" => &draw.textures.colors[0],
+                    "sColor1" => &draw.textures.colors[1],
+                    "sColor2" => &draw.textures.colors[2],
+                    "sClipMask" => &draw.textures.clip,
+                    name => data
+                        .get(name)
+                        .ok_or_else(|| format!("Missing HAL binding {name}"))?,
                 };
-                if Rc::ptr_eq(texture, target) {
+                sampled.push(texture.clone());
+                texture_owners.push(texture.clone());
+                let filter = if binding.name.starts_with("sColor") {
+                    draw.filter.unwrap_or(texture.filter)
+                } else {
+                    TextureFilter::Nearest
+                };
+                let filter_id = match filter {
+                    TextureFilter::Nearest => 0,
+                    TextureFilter::Linear => 1,
+                    TextureFilter::Trilinear => 2,
+                };
+                identities.push((
+                    texture.allocation_id,
+                    texture.base_mip,
+                    texture.mip_count,
+                    texture.format,
+                    filter_id,
+                ));
+                if texture.overlaps(target) {
                     return Err("HAL attachment feedback is unsupported".into());
                 }
                 entries.push(hal::BindGroupEntry {
@@ -615,47 +1199,91 @@ impl<A: hal::Api> FrameRenderer<A> {
                     view: &*texture.view,
                     usage: wgt::TextureUses::RESOURCE,
                 });
-                entries.push(hal::BindGroupEntry {
-                    binding: binding.binding + 1,
-                    resource_index: samplers.len() as u32,
-                    count: 1,
+                if binding.sampler_stages != 0 {
+                    entries.push(hal::BindGroupEntry {
+                        binding: binding.binding + 1,
+                        resource_index: samplers.len() as u32,
+                        count: 1,
+                    });
+                    let filter = if binding.name.starts_with("sColor") {
+                        draw.filter.unwrap_or(texture.filter)
+                    } else {
+                        TextureFilter::Nearest
+                    };
+                    let index = match filter {
+                        TextureFilter::Nearest => 0,
+                        TextureFilter::Linear => 1,
+                        TextureFilter::Trilinear => 2,
+                    };
+                    samplers.push(&*self.samplers[index]);
+                }
+            }
+            let descriptor_key = DescriptorKey {
+                pipeline: key,
+                uniform: uniform.allocation_id,
+                textures: identities,
+            };
+            let cached = self.descriptors.borrow().get(&descriptor_key).cloned();
+            let group = if let Some(group) = cached {
+                group
+            } else {
+                let raw = unsafe {
+                    self.owner
+                        .open
+                        .device
+                        .create_bind_group(&hal::BindGroupDescriptor {
+                            label: Some("WR draw"),
+                            layout: &pipeline.bindings,
+                            buffers: &[uniform.binding()],
+                            samplers: &samplers,
+                            textures: &textures,
+                            entries: &entries,
+                            acceleration_structures: &[],
+                            external_textures: &[],
+                        })
+                }
+                .map_err(|e| format!("Creating draw bindings: {e:?}"))?;
+                let cacheable = texture_owners
+                    .iter()
+                    .all(|texture| !texture.transient.get());
+                let group = Rc::new(Descriptor {
+                    raw: Owned::new(&self.owner, raw, A::Device::destroy_bind_group),
+                    _uniform: uniform.clone(),
+                    _textures: texture_owners,
+                    _pipeline: pipeline.clone(),
                 });
-                samplers
-                    .push(&*self.samplers[usize::from(texture.filter == TextureFilter::Linear)]);
-            }
-            let group = unsafe {
-                self.owner
-                    .open
-                    .device
-                    .create_bind_group(&hal::BindGroupDescriptor {
-                        label: Some("WR draw"),
-                        layout: &self.bindings,
-                        buffers: &[uniform.binding()],
-                        samplers: &samplers,
-                        textures: &textures,
-                        entries: &entries,
-                        acceleration_structures: &[],
-                        external_textures: &[],
-                    })
-            }
-            .map_err(|e| format!("Creating draw bindings: {e:?}"))?;
-            resources.push((
-                key,
-                buffer,
-                Owned::new(&self.owner, group, A::Device::destroy_bind_group),
-            ));
+                if cacheable {
+                    let mut cache = self.descriptors.borrow_mut();
+                    if cache.len() >= 256 {
+                        cache.clear();
+                    }
+                    cache.insert(descriptor_key, group.clone());
+                }
+                group
+            };
+            resources.push((pipeline, buffer, group));
         }
-        let initialized = target.state.get() != wgt::TextureUses::UNINITIALIZED;
-        let mut commands = Commands::<A>::new(&self.owner.open)?;
-        self.quad
-            .transition(commands.encoder(), wgt::BufferUses::VERTEX);
-        uniform.transition(commands.encoder(), wgt::BufferUses::UNIFORM);
+        let initialized = target.initialized() && load_clear.is_none();
+        let clear = load_clear.unwrap_or(ColorF::TRANSPARENT);
+        let mut commands = self.submissions.recording()?;
+        commands.keep(uniform.clone());
+        for (_, buffer, group) in &resources {
+            commands.keep((buffer.clone(), group.clone()));
+        }
+        for texture in sampled {
+            if !texture.sample_initialized() {
+                return Err("Sampling uninitialized or invalidated HAL texture contents".into());
+            }
+            texture.transition(&mut commands, wgt::TextureUses::RESOURCE);
+        }
+        self.quad.transition(&mut commands, wgt::BufferUses::VERTEX);
+        uniform.transition(&mut commands, wgt::BufferUses::UNIFORM);
         for (_, buffer, _) in &resources {
-            buffer.transition(commands.encoder(), wgt::BufferUses::VERTEX);
+            buffer.transition(&mut commands, wgt::BufferUses::VERTEX);
         }
-        target.transition(commands.encoder(), wgt::TextureUses::COLOR_TARGET);
+        target.transition(&mut commands, wgt::TextureUses::COLOR_TARGET);
         if let Some(depth) = &depth {
-            depth.transition(commands.encoder(), wgt::TextureUses::DEPTH_STENCIL_WRITE);
+            depth.transition(&mut commands, wgt::TextureUses::DEPTH_STENCIL_WRITE);
         }
         unsafe {
             commands
@@ -674,7 +1302,12 @@ impl<A: hal::Api> FrameRenderer<A> {
                         },
                         depth_slice: None,
                         resolve_target: None,
-                        clear_value: wgt::Color::TRANSPARENT,
+                        clear_value: wgt::Color {
+                            r: clear.r as f64,
+                            g: clear.g as f64,
+                            b: clear.b as f64,
+                            a: clear.a as f64,
+                        },
                         ops: (if initialized {
                             hal::AttachmentOps::LOAD
                         } else {
@@ -687,7 +1320,11 @@ impl<A: hal::Api> FrameRenderer<A> {
                                 view: &*texture.view,
                                 usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
                             },
-                            depth_ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
+                            depth_ops: (if texture.initialized() {
+                                hal::AttachmentOps::LOAD
+                            } else {
+                                hal::AttachmentOps::LOAD_CLEAR
+                            }) | hal::AttachmentOps::STORE,
                             stencil_ops: hal::AttachmentOps::LOAD_DONT_CARE
                                 | hal::AttachmentOps::STORE_DISCARD,
                             clear_value: (1.0, 0),
@@ -708,38 +1345,47 @@ impl<A: hal::Api> FrameRenderer<A> {
                 0.0..1.0,
             );
             commands.encoder().set_vertex_buffer(0, self.quad.binding());
-            for (draw, (key, buffer, group)) in draws.iter().zip(&resources) {
-                let full = DeviceIntRect::from_size(DeviceIntSize::new(
-                    size.width as i32,
-                    size.height as i32,
-                ));
+            for (draw, (pipeline, buffer, group)) in draws.iter().zip(&resources) {
+                let full = full_rect;
                 let Some(rect) = draw.scissor.intersection(&full) else {
                     continue;
                 };
                 commands.encoder().set_scissor_rect(&hal::Rect {
-                    x: rect.min.x as u32,
-                    y: rect.min.y as u32,
+                    x: (rect.min.x - origin.x) as u32,
+                    y: (rect.min.y - origin.y) as u32,
                     w: rect.width() as u32,
                     h: rect.height() as u32,
                 });
-                commands.encoder().set_render_pipeline(&self.pipelines[key]);
+                commands.encoder().set_render_pipeline(&pipeline.raw);
                 commands
                     .encoder()
-                    .set_bind_group(&self.layout, 0, group, &[]);
+                    .set_bind_group(&pipeline.layout, 0, &group.raw, &[]);
                 commands.encoder().set_vertex_buffer(1, buffer.binding());
                 commands.encoder().draw(0, 4, 0, draw.count);
                 stats.draw_calls += 1;
+                stats.wr_draw_calls += usize::from(draw.count_in_stats);
                 match draw.shader {
                     Shader::Quad => stats.primitive_instances += draw.count as usize,
                     Shader::Composite => stats.composite_tiles += draw.count as usize,
                     Shader::Clear => {}
+                    Shader::Other(name, _) => {
+                        if name.starts_with("ps_quad")
+                            || name == "ps_text_run"
+                            || name == "ps_split_composite"
+                        {
+                            stats.primitive_instances += draw.count as usize;
+                        }
+                    }
                 }
             }
             commands.encoder().end_render_pass();
         }
-        target.transition(commands.encoder(), wgt::TextureUses::RESOURCE);
-        commands.submit_and_wait()?;
-        stats.color_targets += 1;
+        target.transition(&mut commands, wgt::TextureUses::RESOURCE);
+        target.initialize(&mut commands);
+        if let Some(depth) = &depth {
+            depth.initialize(&mut commands);
+        }
+        stats.native_passes += 1;
         Ok(())
     }
 
@@ -759,7 +1405,11 @@ impl<A: hal::Api> FrameRenderer<A> {
             depth: 0,
             count: 1,
             instances: bytes(&[instance]).to_vec(),
-            source: self.dummy.clone(),
+            textures: self.single_texture(self.dummy.clone()),
+            filter: None,
+            clear_color: Some(color),
+            count_in_stats: false,
+            readback: None,
             scissor: rect,
         }
     }
@@ -782,27 +1432,52 @@ impl<A: hal::Api> FrameRenderer<A> {
             (true, &container.opaque_batches),
             (false, &container.alpha_batches),
         ] {
-            for batch in batches {
+            for index in 0..batches.len() {
+                let batch = &batches[if opaque {
+                    batches.len() - 1 - index
+                } else {
+                    index
+                }];
                 if batch.instances.is_empty() {
                     continue;
                 }
-                if batch.key.kind != BatchKind::Quad(PatternKind::ColorOrTexture)
-                    || batch.readback.is_some()
-                    || !matches!(
-                        batch.key.textures.clip_mask,
-                        TextureSource::Invalid | TextureSource::Dummy
-                    )
-                {
-                    return Err(format!("Unsupported HAL batch {:?}", batch.key));
-                }
+                let shader = match batch.key.kind {
+                    BatchKind::Quad(pattern) => self.quad_shader(pattern)?,
+                    BatchKind::SplitComposite => Shader::Other("ps_split_composite", ""),
+                    BatchKind::TextRun(format) => {
+                        let transformed = matches!(
+                            format,
+                            glyph_rasterizer::GlyphFormat::TransformedAlpha
+                                | glyph_rasterizer::GlyphFormat::TransformedSubpixel
+                        );
+                        let features = match (
+                            transformed,
+                            batch.key.blend_mode == BlendMode::SubpixelDualSource,
+                        ) {
+                            (false, false) => "ALPHA_PASS,TEXTURE_2D",
+                            (true, false) => "ALPHA_PASS,GLYPH_TRANSFORM,TEXTURE_2D",
+                            (false, true) => "ALPHA_PASS,DUAL_SOURCE_BLENDING,TEXTURE_2D",
+                            (true, true) => {
+                                "ALPHA_PASS,DUAL_SOURCE_BLENDING,GLYPH_TRANSFORM,TEXTURE_2D"
+                            }
+                        };
+                        Shader::Other("ps_text_run", features)
+                    }
+                };
                 let blend = match batch.key.blend_mode {
                     BlendMode::None => 0,
                     BlendMode::PremultipliedAlpha => 1,
                     BlendMode::Alpha => 2,
+                    BlendMode::Multiply => 3,
+                    BlendMode::PremultipliedDestOut => 4,
+                    BlendMode::SubpixelDualSource => 5,
+                    BlendMode::Screen => 6,
+                    BlendMode::Exclusion => 7,
+                    BlendMode::PlusLighter => 8,
                     mode => return Err(format!("Unsupported HAL blend {mode:?}")),
                 };
                 draws.push(Draw {
-                    shader: Shader::Quad,
+                    shader,
                     blend,
                     depth: if !has_depth {
                         0
@@ -813,10 +1488,119 @@ impl<A: hal::Api> FrameRenderer<A> {
                     },
                     count: batch.instances.len() as u32,
                     instances: bytes(&batch.instances).to_vec(),
-                    source: self.source(batch.key.textures.input.colors[0])?,
+                    textures: self.batch_textures(&batch.key.textures)?,
+                    filter: None,
+                    clear_color: None,
+                    count_in_stats: true,
+                    readback: batch.readback,
                     scissor,
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn draw_batches(
+        &mut self,
+        target: &Rc<Texture<A>>,
+        draws: &[Draw<A>],
+        data: &HashMap<&str, Rc<Texture<A>>>,
+        tasks: &crate::render_task_graph::RenderTaskGraph,
+        stats: &mut DrawStats,
+    ) -> Result<()> {
+        let mut start = 0;
+        for (index, draw) in draws.iter().enumerate() {
+            if let Some(readback) = draw.readback {
+                self.draw_pass(target, &draws[start..index], data, stats)?;
+                let source = &tasks[readback.src_task_id];
+                let destination = &tasks[readback.readback_task_id];
+                if let Some((source_rect, destination_rect)) =
+                    crate::renderer::geometry::readback_rects(source, destination)
+                {
+                    let texture = self.source(destination.get_texture_source())?;
+                    self.record_blit(
+                        target,
+                        &texture,
+                        source_rect,
+                        destination_rect,
+                        TextureFilter::Linear,
+                        stats,
+                    )?;
+                }
+                start = index;
+            }
+        }
+        self.draw_pass(target, &draws[start..], data, stats)
+    }
+
+    fn masks(
+        &self,
+        masks: &ClipMaskInstanceList,
+        rect: DeviceIntRect,
+        draws: &mut Vec<Draw<A>>,
+    ) -> Result<()> {
+        let mut group = |features,
+                         instances: &[crate::gpu_types::MaskInstance],
+                         scissored: &crate::internal_types::FastHashMap<
+            DeviceIntRect,
+            crate::internal_types::FrameVec<crate::gpu_types::MaskInstance>,
+        >|
+         -> Result<()> {
+            let shader = Shader::Other("ps_quad_mask", features);
+            if !instances.is_empty() {
+                draws.push(self.task_draw(shader, 3, instances, &BatchTextures::empty(), rect)?);
+            }
+            for (scissor, instances) in scissored {
+                draws.push(self.task_draw(
+                    shader,
+                    3,
+                    instances,
+                    &BatchTextures::empty(),
+                    *scissor,
+                )?);
+            }
+            Ok(())
+        };
+        group(
+            "FAST_PATH",
+            &masks.mask_instances_fast,
+            &masks.mask_instances_fast_with_scissor,
+        )?;
+        group(
+            "SUPERELLIPSE",
+            &masks.mask_instances_superellipse,
+            &masks.mask_instances_superellipse_with_scissor,
+        )?;
+        for (source, instances) in &masks.image_mask_instances {
+            draws.push(self.task_draw(
+                Shader::Quad,
+                3,
+                instances,
+                &BatchTextures::composite_rgb(*source),
+                rect,
+            )?);
+        }
+        for ((scissor, source), instances) in &masks.image_mask_instances_with_scissor {
+            draws.push(self.task_draw(
+                Shader::Quad,
+                3,
+                instances,
+                &BatchTextures::composite_rgb(*source),
+                *scissor,
+            )?);
+        }
+        let shader = Shader::Other("ps_quad_mask", "");
+        if !masks.mask_instances_slow.is_empty() {
+            draws.push(self.task_draw(
+                shader,
+                3,
+                &masks.mask_instances_slow,
+                &BatchTextures::empty(),
+                rect,
+            )?);
+        }
+        for (scissor, instances) in &masks.mask_instances_slow_with_scissor {
+            draws.push(self.task_draw(shader, 3, instances, &BatchTextures::empty(), *scissor)?);
         }
         Ok(())
     }
@@ -825,25 +1609,9 @@ impl<A: hal::Api> FrameRenderer<A> {
         &mut self,
         target: &RenderTarget,
         data: &HashMap<&str, Rc<Texture<A>>>,
+        tasks: &crate::render_task_graph::RenderTaskGraph,
         stats: &mut DrawStats,
     ) -> Result<()> {
-        if !target.clip_masks.is_empty()
-            || !target.vertical_blurs.is_empty()
-            || !target.horizontal_blurs.is_empty()
-            || !target.scalings.is_empty()
-            || !target.svg_nodes.is_empty()
-            || !target.blits.is_empty()
-            || !target.resolve_ops.is_empty()
-            || target.prim_instances.iter().any(|batch| !batch.is_empty())
-            || !target.prim_instances_with_scissor.is_empty()
-            || !target.border_segments_complex.is_empty()
-            || !target.border_segments_solid.is_empty()
-            || !target.border_segments_complex_superellipse.is_empty()
-            || !target.border_segments_solid_superellipse.is_empty()
-            || !target.line_decorations.is_empty()
-        {
-            return Err("Unsupported HAL render-target operations".into());
-        }
         let texture = self
             .textures
             .get(&target.texture_id)
@@ -856,16 +1624,199 @@ impl<A: hal::Api> FrameRenderer<A> {
                 texture.size.height as i32,
             )));
         let mut draws = Vec::new();
-        if let Some(color) = target.clear_color {
-            draws.push(self.clear(rect, color));
+        if !target.cached {
+            if let Some(color) = target.clear_color {
+                draws.push(self.clear(rect, color));
+            }
         }
-        for &(rect, color) in &target.clears {
-            draws.push(self.clear(rect, color));
+        let clears: Vec<_> = target
+            .clears
+            .iter()
+            .filter(|(_, color)| target.cached || target.clear_color != Some(*color))
+            .map(|(rect, color)| ClearInstance {
+                rect: [
+                    rect.min.x as f32,
+                    rect.min.y as f32,
+                    rect.max.x as f32,
+                    rect.max.y as f32,
+                ],
+                color: color.to_array(),
+            })
+            .collect();
+        if !clears.is_empty() {
+            let full = DeviceIntRect::from_size(DeviceIntSize::new(
+                texture.size.width as i32,
+                texture.size.height as i32,
+            ));
+            draws.push(self.task_draw(Shader::Clear, 0, &clears, &BatchTextures::empty(), full)?);
+        }
+        if !target.resolve_ops.is_empty() {
+            self.draw_pass(&texture, &draws, data, stats)?;
+            draws.clear();
+            for resolve in &target.resolve_ops {
+                for id in &resolve.src_task_ids {
+                    let source_task = &tasks[*id];
+                    let destination_task = &tasks[resolve.dest_task_id];
+                    if let Some((source_rect, destination_rect)) =
+                        crate::renderer::geometry::resolve_rects(
+                            source_task,
+                            destination_task,
+                            &resolve.dest_to_src_raster,
+                        )
+                    {
+                        let source = self.source(source_task.get_texture_source())?;
+                        self.record_blit(
+                            &source,
+                            &texture,
+                            source_rect,
+                            destination_rect,
+                            TextureFilter::Linear,
+                            stats,
+                        )?;
+                    }
+                }
+            }
+        }
+        if !target.blits.is_empty() {
+            self.draw_pass(&texture, &draws, data, stats)?;
+            draws.clear();
+            for blit in &target.blits {
+                let task = &tasks[blit.source];
+                let source = self.source(task.get_texture_source())?;
+                let source_rect = blit
+                    .source_rect
+                    .translate(task.get_target_rect().min.to_vector());
+                self.record_blit(
+                    &source,
+                    &texture,
+                    source_rect,
+                    blit.target_rect,
+                    TextureFilter::Linear,
+                    stats,
+                )?;
+            }
+        }
+        for (name, features, instances) in [
+            ("cs_border_solid", "", &target.border_segments_solid),
+            ("cs_border_segment", "", &target.border_segments_complex),
+            (
+                "cs_border_solid",
+                "SUPERELLIPSE",
+                &target.border_segments_solid_superellipse,
+            ),
+            (
+                "cs_border_segment",
+                "SUPERELLIPSE",
+                &target.border_segments_complex_superellipse,
+            ),
+        ] {
+            if !instances.is_empty() {
+                draws.push(self.task_draw(
+                    Shader::Other(name, features),
+                    1,
+                    instances,
+                    &BatchTextures::empty(),
+                    rect,
+                )?);
+            }
+        }
+        if !target.line_decorations.is_empty() {
+            draws.push(self.task_draw(
+                Shader::Other("cs_line_decoration", ""),
+                1,
+                &target.line_decorations,
+                &BatchTextures::empty(),
+                rect,
+            )?);
+        }
+        for blurs in [&target.vertical_blurs, &target.horizontal_blurs] {
+            for (source, instances) in blurs {
+                draws.push(self.task_draw(
+                    Shader::Other("cs_blur", "COLOR_TARGET"),
+                    0,
+                    instances,
+                    &BatchTextures::composite_rgb(*source),
+                    rect,
+                )?);
+            }
+        }
+        for (source, instances) in &target.scalings {
+            draws.push(Draw {
+                shader: Shader::Other("cs_scale", "TEXTURE_2D"),
+                blend: 0,
+                depth: 0,
+                count: instances.len() as u32,
+                instances: bytes(instances).to_vec(),
+                textures: self.single_texture(self.source(*source)?),
+                filter: None,
+                clear_color: None,
+                count_in_stats: true,
+                readback: None,
+                scissor: rect,
+            });
+        }
+        for (textures, instances) in &target.svg_nodes {
+            if !instances.is_empty() {
+                draws.push(self.task_draw(
+                    Shader::Other("cs_svg_filter_node", ""),
+                    0,
+                    instances,
+                    textures,
+                    rect,
+                )?);
+            }
         }
         for container in &target.alpha_batch_containers {
             self.batches(container, rect, &mut draws)?;
         }
-        self.draw_pass(&texture, &draws, data, stats)
+        for (index, batches) in target.prim_instances.iter().enumerate() {
+            if batches.is_empty() {
+                continue;
+            }
+            let shader = self.quad_shader(PatternKind::from_u32(index as u32))?;
+            for (textures, instances) in batches {
+                draws.push(self.task_draw(
+                    shader,
+                    0,
+                    instances,
+                    &BatchTextures {
+                        input: *textures,
+                        clip_mask: TextureSource::Invalid,
+                    },
+                    rect,
+                )?);
+            }
+        }
+        for ((scissor, pattern), batches) in &target.prim_instances_with_scissor {
+            let shader = self.quad_shader(*pattern)?;
+            for (textures, instances) in batches {
+                draws.push(self.task_draw(
+                    shader,
+                    1,
+                    instances,
+                    &BatchTextures {
+                        input: *textures,
+                        clip_mask: TextureSource::Invalid,
+                    },
+                    *scissor,
+                )?);
+            }
+        }
+        self.masks(&target.clip_masks, rect, &mut draws)?;
+        self.draw_batches(&texture, &draws, data, tasks, stats)
+    }
+
+    pub fn update_resources(&mut self, updates: Vec<ResourceUpdateList>) -> Result<()> {
+        if self.failed {
+            return Err("HAL renderer must be recreated after an execution failure".into());
+        }
+        self.failed = true;
+        for update in updates {
+            self.update(update)?;
+        }
+        self.submissions.submit()?;
+        self.failed = false;
+        Ok(())
     }
 
     pub fn render(
@@ -874,11 +1825,26 @@ impl<A: hal::Api> FrameRenderer<A> {
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
     ) -> Result<FrameOutput> {
+        self.execute(frame, updates, clear, frame.present)
+    }
+
+    pub fn render_offscreen(&mut self, frame: &Frame) -> Result<()> {
+        self.execute(frame, Vec::new(), ColorF::TRANSPARENT, false)
+            .map(|_| ())
+    }
+
+    fn execute(
+        &mut self,
+        frame: &Frame,
+        updates: Vec<ResourceUpdateList>,
+        clear: ColorF,
+        composite: bool,
+    ) -> Result<FrameOutput> {
         if self.failed {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         self.failed = true;
-        let result = self.render_inner(frame, updates, clear);
+        let result = self.render_inner(frame, updates, clear, composite);
         if result.is_ok() {
             self.failed = false;
         }
@@ -890,7 +1856,9 @@ impl<A: hal::Api> FrameRenderer<A> {
         frame: &Frame,
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
+        composite: bool,
     ) -> Result<FrameOutput> {
+        self.depths.clear();
         if !frame.deferred_resolves.is_empty() || !frame.gpu_buffer_f.deferred_uv_copies.is_empty()
         {
             return Err("HAL external-image resolution is not implemented".into());
@@ -898,40 +1866,67 @@ impl<A: hal::Api> FrameRenderer<A> {
         for updates in updates {
             self.update(updates)?;
         }
-        let data = HashMap::from([
+        let mut data = HashMap::from([
+            (
+                "sPrimitiveHeadersF",
+                self.data_texture(
+                    "sPrimitiveHeadersF",
+                    &frame.prim_headers.headers_float,
+                    wgt::TextureFormat::Rgba32Float,
+                )?,
+            ),
+            (
+                "sPrimitiveHeadersI",
+                self.data_texture(
+                    "sPrimitiveHeadersI",
+                    &frame.prim_headers.headers_int,
+                    wgt::TextureFormat::Rgba32Sint,
+                )?,
+            ),
             (
                 "sGpuBufferF",
-                self.data_texture(&frame.gpu_buffer_f.data, wgt::TextureFormat::Rgba32Float)?,
+                self.data_texture(
+                    "sGpuBufferF",
+                    &frame.gpu_buffer_f.data,
+                    wgt::TextureFormat::Rgba32Float,
+                )?,
             ),
             (
                 "sGpuBufferI",
-                self.data_texture(&frame.gpu_buffer_i.data, wgt::TextureFormat::Rgba32Sint)?,
+                self.data_texture(
+                    "sGpuBufferI",
+                    &frame.gpu_buffer_i.data,
+                    wgt::TextureFormat::Rgba32Sint,
+                )?,
             ),
             (
                 "sTransformPalette",
-                self.data_texture(&frame.transform_palette, wgt::TextureFormat::Rgba32Float)?,
+                self.data_texture(
+                    "sTransformPalette",
+                    &frame.transform_palette,
+                    wgt::TextureFormat::Rgba32Float,
+                )?,
             ),
             (
                 "sRenderTasks",
                 self.data_texture(
+                    "sRenderTasks",
                     &frame.render_tasks.task_data,
                     wgt::TextureFormat::Rgba32Float,
                 )?,
             ),
         ]);
+        if let Some(dither) = &self.dither {
+            data.insert("sDither", dither.clone());
+        }
         let mut stats = DrawStats::default();
-        if !frame.has_been_rendered {
-            for pass in &frame.passes {
-                if !pass.alpha.targets.is_empty() {
-                    return Err("HAL alpha targets are not implemented".into());
-                }
-                for target in &pass.color.targets {
-                    self.target(target, &data, &mut stats)?;
-                }
+        for pass in &frame.passes {
+            if !frame.has_been_rendered {
                 for target in pass.texture_cache.values() {
-                    self.target(target, &data, &mut stats)?;
+                    self.target(target, &data, &frame.render_tasks, &mut stats)?;
                 }
                 for target in &pass.picture_cache {
+                    stats.color_targets += 1;
                     let texture = self.surface(&target.surface)?;
                     match &target.kind {
                         PictureCacheTargetKind::Draw {
@@ -942,27 +1937,72 @@ impl<A: hal::Api> FrameRenderer<A> {
                                 draws.push(self.clear(target.dirty_rect, color));
                             }
                             self.batches(alpha_batch_container, target.dirty_rect, &mut draws)?;
-                            self.draw_pass(&texture, &draws, &data, &mut stats)?;
+                            self.draw_batches(
+                                &texture,
+                                &draws,
+                                &data,
+                                &frame.render_tasks,
+                                &mut stats,
+                            )?;
                         }
-                        PictureCacheTargetKind::Blit { .. } => {
-                            return Err("HAL picture blits are not implemented".into())
+                        PictureCacheTargetKind::Blit {
+                            task_id,
+                            sub_rect_offset,
+                        } => {
+                            let task = &frame.render_tasks[*task_id];
+                            let source = self.source(task.get_texture_source())?;
+                            let source_rect = DeviceIntRect::from_origin_and_size(
+                                task.get_target_rect().min + *sub_rect_offset,
+                                target.dirty_rect.size(),
+                            );
+                            if let Some(color) = target.clear_color {
+                                self.draw_pass(
+                                    &texture,
+                                    &[self.clear(target.dirty_rect, color)],
+                                    &data,
+                                    &mut stats,
+                                )?;
+                            }
+                            self.copy(&source, &texture, source_rect, target.dirty_rect)?;
                         }
                     }
                 }
             }
+            for target in &pass.alpha.targets {
+                stats.alpha_targets += 1;
+                self.target(target, &data, &frame.render_tasks, &mut stats)?;
+            }
+            for target in &pass.color.targets {
+                stats.color_targets += 1;
+                self.target(target, &data, &frame.render_tasks, &mut stats)?;
+            }
+            for id in &pass.textures_to_invalidate {
+                if let Some(texture) = self.textures.get(id) {
+                    let mut commands = self.submissions.recording()?;
+                    texture.invalidate(&mut commands);
+                }
+            }
         }
         let size = frame.device_rect.size();
-        if frame.device_rect.min != DeviceIntPoint::zero() {
-            return Err("HAL viewport offsets are not implemented".into());
+        if !composite || size.is_empty() {
+            self.submissions.submit()?;
+            return Ok(FrameOutput {
+                size: [0, 0],
+                pixels: Vec::new(),
+                stats,
+            });
         }
-        let output = Texture::new(
-            &self.owner,
+        stats.color_targets += 1;
+        let output = self.texture_pool.acquire(
             size.width as u32,
             size.height as u32,
             wgt::TextureFormat::Rgba8Unorm,
-            TextureFilter::Nearest,
             true,
         )?;
+        {
+            let mut commands = self.submissions.recording()?;
+            output.invalidate(&mut commands);
+        }
         let mut draws = vec![self.clear(frame.device_rect, clear)];
         for tile in frame.composite_state.tiles.iter().rev() {
             let state = &frame.composite_state;
@@ -980,14 +2020,16 @@ impl<A: hal::Api> FrameRenderer<A> {
             let clip = tile
                 .clip_index
                 .map(|index| state.get_compositor_clip(index));
-            let (instance, source) = match tile.surface {
+            let (instance, textures, shader) = match tile.surface {
                 CompositeTileSurface::Color { color } => (
                     CompositeInstance::new(rect, clip_rect, color.premultiplied(), flip, clip),
-                    self.dummy.clone(),
+                    self.single_texture(self.dummy.clone()),
+                    Shader::Composite,
                 ),
                 CompositeTileSurface::Texture { ref surface } => (
                     CompositeInstance::new(rect, clip_rect, PremultipliedColorF::WHITE, flip, clip),
-                    self.surface(surface)?,
+                    self.single_texture(self.surface(surface)?),
+                    Shader::Composite,
                 ),
                 CompositeTileSurface::ExternalSurface {
                     external_surface_index,
@@ -1004,44 +2046,81 @@ impl<A: hal::Api> FrameRenderer<A> {
                                 flip,
                                 clip,
                             ),
-                            self.source(plane.texture)?,
+                            self.single_texture(self.source(plane.texture)?),
+                            Shader::Composite,
                         ),
-                        _ => return Err("HAL YUV composition is not implemented".into()),
+                        ResolvedExternalSurfaceColorData::Yuv {
+                            planes,
+                            color_space,
+                            format,
+                            channel_bit_depth,
+                            ..
+                        } => (
+                            CompositeInstance::new_yuv(
+                                rect,
+                                clip_rect,
+                                *color_space,
+                                *format,
+                                *channel_bit_depth,
+                                [planes[0].uv_rect, planes[1].uv_rect, planes[2].uv_rect],
+                                flip,
+                                clip,
+                            ),
+                            self.batch_textures(&BatchTextures::composite_yuv(
+                                planes[0].texture,
+                                planes[1].texture,
+                                planes[2].texture,
+                            ))?,
+                            Shader::Other("composite", "TEXTURE_2D,YUV"),
+                        ),
                     }
                 }
             };
             draws.push(Draw {
-                shader: Shader::Composite,
+                shader,
                 blend: 1,
                 depth: 0,
                 count: 1,
                 instances: bytes(&[instance]).to_vec(),
-                source,
+                textures,
+                filter: None,
+                clear_color: None,
+                count_in_stats: true,
+                readback: None,
                 scissor: frame.device_rect,
             });
         }
-        self.draw_pass(&output, &draws, &data, &mut stats)?;
+        self.draw_pass_at(&output, &draws, &data, &mut stats, frame.device_rect.min)?;
         let layout = self.owner.layout(output.size.width, output.size.height)?;
-        let buffer = self.owner.readback_buffer(&layout)?;
-        let mut commands = Commands::<A>::new(&self.owner.open)?;
-        output.transition(commands.encoder(), wgt::TextureUses::COPY_SRC);
+        let buffer = Buffer::readback(&self.owner, &layout)?;
+        let mut commands = self.submissions.recording()?;
+        buffer.transition(&mut commands, wgt::BufferUses::COPY_DST);
+        output.transition(&mut commands, wgt::TextureUses::COPY_SRC);
         unsafe {
             copy_readback::<A>(
                 commands.encoder(),
                 &output.raw,
-                &buffer,
+                &buffer.raw,
                 &layout,
                 output.size,
                 hal::FormatAspects::COLOR,
             );
         }
-        commands.submit_and_wait()?;
-        let pixels = self.owner.map_readback(&buffer, &layout)?;
+        buffer.transition(&mut commands, wgt::BufferUses::MAP_READ);
+        drop(commands);
+        self.submissions.wait()?;
+        let pixels = self.owner.map_readback(&buffer.raw, &layout)?;
         Ok(FrameOutput {
             size: [output.size.width, output.size.height],
             pixels,
             stats,
         })
+    }
+}
+
+impl<A: hal::Api> Drop for FrameRenderer<A> {
+    fn drop(&mut self) {
+        self.submissions.shutdown();
     }
 }
 
@@ -1070,6 +2149,26 @@ fn vertex_layouts(
                 (VertexAttributeKind::I32, 4) => {
                     (ScalarType::Sint, wgt::VertexFormat::Sint32x4, 16)
                 }
+                (VertexAttributeKind::F32, 1) => (ScalarType::Float, wgt::VertexFormat::Float32, 4),
+                (VertexAttributeKind::F32, 3) => {
+                    (ScalarType::Float, wgt::VertexFormat::Float32x3, 12)
+                }
+                (VertexAttributeKind::I32, 1) => (ScalarType::Sint, wgt::VertexFormat::Sint32, 4),
+                (VertexAttributeKind::I32, 2) => (ScalarType::Sint, wgt::VertexFormat::Sint32x2, 8),
+                (VertexAttributeKind::I32, 3) => {
+                    (ScalarType::Sint, wgt::VertexFormat::Sint32x3, 12)
+                }
+                (VertexAttributeKind::U16, 2) => (ScalarType::Uint, wgt::VertexFormat::Uint16x2, 4),
+                (VertexAttributeKind::U16, 4) => (ScalarType::Uint, wgt::VertexFormat::Uint16x4, 8),
+                (VertexAttributeKind::U8Norm, 4) => {
+                    (ScalarType::Float, wgt::VertexFormat::Unorm8x4, 4)
+                }
+                (VertexAttributeKind::U16Norm, 2) => {
+                    (ScalarType::Float, wgt::VertexFormat::Unorm16x2, 4)
+                }
+                (VertexAttributeKind::U16Norm, 4) => {
+                    (ScalarType::Float, wgt::VertexFormat::Unorm16x4, 8)
+                }
                 _ => return Err(format!("Unsupported HAL vertex attribute {attribute:?}")),
             };
             if let Some(input) = shader
@@ -1097,4 +2196,241 @@ fn vertex_layouts(
     }
     let [vertex, instances] = output;
     Ok((vertex, instances, stride))
+}
+
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+
+    #[test]
+    fn all_shader_vertex_interfaces_match_wr_descriptors() {
+        for artifact in shaders::SHADERS {
+            let shader = Shader::Other(artifact.name, artifact.features);
+            vertex_layouts(
+                FrameRenderer::<hal::api::Vulkan>::descriptor(shader),
+                artifact,
+            )
+            .unwrap_or_else(|error| panic!("{} {}: {}", artifact.name, artifact.features, error));
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn all_shader_pipelines() {
+        let owner = create_vulkan_device(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let mut count = 0;
+        for artifact in shaders::SHADERS {
+            if artifact.features.contains("DUAL_SOURCE_BLENDING")
+                && !renderer
+                    .owner
+                    .features
+                    .contains(wgt::Features::DUAL_SOURCE_BLENDING)
+            {
+                continue;
+            }
+            let shader = Shader::Other(artifact.name, artifact.features);
+            let format = if artifact.name == "ps_quad_mask" || artifact.features == "ALPHA_TARGET" {
+                wgt::TextureFormat::R8Unorm
+            } else {
+                wgt::TextureFormat::Rgba8Unorm
+            };
+            let key = FrameRenderer::<hal::api::Vulkan>::key(shader, 0, 0, format).unwrap();
+            renderer.pipeline(key).unwrap();
+            count += 1;
+        }
+        println!("Created {count} current HAL shader pipelines");
+    }
+    fn pixels(
+        renderer: &FrameRenderer<hal::api::Vulkan>,
+        texture: &Rc<Texture<hal::api::Vulkan>>,
+    ) -> Vec<u8> {
+        let layout = renderer
+            .owner
+            .layout(texture.size.width, texture.size.height)
+            .unwrap();
+        let buffer = Buffer::readback(&renderer.owner, &layout).unwrap();
+        let mut commands = renderer.submissions.recording().unwrap();
+        commands.keep(buffer.clone());
+        texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+        unsafe {
+            commands.encoder().copy_texture_to_buffer(
+                &texture.raw,
+                wgt::TextureUses::COPY_SRC,
+                &buffer.raw,
+                std::iter::once(hal::BufferTextureCopy {
+                    buffer_layout: wgt::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(layout.pitch),
+                        rows_per_image: Some(texture.size.height),
+                    },
+                    texture_base: hal::TextureCopyBase {
+                        mip_level: texture.base_mip,
+                        array_layer: 0,
+                        origin: wgt::Origin3d::ZERO,
+                        aspect: hal::FormatAspects::COLOR,
+                    },
+                    size: texture.size.into(),
+                }),
+            );
+        }
+        buffer.transition(&mut commands, wgt::BufferUses::MAP_READ);
+        drop(commands);
+        renderer.submissions.wait().unwrap();
+        renderer.owner.map_readback(&buffer.raw, &layout).unwrap()
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn transfers_mips_and_preserved_regions() {
+        let device = create_vulkan_device(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap();
+        let mut renderer = FrameRenderer::new(device).unwrap();
+        let source = Texture::new(
+            &renderer.owner,
+            7,
+            5,
+            wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest,
+            false,
+        )
+        .unwrap();
+        let full = DeviceIntRect::from_size(DeviceIntSize::new(7, 5));
+        source
+            .upload_recorded(
+                &renderer.owner,
+                &renderer.submissions,
+                full,
+                &[255, 0, 0, 255].repeat(35),
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        let target = Texture::new(
+            &renderer.owner,
+            9,
+            7,
+            wgt::TextureFormat::Bgra8Unorm,
+            TextureFilter::Nearest,
+            true,
+        )
+        .unwrap();
+        let rect = |x, y, w, h| {
+            DeviceIntRect::from_origin_and_size(DeviceIntPoint::new(x, y), DeviceIntSize::new(w, h))
+        };
+        renderer
+            .copy(&source, &target, rect(1, 1, 3, 2), rect(4, 3, 3, 2))
+            .unwrap();
+        renderer
+            .copy(&target, &target, rect(4, 3, 3, 2), rect(3, 3, 3, 2))
+            .unwrap();
+        let output = pixels(&renderer, &target);
+        for y in 0..7 {
+            for x in 0..9 {
+                assert_eq!(
+                    &output[(y * 9 + x) * 4..(y * 9 + x + 1) * 4],
+                    if (3..7).contains(&x) && (3..5).contains(&y) {
+                        &[0, 0, 255, 255]
+                    } else {
+                        &[0; 4]
+                    }
+                );
+            }
+        }
+        let mipmapped = Texture::new(
+            &renderer.owner,
+            17,
+            9,
+            wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Trilinear,
+            true,
+        )
+        .unwrap();
+        for color in [[0, 255, 0, 255], [0, 0, 255, 255]] {
+            mipmapped
+                .upload_recorded(
+                    &renderer.owner,
+                    &renderer.submissions,
+                    rect(0, 0, 17, 9),
+                    &color.repeat(153),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+            renderer.generate_mips(&mipmapped).unwrap();
+            for level in 0..mipmapped.mip_count {
+                let view = mipmapped.mip_view(level).unwrap();
+                assert_eq!(
+                    pixels(&renderer, &view),
+                    color.repeat((view.size.width * view.size.height) as usize)
+                );
+            }
+        }
+    }
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn encoding_error_releases_pooled_resources() {
+        use crate::internal_types::{TextureUpdateList, TextureCacheUpdate};
+        let device = create_vulkan_device(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap();
+        let mut renderer = FrameRenderer::new(device).unwrap();
+        let owner = renderer.owner.clone();
+        let texture = Texture::new(
+            &owner,
+            4,
+            4,
+            wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest,
+            true,
+        )
+        .unwrap();
+        let id = CacheTextureId(777);
+        renderer.textures.insert(id, texture);
+        let mut updates = TextureUpdateList::new();
+        for rect in [
+            DeviceIntRect::from_size(DeviceIntSize::new(4, 4)),
+            DeviceIntRect::from_origin_and_size(
+                DeviceIntPoint::new(-1, 0),
+                DeviceIntSize::new(4, 4),
+            ),
+        ] {
+            updates.push_update(
+                id,
+                TextureCacheUpdate {
+                    rect,
+                    stride: None,
+                    offset: 0,
+                    format_override: None,
+                    source: TextureUpdateSource::Bytes {
+                        data: std::sync::Arc::new(vec![255; 64]),
+                    },
+                },
+            );
+        }
+        assert!(renderer
+            .update_resources(vec![ResourceUpdateList {
+                native_surface_updates: Vec::new(),
+                texture_updates: updates
+            }])
+            .is_err());
+        assert!(renderer
+            .update_resources(Vec::new())
+            .unwrap_err()
+            .contains("recreated"));
+        drop(renderer);
+        assert_eq!(owner.memory.get().buffers, 0);
+        assert_eq!(owner.memory.get().textures, 0);
+    }
 }

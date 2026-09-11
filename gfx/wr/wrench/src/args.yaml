@@ -172,7 +172,7 @@ subcommands:
               help: Add a minimum fuzziness tolerance to all tests.
               required: false
           - REFTEST:
-              help: a specific reftest or directory to run
+              help: a specific reftest, directory, or .list manifest to run
               required: false
               index: 1
     - rawtest:

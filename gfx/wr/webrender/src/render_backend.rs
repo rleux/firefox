@@ -595,7 +595,8 @@ impl Document {
             frame
         };
 
-        self.frame_is_valid = true;
+        // Non-present frames omit composition data needed by a later present request.
+        self.frame_is_valid = present;
         self.dirty_rects_are_valid = true;
 
         self.has_built_scene = false;
