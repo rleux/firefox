@@ -221,13 +221,34 @@ impl WrenchThing for CapturedSequence {
     }
 }
 
-pub struct Wrench {
+pub trait SceneRenderer {
+    fn gl_device(&self) -> Option<&webrender::Device>;
+    fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String>;
+}
+
+impl SceneRenderer for webrender::Renderer {
+    fn gl_device(&self) -> Option<&webrender::Device> { Some(&self.device) }
+    fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String> {
+        self.set_external_image_handler(handler);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "hal-vulkan")]
+impl SceneRenderer for webrender::hal::Renderer {
+    fn gl_device(&self) -> Option<&webrender::Device> { None }
+    fn install_external_images(&mut self, _: Box<dyn ExternalImageHandler>) -> Result<(), String> {
+        Err("GL external images are unavailable on HAL".into())
+    }
+}
+
+pub struct Wrench<R = webrender::Renderer> {
     window_size: DeviceIntSize,
 
     /// The GL context the renderer draws with, shared so that wrench can
     /// create GL textures to hand to the renderer as external images.
-    gl: Rc<dyn gl::Gl>,
-    pub renderer: webrender::Renderer,
+    gl: Option<Rc<dyn gl::Gl>>,
+    pub renderer: R,
     pub api: RenderApi,
     pub document_id: DocumentId,
     pub root_pipeline_id: PipelineId,
@@ -253,7 +274,7 @@ pub struct Wrench {
 
     window_title_to_set: Option<String>,
 
-    graphics_api: webrender::GraphicsApiInfo,
+    renderer_description: String,
 
     pub rebuild_display_lists: bool,
 
@@ -271,10 +292,6 @@ pub struct Wrench {
 }
 
 impl Wrench {
-    pub fn gl(&self) -> &dyn gl::Gl {
-        &*self.gl
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: &mut WindowWrapper,
@@ -365,7 +382,7 @@ impl Wrench {
 
         let mut wrench = Wrench {
             window_size: size,
-            gl,
+            gl: Some(gl),
 
             renderer,
             api,
@@ -379,7 +396,7 @@ impl Wrench {
             font_instances: HashMap::new(),
             dl_builders: HashMap::new(),
 
-            graphics_api,
+            renderer_description: format!("{} - {}", graphics_api.renderer, graphics_api.version),
             frame_start_sender: timing_sender,
 
             callbacks,
@@ -394,6 +411,75 @@ impl Wrench {
         wrench.api.send_transaction(wrench.document_id, txn);
 
         wrench
+    }
+
+    pub fn get_frame_profiles(
+        &mut self,
+    ) -> (Vec<webrender::CpuProfile>, Vec<webrender::GpuProfile>) {
+        self.renderer.get_frame_profiles()
+    }
+
+    pub fn render(&mut self) -> RenderResults {
+        self.renderer.update();
+        let _ = self.renderer.flush_pipeline_info();
+        self.renderer
+            .render(self.window_size, 0)
+            .expect("errors encountered during render!")
+    }
+
+    pub fn show_onscreen_help(&mut self) {
+        let help_lines = [
+            "Esc - Quit",
+            "H - Toggle help",
+            "R - Toggle recreating display items each frame",
+            "P - Toggle profiler",
+            "O - Toggle showing intermediate targets",
+            "I - Toggle showing texture caches",
+            "B - Toggle showing alpha primitive rects",
+            "V - Toggle showing overdraw",
+            "G - Toggle showing gpu cache updates",
+            "S - Toggle compact profiler",
+            "Q - Toggle GPU queries for time and samples",
+            "M - Trigger memory pressure event",
+            "T - Save CPU profile to a file",
+            "C - Save a capture to captures/wrench/",
+            "X - Do a hit test at the current cursor position",
+            "Y - Clear all caches",
+        ];
+
+        let color_and_offset = [(ColorF::BLACK, 2.0), (ColorF::WHITE, 0.0)];
+        self.renderer.device.begin_frame(); // next line might compile shaders:
+        let dr = self.renderer.debug_renderer().unwrap();
+
+        for co in &color_and_offset {
+            let x = 15.0 + co.1;
+            let mut y = 15.0 + co.1 + dr.line_height();
+            for line in &help_lines {
+                dr.add_text(x, y, line, co.0.into(), None);
+                y += dr.line_height();
+            }
+        }
+        self.renderer.device.end_frame();
+    }
+
+    pub fn shut_down(self, rx: Receiver<NotifierEvent>) {
+        self.api.shut_down(true);
+
+        loop {
+            match rx.recv() {
+                Ok(NotifierEvent::ShutDown) => { break; }
+                Ok(_) => {}
+                Err(e) => { panic!("Did not shut down properly: {:?}.", e); }
+            }
+        }
+
+        self.renderer.deinit();
+    }
+}
+
+impl<R> Wrench<R> {
+    pub fn gl(&self) -> &dyn gl::Gl {
+        self.gl.as_deref().expect("GL context is unavailable for the selected backend")
     }
 
     pub fn set_quality_settings(&mut self, settings: QualitySettings) {
@@ -537,10 +623,9 @@ impl Wrench {
 
     pub fn set_title(&mut self, extra: &str) {
         self.window_title_to_set = Some(format!(
-            "Wrench: {} - {} - {}",
+            "Wrench: {} - {}",
             extra,
-            self.graphics_api.renderer,
-            self.graphics_api.version
+            self.renderer_description
         ));
     }
 
@@ -744,20 +829,6 @@ impl Wrench {
         assert!(txn.is_empty());
     }
 
-    pub fn get_frame_profiles(
-        &mut self,
-    ) -> (Vec<webrender::CpuProfile>, Vec<webrender::GpuProfile>) {
-        self.renderer.get_frame_profiles()
-    }
-
-    pub fn render(&mut self) -> RenderResults {
-        self.renderer.update();
-        let _ = self.renderer.flush_pipeline_info();
-        self.renderer
-            .render(self.window_size, 0)
-            .expect("errors encountered during render!")
-    }
-
     pub fn refresh(&mut self) {
         self.begin_frame();
         let mut txn = Transaction::new();
@@ -767,52 +838,45 @@ impl Wrench {
         self.api.send_transaction(self.document_id, txn);
     }
 
-    pub fn show_onscreen_help(&mut self) {
-        let help_lines = [
-            "Esc - Quit",
-            "H - Toggle help",
-            "R - Toggle recreating display items each frame",
-            "P - Toggle profiler",
-            "O - Toggle showing intermediate targets",
-            "I - Toggle showing texture caches",
-            "B - Toggle showing alpha primitive rects",
-            "V - Toggle showing overdraw",
-            "G - Toggle showing gpu cache updates",
-            "S - Toggle compact profiler",
-            "Q - Toggle GPU queries for time and samples",
-            "M - Trigger memory pressure event",
-            "T - Save CPU profile to a file",
-            "C - Save a capture to captures/wrench/",
-            "X - Do a hit test at the current cursor position",
-            "Y - Clear all caches",
-        ];
+}
 
-        let color_and_offset = [(ColorF::BLACK, 2.0), (ColorF::WHITE, 0.0)];
-        self.renderer.device.begin_frame(); // next line might compile shaders:
-        let dr = self.renderer.debug_renderer().unwrap();
-
-        for co in &color_and_offset {
-            let x = 15.0 + co.1;
-            let mut y = 15.0 + co.1 + dr.line_height();
-            for line in &help_lines {
-                dr.add_text(x, y, line, co.0.into(), None);
-                y += dr.line_height();
-            }
-        }
-        self.renderer.device.end_frame();
+#[cfg(feature = "hal-vulkan")]
+impl Wrench<webrender::hal::Renderer> {
+    #[cfg(test)]
+    pub fn new_hal(hal_options: &webrender::hal::Options, size: DeviceIntSize) -> Result<Self, String> {
+        Self::new_hal_with_subpixel(hal_options, size, true)
     }
 
-    pub fn shut_down(self, rx: Receiver<NotifierEvent>) {
-        self.api.shut_down(true);
-
-        loop {
-            match rx.recv() {
-                Ok(NotifierEvent::ShutDown) => { break; }
-                Ok(_) => {}
-                Err(e) => { panic!("Did not shut down properly: {:?}.", e); }
-            }
-        }
-
-        self.renderer.deinit();
+    pub fn new_hal_with_subpixel(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool) -> Result<Self, String> {
+        if size.width <= 0 || size.height <= 0 { return Err("Invalid HAL window dimensions".into()); }
+        let callbacks = Arc::new(Mutex::new(blob::BlobCallbacks::new()));
+        let debug_flags = DebugFlags::ECHO_DRIVER_MESSAGES | DebugFlags::MISSING_SNAPSHOT_PINK;
+        let options = webrender::WebRenderOptions {
+            blob_image_handler: Some(Box::new(blob::CheckerboardRenderer::new(callbacks.clone()))),
+            testing: true,
+            debug_flags,
+            max_internal_texture_size: Some(8196),
+            enable_subpixel_aa,
+            enable_debugger: false,
+            ..Default::default()
+        };
+        let (timing_sender, timing_receiver) = chase_lev::deque();
+        let notifier = Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false)))));
+        let (renderer, sender) = webrender::hal::create_vulkan_renderer(hal_options, options, notifier)?;
+        let info = renderer.info();
+        let renderer_description = format!("{} - {:?} {}", info.name, info.backend, info.driver_info);
+        let api = sender.create_api();
+        let document_id = api.add_document(size);
+        let mut wrench = Self {
+            window_size: size, gl: None, renderer, api, document_id,
+            root_pipeline_id: PipelineId(0, 0), fonts: HashMap::new(),
+            font_instances: HashMap::new(), dl_builders: HashMap::new(),
+            window_title_to_set: None, renderer_description, rebuild_display_lists: true,
+            frame_start_sender: timing_sender, callbacks, debug_flags, compositor_clips_override: None,
+        };
+        let mut transaction = Transaction::new();
+        transaction.set_root_pipeline(wrench.root_pipeline_id);
+        wrench.api.send_transaction(document_id, transaction);
+        Ok(wrench)
     }
 }

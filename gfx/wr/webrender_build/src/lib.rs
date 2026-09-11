@@ -16,6 +16,7 @@ extern crate serde;
 
 pub mod shader;
 pub mod shader_features;
+pub mod hal;
 
 /// This must be known at build-time as the shaders depend on it.
 pub const MAX_VERTEX_TEXTURE_WIDTH: usize = 1024;

@@ -233,7 +233,7 @@ pub struct WebRenderOptions {
 impl WebRenderOptions {
     /// Number of batches to look back in history for adding the current
     /// transparent instance into.
-    const BATCH_LOOKBACK_COUNT: usize = 10;
+    pub(super) const BATCH_LOOKBACK_COUNT: usize = 10;
 
     /// Since we are re-initializing the instance buffers on every draw call,
     /// the driver has to internally manage PBOs in flight.
@@ -365,21 +365,7 @@ fn create_webrender_instance_with_device<F>(
 where
     F: FnOnce(&mut WebRenderOptions) -> Result<Device, RendererError>,
 {
-    if !wr_has_been_initialized() {
-        // If the tracy feature is enabled, try to load the shared library
-        // if the path was provided.
-        #[cfg(feature = "tracy")]
-        unsafe {
-            if let Ok(ref tracy_path) = std::env::var("WR_TRACY_PATH") {
-                let ok = tracy_rs::load(tracy_path);
-                info!("Load tracy from {} -> {}", tracy_path, ok);
-            }
-        }
-
-        register_thread_with_profiler("Compositor".to_owned());
-    }
-
-    HAS_BEEN_INITIALIZED.store(true, Ordering::SeqCst);
+    initialize_process();
 
     // For now, we assume that native OS compositors are top-left origin. If that doesn't
     // turn out to be the case, we can add a query method on `LayerCompositor`.
@@ -620,6 +606,161 @@ where
     let enclosing_size_of_op = options.enclosing_size_of_op;
     let make_size_of_ops =
         move || size_of_op.map(|o| MallocSizeOfOps::new(o, enclosing_size_of_op));
+    let BackendConnection { api_tx, backend_id, pool: owned_pool, sender } = create_render_backend(
+        &mut options,
+        backend_notifier,
+        result_tx,
+        config,
+        BackendResourceOptions {
+            max_internal_texture_size,
+            image_tiling_threshold,
+            color_cache_formats,
+            swizzle_settings,
+            supports_r8_texture_upload: device.get_capabilities().supports_r8_texture_upload,
+        },
+    )?;
+
+    let gpu_profiler = device.create_gpu_profiler(options.enable_gpu_markers);
+
+    let mut renderer = Renderer {
+        result_rx,
+        api_tx: api_tx.clone(),
+        backend_id,
+        _render_backend_pool: owned_pool.clone(),
+        device,
+        active_documents: FastHashMap::default(),
+        pending_texture_updates: Vec::new(),
+        pending_texture_cache_updates: false,
+        pending_native_surface_updates: Vec::new(),
+        pending_shader_updates: Vec::new(),
+        shaders,
+        debug: debug::LazyInitializedDebugRenderer::new(),
+        debug_flags: DebugFlags::empty(),
+        profile: TransactionProfile::new(),
+        frame_counter: 0,
+        resource_upload_time: 0.0,
+        profiler: Profiler::new(),
+        max_recorded_profiles: options.max_recorded_profiles,
+        clear_color: options.clear_color,
+        enable_clear_scissor,
+        enable_advanced_blend_barriers: !ext_blend_equation_advanced_coherent,
+        clear_caches_with_quads: options.clear_caches_with_quads,
+        clear_alpha_targets_with_quads,
+        last_time: 0,
+        gpu_profiler,
+        vaos,
+        gpu_buffer_texture_f: None,
+        gpu_buffer_texture_f_too_large: 0,
+        gpu_buffer_texture_i: None,
+        gpu_buffer_texture_i_too_large: 0,
+        vertex_data_textures,
+        current_vertex_data_textures: 0,
+        pipeline_info: PipelineInfo::default(),
+        dither_matrix_texture,
+        external_image_handler: None,
+        size_of_ops: make_size_of_ops(),
+        cpu_profiles: VecDeque::new(),
+        gpu_profiles: VecDeque::new(),
+        texture_upload_buffer_pool,
+        staging_texture_pool,
+        texture_resolver,
+        renderer_errors: Vec::new(),
+        async_frame_recorder: None,
+        async_screenshots: None,
+        #[cfg(feature = "replay")]
+        owned_external_images: FastHashMap::default(),
+        notifications: Vec::new(),
+        device_size: None,
+        zoom_debug_texture: None,
+        cursor_position: DeviceIntPoint::zero(),
+        shared_texture_cache_cleared: false,
+        documents_seen: FastHashSet::default(),
+        force_redraw: true,
+        compositor_config: options.compositor_config,
+        current_compositor_kind: compositor_kind,
+        allocated_native_surfaces: FastHashSet::default(),
+        debug_overlay_state: DebugOverlayState::new(),
+        buffer_damage_tracker: BufferDamageTracker::default(),
+        max_primitive_instance_count,
+        enable_instancing: options.enable_instancing,
+        use_shared_instance_buffer,
+        consecutive_oom_frames: 0,
+        target_frame_publish_id: None,
+        pending_result_msg: None,
+        layer_compositor_frame_state_in_prev_frame: None,
+        external_composite_debug_items: Vec::new(),
+        #[cfg(feature = "debugger")]
+        renderdoc: crate::renderdoc::RenderDocCapture::new(),
+        #[cfg(feature = "debugger")]
+        renderdoc_capture_reply: None,
+        command_log: None,
+        #[cfg(feature = "debugger")]
+        debugger: Debugger::new(),
+    };
+
+    // We initially set the flags to default and then now call set_debug_flags
+    // to ensure any potential transition when enabling a flag is run.
+    renderer.set_debug_flags(debug_flags);
+    renderer.profiler.set_ui("Default");
+
+    #[cfg(feature = "debugger")]
+    if options.enable_debugger {
+        let api = if options.namespace_alloc_by_client {
+            sender.create_api_by_client(IdNamespace::DEBUGGER)
+        } else {
+            sender.create_api()
+        };
+        crate::debugger::start(api);
+    }
+
+    Ok((renderer, sender))
+}
+
+pub(super) fn initialize_process() {
+    if !wr_has_been_initialized() {
+        // If the tracy feature is enabled, try to load the shared library
+        // if the path was provided.
+        #[cfg(feature = "tracy")]
+        unsafe {
+            if let Ok(ref tracy_path) = std::env::var("WR_TRACY_PATH") {
+                let ok = tracy_rs::load(tracy_path);
+                info!("Load tracy from {} -> {}", tracy_path, ok);
+            }
+        }
+
+        register_thread_with_profiler("Compositor".to_owned());
+    }
+
+    HAS_BEEN_INITIALIZED.store(true, Ordering::SeqCst);
+}
+
+pub(super) struct BackendResourceOptions {
+    pub max_internal_texture_size: i32,
+    pub image_tiling_threshold: i32,
+    pub color_cache_formats: crate::device::TextureFormatPair<ImageFormat>,
+    pub swizzle_settings: Option<crate::internal_types::SwizzleSettings>,
+    pub supports_r8_texture_upload: bool,
+}
+
+pub(super) struct BackendConnection {
+    pub api_tx: api::channel::Sender<ApiMsg>,
+    pub backend_id: RenderBackendId,
+    pub pool: Arc<RenderBackendPool>,
+    pub sender: RenderApiSender,
+}
+
+pub(super) fn create_render_backend(
+    options: &mut WebRenderOptions,
+    backend_notifier: Box<dyn RenderNotifier>,
+    result_tx: api::channel::Sender<crate::internal_types::ResultMsg>,
+    config: FrameBuilderConfig,
+    resources: BackendResourceOptions,
+) -> Result<BackendConnection, RendererError> {
+    let BackendResourceOptions {
+        max_internal_texture_size, image_tiling_threshold, color_cache_formats,
+        swizzle_settings, supports_r8_texture_upload,
+    } = resources;
+    let debug_flags = options.debug_flags;
     let workers = options
         .workers
         .take()
@@ -636,7 +777,7 @@ where
                 .build();
             Arc::new(worker.unwrap())
         });
-    let sampler = options.sampler;
+    let sampler = options.sampler.take();
     let namespace_alloc_by_client = options.namespace_alloc_by_client;
 
     // Ensure shared font keys exist within their own unique namespace so
@@ -665,8 +806,6 @@ where
     let rb_blob_handler = blob_image_handler
         .as_ref()
         .map(|handler| handler.create_similar());
-
-    let supports_r8_texture_upload = device.get_capabilities().supports_r8_texture_upload;
 
     let texture_cache_config = options.texture_cache_config.clone();
     let mut picture_tile_size = options.picture_tile_size.unwrap_or(crate::tile_cache::TILE_SIZE_DEFAULT);
@@ -768,91 +907,8 @@ where
         ));
     }
 
-    let gpu_profiler = device.create_gpu_profiler(options.enable_gpu_markers);
-
-    let mut renderer = Renderer {
-        result_rx,
-        api_tx: api_tx.clone(),
-        backend_id,
-        _render_backend_pool: owned_pool.clone(),
-        device,
-        active_documents: FastHashMap::default(),
-        pending_texture_updates: Vec::new(),
-        pending_texture_cache_updates: false,
-        pending_native_surface_updates: Vec::new(),
-        pending_shader_updates: Vec::new(),
-        shaders,
-        debug: debug::LazyInitializedDebugRenderer::new(),
-        debug_flags: DebugFlags::empty(),
-        profile: TransactionProfile::new(),
-        frame_counter: 0,
-        resource_upload_time: 0.0,
-        profiler: Profiler::new(),
-        max_recorded_profiles: options.max_recorded_profiles,
-        clear_color: options.clear_color,
-        enable_clear_scissor,
-        enable_advanced_blend_barriers: !ext_blend_equation_advanced_coherent,
-        clear_caches_with_quads: options.clear_caches_with_quads,
-        clear_alpha_targets_with_quads,
-        last_time: 0,
-        gpu_profiler,
-        vaos,
-        gpu_buffer_texture_f: None,
-        gpu_buffer_texture_f_too_large: 0,
-        gpu_buffer_texture_i: None,
-        gpu_buffer_texture_i_too_large: 0,
-        vertex_data_textures,
-        current_vertex_data_textures: 0,
-        pipeline_info: PipelineInfo::default(),
-        dither_matrix_texture,
-        external_image_handler: None,
-        size_of_ops: make_size_of_ops(),
-        cpu_profiles: VecDeque::new(),
-        gpu_profiles: VecDeque::new(),
-        texture_upload_buffer_pool,
-        staging_texture_pool,
-        texture_resolver,
-        renderer_errors: Vec::new(),
-        async_frame_recorder: None,
-        async_screenshots: None,
-        #[cfg(feature = "replay")]
-        owned_external_images: FastHashMap::default(),
-        notifications: Vec::new(),
-        device_size: None,
-        zoom_debug_texture: None,
-        cursor_position: DeviceIntPoint::zero(),
-        shared_texture_cache_cleared: false,
-        documents_seen: FastHashSet::default(),
-        force_redraw: true,
-        compositor_config: options.compositor_config,
-        current_compositor_kind: compositor_kind,
-        allocated_native_surfaces: FastHashSet::default(),
-        debug_overlay_state: DebugOverlayState::new(),
-        buffer_damage_tracker: BufferDamageTracker::default(),
-        max_primitive_instance_count,
-        enable_instancing: options.enable_instancing,
-        use_shared_instance_buffer,
-        consecutive_oom_frames: 0,
-        target_frame_publish_id: None,
-        pending_result_msg: None,
-        layer_compositor_frame_state_in_prev_frame: None,
-        external_composite_debug_items: Vec::new(),
-        #[cfg(feature = "debugger")]
-        renderdoc: crate::renderdoc::RenderDocCapture::new(),
-        #[cfg(feature = "debugger")]
-        renderdoc_capture_reply: None,
-        command_log: None,
-        #[cfg(feature = "debugger")]
-        debugger: Debugger::new(),
-    };
-
-    // We initially set the flags to default and then now call set_debug_flags
-    // to ensure any potential transition when enabling a flag is run.
-    renderer.set_debug_flags(debug_flags);
-    renderer.profiler.set_ui("Default");
-
     let sender = RenderApiSender::new(
-        api_tx,
+        api_tx.clone(),
         scene_tx,
         low_priority_scene_tx,
         backend_id,
@@ -860,16 +916,5 @@ where
         fonts,
         owned_pool.clone(),
     );
-
-    #[cfg(feature = "debugger")]
-    if options.enable_debugger {
-        let api = if namespace_alloc_by_client {
-            sender.create_api_by_client(IdNamespace::DEBUGGER)
-        } else {
-            sender.create_api()
-        };
-        crate::debugger::start(api);
-    }
-
-    Ok((renderer, sender))
+    Ok(BackendConnection { api_tx, backend_id, pool: owned_pool, sender })
 }

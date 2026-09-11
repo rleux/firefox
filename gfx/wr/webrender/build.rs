@@ -191,7 +191,12 @@ fn write_optimized_shaders(
 
             let [vert_file_path, frag_file_path] = [
                 (glslopt::ShaderType::Vertex, vert_src, vert_src_map, "vert"),
-                (glslopt::ShaderType::Fragment, frag_src, frag_src_map, "frag"),
+                (
+                    glslopt::ShaderType::Fragment,
+                    frag_src,
+                    frag_src_map,
+                    "frag",
+                ),
             ]
             .map(|(shader_type, shader_src, shader_src_map, extension)| {
                 let output = glslopt_ctx.optimize(shader_type, shader_src.clone());
@@ -264,8 +269,15 @@ fn write_optimized_shaders(
         }
         Err(err) => match err {
             build_parallel::Error::BuildError(err) => {
-                let ShaderOptimizationInput { shader_name, config, gl_version } = &err.shader;
-                panic!("Error optimizing shader '{}', features=[{}], gl_version={:?}:\n\n{}", shader_name, config, gl_version, err.message)
+                let ShaderOptimizationInput {
+                    shader_name,
+                    config,
+                    gl_version,
+                } = &err.shader;
+                panic!(
+                    "Error optimizing shader '{}', features=[{}], gl_version={:?}:\n\n{}",
+                    shader_name, config, gl_version, err.message
+                )
             }
             _ => panic!("Error optimizing shaders."),
         },
@@ -304,6 +316,24 @@ fn write_optimized_shader_file(
 
 fn main() -> Result<(), std::io::Error> {
     let out_dir = env::var("OUT_DIR").unwrap_or("out".to_owned());
+
+    if env::var_os("CARGO_FEATURE_HAL_VULKAN").is_some() {
+        webrender_build::hal::build(Path::new("res"), Path::new(&out_dir), |source, vertex| {
+            let optimizer = glslopt::Context::new(glslopt::Target::OpenGl);
+            let output = optimizer.optimize(
+                if vertex {
+                    glslopt::ShaderType::Vertex
+                } else {
+                    glslopt::ShaderType::Fragment
+                },
+                source,
+            );
+            if !output.get_status() {
+                return Err(std::io::Error::other(output.get_log()));
+            }
+            Ok(output.get_output().unwrap().to_owned())
+        })?;
+    }
 
     let shaders_file_path = Path::new(&out_dir).join("shaders.rs");
     let mut glsl_files = vec![];

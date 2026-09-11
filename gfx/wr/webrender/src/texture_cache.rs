@@ -1384,6 +1384,9 @@ impl TextureCache {
         filter: TextureFilter,
         descriptor: &ImageDescriptor,
     ) -> bool {
+        if !matches!(descriptor.format, ImageFormat::R8 | ImageFormat::R16 | ImageFormat::RGBA8 | ImageFormat::BGRA8) {
+            return false;
+        }
         let mut allowed_in_shared_cache = true;
 
         if matches!(descriptor.format, ImageFormat::RGBA8 | ImageFormat::BGRA8)

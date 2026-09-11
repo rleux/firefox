@@ -20,7 +20,7 @@ use webrender::RenderResults;
 use webrender::api::*;
 use webrender::render_api::*;
 use webrender::api::units::*;
-use crate::wrench::{Wrench, WrenchThing};
+use crate::wrench::{Wrench, SceneRenderer};
 use crate::yaml_frame_reader::YamlFrameReader;
 
 
@@ -765,10 +765,10 @@ struct ReftestEnvironment {
 }
 
 impl ReftestEnvironment {
-    fn new(wrench: &Wrench, window: &WindowWrapper) -> Self {
+    fn new(_wrench: &Wrench, window: &WindowWrapper) -> Self {
         Self {
-            platform: Self::platform(wrench, window),
-            version: Self::version(wrench, window),
+            platform: Self::platform(window.is_software()),
+            version: Self::version(window.is_software()),
             mode: Self::mode(),
         }
     }
@@ -786,8 +786,8 @@ impl ReftestEnvironment {
         env::var(envkey).is_ok()
     }
 
-    fn platform(_wrench: &Wrench, window: &WindowWrapper) -> &'static str {
-        if window.is_software() {
+    fn platform(software: bool) -> &'static str {
+        if software {
             "swgl"
         } else if cfg!(target_os = "windows") {
             "win"
@@ -802,8 +802,8 @@ impl ReftestEnvironment {
         }
     }
 
-    fn version(_wrench: &Wrench, window: &WindowWrapper) -> Option<semver::Version> {
-        if window.is_software() {
+    fn version(software: bool) -> Option<semver::Version> {
+        if software {
             None
         } else if cfg!(target_os = "macos") {
             use std::str;
@@ -888,21 +888,64 @@ impl ReftestEnvironment {
     }
 }
 
-pub struct ReftestHarness<'a> {
-    wrench: &'a mut Wrench,
-    window: &'a mut WindowWrapper,
-    rx: &'a Receiver<NotifierEvent>,
+pub struct ReftestHarness<'a, R = webrender::Renderer> {
+    wrench: &'a mut Wrench<R>,
+    window: Option<&'a mut WindowWrapper>,
+    rx: Option<&'a Receiver<NotifierEvent>>,
+    size: DeviceIntSize,
     environment: ReftestEnvironment,
 }
 impl<'a> ReftestHarness<'a> {
     pub fn new(wrench: &'a mut Wrench, window: &'a mut WindowWrapper, rx: &'a Receiver<NotifierEvent>) -> Self {
         let environment = ReftestEnvironment::new(wrench, window);
-        ReftestHarness { wrench, window, rx, environment }
+        let size = window.get_inner_size();
+        ReftestHarness { wrench, window: Some(window), rx: Some(rx), size, environment }
+    }
+
+ }
+
+pub trait ReftestRenderer: SceneRenderer + Sized {
+    fn render_test(wrench: &mut Wrench<Self>) -> RenderResults;
+    fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8>;
+}
+impl ReftestRenderer for webrender::Renderer {
+    fn render_test(wrench: &mut Wrench<Self>) -> RenderResults { wrench.render() }
+    fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8> { self.read_pixels_rgba8(rect) }
+}
+#[cfg(feature = "hal-vulkan")]
+impl ReftestRenderer for webrender::hal::Renderer {
+    fn render_test(wrench: &mut Wrench<Self>) -> RenderResults {
+        wrench.renderer.prepare_frame(wrench.document_id).expect("HAL frame preparation failed");
+        wrench.renderer.render().expect("HAL frame rendering failed")
+    }
+    fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8> {
+        self.read_pixels_rgba8(rect).expect("HAL readback failed")
+    }
+}
+#[cfg(feature = "hal-vulkan")]
+impl<'a> ReftestHarness<'a, webrender::hal::Renderer> {
+    pub fn new_hal(wrench: &'a mut Wrench<webrender::hal::Renderer>, size: DeviceIntSize) -> Self {
+        let environment = ReftestEnvironment { platform: ReftestEnvironment::platform(false),
+            version: ReftestEnvironment::version(false), mode: ReftestEnvironment::mode() };
+        Self { wrench, window: None, rx: None, size, environment }
+    }
+}
+impl<'a, R: ReftestRenderer> ReftestHarness<'a, R> {
+    fn window_size(&self) -> DeviceIntSize {
+        self.window.as_ref().map_or(self.size, |window| window.get_inner_size())
     }
 
     pub fn run(mut self, base_manifest: &Path, reftests: Option<&Path>, options: &ReftestOptions) -> usize {
+        let (base_manifest, reftests) = match reftests {
+            Some(path) if path.extension().and_then(|ext| ext.to_str()) == Some("list") => (path, None),
+            _ => (base_manifest, reftests),
+        };
         let manifest = ReftestManifest::new(base_manifest, &self.environment, options);
         let reftests = manifest.find(reftests.unwrap_or(&PathBuf::new()));
+        if reftests.is_empty() {
+            eprintln!("No matching reftests");
+            return 1;
+        }
 
         let mut total_passing = 0;
         let mut failing = Vec::new();
@@ -983,7 +1026,7 @@ impl<'a> ReftestHarness<'a> {
                 );
         }
 
-        let window_size = self.window.get_inner_size();
+        let window_size = self.window_size();
         // A png reference may provide a scale-specific variant on disk (e.g.
         // `foo-scale:0.5.png`), otherwise the base `foo.png` is used.
         let reference_image = match reference_path.extension().unwrap().to_str().unwrap() {
@@ -1178,15 +1221,15 @@ impl<'a> ReftestHarness<'a> {
         reader.set_font_render_mode(font_render_mode);
         reader.allow_mipmaps(allow_mipmaps);
         reader.set_device_pixel_scale(device_pixel_scale);
-        reader.do_frame(self.wrench);
+        reader.build_frame(self.wrench);
 
         self.wrench.api.flush_scene_builder();
 
         // wait for the frame
-        self.rx.recv().unwrap();
-        let results = self.wrench.render();
+        if let Some(rx) = self.rx { rx.recv().unwrap(); }
+        let results = R::render_test(self.wrench);
 
-        let window_size = self.window.get_inner_size();
+        let window_size = self.window_size();
         assert!(
             size.width <= window_size.width &&
             size.height <= window_size.height,
@@ -1198,8 +1241,8 @@ impl<'a> ReftestHarness<'a> {
             FramebufferIntPoint::new(0, window_size.height - size.height),
             FramebufferIntSize::new(size.width, size.height),
         );
-        let pixels = self.wrench.renderer.read_pixels_rgba8(rect);
-        self.window.swap_buffers();
+        let pixels = self.wrench.renderer.read_test_pixels(rect);
+        if let Some(window) = self.window.as_mut() { window.swap_buffers(); }
 
         let write_debug_images = false;
         if write_debug_images {
