@@ -135,6 +135,7 @@ impl RenderNotifier for Notifier {
 }
 
 pub trait WrenchThing<R = webrender::Renderer> {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, _scale: f32) {}
     fn next_frame(&mut self);
     fn prev_frame(&mut self);
     fn do_frame(&mut self, _: &mut Wrench<R>) -> u32;
@@ -273,6 +274,7 @@ impl SceneRenderer for webrender::hal::Renderer {
 
 pub struct Wrench<R = webrender::Renderer> {
     window_size: DeviceIntSize,
+    record_frame_start: bool,
 
     /// The GL context the renderer draws with, shared so that wrench can
     /// create GL textures to hand to the renderer as external images.
@@ -412,6 +414,7 @@ impl Wrench {
         let mut wrench = Wrench {
             window_size: size,
             gl: Some(gl),
+            record_frame_start: true,
 
             renderer,
             api,
@@ -812,7 +815,7 @@ impl<R> Wrench<R> {
     }
 
     pub fn begin_frame(&mut self) {
-        self.frame_start_sender.push(Instant::now());
+        if self.record_frame_start { self.frame_start_sender.push(Instant::now()); }
     }
 
     pub fn send_lists(
@@ -896,6 +899,13 @@ impl Wrench<webrender::hal::Renderer> {
         Self::new_hal_target(hal_options, size, true, None, webrender::hal::CompositorConfig::Draw, Some((window, surface_options)))
     }
 
+    pub fn new_hal_window(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool,
+        notifier: Box<dyn RenderNotifier>, compositor: webrender::hal::CompositorConfig,
+        window: std::rc::Rc<dyn webrender::hal::SurfaceWindow>, surface_options: webrender::hal::SurfaceOptions) -> Result<Self, String>
+    {
+        Self::new_hal_target(hal_options, size, enable_subpixel_aa, Some(notifier), compositor, Some((window, surface_options)))
+    }
+
     fn new_hal_target(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool,
         notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig,
         window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
@@ -913,6 +923,7 @@ impl Wrench<webrender::hal::Renderer> {
             ..Default::default()
         };
         let (timing_sender, timing_receiver) = chase_lev::deque();
+        let record_frame_start = notifier.is_none();
         let notifier = notifier.unwrap_or_else(|| Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false))))));
         let (renderer, sender) = match window {
             Some((window, surface_options)) => webrender::hal::create_vulkan_renderer_for_window(hal_options, options,
@@ -924,7 +935,7 @@ impl Wrench<webrender::hal::Renderer> {
         let api = sender.create_api();
         let document_id = api.add_document(size);
         let mut wrench = Self {
-            window_size: size, gl: None, renderer, api, document_id,
+            window_size: size, record_frame_start, gl: None, renderer, api, document_id,
             root_pipeline_id: PipelineId(0, 0), fonts: HashMap::new(),
             font_instances: HashMap::new(), dl_builders: HashMap::new(),
             window_title_to_set: None, renderer_description, rebuild_display_lists: true,

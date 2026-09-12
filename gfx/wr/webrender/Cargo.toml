@@ -11,6 +11,7 @@ edition = "2018"
 [features]
 default = ["static_freetype"]
 hal = ["dep:wgpu-hal", "dep:wgpu-types", "dep:raw-window-handle"]
+hal-testing = ["hal-vulkan"]
 hal-vulkan = ["hal", "wgpu-hal/vulkan", "dep:ash"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]

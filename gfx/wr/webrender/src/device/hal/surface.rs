@@ -85,8 +85,10 @@ impl<A: hal::Api> SurfaceState<A> {
         let caps = unsafe { self.owner.adapter.surface_capabilities(&self.setup.raw) }
             .ok_or("Selected adapter cannot present to this surface")?;
         let config = negotiate(&caps, size, self.options, self.owner.max_texture_size() as u32)?;
+        #[cfg(any(test, feature = "hal-testing"))]
+        self.owner.check_fault(FailurePoint::Configure)?;
         unsafe { self.setup.raw.configure(&self.owner.open.device, &config) }
-            .map_err(|error| format!("Configuring surface: {error}"))?;
+            .map_err(|error| { self.owner.lost.set(true); format!("Configuring surface: {error}") })?;
         self.info.size = [config.extent.width, config.extent.height];
         self.info.format = Some(config.format);
         self.info.present_mode = Some(config.present_mode);
@@ -100,6 +102,8 @@ impl<A: hal::Api> SurfaceState<A> {
     pub fn acquire(&mut self, fence: &A::Fence) -> Result<PresentationStatus> {
         if self.acquired.is_some() { return Err("A surface image is already acquired".into()); }
         if self.config.is_none() { return Ok(PresentationStatus::Suspended); }
+        #[cfg(any(test, feature = "hal-testing"))]
+        self.owner.check_fault(FailurePoint::Acquire)?;
         match unsafe { self.setup.raw.acquire_texture(Some(std::time::Duration::from_millis(100)), fence) } {
             Ok(acquired) => {
                 self.info.acquired += 1;
@@ -111,7 +115,7 @@ impl<A: hal::Api> SurfaceState<A> {
     }
 
     pub fn error(&mut self, error: hal::SurfaceError) -> Result<PresentationStatus> {
-        let status = classify_error(error)?;
+        let status = classify_error(error).map_err(|error| { self.owner.lost.set(true); error })?;
         self.dirty |= matches!(status, PresentationStatus::Outdated | PresentationStatus::Lost);
         self.lost |= status == PresentationStatus::Lost;
         Ok(status)

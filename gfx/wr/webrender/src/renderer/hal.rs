@@ -36,11 +36,7 @@ pub struct ReadbackHandle {
     id: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameCompletion {
-    owner: RenderBackendId,
-    serial: u64,
-}
+pub use crate::device::hal::FrameCompletion;
 
 #[derive(Clone, Copy, Debug)]
 pub struct GpuTiming {
@@ -288,6 +284,11 @@ impl Renderer {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "hal-testing"))]
+    pub fn inject_failure(&self, point: crate::device::hal::FailurePoint) { self.gpu.inject_failure(point); }
+
+    pub fn is_failed(&self) -> bool { self.gpu.is_failed() }
+
     pub fn surface_info(&self) -> Option<crate::device::hal::SurfaceInfo> { self.gpu.surface_info() }
     pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<(), String> { self.gpu.resize_surface(size) }
     pub fn acquire_surface(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.gpu.acquire_surface() }
@@ -527,6 +528,10 @@ impl Renderer {
 
     pub fn has_frame(&self) -> bool { self.document.is_some() }
 
+    pub fn has_presentable_output(&self) -> bool {
+        self.last_output.as_ref().map_or(false, |output| !output.size.contains(&0))
+    }
+
     pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> {
         let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
         let ready = self.ready.state.lock().unwrap().documents.get(&document_id)
@@ -726,8 +731,19 @@ impl Renderer {
     fn readback_result(&self, handle: ReadbackHandle, wait: bool) -> Result<Option<Vec<u8>>, String> {
         if handle.owner != self.backend_id { return Err("HAL readback belongs to another renderer".into()); }
         let mut requests = self.readbacks.borrow_mut();
+        if self.gpu.is_failed() {
+            requests.clear();
+            self.readback_bytes.set(0);
+            return Err("HAL readbacks cancelled after renderer failure".into());
+        }
         let request = requests.get(&handle).ok_or("Unknown or released HAL readback")?;
-        let Some(mut pixels) = self.gpu.poll_readback(&request.ticket, wait)? else { return Ok(None); };
+        let result = self.gpu.poll_readback(&request.ticket, wait);
+        if let Err(error) = result {
+            requests.clear();
+            self.readback_bytes.set(0);
+            return Err(error);
+        }
+        let Some(mut pixels) = result.unwrap() else { return Ok(None); };
         if request.flip_rows {
             let [width, height] = request.ticket.size;
             let stride = width as usize * 4;
@@ -974,6 +990,83 @@ mod tests {
     impl api::NotificationHandler for Checkpoints {
         fn notify(&self, checkpoint: Checkpoint) {
             self.0.lock().unwrap().push(checkpoint);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn failures_cancel_pending_reads_and_release_images() {
+        use api::units::*;
+        use api::*;
+        use crate::device::hal::{FailurePoint, ExternalImageProvider, ExternalImageLease, ExternalImageSource, ExternalImageRelease, NativeImage};
+        use crate::render_api::Transaction;
+        use std::rc::Rc;
+        struct Provider { image: NativeImage, fail: Rc<Cell<bool>>, releases: Rc<RefCell<Vec<ExternalImageRelease>>> }
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease, String> {
+                if self.fail.get() { return Err("Injected provider acquisition failure".into()); }
+                let releases = self.releases.clone();
+                ExternalImageLease::new(self.image.descriptor(), TexelRect::new(0.0, 0.0, 4.0, 4.0), self.image.generation(),
+                    ExternalImageSource::Native(self.image.clone()), move |status| releases.borrow_mut().push(status))
+            }
+        }
+        for fault in [Some(FailurePoint::Record), Some(FailurePoint::Submit), Some(FailurePoint::Map), None] {
+            let (mut renderer, sender) = create_vulkan_renderer(&Options { validation: true, ..Default::default() },
+                WebRenderOptions::default(), Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false))))).unwrap();
+            let mut api = sender.create_api();
+            let doc = api.add_document(DeviceIntSize::new(16, 16));
+            let pipeline = PipelineId(0, 0);
+            let descriptor = ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE);
+            let producer = renderer.external_image_device();
+            let native = producer.create_image(descriptor, &[255, 0, 0, 255].repeat(16)).unwrap();
+            let releases = Rc::new(RefCell::new(Vec::new()));
+            let fail = Rc::new(Cell::new(false));
+            renderer.set_external_image_provider(Box::new(Provider { image: native, fail: fail.clone(), releases: releases.clone() })).unwrap();
+            let key = api.generate_image_key();
+            let external = ImageData::External(ExternalImageData { id: ExternalImageId(12), channel_index: 0,
+                image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D), normalized_uvs: false });
+            let mut builder = DisplayListBuilder::new(pipeline);
+            builder.begin(60.0);
+            let rect = LayoutRect::from_size(LayoutSize::new(16.0, 16.0));
+            let info = CommonItemProperties { clip_rect: rect, clip_chain_id: ClipChainId::INVALID,
+                spatial_id: SpatialId::root_scroll_node(pipeline), flags: PrimitiveFlags::default() };
+            builder.push_image(&info, rect, ImageRendering::Pixelated, AlphaType::PremultipliedAlpha, key, ColorF::WHITE);
+            let mut txn = Transaction::new();
+            txn.add_image(key, descriptor, external.clone(), None);
+            txn.set_root_pipeline(pipeline);
+            txn.set_display_list(Epoch(0), api.get_namespace_id(), builder.end());
+            txn.generate_frame(0, true, false, RenderReasons::TESTING);
+            api.send_transaction(doc, txn);
+            renderer.prepare_frame(doc).unwrap();
+            let first = renderer.render_frame().unwrap();
+            assert_eq!(&first.pixels[..4], &[255, 0, 0, 255]);
+            assert_eq!(*releases.borrow(), [ExternalImageRelease::Complete]);
+            let rect = FramebufferIntRect::from_size(FramebufferIntSize::new(16, 16));
+            let pending = renderer.request_readback(rect).unwrap();
+            let second = renderer.request_readback(rect).unwrap();
+            if fault == Some(FailurePoint::Map) {
+                renderer.inject_failure(FailurePoint::Map);
+                assert!(renderer.wait_readback(pending).is_err());
+            } else {
+                let mut txn = Transaction::new();
+                txn.update_image(key, descriptor, external, &DirtyRect::All);
+                txn.generate_frame(1, true, false, RenderReasons::TESTING);
+                api.send_transaction(doc, txn);
+                renderer.prepare_frame(doc).unwrap();
+                if let Some(point) = fault { renderer.inject_failure(point); } else { fail.set(true); }
+                assert!(renderer.render().is_err());
+                if fault == Some(FailurePoint::Submit) { assert_eq!(releases.borrow().last(), Some(&ExternalImageRelease::Abandoned)); }
+                if fault == Some(FailurePoint::Record) { assert_eq!(releases.borrow().last(), Some(&ExternalImageRelease::Unused)); }
+            }
+            assert!(renderer.is_failed());
+            assert!(renderer.poll().is_err());
+            assert!(renderer.wait_readback(second).is_err());
+            assert!(renderer.readbacks.borrow().is_empty());
+            assert_eq!(renderer.readback_bytes.get(), 0);
+            assert!(renderer.request_readback(rect).is_err());
+            assert!(renderer.render().is_err());
+            api.shut_down(true);
+            drop(renderer);
         }
     }
 

@@ -271,6 +271,9 @@ impl<A: hal::Api> SubmissionQueue<A> {
     }
 
     pub fn recording(&self) -> Result<RefMut<'_, Submission<A>>> {
+        if self.owner.lost.get() { return Err("HAL device requires recreation".into()); }
+        #[cfg(any(test, feature = "hal-testing"))]
+        self.owner.check_fault(FailurePoint::Record)?;
         let mut state = self.state.borrow_mut();
         if state.active.is_none() {
             #[cfg(test)]
@@ -302,7 +305,10 @@ impl<A: hal::Api> SubmissionQueue<A> {
     pub fn submit_surfaces(&self, surfaces: &[&A::SurfaceTexture]) -> Result<()> {
         let mut state = self.state.borrow_mut();
         if let Some(mut active) = state.active.take() {
-            active.submit(surfaces)?;
+            if self.owner.lost.get() { return Err("HAL device requires recreation".into()); }
+            #[cfg(any(test, feature = "hal-testing"))]
+            self.owner.check_fault(FailurePoint::Submit)?;
+            active.submit(surfaces).map_err(|error| { self.owner.lost.set(true); error })?;
             state.submitted = active.serial;
             state.pending.push_back(active);
             state.peak_pending = state.peak_pending.max(state.pending.len());
@@ -371,10 +377,27 @@ impl<A: hal::Api> Drop for SubmissionQueue<A> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
     use super::*;
     use super::super::resources::{Buffer, Texture};
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn failed_submit_does_not_publish_completion() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        let completed = Rc::new(std::cell::Cell::new(false));
+        let notice = completed.clone();
+        queue.recording().unwrap().on_complete(move || notice.set(true));
+        owner.fault.set(Some(FailurePoint::Submit));
+        assert!(queue.submit().is_err());
+        assert_eq!(queue.state.borrow().submitted, 0);
+        assert_eq!(queue.poll().unwrap(), 0);
+        assert!(queue.wait_for(1).is_err());
+        assert!(!completed.get());
+        assert!(queue.recording().is_err());
+    }
 
     #[test]
     #[ignore = "Requires Vulkan"]
