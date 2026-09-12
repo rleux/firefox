@@ -26,6 +26,12 @@ args:
       long: hal-validation
       global: true
       help: Require the Vulkan validation layer
+  - hal_filtering:
+      long: hal-filtering
+      takes_value: true
+      possible_values: [standard, legacy-brilinear]
+      global: true
+      help: Select standard filtering or experimental legacy mip weighting
   - hal_compositor:
       long: hal-compositor
       takes_value: true

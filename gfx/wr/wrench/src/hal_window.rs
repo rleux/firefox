@@ -210,6 +210,7 @@ impl App<'_> {
         let notifier = Box::new(Notifier { window: window.id(), proxy: self.proxy.clone() });
         let mut wrench = Wrench::new_hal_window(self.options, size, !self.args.is_present("no_subpixel_aa"), notifier,
             crate::hal::compositor_config(self.args)?, window.clone(), SurfaceOptions { vsync: self.args.is_present("vsync"), transparent: false })?;
+        wrench.renderer.configure_filtering(crate::hal::filtering(self.args))?;
         wrench.rebuild_display_lists = self.args.is_present("rebuild");
         let show = self.args.subcommand_matches("show").unwrap();
         let path = Path::new(show.value_of("INPUT").unwrap());

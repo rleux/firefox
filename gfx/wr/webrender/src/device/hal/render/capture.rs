@@ -81,6 +81,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         if self.is_failed() { return Err("Cannot capture a failed HAL renderer".into()); }
         let root = config.resource_root();
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        fs::write(root.join("hal-filtering.txt"), self.filtering.name()).map_err(|error| error.to_string())?;
         if config.bits.contains(CaptureBits::EXTERNAL_RESOURCES) && !externals.is_empty() {
             fs::create_dir_all(root.join("externals")).map_err(|error| error.to_string())?;
             for (index, external) in externals.iter_mut().enumerate() {
@@ -150,6 +151,17 @@ impl<A: hal::Api> FrameRenderer<A> {
 
     #[cfg(feature = "replay")]
     pub fn load_capture(&mut self, config: CaptureConfig, externals: Vec<PlainExternalImage>) -> Result<()> {
+        let policy = match fs::read_to_string(config.resource_root().join("hal-filtering.txt")) {
+            Ok(policy) => policy,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("Legacy capture has no filtering metadata; applying standard HAL replay policy");
+                "standard".into()
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        if policy != self.filtering.name() {
+            return Err(format!("Capture filtering {policy:?} differs from renderer filtering {:?}", self.filtering.name()));
+        }
         self.submissions.wait()?;
         self.descriptors.borrow_mut().clear();
         self.textures.clear();

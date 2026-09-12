@@ -18,9 +18,12 @@ targets, masks, gradients/repetition, borders/lines/shadows, blur/scaling, text,
 SVG filters, owned YUV planes, split composition and backdrop readbacks/resolves.
 It retains WR's current tasks, instance layouts and GLSL algorithms. Stage 5
 acceptance remains open: some selected Vulkan pixel comparisons exceed the
-existing tolerances. Standard native filtering is retained; legacy Mesa filtering
-is not emulated. Native targets and OS external-image resolution remain later
-work. Unsupported operations fail. Full Vulkan Wrench acceptance remains Stage 7.
+existing tolerances. Standard native filtering remains the default. An opt-in
+legacy brilinear profile reproduces the selected legacy mip-weight curve while
+retaining native spatial interpolation and mip generation. It does not yet pass
+the original reference images. Same-device external images and standalone
+Draw/Native/Layer targets are integrated; platform-native imports remain later
+work. Unsupported backend operations fail. Full Vulkan Wrench acceptance remains open.
 
 ## Wrench commands
 
@@ -29,6 +32,7 @@ Inside the prescribed reference container, from `gfx/wr/wrench`:
 ```sh
 python3 script/headless.py --backend hal --hal-validation test_hal
 python3 script/headless.py --backend hal --hal-validation reftest reftests/image/tile-size.yaml
+python3 script/headless.py --backend hal --hal-validation --hal-filtering legacy-brilinear reftest reftests/image/downscale.yaml
 python3 script/headless.py --backend hal --hal-validation png scene.yaml output.png
 ```
 
@@ -44,6 +48,15 @@ HAL PNG/reftest dimensions default to 1920x1080, matching GL. `--size` overrides
 this. Reftests retain the original comparator, scales and per-test tolerances;
 an explicit `.list` manifest is also accepted. Empty selections fail. Use an
 explicit output path for diagnostic PNGs to preserve reference assets.
+
+`--hal-filtering standard|legacy-brilinear` selects a policy when creating a HAL
+renderer. Library users call `Renderer::configure_filtering` once before processing
+renderer messages; existing constructors and `Options` remain compatible. The
+legacy profile applies only to audited mipmapped 2D image reads in `sColor0`.
+Nearest, non-mip linear, data-texture and single-level external reads retain their
+existing paths. Shader/pipeline identity includes the profile. Captures record it
+in `hal-filtering.txt`; mismatched replay is rejected. Older captures without a
+marker use the existing standard HAL replay policy, with an explicit diagnostic.
 
 `test_init` checks bootstrap clear/readback; `test_hal` also checks native-image
 ownership. The ignored Wrench tests under `hal::tests` exercise real frame
@@ -75,8 +88,9 @@ One graphics queue uses at most three in-flight contexts with completion-based
 retirement and backpressure. Transfers and passes share submissions. Upload and
 intermediate pools each cache at most 64 MiB, with count limits of 256 and 128;
 oversized or busy allocations retire without entering the cache. Pipeline,
-descriptor and projection caches are bounded. Readback remains synchronous;
-offscreen work and resource updates do not wait per pass. `WR_HAL_SYNC` enables
+descriptor and projection caches are bounded. Readback requests are bounded and
+support polling, cancellation and frame retention; `render_frame` is a synchronous
+convenience wrapper. Offscreen work and resource updates do not wait per pass. `WR_HAL_SYNC` enables
 diagnostic synchronization. Execution failure poisons the executor and requires
 recreation rather than reusing planned states from discarded commands.
 
@@ -84,7 +98,8 @@ Frame publication is consumed in order, including required superseded cache work
 offscreen/no-present frames and resource-only updates. Readiness notifications
 coalesce, and pipeline information has a public drain. Texture/render checkpoints
 follow command submission, while readback waits for GPU completion.
-The embedding/capture/profiling interfaces are incomplete. FrameOutput pixels are
+Standalone embedding, capture/replay, screenshots and GPU timing are available;
+Gecko integration and platform adapters remain separate work. FrameOutput pixels are
 packed top-down RGBA8; the Wrench-compatible read_pixels_rgba8 adapter accepts
 framebuffer rectangles and returns bottom-up rows for the existing comparator.
 The projection accounts for HAL Vulkan's negative-height viewport once.

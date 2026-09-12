@@ -92,6 +92,7 @@ enum Shader {
     Composite,
     Clear,
     Other(&'static str, &'static str),
+    LegacyBrilinear(&'static str, &'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -195,6 +196,7 @@ struct Descriptor<A: hal::Api> {
 }
 
 pub(crate) struct FrameRenderer<A: hal::Api> {
+    pub(crate) filtering: Filtering,
     owner: Rc<Device<A>>,
     textures: HashMap<CacheTextureId, Rc<Texture<A>>>,
     pipelines: HashMap<PipelineKey, Rc<Pipeline<A>>>,
@@ -303,6 +305,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         let capture_pool = super::pool::TexturePool::new(&owner);
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
         Ok(Self {
+            filtering: Filtering::Standard,
             owner,
             textures: HashMap::new(),
             pipelines: HashMap::new(),
@@ -1127,10 +1130,13 @@ impl<A: hal::Api> FrameRenderer<A> {
             Shader::Composite => ("composite", "TEXTURE_2D"),
             Shader::Clear => ("ps_clear", ""),
             Shader::Other(name, features) => (name, features),
+            Shader::LegacyBrilinear(name, features) => (name, features),
         };
         shaders::SHADERS
             .iter()
-            .find(|entry| entry.name == name && entry.features == features)
+            .find(|entry| entry.name == name && if matches!(shader, Shader::LegacyBrilinear(..)) {
+                entry.features.strip_suffix(",HAL_LEGACY_BRILINEAR") == Some(features)
+            } else { entry.features == features })
             .unwrap()
     }
 
@@ -1497,13 +1503,26 @@ impl<A: hal::Api> FrameRenderer<A> {
             } else {
                 draw.depth
             };
-            let key = Self::key(draw.shader, draw.blend, depth_mode, target.format)?;
+            let shader = if self.filtering == Filtering::LegacyBrilinear
+                && draw.textures.colors[0].mip_count > 1
+                && draw.filter.unwrap_or(draw.textures.colors[0].filter) == TextureFilter::Trilinear {
+                let artifact = Self::artifact(draw.shader);
+                if !matches!(artifact.name, "ps_quad_textured" | "ps_quad_repeat" | "composite" | "cs_scale") {
+                    return Err(format!("Legacy brilinear is not audited for {}", artifact.name));
+                }
+                Shader::LegacyBrilinear(artifact.name, artifact.features)
+            } else { draw.shader };
+            if self.filtering == Filtering::LegacyBrilinear && draw.textures.colors[1..].iter().any(|texture|
+                texture.mip_count > 1 && draw.filter.unwrap_or(texture.filter) == TextureFilter::Trilinear) {
+                return Err("Legacy brilinear requires mipmapped images in sColor0".into());
+            }
+            let key = Self::key(shader, draw.blend, depth_mode, target.format)?;
             self.pipeline(key)?;
             let pipeline = self.pipelines[&key].clone();
             let buffer = self
                 .submissions
                 .upload(&draw.instances, wgt::BufferUses::VERTEX)?;
-            let artifact = Self::artifact(draw.shader);
+            let artifact = Self::artifact(shader);
             let mut entries = Vec::new();
             if artifact.projection_stages != 0 {
                 entries.push(hal::BindGroupEntry {
@@ -1726,7 +1745,7 @@ impl<A: hal::Api> FrameRenderer<A> {
                     Shader::Quad => stats.primitive_instances += draw.count as usize,
                     Shader::Composite => stats.composite_tiles += draw.count as usize,
                     Shader::Clear => {}
-                    Shader::Other(name, _) => {
+                    Shader::Other(name, _) | Shader::LegacyBrilinear(name, _) => {
                         if name.starts_with("ps_quad")
                             || name == "ps_text_run"
                             || name == "ps_split_composite"
@@ -2788,10 +2807,9 @@ mod shader_tests {
         renderer: &FrameRenderer<hal::api::Vulkan>,
         texture: &Rc<Texture<hal::api::Vulkan>>,
     ) -> Vec<u8> {
-        let layout = renderer
-            .owner
-            .layout(texture.size.width, texture.size.height)
-            .unwrap();
+        let layout = ReadbackLayout::with_pixel_size(texture.size.width, texture.size.height,
+            renderer.owner.capabilities.alignments.buffer_copy_pitch.get(),
+            super::super::resources::bytes_per_pixel(texture.format) as u32).unwrap();
         let buffer = Buffer::readback(&renderer.owner, &layout).unwrap();
         let mut commands = renderer.submissions.recording().unwrap();
         commands.keep(buffer.clone());
@@ -2821,6 +2839,165 @@ mod shader_tests {
         drop(commands);
         renderer.submissions.wait().unwrap();
         renderer.owner.map_readback(&buffer.raw, &layout).unwrap()
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn blend_store_precision() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, true).unwrap();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
+        for color in [
+            ColorF::new(0.5627743005752563, 0.21779930591583252, 0.17092502117156982, 0.8750019073486328),
+            ColorF::new(0.5627743005752563, 0.21779930591583252, 0.17092502117156982, 0.8750019669532776),
+            ColorF::new(0.5, 0.5, 0.5, 0.5),
+        ] {
+            for blend in [0, 1] {
+                let clear = renderer.clear(rect, ColorF::WHITE);
+                renderer.draw_pass(&target, &[clear], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                let mut draw = renderer.clear(rect, color);
+                draw.clear_color = None;
+                draw.blend = blend;
+                renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                let data = pixels(&renderer, &target);
+                for (actual, channel) in data[..3].iter().zip([color.r, color.g, color.b]) {
+                    let ideal = (channel + if blend == 1 { 1.0 - color.a } else { 0.0 }).clamp(0.0, 1.0) * 255.0;
+                    assert!((*actual as f32 - ideal).abs() <= 2.0);
+                }
+                println!("BLEND_STORE {:?} {} {:?}", color, blend, &data[..4]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn unorm_sample_precision() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let source = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Linear, false).unwrap();
+        let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba32Float,
+            TextureFilter::Nearest, true).unwrap();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
+        for color in [[144, 48, 24, 191], [16, 48, 96, 128], [1, 64, 127, 255]] {
+            source.upload_recorded(&renderer.owner, &renderer.submissions, rect, &color.repeat(16), None, 0, None).unwrap();
+            for filter in [TextureFilter::Nearest, TextureFilter::Linear] {
+                let draw = Draw {
+                    shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
+                    instances: bytes(&[ScalingInstance::new(rect.to_f32(), rect.to_f32(), false)]).to_vec(),
+                    textures: renderer.single_texture(source.clone()), filter: Some(filter), clear_color: None,
+                    count_in_stats: false, readback: None, scissor: rect,
+                };
+                renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                let data = pixels(&renderer, &target);
+                let values: Vec<_> = data[..16].chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+                for (actual, expected) in values.iter().zip(color) {
+                    assert!((actual - expected as f32 / 255.0).abs() < 1.0 / 255.0);
+                }
+                println!("UNORM_SAMPLE {:?} {:?} {:?}", color, filter, values);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn sampler_lod_and_mip_probes() {
+        sampler_probes(Filtering::Standard);
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn legacy_brilinear_lod_and_mip_probes() {
+        sampler_probes(Filtering::LegacyBrilinear);
+    }
+
+    fn sampler_probes(filtering: Filtering) {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        renderer.filtering = filtering;
+        let rect = |w, h| DeviceIntRect::from_size(DeviceIntSize::new(w, h));
+        let source = Texture::new(&renderer.owner, 256, 256, wgt::TextureFormat::Rgba8Unorm,
+                                  TextureFilter::Trilinear, true).unwrap();
+        for level in 0..source.mip_count {
+            let view = source.mip_view(level).unwrap();
+            let color = [(level * 28) as u8, 0, 0, 255];
+            view.upload_recorded(&renderer.owner, &renderer.submissions,
+                rect(view.size.width as i32, view.size.height as i32),
+                &color.repeat((view.size.width * view.size.height) as usize), None, 0, None).unwrap();
+            assert_eq!(pixels(&renderer, &view), color.repeat((view.size.width * view.size.height) as usize));
+        }
+        let target = Texture::new(&renderer.owner, 32, 32, wgt::TextureFormat::Rgba8Unorm,
+                                  TextureFilter::Nearest, true).unwrap();
+        let diagnostic = std::env::var_os("WR_HAL_SAMPLER_PROBES");
+        for extent in (16..=128).step_by(2).chain([192, 224, 254, 256]) {
+            renderer.record_blit(&source, &target, rect(extent, extent), rect(32, 32),
+                TextureFilter::Trilinear, &mut DrawStats::default()).unwrap();
+            let data = pixels(&renderer, &target);
+            let actual = data[(16 * 32 + 16) * 4];
+            let expected = ((extent as f32 / 32.0).log2().max(0.0) * 28.0).round() as i32;
+            println!("SAMPLER_LOD {extent} {actual} {expected}");
+            if diagnostic.is_none() && filtering == Filtering::Standard {
+                // Mesa's linear log2 approximation errs by at most 0.087 LOD, plus UNORM rounding.
+                assert!((actual as i32 - expected).abs() <= 4, "extent {}: {} vs {}", extent, actual, expected);
+                if (extent as u32).is_power_of_two() {
+                    assert_eq!(actual as i32, expected);
+                }
+            }
+            if filtering == Filtering::LegacyBrilinear {
+                let anchors = [(16, 0), (32, 0), (38, 0), (40, 3), (48, 20),
+                    (52, 28), (56, 28), (64, 28), (80, 31), (96, 48), (128, 56), (192, 76), (256, 84)];
+                if let Some((_, expected)) = anchors.iter().find(|(size, _)| *size == extent) {
+                    assert!((actual as i32 - expected).abs() <= 1, "legacy footprint {}: {} vs {}", extent, actual, expected);
+                }
+            }
+        }
+        for level in [0, 2, 5, 8] {
+            let view = source.mip_view(level).unwrap();
+            renderer.record_blit(&view, &target, rect(view.size.width as i32, view.size.height as i32),
+                rect(32, 32), TextureFilter::Trilinear, &mut DrawStats::default()).unwrap();
+            assert_eq!(pixels(&renderer, &target), [(level * 28) as u8, 0, 0, 255].repeat(1024));
+        }
+        for (width, height) in [(17, 9), (1, 17), (17, 1), (16, 16)] {
+            for format in [wgt::TextureFormat::Rgba8Unorm, wgt::TextureFormat::Bgra8Unorm, wgt::TextureFormat::R8Unorm] {
+                let texture = Texture::new(&renderer.owner, width, height, format,
+                    TextureFilter::Trilinear, true).unwrap();
+                let mut data = Vec::new();
+                for y in 0..height {
+                    for x in 0..width {
+                        let alpha = if (x + y) % 2 == 0 { 255 } else { 64 };
+                        if format == wgt::TextureFormat::R8Unorm {
+                            data.push(alpha as u8);
+                        } else {
+                            data.extend_from_slice(&[(x * 7).min(alpha) as u8, (y * 7).min(alpha) as u8, 0, alpha as u8]);
+                        }
+                    }
+                }
+                texture.upload_recorded(&renderer.owner, &renderer.submissions,
+                    rect(width as i32, height as i32), &data, None, 0, None).unwrap();
+                assert_eq!(pixels(&renderer, &texture.mip_view(0).unwrap()), data);
+                renderer.generate_mips(&texture).unwrap();
+                for level in 0..texture.mip_count {
+                    let view = texture.mip_view(level).unwrap();
+                    let data = pixels(&renderer, &view);
+                    if let Some(directory) = &diagnostic {
+                        let path = std::path::Path::new(directory);
+                        std::fs::create_dir_all(path).unwrap();
+                        std::fs::write(path.join(format!("mip-{width}x{height}-{format:?}-{level}-{}x{}.bin",
+                            view.size.width, view.size.height)), data).unwrap();
+                    }
+                }
+            }
+        }
+        for format in [wgt::TextureFormat::Rg8Unorm, wgt::TextureFormat::R16Unorm, wgt::TextureFormat::Rg16Unorm] {
+            let texture = Texture::new(&renderer.owner, 7, 5, format, TextureFilter::Linear, false).unwrap();
+            let bpp = super::super::resources::bytes_per_pixel(format);
+            let data: Vec<_> = (0..35 * bpp).map(|n| (n * 29) as u8).collect();
+            texture.upload_recorded(&renderer.owner, &renderer.submissions, rect(7, 5), &data, None, 0, None).unwrap();
+            assert_eq!(pixels(&renderer, &texture), data);
+            assert_eq!(texture.mip_count, 1);
+        }
     }
 
     #[test]
