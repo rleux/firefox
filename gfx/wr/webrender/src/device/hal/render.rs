@@ -5,15 +5,16 @@
 use super::*;
 use super::submission::SubmissionQueue;
 use super::resources::{Buffer, Owned, Texture, texture_format};
-use std::{cell::RefCell, collections::HashMap, mem, rc::Rc};
+use super::external::{ReleaseQueue, dispatch_releases};
+use std::{cell::{Cell, RefCell}, collections::HashMap, mem, rc::Rc};
 use api::{ColorF, ImageBufferKind, PremultipliedColorF, units::*};
 use crate::batch::{AlphaBatchContainer, BatchKind, BatchTextures, ClipMaskInstanceList};
-use crate::composite::{CompositeTileSurface, ResolvedExternalSurfaceColorData};
+use crate::composite::{CompositeTileSurface, ResolvedExternalSurface, ResolvedExternalSurfaceColorData, NativeTileId, CompositorClip};
 use crate::device::{BlendMode, TextureFilter, VertexAttributeKind, VertexDescriptor};
 use crate::frame_builder::Frame;
 use crate::gpu_types::{ClearInstance, CompositeInstance, PrimitiveInstanceData, ScalingInstance};
 use crate::internal_types::{
-    CacheTextureId, ResourceUpdateList, Swizzle, TextureCacheAllocationKind, TextureSource,
+    CacheTextureId, DeferredResolveIndex, ResourceUpdateList, Swizzle, TextureCacheAllocationKind, TextureSource,
     TextureUpdateSource,
 };
 use crate::pattern::PatternKind;
@@ -25,6 +26,10 @@ use webrender_build::hal::{ScalarType, ShaderArtifact};
 mod shaders {
     include!(concat!(env!("OUT_DIR"), "/hal_shaders.rs"));
 }
+
+#[cfg(any(feature = "capture", feature = "replay"))]
+mod capture;
+mod present;
 
 // Only audited, fully initialized numeric GPU layouts may expose their bytes.
 unsafe trait GpuData {
@@ -101,7 +106,7 @@ struct PipelineKey {
     depth_format: Option<wgt::TextureFormat>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct DrawStats {
     pub draw_calls: usize,
     pub wr_draw_calls: usize,
@@ -118,9 +123,41 @@ pub struct FrameOutput {
     pub stats: DrawStats,
 }
 
+pub(crate) struct RenderedFrame<A: hal::Api> {
+    pub size: [u32; 2],
+    pub origin: DeviceIntPoint,
+    pub stats: DrawStats,
+    pub serial: u64,
+    texture: Option<Rc<Texture<A>>>,
+}
+
+pub(crate) struct PendingReadback<A: hal::Api> {
+    buffer: Rc<Buffer<A>>,
+    layout: ReadbackLayout,
+    serial: u64,
+    pub size: [u32; 2],
+}
+
+impl<A: hal::Api> PendingReadback<A> {
+    pub fn bytes(&self) -> u64 { self.layout.size }
+}
+
 struct DrawTextures<A: hal::Api> {
     colors: [Rc<Texture<A>>; 3],
     clip: Rc<Texture<A>>,
+}
+
+struct ResolvedImage<A: hal::Api> {
+    texture: Rc<Texture<A>>,
+    uv: TexelRect,
+    return_usage: wgt::TextureUses,
+}
+
+struct BoundTarget<A: hal::Api> {
+    texture: Rc<Texture<A>>,
+    origin: DeviceIntPoint,
+    size: DeviceIntSize,
+    return_usage: wgt::TextureUses,
 }
 
 struct Draw<A: hal::Api> {
@@ -171,10 +208,27 @@ pub(crate) struct FrameRenderer<A: hal::Api> {
     texture_pool: super::pool::TexturePool<A>,
     data_textures: RefCell<HashMap<&'static str, Rc<Texture<A>>>>,
     uniforms: HashMap<[u32; 16], Rc<Buffer<A>>>,
-    failed: bool,
+    failed: Cell<bool>,
+    external_provider: Option<Box<dyn ExternalImageProvider>>,
+    external_images: HashMap<DeferredResolveIndex, ResolvedImage<A>>,
+    releases: ReleaseQueue,
+    compositor: CompositorConfig,
+    native_targets: HashMap<NativeTileId, BoundTarget<A>>,
+    native_operations: Vec<crate::composite::NativeSurfaceOperation>,
+    native_sizes: HashMap<NativeTileId, DeviceIntSize>,
+    layer_targets: Vec<BoundTarget<A>>,
+    readback_pool: RefCell<Vec<Rc<Buffer<A>>>>,
+    capture_pool: super::pool::TexturePool<A>,
+    queries: RefCell<super::query::QueryPool<A>>,
+    resource_upload_bytes: u64,
+    surface: Option<super::surface::SurfaceState<A>>,
 }
 
 impl<A: hal::Api> FrameRenderer<A> {
+    pub fn external_image_device(&self) -> ExternalImageDevice {
+        ExternalImageDevice::new(&self.owner)
+    }
+
     pub fn new(device: Device<A>) -> Result<Self> {
         let owner = Rc::new(device);
         let native = &owner.open.device;
@@ -232,6 +286,8 @@ impl<A: hal::Api> FrameRenderer<A> {
             None,
         )?;
         let texture_pool = super::pool::TexturePool::new(&owner);
+        let capture_pool = super::pool::TexturePool::new(&owner);
+        let queries = RefCell::new(super::query::QueryPool::new(&owner));
         Ok(Self {
             owner,
             textures: HashMap::new(),
@@ -246,17 +302,47 @@ impl<A: hal::Api> FrameRenderer<A> {
             texture_pool,
             data_textures: RefCell::new(HashMap::new()),
             uniforms: HashMap::new(),
-            failed: false,
+            failed: Cell::new(false),
+            external_provider: None,
+            external_images: HashMap::new(),
+            releases: Rc::new(RefCell::new(Vec::new())),
+            compositor: CompositorConfig::Draw,
+            native_targets: HashMap::new(),
+            native_operations: Vec::new(),
+            native_sizes: HashMap::new(),
+            layer_targets: Vec::new(),
+            readback_pool: RefCell::new(Vec::new()),
+            capture_pool,
+            queries,
+            resource_upload_bytes: 0,
+            surface: None,
         })
     }
 
     pub fn memory_stats(&self) -> MemoryStats {
         let mut stats = self.owner.memory.get();
+        (stats.query_slots, stats.pending_queries) = self.queries.borrow().counts();
         self.submissions.memory(&mut stats);
         stats.cached_texture_bytes = self.texture_pool.bytes();
+        stats.cached_texture_bytes += self.capture_pool.bytes();
+        stats.cached_buffer_bytes += self.readback_pool.borrow().iter().map(|buffer| buffer.size).sum::<u64>();
         stats.pipelines = self.pipelines.len();
         stats.descriptors = self.descriptors.borrow().len();
         stats
+    }
+
+    pub fn trim_transient_resources(&mut self, uploads: bool) -> Result<()> {
+        self.submissions.trim(uploads)?;
+        self.descriptors.borrow_mut().clear();
+        self.depths.clear();
+        self.texture_pool.clear();
+        self.capture_pool.clear();
+        self.readback_pool.borrow_mut().clear();
+        self.data_textures.borrow_mut().clear();
+        self.uniforms.clear();
+        self.queries.borrow_mut().trim();
+        dispatch_releases(&self.releases);
+        Ok(())
     }
 
     pub fn info(&self) -> &wgt::AdapterInfo {
@@ -271,8 +357,216 @@ impl<A: hal::Api> FrameRenderer<A> {
                 .get(&id)
                 .cloned()
                 .ok_or_else(|| format!("Missing HAL texture {id:?}")),
+            TextureSource::External(source) => self.external_images.get(&source.index)
+                .map(|image| image.texture.clone()).ok_or_else(|| "Missing HAL external image resolution".into()),
             _ => Err(format!("Unsupported HAL texture source {source:?}")),
         }
+    }
+
+    pub fn set_external_image_provider(&mut self, provider: Box<dyn ExternalImageProvider>) {
+        self.external_provider = Some(provider);
+    }
+
+    pub fn set_compositor(&mut self, compositor: CompositorConfig) { self.compositor = compositor; }
+
+    fn acquired_target(&self, target: CompositorTarget, size: DeviceIntSize) -> Result<BoundTarget<A>> {
+        target.image.attach_releases(&self.releases);
+        let image = match &target.image.source {
+            ExternalImageSource::Native(image) => image,
+            _ => return Err("Compositor target must be a native image".into()),
+        };
+        let texture = image.texture(&self.owner)?;
+        if texture.target.is_none() || !matches!(texture.format, wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm) {
+            return Err("Compositor target must support RGBA8/BGRA8 rendering".into());
+        }
+        if size.is_empty() || target.size != size || target.origin.x < 0 || target.origin.y < 0
+            || target.origin.x.checked_add(size.width).map_or(true, |end| end as u32 > texture.size.width)
+            || target.origin.y.checked_add(size.height).map_or(true, |end| end as u32 > texture.size.height) {
+            return Err("Compositor target origin/extent exceeds its image".into());
+        }
+        let return_usage = match texture.current_usage() {
+            wgt::TextureUses::UNINITIALIZED => wgt::TextureUses::RESOURCE,
+            usage => usage,
+        };
+        let texture = texture.with_lease(target.image.state.clone(), TextureFilter::Linear)?;
+        Ok(BoundTarget { texture, origin: target.origin, size, return_usage })
+    }
+
+    fn bind_native_tile(&mut self, id: NativeTileId, size: DeviceIntSize, dirty: DeviceIntRect, valid: DeviceIntRect) -> Result<()> {
+        let full = DeviceIntRect::from_size(size);
+        if !full.contains_box(&dirty) || !full.contains_box(&valid) { return Err("Invalid compositor tile update region".into()); }
+        let target = match &mut self.compositor {
+            CompositorConfig::Native { compositor, .. } => compositor.bind_tile(id, dirty, valid)?,
+            _ => return Err("Native tile requires a native compositor".into()),
+        };
+        let target = self.acquired_target(target, size)?;
+        self.native_sizes.insert(id, size);
+        self.native_targets.insert(id, target);
+        Ok(())
+    }
+
+    fn acquire_composite_tiles(&mut self, frame: &Frame) -> Result<()> {
+        for tile in &frame.composite_state.tiles {
+            if let CompositeTileSurface::Texture { surface: ResolvedSurfaceTexture::Native { id, size } } = tile.surface {
+                if !self.native_targets.contains_key(&id) {
+                    let target = match &mut self.compositor {
+                        CompositorConfig::Native { compositor, .. } => compositor.read_tile(id)?,
+                        _ => return Err("Native tile requires a native compositor".into()),
+                    };
+                    let target = self.acquired_target(target, size)?;
+                    self.native_targets.insert(id, target);
+                }
+            }
+        }
+        if matches!(self.compositor, CompositorConfig::Native { .. }) {
+            for surface in &frame.composite_state.external_surfaces {
+                if surface.external_image_id.is_some() { continue; }
+                if let Some(surface_id) = surface.native_surface_id {
+                    let id = NativeTileId { surface_id, x: 0, y: 0 };
+                    if !self.native_targets.contains_key(&id) {
+                        let target = match &mut self.compositor {
+                            CompositorConfig::Native { compositor, .. } => compositor.read_tile(id)?,
+                            _ => unreachable!(),
+                        };
+                        let size = target.size;
+                        let target = self.acquired_target(target, size)?;
+                        self.native_targets.insert(id, target);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn external_uv(&self, source: TextureSource, fallback: TexelRect) -> Result<TexelRect> {
+        match source {
+            TextureSource::External(source) => self.external_images.get(&source.index)
+                .map(|image| image.uv).ok_or_else(|| "Missing external compositor image".into()),
+            _ => Ok(fallback),
+        }
+    }
+
+    fn external_composite(&self, surface: &ResolvedExternalSurface, rect: DeviceRect, clip_rect: DeviceRect,
+                          flip: (bool, bool), clip: Option<&CompositorClip>) -> Result<(CompositeInstance, DrawTextures<A>, Shader)> {
+        Ok(match &surface.color_data {
+            ResolvedExternalSurfaceColorData::Rgb { plane, .. } => (
+                CompositeInstance::new_rgb(rect, clip_rect, PremultipliedColorF::WHITE,
+                    self.external_uv(plane.texture, plane.uv_rect)?, false, flip, clip),
+                self.single_texture(self.source(plane.texture)?), Shader::Composite,
+            ),
+            ResolvedExternalSurfaceColorData::Yuv { planes, color_space, format, channel_bit_depth, .. } => (
+                CompositeInstance::new_yuv(rect, clip_rect, *color_space, *format, *channel_bit_depth,
+                    [self.external_uv(planes[0].texture, planes[0].uv_rect)?,
+                     self.external_uv(planes[1].texture, planes[1].uv_rect)?,
+                     self.external_uv(planes[2].texture, planes[2].uv_rect)?], flip, clip),
+                self.batch_textures(&BatchTextures::composite_yuv(planes[0].texture, planes[1].texture, planes[2].texture))?,
+                Shader::Other("composite", "TEXTURE_2D,YUV"),
+            ),
+        })
+    }
+
+    fn update_native_external_surfaces(&mut self, frame: &Frame, data: &HashMap<&'static str, Rc<Texture<A>>>, stats: &mut DrawStats) -> Result<()> {
+        if !matches!(self.compositor, CompositorConfig::Native { .. }) { return Ok(()); }
+        for surface in &frame.composite_state.external_surfaces {
+            let Some((surface_id, size)) = surface.update_params else { continue; };
+            let rect = DeviceIntRect::from_size(size);
+            let id = NativeTileId { surface_id, x: 0, y: 0 };
+            self.bind_native_tile(id, size, rect, rect)?;
+            let (instance, textures, shader) = self.external_composite(surface, rect.to_f32(), rect.to_f32(), (false, false), None)?;
+            let target = &self.native_targets[&id];
+            let texture = target.texture.clone();
+            let origin = DeviceIntPoint::new(-target.origin.x, -target.origin.y);
+            let draw = Draw { shader, blend: 0, depth: 0, count: 1, instances: bytes(&[instance]).to_vec(),
+                textures, filter: None, clear_color: None, count_in_stats: true, readback: None, scissor: rect };
+            self.draw_pass_at(&texture, &[self.clear(rect, ColorF::TRANSPARENT), draw], data, stats, origin)?;
+            stats.color_targets += 1;
+        }
+        Ok(())
+    }
+
+    pub fn end_compositor_frame(&mut self, frame: &Frame, completion: crate::renderer::hal::FrameCompletion) -> Result<()> {
+        let result = match &mut self.compositor {
+            CompositorConfig::Draw => Ok(()),
+            CompositorConfig::Native { compositor, .. } => compositor.end_frame(&frame.composite_state.descriptor, completion),
+            CompositorConfig::Layer { compositor } => compositor.end_frame(completion),
+        };
+        if result.is_err() { self.failed.set(true); }
+        result
+    }
+
+    pub fn poll(&self) -> Result<()> {
+        let result = self.submissions.poll().and_then(|completed| self.queries.borrow_mut().poll(completed));
+        dispatch_releases(&self.releases);
+        if result.is_err() { self.failed.set(true); }
+        result
+    }
+
+    pub fn configure_timestamps(&self, bits: u32) { self.queries.borrow_mut().configure(bits); }
+    pub fn take_resource_upload_bytes(&mut self) -> u64 { std::mem::replace(&mut self.resource_upload_bytes, 0) }
+    pub fn enable_gpu_profiling(&self, enabled: bool) -> bool { self.queries.borrow_mut().enable(enabled) }
+    pub fn take_gpu_timings(&self) -> Result<Vec<(u64, f64)>> {
+        self.poll()?;
+        Ok(self.queries.borrow_mut().take())
+    }
+
+    fn acquire_external(&mut self, id: api::ExternalImageId, channel: u8, composited: bool) -> Result<ExternalImageLease> {
+        let lease = self.external_provider.as_mut().ok_or("No HAL external-image provider is installed")?
+            .acquire(id, channel, composited)?;
+        lease.attach_releases(&self.releases);
+        Ok(lease)
+    }
+
+    fn resolve_external_images(&mut self, frame: &mut Frame) -> Result<()> {
+        for (index, resolve) in frame.deferred_resolves.iter().enumerate() {
+            let props = &resolve.image_properties;
+            let external = props.external_image.ok_or("Deferred image has no external descriptor")?;
+            if !matches!(external.image_type, api::ExternalImageType::TextureHandle(ImageBufferKind::Texture2D | ImageBufferKind::TextureRect)) {
+                return Err("HAL external sampler type requires a platform adapter".into());
+            }
+            let lease = self.acquire_external(external.id, external.channel_index, resolve.is_composited)?;
+            let native = match &lease.source {
+                ExternalImageSource::Native(native) => native,
+                _ => return Err("Deferred external image requires a native texture".into()),
+            };
+            let texture = native.texture(&self.owner)?;
+            if !texture.sample_initialized() { return Err("External image contents are not initialized".into()); }
+            let filter = if resolve.rendering == api::ImageRendering::Pixelated { TextureFilter::Nearest } else { TextureFilter::Linear };
+            let return_usage = texture.current_usage();
+            let texture = texture.with_lease(lease.state.clone(), filter)?;
+            let mut uv = lease.uv.to_array();
+            if external.normalized_uvs {
+                if props.descriptor.size.is_empty() { return Err("Invalid normalized external image size".into()); }
+                uv[0] /= props.descriptor.size.width as f32;
+                uv[2] /= props.descriptor.size.width as f32;
+                uv[1] /= props.descriptor.size.height as f32;
+                uv[3] /= props.descriptor.size.height as f32;
+            }
+            let address = frame.gpu_buffer_f.resolve_handle(resolve.handle).as_u32() as usize;
+            if address.checked_add(1).map_or(true, |end| end >= frame.gpu_buffer_f.data.len()) {
+                return Err("Invalid deferred external image address".into());
+            }
+            frame.gpu_buffer_f.data[address] = uv.into();
+            frame.gpu_buffer_f.data[address + 1] = [0.0; 4].into();
+            self.external_images.insert(DeferredResolveIndex(index as u32), ResolvedImage { texture, uv: lease.uv, return_usage });
+        }
+        frame.gpu_buffer_f.apply_deferred_uv_copies();
+        Ok(())
+    }
+
+    fn restore_external_images(&self) -> Result<()> {
+        for image in self.external_images.values() {
+            if image.texture.current_usage() != image.return_usage {
+                let mut commands = self.submissions.recording()?;
+                image.texture.transition(&mut commands, image.return_usage);
+            }
+        }
+        for target in self.native_targets.values().chain(self.layer_targets.iter()) {
+            if target.texture.current_usage() != target.return_usage {
+                let mut commands = self.submissions.recording()?;
+                target.texture.transition(&mut commands, target.return_usage);
+            }
+        }
+        Ok(())
     }
 
     pub fn enable_dithering(&mut self) -> Result<()> {
@@ -304,7 +598,7 @@ impl<A: hal::Api> FrameRenderer<A> {
 
     fn quad_shader(&self, pattern: PatternKind) -> Result<Shader> {
         Ok(match pattern {
-            PatternKind::ColorOrTexture => Shader::Quad,
+            PatternKind::ColorOrTexture | PatternKind::TextureRect => Shader::Quad,
             PatternKind::Gradient => Shader::Other(
                 "ps_quad_gradient",
                 if self.dither.is_some() {
@@ -315,7 +609,7 @@ impl<A: hal::Api> FrameRenderer<A> {
             ),
             PatternKind::Repeat => Shader::Other("ps_quad_repeat", ""),
             PatternKind::Blend => Shader::Other("ps_quad_blend", "TEXTURE_2D"),
-            PatternKind::Yuv => Shader::Other("ps_quad_yuv", "TEXTURE_2D"),
+            PatternKind::Yuv | PatternKind::YuvTextureRect => Shader::Other("ps_quad_yuv", "TEXTURE_2D"),
             PatternKind::Backdrop => Shader::Other("ps_quad_backdrop", "TEXTURE_2D"),
             PatternKind::MixBlend => Shader::Other("ps_quad_mix_blend", "TEXTURE_2D"),
             PatternKind::BoxShadow => Shader::Other("ps_quad_box_shadow", ""),
@@ -370,13 +664,45 @@ impl<A: hal::Api> FrameRenderer<A> {
     fn surface(&self, surface: &ResolvedSurfaceTexture) -> Result<Rc<Texture<A>>> {
         match *surface {
             ResolvedSurfaceTexture::TextureCache { texture } => self.source(texture),
-            _ => Err("HAL native render targets are not implemented".into()),
+            ResolvedSurfaceTexture::Native { id, .. } => self.native_targets.get(&id)
+                .map(|target| target.texture.clone()).ok_or_else(|| "Native target is not acquired".into()),
+        }
+    }
+
+    fn track_native_operations(&mut self, operations: &[crate::composite::NativeSurfaceOperation]) {
+        use crate::composite::NativeSurfaceOperationDetails as Op;
+        for operation in operations {
+            match operation.details {
+                Op::DestroySurface { id } => {
+                    self.native_sizes.retain(|tile, _| tile.surface_id != id);
+                    self.native_operations.retain(|op| match op.details {
+                        Op::CreateSurface { id: surface, .. } | Op::CreateExternalSurface { id: surface, .. }
+                        | Op::CreateBackdropSurface { id: surface, .. } | Op::AttachExternalImage { id: surface, .. } => surface != id,
+                        Op::CreateTile { id: tile } => tile.surface_id != id,
+                        _ => false,
+                    });
+                }
+                Op::DestroyTile { id } => {
+                    self.native_sizes.remove(&id);
+                    self.native_operations.retain(|op| !matches!(op.details, Op::CreateTile { id: tile } if tile == id));
+                }
+                Op::AttachExternalImage { id, .. } => {
+                    self.native_operations.retain(|op| !matches!(op.details, Op::AttachExternalImage { id: surface, .. } if surface == id));
+                    self.native_operations.push(operation.clone());
+                }
+                _ => self.native_operations.push(operation.clone()),
+            }
         }
     }
 
     fn update(&mut self, updates: ResourceUpdateList) -> Result<()> {
         if !updates.native_surface_updates.is_empty() {
-            return Err("HAL native surface updates are not implemented".into());
+            let device = self.external_image_device();
+            match &mut self.compositor {
+                CompositorConfig::Native { compositor, .. } => compositor.update_surfaces(&device, &updates.native_surface_updates)?,
+                _ => return Err("Native surface updates require a native compositor".into()),
+            }
+            self.track_native_operations(&updates.native_surface_updates);
         }
         let updates = updates.texture_updates;
         if !updates.allocations.is_empty() {
@@ -432,6 +758,9 @@ impl<A: hal::Api> FrameRenderer<A> {
                 .cloned()
                 .ok_or("Updating unknown HAL texture")?;
             for update in updates {
+                let uploaded = !matches!(update.source, TextureUpdateSource::DebugClear);
+                let upload_bytes = update.rect.width() as u64 * update.rect.height() as u64
+                    * super::resources::bytes_per_pixel(texture.format) as u64;
                 match update.source {
                     TextureUpdateSource::Bytes { data } => texture.upload_recorded(
                         &self.owner,
@@ -452,8 +781,18 @@ impl<A: hal::Api> FrameRenderer<A> {
                             &mut DrawStats::default(),
                         )?;
                     }
-                    _ => return Err("HAL external texture updates require an image adapter".into()),
+                    TextureUpdateSource::External { id, channel_index } => {
+                        let lease = self.acquire_external(id, channel_index, false)?;
+                        let data = match &lease.source {
+                            ExternalImageSource::Buffer(data) => data,
+                            _ => return Err("External buffer update requires CPU bytes".into()),
+                        };
+                        texture.upload_recorded(&self.owner, &self.submissions, update.rect, data,
+                            update.stride, update.offset, update.format_override.or(Some(lease.descriptor.format)))?;
+                        lease.complete_cpu_copy();
+                    }
                 }
+                if uploaded { self.resource_upload_bytes += upload_bytes; }
             }
             self.generate_mips(&texture)?;
         }
@@ -1741,6 +2080,14 @@ impl<A: hal::Api> FrameRenderer<A> {
             }
         }
         for (source, instances) in &target.scalings {
+            let external_instances;
+            let instances = if let TextureSource::External(source) = source {
+                let image = self.external_images.get(&source.index).ok_or("Missing external scaling image")?;
+                external_instances = instances.iter().map(|instance| ScalingInstance::new(
+                    instance.target_rect, DeviceRect::new(image.uv.uv0, image.uv.uv1), false,
+                )).collect::<Vec<_>>();
+                external_instances.as_slice()
+            } else { instances.as_slice() };
             draws.push(Draw {
                 shader: Shader::Other("cs_scale", "TEXTURE_2D"),
                 blend: 0,
@@ -1807,65 +2154,69 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn update_resources(&mut self, updates: Vec<ResourceUpdateList>) -> Result<()> {
-        if self.failed {
+        if self.failed.get() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
-        self.failed = true;
+        self.failed.set(true);
         for update in updates {
             self.update(update)?;
         }
         self.submissions.submit()?;
-        self.failed = false;
+        self.failed.set(false);
         Ok(())
     }
 
     pub fn render(
         &mut self,
-        frame: &Frame,
+        frame: &mut Frame,
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
-    ) -> Result<FrameOutput> {
+    ) -> Result<RenderedFrame<A>> {
         self.execute(frame, updates, clear, frame.present)
     }
 
-    pub fn render_offscreen(&mut self, frame: &Frame) -> Result<()> {
+    pub fn render_offscreen(&mut self, frame: &mut Frame) -> Result<()> {
         self.execute(frame, Vec::new(), ColorF::TRANSPARENT, false)
             .map(|_| ())
     }
 
     fn execute(
         &mut self,
-        frame: &Frame,
+        frame: &mut Frame,
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
         composite: bool,
-    ) -> Result<FrameOutput> {
-        if self.failed {
+    ) -> Result<RenderedFrame<A>> {
+        if self.failed.get() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
-        self.failed = true;
+        self.poll()?;
+        self.failed.set(true);
         let result = self.render_inner(frame, updates, clear, composite);
+        if result.is_err() { self.submissions.discard_recording(); }
+        self.external_images.clear();
+        self.native_targets.clear();
+        self.layer_targets.clear();
+        dispatch_releases(&self.releases);
         if result.is_ok() {
-            self.failed = false;
+            self.failed.set(false);
         }
         result
     }
 
     fn render_inner(
         &mut self,
-        frame: &Frame,
+        frame: &mut Frame,
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
         composite: bool,
-    ) -> Result<FrameOutput> {
+    ) -> Result<RenderedFrame<A>> {
         self.depths.clear();
-        if !frame.deferred_resolves.is_empty() || !frame.gpu_buffer_f.deferred_uv_copies.is_empty()
-        {
-            return Err("HAL external-image resolution is not implemented".into());
-        }
         for updates in updates {
             self.update(updates)?;
         }
+        self.resolve_external_images(frame)?;
+        let query = self.queries.borrow_mut().begin(&self.submissions)?;
         let mut data = HashMap::from([
             (
                 "sPrimitiveHeadersF",
@@ -1927,7 +2278,29 @@ impl<A: hal::Api> FrameRenderer<A> {
                 }
                 for target in &pass.picture_cache {
                     stats.color_targets += 1;
-                    let texture = self.surface(&target.surface)?;
+                    let native_id = match target.surface {
+                        ResolvedSurfaceTexture::Native { id, size } => {
+                            self.bind_native_tile(id, size, target.dirty_rect, target.valid_rect)?;
+                            Some(id)
+                        }
+                        _ => None,
+                    };
+                    let texture = if let Some(id) = native_id {
+                        let native = &self.native_targets[&id];
+                        let texture = self.texture_pool.acquire(native.size.width as u32, native.size.height as u32, native.texture.format, true)?;
+                        {
+                            let mut commands = self.submissions.recording()?;
+                            texture.invalidate(&mut commands);
+                        }
+                        if native.texture.initialized() {
+                            let source = native.texture.clone();
+                            let rect = DeviceIntRect::from_origin_and_size(native.origin, native.size);
+                            self.copy_native(&source, &texture, rect, DeviceIntRect::from_size(rect.size()))?;
+                        } else {
+                            self.draw_pass(&texture, &[self.clear(DeviceIntRect::from_size(native.size), ColorF::TRANSPARENT)], &data, &mut stats)?;
+                        }
+                        texture
+                    } else { self.surface(&target.surface)? };
                     match &target.kind {
                         PictureCacheTargetKind::Draw {
                             alpha_batch_container,
@@ -1966,6 +2339,12 @@ impl<A: hal::Api> FrameRenderer<A> {
                             self.copy(&source, &texture, source_rect, target.dirty_rect)?;
                         }
                     }
+                    if let Some(id) = native_id {
+                        let native = &self.native_targets[&id];
+                        let destination = native.texture.clone();
+                        let destination_rect = target.dirty_rect.translate(native.origin.to_vector());
+                        self.copy_native(&texture, &destination, target.dirty_rect, destination_rect)?;
+                    }
                 }
             }
             for target in &pass.alpha.targets {
@@ -1983,16 +2362,21 @@ impl<A: hal::Api> FrameRenderer<A> {
                 }
             }
         }
+        self.update_native_external_surfaces(frame, &data, &mut stats)?;
         let size = frame.device_rect.size();
         if !composite || size.is_empty() {
-            self.submissions.submit()?;
-            return Ok(FrameOutput {
+            self.restore_external_images()?;
+            let serial = self.queries.borrow_mut().finish(&self.submissions, query)?;
+            return Ok(RenderedFrame {
                 size: [0, 0],
-                pixels: Vec::new(),
+                origin: frame.device_rect.min,
                 stats,
+                serial,
+                texture: None,
             });
         }
         stats.color_targets += 1;
+        self.acquire_composite_tiles(frame)?;
         let output = self.texture_pool.acquire(
             size.width as u32,
             size.height as u32,
@@ -2004,6 +2388,7 @@ impl<A: hal::Api> FrameRenderer<A> {
             output.invalidate(&mut commands);
         }
         let mut draws = vec![self.clear(frame.device_rect, clear)];
+        let mut layer_rects = Vec::new();
         for tile in frame.composite_state.tiles.iter().rev() {
             let state = &frame.composite_state;
             let rect = state.get_device_rect(&tile.local_rect, tile.transform_index);
@@ -2015,6 +2400,7 @@ impl<A: hal::Api> FrameRenderer<A> {
             else {
                 continue;
             };
+            layer_rects.push(clip_rect.round_out().to_i32());
             let transform = state.get_device_transform(tile.transform_index);
             let flip = (transform.scale.x < 0.0, transform.scale.y < 0.0);
             let clip = tile
@@ -2026,53 +2412,29 @@ impl<A: hal::Api> FrameRenderer<A> {
                     self.single_texture(self.dummy.clone()),
                     Shader::Composite,
                 ),
-                CompositeTileSurface::Texture { ref surface } => (
-                    CompositeInstance::new(rect, clip_rect, PremultipliedColorF::WHITE, flip, clip),
-                    self.single_texture(self.surface(surface)?),
-                    Shader::Composite,
-                ),
+                CompositeTileSurface::Texture { ref surface } => {
+                    let instance = match surface {
+                        ResolvedSurfaceTexture::Native { id, .. } => {
+                            let target = &self.native_targets[id];
+                            CompositeInstance::new_rgb(rect, clip_rect, PremultipliedColorF::WHITE,
+                                DeviceIntRect::from_origin_and_size(target.origin, target.size).into(), false, flip, clip)
+                        }
+                        _ => CompositeInstance::new(rect, clip_rect, PremultipliedColorF::WHITE, flip, clip),
+                    };
+                    (instance, self.single_texture(self.surface(surface)?), Shader::Composite)
+                },
                 CompositeTileSurface::ExternalSurface {
                     external_surface_index,
                 } => {
                     let surface = &state.external_surfaces[external_surface_index.0];
-                    match &surface.color_data {
-                        ResolvedExternalSurfaceColorData::Rgb { plane, .. } => (
-                            CompositeInstance::new_rgb(
-                                rect,
-                                clip_rect,
-                                PremultipliedColorF::WHITE,
-                                plane.uv_rect,
-                                plane.texture.uses_normalized_uvs(),
-                                flip,
-                                clip,
-                            ),
-                            self.single_texture(self.source(plane.texture)?),
-                            Shader::Composite,
-                        ),
-                        ResolvedExternalSurfaceColorData::Yuv {
-                            planes,
-                            color_space,
-                            format,
-                            channel_bit_depth,
-                            ..
-                        } => (
-                            CompositeInstance::new_yuv(
-                                rect,
-                                clip_rect,
-                                *color_space,
-                                *format,
-                                *channel_bit_depth,
-                                [planes[0].uv_rect, planes[1].uv_rect, planes[2].uv_rect],
-                                flip,
-                                clip,
-                            ),
-                            self.batch_textures(&BatchTextures::composite_yuv(
-                                planes[0].texture,
-                                planes[1].texture,
-                                planes[2].texture,
-                            ))?,
-                            Shader::Other("composite", "TEXTURE_2D,YUV"),
-                        ),
+                    if matches!(self.compositor, CompositorConfig::Native { .. }) && surface.external_image_id.is_none() {
+                        let surface_id = surface.native_surface_id.ok_or("Missing native external surface identity")?;
+                        let target = &self.native_targets[&NativeTileId { surface_id, x: 0, y: 0 }];
+                        (CompositeInstance::new_rgb(rect, clip_rect, PremultipliedColorF::WHITE,
+                            DeviceIntRect::from_origin_and_size(target.origin, target.size).into(), false, flip, clip),
+                         self.single_texture(target.texture.clone()), Shader::Composite)
+                    } else {
+                        self.external_composite(surface, rect, clip_rect, flip, clip)?
                     }
                 }
             };
@@ -2090,37 +2452,193 @@ impl<A: hal::Api> FrameRenderer<A> {
                 scissor: frame.device_rect,
             });
         }
-        self.draw_pass_at(&output, &draws, &data, &mut stats, frame.device_rect.min)?;
-        let layout = self.owner.layout(output.size.width, output.size.height)?;
-        let buffer = Buffer::readback(&self.owner, &layout)?;
+        if matches!(self.compositor, CompositorConfig::Layer { .. }) {
+            let input_layers: Vec<_> = layer_rects.iter().map(|rect| crate::composite::CompositorInputLayer {
+                offset: rect.min, clip_rect: *rect, usage: crate::composite::CompositorSurfaceUsage::Content,
+                is_opaque: false, rounded_clip_rect: *rect, rounded_clip_radii: crate::composite::ClipRadius::EMPTY,
+            }).collect();
+            let device = self.external_image_device();
+            if let CompositorConfig::Layer { compositor } = &mut self.compositor {
+                compositor.begin_frame(&device, &crate::composite::CompositorInputConfig { enable_screenshot: true, layers: &input_layers })?;
+            }
+            let mut composites = vec![self.clear(frame.device_rect, clear)];
+            for (index, (draw, rect)) in draws.into_iter().skip(1).zip(layer_rects).enumerate() {
+                let dirty = DeviceIntRect::from_size(rect.size());
+                let target = match &mut self.compositor {
+                    CompositorConfig::Layer { compositor } => compositor.bind_layer(index, &[dirty])?,
+                    _ => unreachable!(),
+                };
+                let target = self.acquired_target(target, rect.size())?;
+                let origin = rect.min - target.origin.to_vector();
+                let clear = self.clear(rect, ColorF::TRANSPARENT);
+                self.draw_pass_at(&target.texture, &[clear, draw], &data, &mut stats, origin)?;
+                stats.color_targets += 1;
+                let instance = CompositeInstance::new_rgb(rect.to_f32(), rect.to_f32(), PremultipliedColorF::WHITE,
+                    DeviceIntRect::from_origin_and_size(target.origin, target.size).into(), false, (false, false), None);
+                composites.push(Draw {
+                    shader: Shader::Composite, blend: 1, depth: 0, count: 1, instances: bytes(&[instance]).to_vec(),
+                    textures: self.single_texture(target.texture.clone()), filter: None, clear_color: None,
+                    count_in_stats: false, readback: None, scissor: frame.device_rect,
+                });
+                self.layer_targets.push(target);
+            }
+            self.draw_pass_at(&output, &composites, &data, &mut stats, frame.device_rect.min)?;
+        } else {
+            self.draw_pass_at(&output, &draws, &data, &mut stats, frame.device_rect.min)?;
+        }
+        self.restore_external_images()?;
+        let serial = self.queries.borrow_mut().finish(&self.submissions, query)?;
+        Ok(RenderedFrame {
+            size: [output.size.width, output.size.height],
+            origin: frame.device_rect.min,
+            stats,
+            serial,
+            texture: Some(output),
+        })
+    }
+
+    pub fn readback_bytes(&self, width: u32, height: u32) -> Result<u64> {
+        Ok(self.owner.layout(width, height)?.size)
+    }
+
+    pub fn release_capture_buffers(&mut self) {
+        self.capture_pool.clear();
+        self.readback_pool.borrow_mut().clear();
+    }
+
+    fn readback_buffer(&self, layout: &ReadbackLayout) -> Result<Rc<Buffer<A>>> {
+        self.submissions.poll()?;
+        let mut pool = self.readback_pool.borrow_mut();
+        if let Some(buffer) = pool.iter().find(|buffer| Rc::strong_count(buffer) == 1 && buffer.size >= layout.size) {
+            return Ok(buffer.clone());
+        }
+        let buffer = Buffer::readback(&self.owner, layout)?;
+        let mut bytes: u64 = pool.iter().map(|buffer| buffer.size).sum();
+        let mut count = pool.len();
+        pool.retain(|old| {
+            if (bytes + buffer.size > 64 << 20 || count >= 8) && Rc::strong_count(old) == 1 {
+                bytes -= old.size; count -= 1; false
+            } else { true }
+        });
+        if bytes + buffer.size <= 64 << 20 && pool.len() < 8 { pool.push(buffer.clone()); }
+        Ok(buffer)
+    }
+
+    pub fn scaled_readback(&mut self, frame: &RenderedFrame<A>, rect: DeviceIntRect, size: DeviceIntSize) -> Result<PendingReadback<A>> {
+        if self.failed.get() { return Err("HAL renderer requires recreation".into()); }
+        let mut source = frame.texture.as_ref().ok_or("No HAL output to capture")?.clone();
+        if rect.is_empty() || size.is_empty() || !DeviceIntRect::from_size(DeviceIntSize::new(frame.size[0] as i32, frame.size[1] as i32)).contains_box(&rect) {
+            return Err("Invalid HAL screenshot rectangle or size".into());
+        }
+        let mut levels = vec![size];
+        while rect.width() > levels.last().unwrap().width.saturating_mul(2) {
+            let previous = *levels.last().unwrap();
+            let next = DeviceIntSize::new(previous.width.saturating_mul(2), previous.height.saturating_mul(2));
+            if next.width > self.owner.max_texture_size() || next.height > self.owner.max_texture_size() { break; }
+            levels.push(next);
+        }
+        self.failed.set(true);
+        let mut source_rect = rect;
+        for level in levels.into_iter().rev() {
+            let target = self.capture_pool.acquire(level.width as u32, level.height as u32, wgt::TextureFormat::Rgba8Unorm, true)?;
+            {
+                let mut commands = self.submissions.recording()?;
+                target.invalidate(&mut commands);
+            }
+            let target_rect = DeviceIntRect::from_size(level);
+            self.record_blit(&source, &target, source_rect, target_rect, TextureFilter::Linear, &mut DrawStats::default())?;
+            source = target;
+            source_rect = target_rect;
+        }
+        let serial = self.submissions.submit_serial()?;
+        self.failed.set(false);
+        self.start_readback(&RenderedFrame { size: [size.width as u32, size.height as u32], origin: DeviceIntPoint::zero(),
+            stats: DrawStats::default(), serial, texture: Some(source) }, DeviceIntRect::from_size(size))
+    }
+
+    pub fn poll_completion(&self, serial: u64) -> Result<bool> {
+        let result = self.submissions.poll();
+        dispatch_releases(&self.releases);
+        match result {
+            Ok(completed) => Ok(completed >= serial),
+            Err(error) => { self.failed.set(true); Err(error) }
+        }
+    }
+
+    pub fn start_readback(&self, frame: &RenderedFrame<A>, rect: DeviceIntRect) -> Result<PendingReadback<A>> {
+        if self.failed.get() {
+            return Err("HAL renderer must be recreated after an execution failure".into());
+        }
+        let output = frame.texture.as_ref().ok_or("HAL frame has no output target")?;
+        if rect.is_empty() || rect.min.x < 0 || rect.min.y < 0
+            || rect.max.x as u32 > frame.size[0] || rect.max.y as u32 > frame.size[1] {
+            return Err("Invalid HAL readback rectangle".into());
+        }
+        let size = [rect.width() as u32, rect.height() as u32];
+        let layout = self.owner.layout(size[0], size[1])?;
+        let buffer = self.readback_buffer(&layout)?;
+        self.failed.set(true);
         let mut commands = self.submissions.recording()?;
         buffer.transition(&mut commands, wgt::BufferUses::COPY_DST);
         output.transition(&mut commands, wgt::TextureUses::COPY_SRC);
         unsafe {
-            copy_readback::<A>(
-                commands.encoder(),
+            commands.encoder().copy_texture_to_buffer(
                 &output.raw,
+                wgt::TextureUses::COPY_SRC,
                 &buffer.raw,
-                &layout,
-                output.size,
-                hal::FormatAspects::COLOR,
+                std::iter::once(hal::BufferTextureCopy {
+                    buffer_layout: wgt::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(layout.pitch),
+                        rows_per_image: Some(size[1]),
+                    },
+                    texture_base: hal::TextureCopyBase {
+                        mip_level: output.base_mip,
+                        array_layer: 0,
+                        origin: wgt::Origin3d { x: rect.min.x as u32, y: rect.min.y as u32, z: 0 },
+                        aspect: hal::FormatAspects::COLOR,
+                    },
+                    size: wgt::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 }.into(),
+                }),
             );
         }
         buffer.transition(&mut commands, wgt::BufferUses::MAP_READ);
         drop(commands);
-        self.submissions.wait()?;
-        let pixels = self.owner.map_readback(&buffer.raw, &layout)?;
-        Ok(FrameOutput {
-            size: [output.size.width, output.size.height],
-            pixels,
-            stats,
-        })
+        let serial = self.submissions.submit_serial()?;
+        self.failed.set(false);
+        Ok(PendingReadback { buffer, layout, serial, size })
+    }
+
+    pub fn poll_readback(&self, readback: &PendingReadback<A>, wait: bool) -> Result<Option<Vec<u8>>> {
+        let result = (|| {
+            if wait {
+                self.submissions.wait_for(readback.serial)?;
+            } else if self.submissions.poll()? < readback.serial {
+                return Ok(None);
+            }
+            self.owner.map_readback(&readback.buffer.raw, &readback.layout).map(Some)
+        })();
+        if result.is_err() { self.failed.set(true); }
+        dispatch_releases(&self.releases);
+        result
     }
 }
 
 impl<A: hal::Api> Drop for FrameRenderer<A> {
     fn drop(&mut self) {
+        if !self.failed.get() {
+            if let Some(acquired) = self.surface.as_ref().and_then(|surface| surface.acquired.as_ref()) {
+                if self.submissions.recording().is_ok() {
+                    let _ = self.submissions.submit_surfaces(&[&acquired.texture]);
+                }
+            }
+        }
         self.submissions.shutdown();
+        if let Some(surface) = &mut self.surface { surface.discard(); }
+        self.external_images.clear();
+        self.native_targets.clear();
+        self.layer_targets.clear();
+        dispatch_releases(&self.releases);
     }
 }
 

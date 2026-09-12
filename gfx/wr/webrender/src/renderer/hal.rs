@@ -11,13 +11,15 @@ use crate::api::{
 use crate::api::channel::{unbounded_channel, Receiver, Sender};
 use crate::composite::{CompositorConfig, CompositorKind};
 use crate::device::hal::{create_vulkan_device, Options, FrameOutput};
-use crate::device::hal::render::FrameRenderer;
+use crate::device::hal::render::{FrameRenderer, RenderedFrame, PendingReadback};
 use crate::frame_builder::FrameBuilderConfig;
 use crate::internal_types::{RenderedDocument, ResourceUpdateList, ResultMsg};
 use crate::render_api::{ApiMsg, RenderApiSender};
 use crate::render_backend_pool::RenderBackendPool;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
 
@@ -28,14 +30,79 @@ pub struct PreparedFrameInfo {
     pub primitive_instances: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ReadbackHandle {
+    owner: RenderBackendId,
+    id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameCompletion {
+    owner: RenderBackendId,
+    serial: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GpuTiming {
+    pub completion: FrameCompletion,
+    pub nanoseconds: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CpuTiming {
+    pub completion: FrameCompletion,
+    pub composite_time: Duration,
+    pub resource_upload_time: Duration,
+    pub is_slow: bool,
+}
+
+pub struct RendererMemoryReport {
+    pub cpu: crate::render_api::MemoryReport,
+    pub gpu: crate::device::hal::MemoryStats,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenshotHandle {
+    readback: ReadbackHandle,
+    size: api::units::DeviceIntSize,
+    format: ImageFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecordedFrameHandle(ScreenshotHandle);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReadbackKind { Pixels, Screenshot, Recording }
+
+struct ReadbackRequest {
+    ticket: PendingReadback<wgpu_hal::api::Vulkan>,
+    flip_rows: bool,
+    format: ImageFormat,
+    kind: ReadbackKind,
+}
+
 pub struct Renderer {
     gpu: FrameRenderer<wgpu_hal::api::Vulkan>,
     ready: Arc<FrameReady>,
     ready_generation: u64,
     pending_message: Option<ResultMsg>,
     document_id: Option<DocumentId>,
+    parked_documents: HashMap<DocumentId, RenderedDocument>,
+    prepared_generations: HashMap<DocumentId, u64>,
+    cpu_timings: std::collections::VecDeque<CpuTiming>,
+    slow_cpu_frame_threshold: Duration,
+    resource_upload_time: Duration,
+    last_upload_time: Duration,
+    last_upload_bytes: u64,
     clear_color: api::ColorF,
-    last_output: Option<FrameOutput>,
+    last_output: Option<RenderedFrame<wgpu_hal::api::Vulkan>>,
+    readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest>>,
+    readback_bytes: Cell<u64>,
+    next_readback: Cell<u64>,
+    last_descriptor: Option<crate::composite::CompositeDescriptor>,
+    last_device_rect: Option<api::units::DeviceIntRect>,
+    damage: Vec<api::units::DeviceIntRect>,
+    did_rasterize: bool,
     result_rx: Receiver<ResultMsg>,
     api_tx: Option<Sender<ApiMsg>>,
     backend_id: RenderBackendId,
@@ -49,8 +116,39 @@ pub struct Renderer {
 
 pub fn create_vulkan_renderer(
     hal_options: &Options,
+    options: WebRenderOptions,
+    notifier: Box<dyn RenderNotifier>,
+) -> Result<(Renderer, RenderApiSender), String> {
+    create_vulkan_renderer_with_compositor(hal_options, options, notifier, crate::device::hal::CompositorConfig::Draw)
+}
+
+pub fn create_vulkan_renderer_with_compositor(
+    hal_options: &Options,
+    options: WebRenderOptions,
+    notifier: Box<dyn RenderNotifier>,
+    compositor: crate::device::hal::CompositorConfig,
+) -> Result<(Renderer, RenderApiSender), String> {
+    create_renderer(hal_options, options, notifier, compositor, None)
+}
+
+pub fn create_vulkan_renderer_for_window(
+    hal_options: &Options,
+    options: WebRenderOptions,
+    notifier: Box<dyn RenderNotifier>,
+    compositor: crate::device::hal::CompositorConfig,
+    window: std::rc::Rc<dyn crate::device::hal::SurfaceWindow>,
+    size: [u32; 2],
+    surface_options: crate::device::hal::SurfaceOptions,
+) -> Result<(Renderer, RenderApiSender), String> {
+    create_renderer(hal_options, options, notifier, compositor, Some((window, size, surface_options)))
+}
+
+fn create_renderer(
+    hal_options: &Options,
     mut options: WebRenderOptions,
     notifier: Box<dyn RenderNotifier>,
+    compositor: crate::device::hal::CompositorConfig,
+    window: Option<(std::rc::Rc<dyn crate::device::hal::SurfaceWindow>, [u32; 2], crate::device::hal::SurfaceOptions)>,
 ) -> Result<(Renderer, RenderApiSender), String> {
     if !matches!(
         options.compositor_config,
@@ -65,7 +163,16 @@ pub fn create_vulkan_renderer(
         return Err("GL program caches and shader overrides are unavailable on HAL".into());
     }
     init::initialize_process();
-    let device = create_vulkan_device(hal_options)?;
+    let compositor_kind = compositor.kind();
+    if matches!(compositor_kind, CompositorKind::Layer { .. }) { options.surface_origin_is_top_left = true; }
+    let (device, surface) = match window {
+        Some((window, size, options)) => {
+            let (device, setup) = crate::device::hal::vulkan::create_vulkan_device_for_window(hal_options, window)?;
+            (device, Some((setup, size, options)))
+        }
+        None => (create_vulkan_device(hal_options)?, None),
+    };
+    let timestamp_bits = device.timestamp_valid_bits();
     let max_internal_texture_size = options
         .max_internal_texture_size
         .unwrap_or(device.max_texture_size())
@@ -92,7 +199,7 @@ pub fn create_vulkan_renderer(
         external_images_require_copy: true,
         batch_lookback_count: WebRenderOptions::BATCH_LOOKBACK_COUNT,
         background_color: Some(options.clear_color),
-        compositor_kind: CompositorKind::default(),
+        compositor_kind,
         tile_size_override: None,
         max_surface_override: None,
         max_depth_ids: MAX_DEPTH_IDS,
@@ -113,6 +220,10 @@ pub fn create_vulkan_renderer(
         supports_r8_texture_upload: true,
     };
     let mut gpu = FrameRenderer::new(device)?;
+    gpu.configure_timestamps(timestamp_bits);
+    gpu.enable_gpu_profiling(options.debug_flags.contains(api::DebugFlags::GPU_TIME_QUERIES));
+    gpu.set_compositor(compositor);
+    if let Some((setup, size, options)) = surface { gpu.attach_surface(setup, size, options)?; }
     if options.enable_dithering {
         gpu.enable_dithering()?;
     }
@@ -136,8 +247,22 @@ pub fn create_vulkan_renderer(
             ready_generation: 0,
             pending_message: None,
             document_id: None,
+            parked_documents: HashMap::new(),
+            prepared_generations: HashMap::new(),
+            cpu_timings: std::collections::VecDeque::new(),
+            slow_cpu_frame_threshold: Duration::from_millis(10),
+            resource_upload_time: Duration::ZERO,
+            last_upload_time: Duration::ZERO,
+            last_upload_bytes: 0,
             clear_color: options.clear_color,
             last_output: None,
+            readbacks: RefCell::new(HashMap::new()),
+            readback_bytes: Cell::new(0),
+            next_readback: Cell::new(1),
+            last_descriptor: None,
+            last_device_rect: None,
+            damage: Vec::new(),
+            did_rasterize: false,
             result_rx,
             api_tx: Some(api_tx),
             backend_id,
@@ -153,6 +278,51 @@ pub fn create_vulkan_renderer(
 }
 
 impl Renderer {
+    pub fn external_image_device(&self) -> crate::device::hal::ExternalImageDevice {
+        self.gpu.external_image_device()
+    }
+
+    pub fn set_external_image_provider(&mut self, provider: Box<dyn crate::device::hal::ExternalImageProvider>) -> Result<(), String> {
+        self.flush_required_frame()?;
+        self.gpu.set_external_image_provider(provider);
+        Ok(())
+    }
+
+    pub fn surface_info(&self) -> Option<crate::device::hal::SurfaceInfo> { self.gpu.surface_info() }
+    pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<(), String> { self.gpu.resize_surface(size) }
+    pub fn acquire_surface(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.gpu.acquire_surface() }
+    pub fn discard_surface(&mut self) -> Result<(), String> { self.gpu.discard_surface() }
+    pub fn present(&mut self) -> Result<crate::device::hal::PresentationStatus, String> {
+        self.gpu.present_output(self.last_output.as_ref().ok_or("No rendered frame to present")?)
+    }
+
+    pub fn poll(&self) -> Result<(), String> { self.gpu.poll() }
+
+    pub fn enable_gpu_profiling(&self, enabled: bool) -> bool { self.gpu.enable_gpu_profiling(enabled) }
+
+    pub fn take_gpu_timings(&self) -> Result<Vec<GpuTiming>, String> {
+        Ok(self.gpu.take_gpu_timings()?.into_iter().map(|(serial, nanoseconds)| GpuTiming {
+            completion: FrameCompletion { owner: self.backend_id, serial }, nanoseconds,
+        }).collect())
+    }
+
+    pub fn take_cpu_timings(&mut self) -> Vec<CpuTiming> { self.cpu_timings.drain(..).collect() }
+
+    pub fn report_memory(&self) -> RendererMemoryReport {
+        let mut cpu = crate::render_api::MemoryReport::default();
+        for document in self.document.iter().chain(self.parked_documents.values()) {
+            cpu.frame_allocator += document.frame.allocator_memory.get_stats().reserved_bytes;
+            cpu.render_tasks += document.frame.render_tasks.report_memory();
+        }
+        RendererMemoryReport { cpu, gpu: self.memory_stats() }
+    }
+
+    pub fn trim_transient_resources(&self, trim_upload_buffers: bool) {
+        if let Some(sender) = &self.api_tx {
+            let _ = sender.send(ApiMsg::TrimTransientResources { backend_id: self.backend_id, trim_upload_buffers });
+        }
+    }
+
     pub fn memory_stats(&self) -> crate::device::hal::MemoryStats {
         let mut stats = self.gpu.memory_stats();
         stats.pending_notifications = self.notifications.len();
@@ -169,25 +339,37 @@ impl Renderer {
     }
 
     pub fn update(&mut self) -> Result<(), String> {
+        self.gpu.poll()?;
         self.update_until(None)
     }
 
     fn check_document(&mut self, id: DocumentId) -> Result<(), String> {
-        match self.document_id {
-            Some(previous) if previous != id => {
-                Err("Multiple documents require HAL embedding integration".into())
+        if self.document_id != Some(id) {
+            self.flush_required_frame()?;
+            if let (Some(previous), Some(document)) = (self.document_id, self.document.take()) {
+                self.parked_documents.insert(previous, document);
             }
-            _ => {
-                self.document_id = Some(id);
-                Ok(())
+            self.document = self.parked_documents.remove(&id);
+            if let Some(document) = &mut self.document {
+                // Picture-cache storage may have been reused by the other document.
+                document.frame.has_been_rendered = false;
             }
+            self.document_id = Some(id);
+            self.force_redraw = true;
         }
+        Ok(())
     }
 
     fn flush_required_frame(&mut self) -> Result<(), String> {
         if let Some(document) = &mut self.document {
             if document.frame.must_be_drawn() {
-                self.gpu.render_offscreen(&document.frame)?;
+                self.gpu.render_offscreen(&mut document.frame)?;
+                document.frame.has_been_rendered = true;
+            }
+        }
+        for document in self.parked_documents.values_mut() {
+            if document.frame.must_be_drawn() {
+                self.gpu.render_offscreen(&mut document.frame)?;
                 document.frame.has_been_rendered = true;
             }
         }
@@ -203,7 +385,9 @@ impl Renderer {
     }
 
     fn apply_resources(&mut self, updates: ResourceUpdateList) -> Result<(), String> {
+        let start = std::time::Instant::now();
         self.gpu.update_resources(vec![updates])?;
+        self.resource_upload_time += start.elapsed();
         self.notify(Checkpoint::FrameTexturesUpdated);
         Ok(())
     }
@@ -238,24 +422,31 @@ impl Renderer {
                 self.apply_resources(updates)?;
                 self.document = Some(document);
             }
-            ResultMsg::RenderDocumentOffscreen(id, document, updates) => {
+            ResultMsg::RenderDocumentOffscreen(id, mut document, updates) => {
                 self.check_document(id)?;
                 self.flush_required_frame()?;
                 self.apply_resources(updates)?;
-                self.gpu.render_offscreen(&document.frame)?;
+                self.gpu.render_offscreen(&mut document.frame)?;
             }
             ResultMsg::UpdateResources {
                 resource_updates,
                 memory_pressure,
                 discard_active_documents,
+                trim_upload_buffers,
                 ..
             } => {
                 if memory_pressure || discard_active_documents {
                     self.flush_required_frame()?;
                     self.document = None;
+                    self.parked_documents.clear();
                     self.last_output = None;
+                    self.last_descriptor = None;
+                    self.last_device_rect = None;
                 }
                 self.apply_resources(resource_updates)?;
+                if memory_pressure || discard_active_documents || trim_upload_buffers {
+                    self.gpu.trim_transient_resources(trim_upload_buffers || memory_pressure)?;
+                }
             }
             ResultMsg::PublishPipelineInfo(info) => {
                 self.pipeline_info.epochs.extend(info.epochs);
@@ -273,6 +464,11 @@ impl Renderer {
                 api::BoolParameter::Multithreading,
                 _,
             )) => {}
+            ResultMsg::SetParameter(api::Parameter::Float(api::FloatParameter::SlowCpuFrameThreshold, threshold)) => {
+                if !threshold.is_finite() || threshold < 0.0 { return Err("Invalid CPU frame threshold".into()); }
+                self.slow_cpu_frame_threshold = Duration::try_from_secs_f64(threshold as f64 / 1000.0)
+                    .map_err(|_| "CPU frame threshold exceeds supported duration")?;
+            }
             ResultMsg::SetParameter(parameter) => {
                 return Err(format!(
                     "HAL has no consumer for renderer parameter {parameter:?}"
@@ -294,29 +490,57 @@ impl Renderer {
                             | api::DebugFlags::MISSING_SNAPSHOT_PINK
                             | api::DebugFlags::DISABLE_COMPOSITOR_CLIPS
                             | api::DebugFlags::DISABLE_BATCHING;
+                        let allowed = allowed | api::DebugFlags::GPU_TIME_QUERIES;
                         if !(flags - allowed).is_empty() {
                             return Err(format!("Unsupported HAL debug flags {flags:?}"));
                         }
                         self.debug_flags = flags;
+                        self.gpu.enable_gpu_profiling(flags.contains(api::DebugFlags::GPU_TIME_QUERIES));
                     }
                     _ => return Err("Unsupported HAL renderer debug command".into()),
                 }
             }
-            ResultMsg::DebugOutput(_) | ResultMsg::RefreshShader(_) => {
-                return Err("HAL capture and shader reload require embedding integration".into());
-            }
+            ResultMsg::DebugOutput(output) => match output {
+                #[cfg(feature = "capture")]
+                crate::internal_types::DebugOutput::SaveCapture(config, externals) => {
+                    self.flush_required_frame()?;
+                    let size = self.last_output.as_ref().map(|output| api::units::DeviceIntSize::new(output.size[0] as i32, output.size[1] as i32));
+                    self.gpu.save_capture(config, externals, size)?;
+                }
+                #[cfg(feature = "replay")]
+                crate::internal_types::DebugOutput::LoadCapture(config, externals) => {
+                    self.flush_required_frame()?;
+                    self.document = None;
+                    self.document_id = None;
+                    self.parked_documents.clear();
+                    self.last_output = None;
+                    self.last_descriptor = None;
+                    self.last_device_rect = None;
+                    self.gpu.load_capture(config, externals)?;
+                    self.force_redraw = true;
+                }
+            },
+            ResultMsg::RefreshShader(_) => return Err("HAL runtime shader reload is unavailable; rebuild the shader pack".into()),
         }
         Ok(())
     }
 
+    pub fn has_frame(&self) -> bool { self.document.is_some() }
+
+    pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> {
+        let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
+        let ready = self.ready.state.lock().unwrap().documents.get(&document_id)
+            .map_or(false, |frame| frame.0 > previous);
+        if ready { self.prepare_frame(document_id).map(Some) } else { Ok(None) }
+    }
+
     pub fn prepare_frame(&mut self, document_id: DocumentId) -> Result<PreparedFrameInfo, String> {
-        let (generation, ready_document, publish, present) =
-            self.ready.wait(self.ready_generation)?;
-        if ready_document != document_id {
-            return Err("Unexpected HAL frame notification".into());
-        }
+        let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
+        let (generation, publish, present) = self.ready.wait_document(document_id, previous)?;
         self.ready_generation = generation;
+        self.prepared_generations.insert(document_id, generation);
         self.update_until(Some(publish))?;
+        self.check_document(document_id)?;
         if let Some(document) = &mut self.document {
             document.frame.present = present;
         }
@@ -345,33 +569,92 @@ impl Renderer {
         })
     }
 
-    pub fn render_frame(&mut self) -> Result<FrameOutput, String> {
+    fn execute_frame(&mut self) -> Result<RenderedFrame<wgpu_hal::api::Vulkan>, String> {
+        let start = std::time::Instant::now();
         let document = self.document.as_mut().ok_or("No prepared WR frame")?;
+        let frame = &document.frame;
+        let state = &frame.composite_state;
+        let damage = if !frame.present || frame.device_rect.is_empty() {
+            Vec::new()
+        } else if self.force_redraw || !state.dirty_rects_are_valid
+            || self.last_device_rect != Some(frame.device_rect)
+            || self.last_descriptor.as_ref() != Some(&state.descriptor)
+            || !frame.deferred_resolves.is_empty() {
+            vec![frame.device_rect]
+        } else if frame.has_been_rendered {
+            Vec::new()
+        } else {
+            state.tiles.iter().filter_map(|tile| {
+                if tile.local_dirty_rect.is_empty() { return None; }
+                state.get_device_rect(&tile.local_dirty_rect, tile.transform_index)
+                    .intersection(&tile.device_clip_rect)
+                    .map(|rect| rect.round_out().to_i32())
+                    .and_then(|rect| rect.intersection(&frame.device_rect))
+            }).collect()
+        };
+        let did_rasterize = !frame.has_been_rendered && state.did_rasterize_any_tile;
         let output = self
             .gpu
-            .render(&document.frame, Vec::new(), self.clear_color)?;
+            .render(&mut document.frame, Vec::new(), self.clear_color)?;
+        if document.frame.present {
+            self.gpu.end_compositor_frame(&document.frame, FrameCompletion { owner: self.backend_id, serial: output.serial })?;
+        }
         document.frame.has_been_rendered = true;
+        if document.frame.present && !document.frame.device_rect.is_empty() {
+            self.last_descriptor = Some(document.frame.composite_state.descriptor.clone());
+            self.last_device_rect = Some(document.frame.device_rect);
+        }
+        self.damage = damage;
+        self.did_rasterize = did_rasterize;
+        self.last_upload_time = std::mem::replace(&mut self.resource_upload_time, Duration::ZERO);
+        self.last_upload_bytes = self.gpu.take_resource_upload_bytes();
+        let composite_time = start.elapsed();
+        if self.cpu_timings.len() == 64 { self.cpu_timings.pop_front(); }
+        self.cpu_timings.push_back(CpuTiming { completion: FrameCompletion { owner: self.backend_id, serial: output.serial },
+            composite_time, resource_upload_time: self.last_upload_time,
+            is_slow: composite_time + self.last_upload_time >= self.slow_cpu_frame_threshold });
         self.notify(Checkpoint::FrameRendered);
         self.force_redraw = false;
         Ok(output)
     }
 
+    pub fn render_frame(&mut self) -> Result<FrameOutput, String> {
+        let output = self.execute_frame()?;
+        let size = output.size;
+        let stats = output.stats;
+        self.last_output = Some(output);
+        let pixels = if size[0] == 0 || size[1] == 0 {
+            Vec::new()
+        } else {
+            let rect = api::units::FramebufferIntRect::from_size(
+                api::units::FramebufferIntSize::new(size[0] as i32, size[1] as i32),
+            );
+            let handle = self.request_readback_inner(rect, false)?;
+            self.wait_readback(handle)?
+        };
+        Ok(FrameOutput { size, pixels, stats })
+    }
+
     pub fn render(&mut self) -> Result<super::RenderResults, String> {
-        let output = self.render_frame()?;
+        let output = self.execute_frame()?;
         println!("HAL rendered WR frame: {:?}", output.stats);
         let document = self.document.as_mut().unwrap();
         let mut results = super::RenderResults::default();
         results.stats.total_draw_calls = output.stats.wr_draw_calls;
         results.stats.color_target_count = output.stats.color_targets;
         results.stats.alpha_target_count = output.stats.alpha_targets;
-        results.dirty_rects.push(document.frame.device_rect);
-        results.did_rasterize_any_tile = document.frame.composite_state.did_rasterize_any_tile;
+        results.stats.resource_upload_time = self.last_upload_time.as_secs_f64() * 1000.0;
+        results.stats.texture_upload_mb = self.last_upload_bytes as f64 / (1024.0 * 1024.0);
+        results.compositor_surface_overlays = document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_OVERLAYS, 0.0) as usize;
+        results.compositor_surface_underlays = document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_UNDERLAYS, 0.0) as usize;
+        results.dirty_rects.extend_from_slice(&self.damage);
+        results.did_rasterize_any_tile = self.did_rasterize;
         results.picture_cache_debug = std::mem::replace(
             &mut document.frame.composite_state.picture_cache_debug,
             crate::tile_cache::PictureCacheDebugInfo::new(),
         );
-        if let Some(stats) = &document.frame_stats {
-            results.stats.merge(stats);
+        if let Some(stats) = document.frame_stats.take() {
+            results.stats.merge(&stats);
         }
         self.last_output = Some(output);
         Ok(results)
@@ -381,6 +664,26 @@ impl Renderer {
         &self,
         rect: api::units::FramebufferIntRect,
     ) -> Result<Vec<u8>, String> {
+        self.wait_readback(self.request_readback(rect)?)
+    }
+
+    pub fn frame_completion(&self) -> Option<FrameCompletion> {
+        self.last_output.as_ref().map(|output| FrameCompletion {
+            owner: self.backend_id,
+            serial: output.serial,
+        })
+    }
+
+    pub fn poll_completion(&self, completion: FrameCompletion) -> Result<bool, String> {
+        if completion.owner != self.backend_id { return Err("HAL completion belongs to another renderer".into()); }
+        self.gpu.poll_completion(completion.serial)
+    }
+
+    pub fn request_readback(&self, rect: api::units::FramebufferIntRect) -> Result<ReadbackHandle, String> {
+        self.request_readback_inner(rect, true)
+    }
+
+    fn request_readback_inner(&self, rect: api::units::FramebufferIntRect, flip_rows: bool) -> Result<ReadbackHandle, String> {
         let output = self
             .last_output
             .as_ref()
@@ -394,14 +697,135 @@ impl Renderer {
         {
             return Err("Invalid HAL readback rectangle".into());
         }
-        let mut pixels = Vec::with_capacity(rect.width() as usize * rect.height() as usize * 4);
-        for y in rect.min.y..rect.max.y {
-            let offset =
-                ((height as i32 - 1 - y) as usize * width as usize + rect.min.x as usize) * 4;
-            pixels.extend_from_slice(&output.pixels[offset..offset + rect.width() as usize * 4]);
+        let bytes = self.gpu.readback_bytes(rect.width() as u32, rect.height() as u32)?;
+        if self.readbacks.borrow().len() >= 8 || bytes > (64 << 20) - self.readback_bytes.get() {
+            return Err("HAL readback request budget exhausted".into());
         }
-        Ok(pixels)
+        let id = self.next_readback.get();
+        let next = id.checked_add(1).ok_or("HAL readback handle overflow")?;
+        let source_rect = api::units::DeviceIntRect::from_origin_and_size(
+            api::units::DeviceIntPoint::new(rect.min.x, height as i32 - rect.max.y),
+            api::units::DeviceIntSize::new(rect.width(), rect.height()),
+        );
+        let ticket = self.gpu.start_readback(output, source_rect)?;
+        let handle = ReadbackHandle { owner: self.backend_id, id };
+        self.readbacks.borrow_mut().insert(handle, ReadbackRequest { ticket, flip_rows, format: ImageFormat::RGBA8, kind: ReadbackKind::Pixels });
+        self.readback_bytes.set(self.readback_bytes.get() + bytes);
+        self.next_readback.set(next);
+        Ok(handle)
     }
+
+    pub fn poll_readback(&self, handle: ReadbackHandle) -> Result<Option<Vec<u8>>, String> {
+        self.readback_result(handle, false)
+    }
+
+    pub fn wait_readback(&self, handle: ReadbackHandle) -> Result<Vec<u8>, String> {
+        self.readback_result(handle, true)?.ok_or_else(|| "HAL readback did not complete".into())
+    }
+
+    fn readback_result(&self, handle: ReadbackHandle, wait: bool) -> Result<Option<Vec<u8>>, String> {
+        if handle.owner != self.backend_id { return Err("HAL readback belongs to another renderer".into()); }
+        let mut requests = self.readbacks.borrow_mut();
+        let request = requests.get(&handle).ok_or("Unknown or released HAL readback")?;
+        let Some(mut pixels) = self.gpu.poll_readback(&request.ticket, wait)? else { return Ok(None); };
+        if request.flip_rows {
+            let [width, height] = request.ticket.size;
+            let stride = width as usize * 4;
+            for y in 0..height as usize / 2 {
+                let (top, bottom) = pixels.split_at_mut((height as usize - 1 - y) * stride);
+                top[y * stride..(y + 1) * stride].swap_with_slice(&mut bottom[..stride]);
+            }
+        }
+        if request.format == ImageFormat::BGRA8 {
+            for pixel in pixels.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        }
+        self.readback_bytes.set(self.readback_bytes.get() - request.ticket.bytes());
+        requests.remove(&handle);
+        Ok(Some(pixels))
+    }
+
+    pub fn cancel_readback(&self, handle: ReadbackHandle) -> Result<(), String> {
+        if handle.owner != self.backend_id { return Err("HAL readback belongs to another renderer".into()); }
+        let request = self.readbacks.borrow_mut().remove(&handle).ok_or("Unknown or released HAL readback")?;
+        self.readback_bytes.set(self.readback_bytes.get() - request.ticket.bytes());
+        Ok(())
+    }
+
+    pub fn get_screenshot_async(&mut self, window_rect: api::units::DeviceIntRect, buffer_size: api::units::DeviceIntSize,
+                                format: ImageFormat) -> Result<(ScreenshotHandle, api::units::DeviceIntSize), String> {
+        if !matches!(format, ImageFormat::RGBA8 | ImageFormat::BGRA8) || window_rect.is_empty() || buffer_size.is_empty() {
+            return Err("Unsupported screenshot format or dimensions".into());
+        }
+        let scale = (buffer_size.width as f32 / window_rect.width() as f32)
+            .min(buffer_size.height as f32 / window_rect.height() as f32);
+        let size = (window_rect.size().to_f32() * scale).round().to_i32();
+        if size.is_empty() { return Err("Screenshot size rounds to zero".into()); }
+        let bytes = self.gpu.readback_bytes(size.width as u32, size.height as u32)?;
+        if self.readbacks.borrow().len() >= 8 || bytes > (64 << 20) - self.readback_bytes.get() {
+            return Err("HAL readback request budget exhausted".into());
+        }
+        let id = self.next_readback.get();
+        let next = id.checked_add(1).ok_or("HAL readback handle overflow")?;
+        let frame = self.last_output.as_ref().ok_or("No rendered frame to capture")?;
+        let rect = window_rect.translate(-frame.origin.to_vector());
+        let ticket = self.gpu.scaled_readback(frame, rect, size)?;
+        let readback = ReadbackHandle { owner: self.backend_id, id };
+        self.readbacks.borrow_mut().insert(readback, ReadbackRequest {
+            ticket, flip_rows: false, format, kind: ReadbackKind::Screenshot,
+        });
+        self.readback_bytes.set(self.readback_bytes.get() + bytes);
+        self.next_readback.set(next);
+        Ok((ScreenshotHandle { readback, size, format }, size))
+    }
+
+    pub fn map_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> {
+        if !matches!(format, ImageFormat::RGBA8 | ImageFormat::BGRA8) { return Err("Unsupported screenshot destination format".into()); }
+        let row = handle.size.width as usize * 4;
+        let required = stride.checked_mul(handle.size.height as usize - 1).and_then(|offset| offset.checked_add(row))
+            .ok_or("Screenshot destination size overflow")?;
+        if stride < row || destination.len() < required { return Err("Screenshot destination is too small".into()); }
+        let Some(mut pixels) = self.poll_readback(handle.readback)? else { return Ok(false); };
+        if format != handle.format {
+            for pixel in pixels.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        }
+        for (source, target) in pixels.chunks_exact(row).zip(destination.chunks_mut(stride)) {
+            target[..row].copy_from_slice(source);
+        }
+        Ok(true)
+    }
+
+    pub fn record_frame(&self, format: ImageFormat) -> Result<(RecordedFrameHandle, api::units::DeviceIntSize), String> {
+        if !matches!(format, ImageFormat::RGBA8 | ImageFormat::BGRA8) { return Err("Unsupported recording format".into()); }
+        let output = self.last_output.as_ref().ok_or("No frame to record")?;
+        let size = api::units::DeviceIntSize::new(output.size[0] as i32, output.size[1] as i32);
+        let rect = api::units::FramebufferIntRect::from_size(api::units::FramebufferIntSize::new(size.width, size.height));
+        let readback = self.request_readback_inner(rect, false)?;
+        let mut requests = self.readbacks.borrow_mut();
+        let request = requests.get_mut(&readback).unwrap();
+        request.format = format;
+        request.kind = ReadbackKind::Recording;
+        Ok((RecordedFrameHandle(ScreenshotHandle { readback, size, format }), size))
+    }
+
+    pub fn map_recorded_frame(&self, handle: RecordedFrameHandle, destination: &mut [u8], stride: usize) -> Result<bool, String> {
+        self.map_and_recycle_screenshot(handle.0, destination, stride, handle.0.format)
+    }
+
+    fn release_capture_requests(&self, kind: ReadbackKind) {
+        let mut requests = self.readbacks.borrow_mut();
+        requests.retain(|_, request| request.kind != kind);
+        self.readback_bytes.set(requests.values().map(|request| request.ticket.bytes()).sum());
+    }
+
+    pub fn release_profiler_structures(&mut self) {
+        self.release_capture_requests(ReadbackKind::Screenshot);
+        self.gpu.release_capture_buffers();
+    }
+    pub fn release_composition_recorder_structures(&mut self) {
+        self.release_capture_requests(ReadbackKind::Recording);
+        self.gpu.release_capture_buffers();
+    }
+    pub fn supports_bgra_readback(&self) -> bool { true }
 }
 
 impl Drop for Renderer {
@@ -416,6 +840,7 @@ impl Drop for Renderer {
 struct ReadyState {
     generation: u64,
     frame: Option<(DocumentId, api::FramePublishId, bool)>,
+    documents: HashMap<DocumentId, (u64, api::FramePublishId, bool)>,
     shutdown: bool,
 }
 
@@ -430,6 +855,8 @@ impl FrameReady {
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
         state.frame = Some((document, publish, present));
+        let generation = state.generation;
+        state.documents.insert(document, (generation, publish, present));
         self.changed.notify_all();
     }
 
@@ -455,6 +882,13 @@ impl FrameReady {
         }
         let (document, publish, present) = state.frame.ok_or("No WR frame notification")?;
         Ok((state.generation, document, publish, present))
+    }
+
+    fn wait_document(&self, document: DocumentId, generation: u64) -> Result<(u64, api::FramePublishId, bool), String> {
+        let (state, _) = self.changed.wait_timeout_while(self.state.lock().unwrap(), Duration::from_secs(60),
+            |state| state.documents.get(&document).map_or(true, |frame| frame.0 <= generation) && !state.shutdown).unwrap();
+        state.documents.get(&document).filter(|frame| frame.0 > generation).copied()
+            .ok_or_else(|| if state.shutdown { "WR backend shut down".into() } else { "Timed out waiting for WR document".into() })
     }
 }
 
@@ -544,6 +978,132 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn external_images_update_crop_flip_and_release() {
+        use api::units::*;
+        use api::*;
+        use crate::device::hal::{ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource};
+        use crate::render_api::Transaction;
+        use std::rc::Rc;
+        struct ImageState {
+            source: ExternalImageSource,
+            descriptor: ImageDescriptor,
+            uv: TexelRect,
+            generation: u64,
+        }
+        struct Provider {
+            image: Rc<RefCell<ImageState>>,
+            acquired: Rc<Cell<usize>>,
+            released: Rc<RefCell<Vec<ExternalImageRelease>>>,
+        }
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, id: ExternalImageId, channel: u8, _: bool) -> Result<ExternalImageLease, String> {
+                assert_eq!((id.0, channel), (19, 1));
+                self.acquired.set(self.acquired.get() + 1);
+                let image = self.image.borrow();
+                let released = self.released.clone();
+                ExternalImageLease::new(image.descriptor, image.uv, image.generation, image.source.clone(),
+                    move |status| released.borrow_mut().push(status))
+            }
+        }
+        let (mut renderer, sender) = create_vulkan_renderer(
+            &Options { validation: true, ..Options::default() }, WebRenderOptions::default(),
+            Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false)))),
+        ).unwrap();
+        let mut api = sender.create_api();
+        let document = api.add_document(DeviceIntSize::new(17, 9));
+        let pipeline = PipelineId(0, 0);
+        let key = api.generate_image_key();
+        let producer = renderer.external_image_device();
+        let descriptor = ImageDescriptor::new(7, 5, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE);
+        let pixels = |serial: u8| -> Vec<u8> {
+            (0..5u8).flat_map(|y| (0..7u8).flat_map(move |x| [x * 31, y * 47, 17 + serial, 255])).collect()
+        };
+        let image = Rc::new(RefCell::new(ImageState {
+            source: ExternalImageSource::Native(producer.create_image(descriptor, &pixels(0)).unwrap()),
+            descriptor, uv: TexelRect::new(0.0, 0.0, 7.0, 5.0), generation: 0,
+        }));
+        let acquired = Rc::new(Cell::new(0));
+        let released = Rc::new(RefCell::new(Vec::new()));
+        renderer.set_external_image_provider(Box::new(Provider {
+            image: image.clone(), acquired: acquired.clone(), released: released.clone(),
+        })).unwrap();
+        for serial in 0..4u8 {
+            let data = pixels(serial);
+            let uv = match serial {
+                1 => TexelRect::new(7.0, 5.0, 0.0, 0.0),
+                2 => TexelRect::new(1.0, 1.0, 6.0, 4.0),
+                _ => TexelRect::new(0.0, 0.0, 7.0, 5.0),
+            };
+            {
+                let mut state = image.borrow_mut();
+                if serial == 3 {
+                    state.source = ExternalImageSource::Buffer(Arc::new(data.clone()));
+                } else if serial == 2 {
+                    state.source = ExternalImageSource::Native(producer.create_image(descriptor, &data).unwrap());
+                } else if let ExternalImageSource::Native(native) = &state.source {
+                    producer.update_image(native, descriptor, &data).unwrap();
+                }
+                state.uv = uv;
+                state.generation = serial as u64;
+            }
+            let mut transaction = Transaction::new();
+            let external = ImageData::External(ExternalImageData {
+                id: ExternalImageId(19), channel_index: 1,
+                image_type: if serial == 3 { ExternalImageType::Buffer }
+                    else { ExternalImageType::TextureHandle(if serial == 2 { ImageBufferKind::TextureRect } else { ImageBufferKind::Texture2D }) },
+                normalized_uvs: serial == 1,
+            });
+            if serial == 0 {
+                transaction.add_image(key, descriptor, external, None);
+                let mut builder = DisplayListBuilder::new(pipeline);
+                builder.begin(60.0);
+                let info = CommonItemProperties {
+                    clip_rect: LayoutRect::from_size(LayoutSize::new(17.0, 9.0)),
+                    clip_chain_id: ClipChainId::INVALID, spatial_id: SpatialId::root_scroll_node(pipeline),
+                    flags: PrimitiveFlags::default(),
+                };
+                builder.push_stacking_context(info.spatial_id, info.flags, None, TransformStyle::Flat,
+                    MixBlendMode::Normal, &[], &[], RasterSpace::Screen, StackingContextFlags::empty(), None);
+                builder.push_image(&info, LayoutRect::from_origin_and_size(LayoutPoint::new(3.0, 2.0), LayoutSize::new(7.0, 5.0)),
+                    ImageRendering::Pixelated, AlphaType::PremultipliedAlpha, key, ColorF::WHITE);
+                builder.pop_stacking_context();
+                transaction.set_root_pipeline(pipeline);
+                transaction.set_display_list(Epoch(0), api.get_namespace_id(), builder.end());
+            } else {
+                transaction.update_image(key, descriptor, external, &DirtyRect::All);
+            }
+            transaction.generate_frame(serial as u64, true, false, RenderReasons::TESTING);
+            api.send_transaction(document, transaction);
+            renderer.prepare_frame(document).unwrap();
+            renderer.render().unwrap();
+            if serial == 3 { assert!(renderer.last_upload_bytes >= 7 * 5 * 4); }
+            if serial == 0 {
+                assert!(released.borrow().is_empty());
+                if let ExternalImageSource::Native(native) = &image.borrow().source {
+                    assert!(producer.update_image(native, descriptor, &data).unwrap_err().contains("acquired"));
+                }
+            }
+            let bottom_up = renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(17, 9))).unwrap();
+            let output: Vec<u8> = bottom_up.chunks_exact(17 * 4).rev().flatten().copied().collect();
+            for y in 0..5usize {
+                for x in 0..7usize {
+                    let sx = (uv.uv0.x + (x as f32 + 0.5) / 7.0 * (uv.uv1.x - uv.uv0.x)).floor() as usize;
+                    let sy = (uv.uv0.y + (y as f32 + 0.5) / 5.0 * (uv.uv1.y - uv.uv0.y)).floor() as usize;
+                    let expected = &data[(sy * 7 + sx) * 4..(sy * 7 + sx + 1) * 4];
+                    let offset = ((y + 2) * 17 + x + 3) * 4;
+                    assert_eq!(&output[offset..offset + 4], expected, "frame {serial}, pixel {x},{y}");
+                }
+            }
+            renderer.poll().unwrap();
+            assert_eq!(released.borrow().len(), acquired.get());
+            assert!(released.borrow().iter().all(|status| *status == ExternalImageRelease::Complete));
+        }
+        assert!(acquired.get() >= 4);
+        api.shut_down(true);
+    }
+
+    #[test]
     #[ignore = "Requires a Vulkan ICD and validation layer"]
     fn queued_publications_resources_and_checkpoints() {
         use api::units::*;
@@ -558,6 +1118,10 @@ mod tests {
             Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false)))),
         )
         .unwrap();
+        assert!(renderer.enable_gpu_profiling(true));
+        renderer.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, 0.0))).unwrap();
+        assert!(renderer.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, f32::NAN))).is_err());
+        assert!(renderer.process_message(ResultMsg::SetParameter(Parameter::Bool(BoolParameter::PboUploads, true))).is_err());
         let mut api = sender.create_api();
         let id = api.add_document(DeviceIntSize::new(64, 64));
         let pipeline = PipelineId(0, 0);
@@ -598,6 +1162,13 @@ mod tests {
         assert_eq!(renderer.ready_generation, generation);
         let output = renderer.render_frame().unwrap();
         assert_eq!(&output.pixels[..4], &[255, 0, 0, 255]);
+        let completion = renderer.frame_completion().unwrap();
+        let timings = renderer.take_gpu_timings().unwrap();
+        assert!(timings.iter().any(|timing| timing.completion == completion));
+        assert!(timings.iter().all(|timing| timing.nanoseconds.is_finite() && timing.nanoseconds >= 0.0));
+        let cpu_timings = renderer.take_cpu_timings();
+        assert_eq!(cpu_timings.last().unwrap().completion, completion);
+        assert!(cpu_timings.last().unwrap().is_slow);
         let original_rect = renderer.document.as_ref().unwrap().frame.device_rect;
         renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
             DeviceIntPoint::new(5, 7),
@@ -611,7 +1182,103 @@ mod tests {
             &[0, 0, 255, 255]
         );
         renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
+        renderer.render().unwrap();
+        assert!(renderer.readbacks.borrow().is_empty());
+        let completion = renderer.frame_completion().unwrap();
+        let crop_rect = FramebufferIntRect::from_origin_and_size(
+            FramebufferIntPoint::new(7, 37), FramebufferIntSize::new(19, 21),
+        );
+        let old_crop = renderer.request_readback(crop_rect).unwrap();
+        let cancelled = renderer.request_readback(crop_rect).unwrap();
+        let (other, _other_sender) = create_vulkan_renderer(
+            &Options { validation: true, ..Options::default() },
+            WebRenderOptions::default(),
+            Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false)))),
+        ).unwrap();
+        assert!(other.poll_readback(old_crop).is_err());
+        assert!(other.poll_completion(completion).is_err());
+        drop(other);
+        renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
+            DeviceIntPoint::new(5, 7), DeviceIntSize::new(40, 40),
+        );
+        renderer.render().unwrap();
+        let new_rect = FramebufferIntRect::from_size(FramebufferIntSize::new(40, 40));
+        let new_frame = renderer.request_readback(new_rect).unwrap();
+        let expected_crop: Vec<u8> = (6..27).rev().flat_map(|y| {
+            output.pixels[(y * 64 + 7) * 4..(y * 64 + 26) * 4].iter().copied()
+        }).collect();
+        assert_eq!(renderer.wait_readback(old_crop).unwrap(), expected_crop);
+        assert!(renderer.poll_completion(completion).unwrap());
+        assert!(renderer.poll_readback(old_crop).is_err());
+        renderer.cancel_readback(cancelled).unwrap();
+        assert!(renderer.wait_readback(cancelled).is_err());
+        let expected_new: Vec<u8> = cropped.pixels.chunks_exact(40 * 4).rev().flatten().copied().collect();
+        let new_pixels = renderer.poll_readback(new_frame).unwrap()
+            .unwrap_or_else(|| renderer.wait_readback(new_frame).unwrap());
+        assert_eq!(new_pixels, expected_new);
+        let handles: Vec<_> = (0..8).map(|_| renderer.request_readback(new_rect).unwrap()).collect();
+        assert!(renderer.request_readback(new_rect).unwrap_err().contains("budget"));
+        for handle in handles { renderer.cancel_readback(handle).unwrap(); }
+        assert_eq!(renderer.readback_bytes.get(), 0);
+        assert!(renderer.readbacks.borrow().is_empty());
+        assert!(renderer.request_readback(FramebufferIntRect::zero()).is_err());
+        renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
         let pipeline_info = renderer.flush_pipeline_info();
+        renderer.render().unwrap();
+        let unchanged = renderer.render().unwrap();
+        assert!(unchanged.dirty_rects.is_empty());
+        assert!(!unchanged.did_rasterize_any_tile);
+        let (shot, shot_size) = renderer.get_screenshot_async(original_rect, DeviceIntSize::new(16, 16), ImageFormat::BGRA8).unwrap();
+        assert_eq!(shot_size, DeviceIntSize::new(16, 16));
+        assert!(renderer.map_and_recycle_screenshot(shot, &mut [0; 1], 1, ImageFormat::RGBA8).is_err());
+        let mut screenshot = vec![0xa5; 71 * 16];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !renderer.map_and_recycle_screenshot(shot, &mut screenshot, 71, ImageFormat::RGBA8).unwrap() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll().unwrap();
+        }
+        for y in 0..16 {
+            for x in 0..16 {
+                let expected = if (2..6).contains(&x) && (2..6).contains(&y) { [0, 0, 255, 255] } else { [255, 0, 0, 255] };
+                assert_eq!(&screenshot[y * 71 + x * 4..y * 71 + x * 4 + 4], &expected);
+            }
+            assert!(screenshot[y * 71 + 64..(y + 1) * 71].iter().all(|&value| value == 0xa5));
+        }
+        let (recorded, recorded_size) = renderer.record_frame(ImageFormat::BGRA8).unwrap();
+        assert_eq!(recorded_size, DeviceIntSize::new(64, 64));
+        renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
+            DeviceIntPoint::new(5, 7), DeviceIntSize::new(40, 40),
+        );
+        renderer.render().unwrap();
+        let mut recorded_pixels = vec![0; 64 * 64 * 4];
+        while !renderer.map_recorded_frame(recorded, &mut recorded_pixels, 64 * 4).unwrap() {
+            assert!(std::time::Instant::now() < deadline);
+            renderer.poll().unwrap();
+        }
+        let mut expected_recording = output.pixels.clone();
+        for pixel in expected_recording.chunks_exact_mut(4) { pixel.swap(0, 2); }
+        assert_eq!(recorded_pixels, expected_recording);
+        let capture_rect = renderer.document.as_ref().unwrap().frame.device_rect;
+        let (cancelled_shot, _) = renderer.get_screenshot_async(capture_rect, DeviceIntSize::new(8, 8), ImageFormat::RGBA8).unwrap();
+        renderer.release_profiler_structures();
+        assert!(renderer.poll_readback(cancelled_shot.readback).is_err());
+        let (cancelled_recording, _) = renderer.record_frame(ImageFormat::RGBA8).unwrap();
+        renderer.release_composition_recorder_structures();
+        assert!(renderer.poll_readback(cancelled_recording.0.readback).is_err());
+        renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(40, 40))).unwrap();
+        renderer.poll().unwrap();
+        let before_trim = renderer.memory_stats();
+        renderer.gpu.trim_transient_resources(true).unwrap();
+        let after_trim = renderer.memory_stats();
+        assert_eq!(after_trim.cached_buffer_bytes, 0);
+        assert_eq!(after_trim.cached_texture_bytes, 0);
+        assert!(after_trim.texture_bytes < before_trim.texture_bytes);
+        assert!(after_trim.buffer_bytes < before_trim.buffer_bytes);
+        let report = renderer.report_memory();
+        assert_eq!(report.gpu.buffer_bytes, after_trim.buffer_bytes);
+        assert_eq!(report.gpu.texture_bytes, after_trim.texture_bytes);
+        assert!(report.cpu.frame_allocator > 0);
+        renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
         assert_eq!(pipeline_info.epochs[&(pipeline, id)], Epoch(3));
         assert!(renderer.flush_pipeline_info().epochs.is_empty());
 

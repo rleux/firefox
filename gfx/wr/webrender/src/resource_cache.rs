@@ -2578,11 +2578,14 @@ impl ResourceCache {
 
     #[cfg(feature = "capture")]
     pub fn save_capture_sequence(&mut self, config: &mut CaptureConfig) -> Vec<ExternalCaptureImage> {
-        if self.capture_dirty {
+        if self.capture_dirty || config.bits.contains(crate::render_api::CaptureBits::FRAME) {
             self.capture_dirty = false;
             config.prepare_resource();
             let (resources, deferred) = self.save_capture(&config.resource_root());
             config.serialize_for_resource(&resources, "plain-resources.ron");
+            if config.bits.contains(crate::render_api::CaptureBits::FRAME) {
+                config.serialize_for_resource(&self.save_caches(&config.resource_root()), "resource_cache");
+            }
             deferred
         } else {
             Vec::new()

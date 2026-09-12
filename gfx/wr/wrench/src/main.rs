@@ -24,6 +24,10 @@ mod blob;
 mod composite;
 mod egl;
 mod hal;
+#[cfg(feature = "hal-vulkan")]
+mod hal_compositor;
+#[cfg(feature = "hal-vulkan")]
+mod hal_surface;
 mod parse_function;
 mod perf;
 mod png;
@@ -611,8 +615,13 @@ fn create_notifier() -> (Box<dyn RenderNotifier>, Receiver<NotifierEvent>) {
     (Box::new(Notifier { tx }), rx)
 }
 
-fn rawtest(mut wrench: Wrench, window: &mut WindowWrapper, rx: Receiver<NotifierEvent>) {
-    RawtestHarness::new(&mut wrench, window, &rx).run();
+fn rawtest(mut wrench: Wrench, window: &mut WindowWrapper, rx: Receiver<NotifierEvent>, filter: Option<&str>) {
+    let harness = RawtestHarness::new(&mut wrench, window, &rx);
+    if filter.is_some() {
+        harness.run_selected(filter).expect("Raw tests failed");
+    } else {
+        harness.run();
+    }
     wrench.shut_down(rx);
 }
 
@@ -699,6 +708,7 @@ struct WrenchApp {
     // Reftest
     reftest_specific: Option<PathBuf>,
     reftest_fuzz: Option<f64>,
+    rawtest_specific: Option<String>,
 
     // Show
     thing_to_build: Option<ThingToBuild>,
@@ -941,7 +951,7 @@ impl ApplicationHandler for WrenchApp {
                 event_loop.exit();
             }
             "rawtest" => {
-                rawtest(wrench, &mut window, rx.unwrap());
+                rawtest(wrench, &mut window, rx.unwrap(), self.rawtest_specific.as_deref());
                 event_loop.exit();
             }
             "perf" => {
@@ -1305,6 +1315,7 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
         size, vsync, angle, software, using_compositor, gl_request, headless,
         res_path, use_optimized_shaders, rebuild, no_subpixel_aa, verbose,
         no_scissor, no_batch_global, color_target_init, precache, dump_shader_source, profiler_ui,
+        rawtest_specific: args.subcommand_matches("rawtest").and_then(|m| m.value_of("TEST")).map(str::to_owned),
         subcommand, compositor_clips, reftest_specific, reftest_fuzz,
         thing_to_build, show_no_block, show_no_batch,
         png_reader, png_surface, png_output_path,
@@ -1459,7 +1470,7 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
         }
         "rawtest" => {
             // rawtest() calls wrench.shut_down() which calls deinit().
-            rawtest(wrench, &mut window, rx.unwrap());
+            rawtest(wrench, &mut window, rx.unwrap(), app.rawtest_specific.as_deref());
             0
         }
         "perf" => {

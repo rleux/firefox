@@ -10,7 +10,7 @@ args:
       possible_values: [gl, hal]
       default_value: gl
       global: true
-      help: Select the GL renderer or experimental HAL bootstrap
+      help: Select the GL renderer or experimental HAL renderer
   - hal_backend:
       long: hal-backend
       takes_value: true
@@ -26,6 +26,17 @@ args:
       long: hal-validation
       global: true
       help: Require the Vulkan validation layer
+  - hal_compositor:
+      long: hal-compositor
+      takes_value: true
+      possible_values: [draw, native, layer]
+      help: Select the HAL compositor test adapter
+      global: true
+  - hal_frames:
+      long: hal-frames
+      takes_value: true
+      global: true
+      help: Stop HAL show after this many frames (headless defaults to one)
   - precache:
       short: c
       long: precache
@@ -110,6 +121,8 @@ args:
       help: A string describing what to show on in the profiler HUD (See https://github.com/servo/webrender/wiki/Debugging-WebRender#anchor_6).
 
 subcommands:
+    - test_surface:
+        about: Exercise Vulkan surface acquisition, presentation, resize, and discard
     - test_hal:
         about: Check HAL color/depth readback and same-device native-image ownership
     - png:
@@ -177,6 +190,10 @@ subcommands:
               index: 1
     - rawtest:
         about: run rawtests
+        args:
+          - TEST:
+              help: Run one named raw test (for example test_resize_image)
+              index: 1
     - perf:
         about: run benchmarks
         args:

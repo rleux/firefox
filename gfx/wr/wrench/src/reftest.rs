@@ -905,17 +905,34 @@ impl<'a> ReftestHarness<'a> {
  }
 
 pub trait ReftestRenderer: SceneRenderer + Sized {
+    fn update_test_renderer(&mut self);
     fn render_test(wrench: &mut Wrench<Self>) -> RenderResults;
     fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8>;
+    fn trim_test_resources(&mut self, _discard_frames: bool) -> Result<(), String> {
+        Err("Resource trimming is not implemented for this renderer".into())
+    }
 }
 impl ReftestRenderer for webrender::Renderer {
+    fn update_test_renderer(&mut self) { self.update(); }
     fn render_test(wrench: &mut Wrench<Self>) -> RenderResults { wrench.render() }
     fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8> { self.read_pixels_rgba8(rect) }
+    fn trim_test_resources(&mut self, discard_frames: bool) -> Result<(), String> {
+        self.trim_transient_resources(discard_frames);
+        Ok(())
+    }
 }
 #[cfg(feature = "hal-vulkan")]
 impl ReftestRenderer for webrender::hal::Renderer {
+    fn trim_test_resources(&mut self, uploads: bool) -> Result<(), String> {
+        self.trim_transient_resources(uploads);
+        Ok(())
+    }
+    fn update_test_renderer(&mut self) { self.update().expect("HAL renderer update failed"); }
     fn render_test(wrench: &mut Wrench<Self>) -> RenderResults {
-        wrench.renderer.prepare_frame(wrench.document_id).expect("HAL frame preparation failed");
+        wrench.renderer.update().expect("HAL renderer update failed");
+        wrench.renderer.prepare_frame_if_ready(wrench.document_id).expect("HAL frame preparation failed");
+        if !wrench.renderer.has_frame() { return RenderResults::default(); }
+        let _ = wrench.renderer.flush_pipeline_info();
         wrench.renderer.render().expect("HAL frame rendering failed")
     }
     fn read_test_pixels(&mut self, rect: FramebufferIntRect) -> Vec<u8> {

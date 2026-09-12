@@ -1,0 +1,8 @@
+{
+  "package": "wgpu-hal",
+  "version": "30.0.0",
+  "source": "Existing Cargo registry cache; no repository cloned",
+  "crate_sha256": "cf765132d8d5f50e192e7880464890c13f4e7457aafe8e5466e8174586e9f101",
+  "patch": "Pass a null acquire fence outside Windows; the pacing fence is only waited/reset on Windows.",
+  "modified_file": "src/vulkan/swapchain/native.rs"
+}

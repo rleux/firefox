@@ -9,17 +9,25 @@ use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Qu
 use wgpu_types as wgt;
 
 mod pool;
+mod external;
+mod compositor;
+pub use self::compositor::{CompositorConfig, CompositorTarget, LayerCompositor, NativeCompositor};
+pub use crate::composite::{CompositeDescriptor, CompositorInputLayer, NativeSurfaceOperation, NativeSurfaceOperationDetails};
+pub use self::external::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource, NativeImage};
 #[cfg(feature = "hal-vulkan")]
 pub(crate) mod render;
 #[cfg(feature = "hal-vulkan")]
 mod resources;
 mod submission;
+mod surface;
+pub use self::surface::{PresentationStatus, SurfaceInfo, SurfaceOptions, SurfaceWindow};
+mod query;
 #[cfg(feature = "hal-vulkan")]
-mod vulkan;
+pub(crate) mod vulkan;
 #[cfg(feature = "hal-vulkan")]
-pub use self::vulkan::create_vulkan_device;
+pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDescriptor};
 #[cfg(feature = "hal-vulkan")]
-pub use crate::renderer::hal::{create_vulkan_renderer, PreparedFrameInfo, Renderer};
+pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, CpuTiming, FrameCompletion, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, Renderer, RendererMemoryReport, ScreenshotHandle};
 #[cfg(feature = "hal-vulkan")]
 pub use self::render::{DrawStats, FrameOutput};
 
@@ -40,6 +48,7 @@ pub struct Device<A: hal::Api> {
     next_texture_id: std::cell::Cell<u64>,
     memory: std::cell::Cell<MemoryStats>,
     formats: Vec<(wgt::TextureFormat, hal::TextureFormatCapabilities)>,
+    adapter: A::Adapter,
     _instance: A::Instance,
 }
 
@@ -57,6 +66,8 @@ pub struct MemoryStats {
     pub retained_references: usize,
     pub pending_notifications: usize,
     pub pipeline_epochs: usize,
+    pub query_slots: usize,
+    pub pending_queries: usize,
 }
 
 pub struct Readback {
@@ -199,10 +210,14 @@ struct ReadbackLayout {
 
 impl ReadbackLayout {
     fn new(width: u32, height: u32, alignment: u64) -> Result<Self> {
+        Self::with_pixel_size(width, height, alignment, 4)
+    }
+
+    fn with_pixel_size(width: u32, height: u32, alignment: u64, bytes_per_pixel: u32) -> Result<Self> {
         if width == 0 || height == 0 || alignment == 0 {
             return Err("Invalid readback dimensions/alignment".into());
         }
-        let row_bytes = width.checked_mul(4).ok_or("Readback row overflow")?;
+        let row_bytes = width.checked_mul(bytes_per_pixel).ok_or("Readback row overflow")?;
         let pitch = u64::from(row_bytes)
             .checked_add(alignment - 1)
             .ok_or("Readback pitch overflow")?
@@ -223,6 +238,14 @@ impl ReadbackLayout {
 
 impl<A: hal::Api> Device<A> {
     fn new(options: &Options) -> Result<Self> {
+        Self::new_with_window(options, None).map(|(device, _)| device)
+    }
+
+    fn new_with_window(options: &Options, window: Option<std::rc::Rc<dyn SurfaceWindow>>)
+        -> Result<(Self, Option<surface::SurfaceSetup<A>>)>
+    {
+        let display = window.as_ref().map(|window| window.display_handle()).transpose()
+            .map_err(|error| format!("Getting display handle: {error}"))?;
         let instance = unsafe {
             A::Instance::init(&hal::InstanceDescriptor {
                 name: "WebRender HAL",
@@ -234,11 +257,17 @@ impl<A: hal::Api> Device<A> {
                 memory_budget_thresholds: Default::default(),
                 backend_options: Default::default(),
                 telemetry: None,
-                display: None,
+                display,
             })
         }
         .map_err(|e| format!("Initializing HAL: {e:?}"))?;
-        let mut adapters = unsafe { instance.enumerate_adapters(None) };
+        let surface = window.as_ref().map(|window| {
+            let display = window.display_handle().map_err(|error| error.to_string())?;
+            let handle = window.window_handle().map_err(|error| error.to_string())?;
+            unsafe { instance.create_surface(display.as_raw(), handle.as_raw()) }
+                .map_err(|error| format!("Creating surface: {error}"))
+        }).transpose()?;
+        let mut adapters = unsafe { instance.enumerate_adapters(surface.as_ref()) };
         if let Some(name) = &options.adapter_name {
             if name.trim().is_empty() {
                 return Err("Adapter name must not be empty".into());
@@ -250,6 +279,9 @@ impl<A: hal::Api> Device<A> {
                     adapters.len()
                 ));
             }
+        }
+        if let Some(surface) = &surface {
+            adapters.retain(|adapter| unsafe { adapter.adapter.surface_capabilities(surface) }.is_some());
         }
         adapters.sort_by_key(|a| {
             (
@@ -305,7 +337,8 @@ impl<A: hal::Api> Device<A> {
         })
         .collect();
         let features = exposed.features
-            & (wgt::Features::DUAL_SOURCE_BLENDING | wgt::Features::TEXTURE_FORMAT_16BIT_NORM);
+            & (wgt::Features::DUAL_SOURCE_BLENDING | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
+                | wgt::Features::TIMESTAMP_QUERY | wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let open = unsafe {
             exposed.adapter.open(
                 features,
@@ -314,7 +347,7 @@ impl<A: hal::Api> Device<A> {
             )
         }
         .map_err(|e| format!("Opening {}: {e:?}", exposed.info.name))?;
-        Ok(Self {
+        Ok((Self {
             open,
             info: exposed.info,
             capabilities: exposed.capabilities,
@@ -322,8 +355,9 @@ impl<A: hal::Api> Device<A> {
             next_texture_id: std::cell::Cell::new(1),
             memory: std::cell::Cell::new(MemoryStats::default()),
             formats,
+            adapter: exposed.adapter,
             _instance: instance,
-        })
+        }, surface.map(|raw| surface::SurfaceSetup { raw, window: window.unwrap() })))
     }
 
     pub fn info(&self) -> &wgt::AdapterInfo {

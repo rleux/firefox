@@ -4247,29 +4247,29 @@ pub struct RenderResults {
 #[cfg(any(feature = "capture", feature = "replay"))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-struct PlainTexture {
-    data: String,
-    size: DeviceIntSize,
-    format: ImageFormat,
-    filter: TextureFilter,
-    has_depth: bool,
-    category: Option<TextureCacheCategory>,
+pub(crate) struct PlainTexture {
+    pub(crate) data: String,
+    pub(crate) size: DeviceIntSize,
+    pub(crate) format: ImageFormat,
+    pub(crate) filter: TextureFilter,
+    pub(crate) has_depth: bool,
+    pub(crate) category: Option<TextureCacheCategory>,
 }
 
 
 #[cfg(any(feature = "capture", feature = "replay"))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-struct PlainRenderer {
-    device_size: Option<DeviceIntSize>,
-    textures: FastHashMap<CacheTextureId, PlainTexture>,
+pub(crate) struct PlainRenderer {
+    pub(crate) device_size: Option<DeviceIntSize>,
+    pub(crate) textures: FastHashMap<CacheTextureId, PlainTexture>,
 }
 
 #[cfg(any(feature = "capture", feature = "replay"))]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-struct PlainExternalResources {
-    images: Vec<ExternalCaptureImage>
+pub(crate) struct PlainExternalResources {
+    pub(crate) images: Vec<ExternalCaptureImage>
 }
 
 #[cfg(feature = "replay")]

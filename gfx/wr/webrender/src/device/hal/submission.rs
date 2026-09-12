@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::resources::Owned;
 use std::any::Any;
 use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
@@ -12,37 +13,32 @@ pub(super) struct Submission<A: hal::Api> {
     owner: Rc<Device<A>>,
     encoder: Option<A::CommandEncoder>,
     buffer: Option<A::CommandBuffer>,
-    fence: Option<A::Fence>,
+    fence: Rc<Owned<A, A::Fence>>,
     recording: bool,
     attempted: bool,
     complete: bool,
     serial: u64,
     resources: Vec<Box<dyn Any>>,
     commits: Vec<Box<dyn FnOnce()>>,
+    completions: Vec<Box<dyn FnOnce()>>,
 }
 
 impl<A: hal::Api> Submission<A> {
-    fn new(owner: &Rc<Device<A>>, serial: u64) -> Result<Self> {
+    fn new(owner: &Rc<Device<A>>, serial: u64, fence: Rc<Owned<A, A::Fence>>) -> Result<Self> {
         let mut submission = Self {
             owner: owner.clone(),
             encoder: None,
             buffer: None,
-            fence: None,
+            fence,
             recording: false,
             attempted: false,
             complete: false,
             serial,
             resources: Vec::new(),
             commits: Vec::new(),
+            completions: Vec::new(),
         };
         unsafe {
-            submission.fence = Some(
-                owner
-                    .open
-                    .device
-                    .create_fence()
-                    .map_err(|e| format!("Creating submission fence: {e:?}"))?,
-            );
             submission.encoder = Some(
                 owner
                     .open
@@ -68,6 +64,7 @@ impl<A: hal::Api> Submission<A> {
         unsafe {
             self.encoder().reset_all(buffer.into_iter());
         }
+        for complete in self.completions.drain(..) { complete(); }
         self.resources.clear();
     }
 
@@ -94,7 +91,11 @@ impl<A: hal::Api> Submission<A> {
         self.commits.push(Box::new(commit));
     }
 
-    fn submit(&mut self) -> Result<()> {
+    pub fn on_complete(&mut self, complete: impl FnOnce() + 'static) {
+        self.completions.push(Box::new(complete));
+    }
+
+    fn submit(&mut self, surfaces: &[&A::SurfaceTexture]) -> Result<()> {
         unsafe {
             self.buffer = Some(
                 self.encoder()
@@ -108,8 +109,8 @@ impl<A: hal::Api> Submission<A> {
                 .queue
                 .submit(
                     &[self.buffer.as_ref().unwrap()],
-                    &[],
-                    (self.fence.as_ref().unwrap(), self.serial),
+                    surfaces,
+                    (&self.fence, self.serial),
                 )
                 .map_err(|e| format!("Submitting WR commands: {e:?}"))?;
         }
@@ -124,7 +125,7 @@ impl<A: hal::Api> Submission<A> {
             self.owner
                 .open
                 .device
-                .get_fence_value(self.fence.as_ref().unwrap())
+                .get_fence_value(&self.fence)
                 .map_err(|e| format!("Polling WR submission: {e:?}"))?
                 >= self.serial
         };
@@ -136,7 +137,7 @@ impl<A: hal::Api> Submission<A> {
             self.owner
                 .open
                 .device
-                .wait(self.fence.as_ref().unwrap(), self.serial, None)
+                .wait(&self.fence, self.serial, None)
                 .map_err(|e| format!("Waiting for WR submission: {e:?}"))?
         };
         if self.complete {
@@ -159,9 +160,6 @@ impl<A: hal::Api> Drop for Submission<A> {
                 }
                 encoder.reset_all(self.buffer.take().into_iter());
             }
-            if let Some(fence) = self.fence.take() {
-                self.owner.open.device.destroy_fence(fence);
-            }
         }
     }
 }
@@ -171,6 +169,7 @@ struct QueueState<A: hal::Api> {
     pending: VecDeque<Submission<A>>,
     next_serial: u64,
     completed: u64,
+    submitted: u64,
     peak_pending: usize,
     waits: usize,
     ready: Vec<Submission<A>>,
@@ -182,6 +181,7 @@ pub(super) struct SubmissionQueue<A: hal::Api> {
     limit: usize,
     synchronous: bool,
     uploads: super::pool::BufferPool<A>,
+    fence: RefCell<Option<Rc<Owned<A, A::Fence>>>>,
     #[cfg(test)]
     defer_poll: std::cell::Cell<bool>,
 }
@@ -194,6 +194,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
             limit,
             synchronous,
             uploads: super::pool::BufferPool::new(owner),
+            fence: RefCell::new(None),
             #[cfg(test)]
             defer_poll: std::cell::Cell::new(false),
             state: RefCell::new(QueueState {
@@ -201,11 +202,22 @@ impl<A: hal::Api> SubmissionQueue<A> {
                 pending: VecDeque::new(),
                 next_serial: 1,
                 completed: 0,
+                submitted: 0,
                 peak_pending: 0,
                 waits: 0,
                 ready: Vec::new(),
             }),
         }
+    }
+
+    pub fn fence(&self) -> Result<Rc<Owned<A, A::Fence>>> {
+        let mut fence = self.fence.borrow_mut();
+        if fence.is_none() {
+            let raw = unsafe { self.owner.open.device.create_fence() }
+                .map_err(|error| format!("Creating submission fence: {error:?}"))?;
+            *fence = Some(Rc::new(Owned::new(&self.owner, raw, A::Device::destroy_fence)));
+        }
+        Ok(fence.as_ref().unwrap().clone())
     }
 
     fn retire(state: &mut QueueState<A>, wait: bool) -> Result<()> {
@@ -251,6 +263,13 @@ impl<A: hal::Api> SubmissionQueue<A> {
         stats.cached_buffer_bytes = self.uploads.bytes();
     }
 
+    pub fn trim(&self, uploads: bool) -> Result<()> {
+        self.poll()?;
+        self.state.borrow_mut().ready.clear();
+        if uploads { self.uploads.clear(); }
+        Ok(())
+    }
+
     pub fn recording(&self) -> Result<RefMut<'_, Submission<A>>> {
         let mut state = self.state.borrow_mut();
         if state.active.is_none() {
@@ -272,16 +291,19 @@ impl<A: hal::Api> SubmissionQueue<A> {
                 ready.restart(serial)?;
                 ready
             } else {
-                Submission::new(&self.owner, serial)?
+                Submission::new(&self.owner, serial, self.fence()?)?
             });
         }
         Ok(RefMut::map(state, |state| state.active.as_mut().unwrap()))
     }
 
-    pub fn submit(&self) -> Result<()> {
+    pub fn submit(&self) -> Result<()> { self.submit_surfaces(&[]) }
+
+    pub fn submit_surfaces(&self, surfaces: &[&A::SurfaceTexture]) -> Result<()> {
         let mut state = self.state.borrow_mut();
         if let Some(mut active) = state.active.take() {
-            active.submit()?;
+            active.submit(surfaces)?;
+            state.submitted = active.serial;
             state.pending.push_back(active);
             state.peak_pending = state.peak_pending.max(state.pending.len());
         }
@@ -293,12 +315,38 @@ impl<A: hal::Api> SubmissionQueue<A> {
         Ok(())
     }
 
+    pub fn submit_serial(&self) -> Result<u64> {
+        self.submit()?;
+        Ok(self.state.borrow().submitted)
+    }
+
+    pub fn poll(&self) -> Result<u64> {
+        let mut state = self.state.borrow_mut();
+        Self::retire(&mut state, false)?;
+        Ok(state.completed)
+    }
+
+    pub fn wait_for(&self, serial: u64) -> Result<()> {
+        let mut state = self.state.borrow_mut();
+        if serial > state.submitted {
+            return Err("Cannot wait for an unsubmitted HAL serial".into());
+        }
+        while state.completed < serial {
+            Self::retire(&mut state, true)?;
+        }
+        Ok(())
+    }
+
     pub fn shutdown(&self) {
         self.state.borrow_mut().active.take();
         let _ = self.wait();
         let mut state = self.state.borrow_mut();
         state.active.take();
         state.pending.clear();
+    }
+
+    pub fn discard_recording(&self) {
+        self.state.borrow_mut().active.take();
     }
 
     pub fn wait(&self) -> Result<()> {

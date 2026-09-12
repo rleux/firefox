@@ -9,6 +9,8 @@ use image::GenericImageView;
 use crate::parse_function::parse_function;
 use crate::premultiply::premultiply;
 use std::collections::HashMap;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
@@ -94,14 +96,15 @@ fn gl_target(target: ImageBufferKind) -> gl::GLenum {
     }
 }
 
+#[derive(Clone)]
 struct LocalExternalImageHandler {
-    texture_ids: Vec<(gl::GLuint, ImageDescriptor)>,
+    texture_ids: Rc<RefCell<Vec<(gl::GLuint, ImageDescriptor)>>>,
 }
 
 impl LocalExternalImageHandler {
     pub fn new() -> LocalExternalImageHandler {
         LocalExternalImageHandler {
-            texture_ids: Vec::new(),
+            texture_ids: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -162,8 +165,9 @@ impl LocalExternalImageHandler {
                     data,
                     gl,
                 );
-                self.texture_ids.push((texture_ids[0], desc));
-                (ExternalImageId((self.texture_ids.len() - 1) as u64), 0)
+                let mut images = self.texture_ids.borrow_mut();
+                images.push((texture_ids[0], desc));
+                (ExternalImageId((images.len() - 1) as u64), 0)
             },
             _ => panic!("unsupported!"),
         };
@@ -186,13 +190,71 @@ impl ExternalImageHandler for LocalExternalImageHandler {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let (id, desc) = self.texture_ids[key.0 as usize];
+        let (id, desc) = self.texture_ids.borrow()[key.0 as usize];
         ExternalImage {
             uv: TexelRect::new(0.0, 0.0, desc.size.width as f32, desc.size.height as f32),
             source: ExternalImageSource::NativeTexture(ExternalTextureHandle(id as u64)),
         }
     }
     fn unlock(&mut self, _key: ExternalImageId, _channel_index: u8) {}
+}
+
+#[cfg(feature = "hal-vulkan")]
+#[derive(Clone)]
+struct LocalHalImageProvider {
+    device: webrender::hal::ExternalImageDevice,
+    images: Rc<RefCell<Vec<webrender::hal::NativeImage>>>,
+}
+
+#[cfg(feature = "hal-vulkan")]
+impl webrender::hal::ExternalImageProvider for LocalHalImageProvider {
+    fn acquire(&mut self, id: ExternalImageId, channel: u8, _: bool) -> Result<webrender::hal::ExternalImageLease, String> {
+        if channel != 0 { return Err("Invalid Wrench native image channel".into()); }
+        let image = self.images.borrow().get(id.0 as usize).cloned().ok_or("Unknown Wrench native image")?;
+        let descriptor = image.descriptor();
+        webrender::hal::ExternalImageLease::new(descriptor,
+            TexelRect::new(0.0, 0.0, descriptor.size.width as f32, descriptor.size.height as f32),
+            image.generation(), webrender::hal::ExternalImageSource::Native(image), |_| {})
+    }
+}
+
+enum LocalExternalImages {
+    Gl(LocalExternalImageHandler),
+    #[cfg(feature = "hal-vulkan")]
+    Hal(LocalHalImageProvider),
+}
+
+impl LocalExternalImages {
+    fn add_image<R: SceneRenderer>(&mut self, renderer: &R, gl: Option<&dyn gl::Gl>, descriptor: ImageDescriptor, target: ImageBufferKind, data: ImageData) -> ImageData {
+        #[cfg(feature = "hal-vulkan")]
+        if matches!(self, Self::Gl(_)) && renderer.gl_device().is_none() {
+            let device = renderer.hal_image_device().expect("No native image device available");
+            *self = Self::Hal(LocalHalImageProvider { device, images: Rc::new(RefCell::new(Vec::new())) });
+        }
+        match self {
+            Self::Gl(handler) => handler.add_image(gl.expect("No GL context"), descriptor, target, data),
+            #[cfg(feature = "hal-vulkan")]
+            Self::Hal(handler) => {
+                let data = match data { ImageData::Raw(data) => data, _ => panic!("Native external image requires pixel data") };
+                let image = handler.device.create_image(descriptor, &data).expect("Creating native external image failed");
+                let mut images = handler.images.borrow_mut();
+                let id = ExternalImageId(images.len() as u64);
+                images.push(image);
+                ImageData::External(ExternalImageData { id, channel_index: 0,
+                    image_type: ExternalImageType::TextureHandle(target), normalized_uvs: false })
+            }
+        }
+    }
+
+    fn install<R: SceneRenderer>(&self, renderer: &mut R) -> Result<(), String> {
+        match self {
+            Self::Gl(handler) if renderer.gl_device().is_some() || !handler.texture_ids.borrow().is_empty() =>
+                renderer.install_external_images(Box::new(handler.clone())),
+            Self::Gl(_) => Ok(()),
+            #[cfg(feature = "hal-vulkan")]
+            Self::Hal(handler) => renderer.install_hal_external_images(Box::new(handler.clone())),
+        }
+    }
 }
 
 fn broadcast<T: Clone>(base_vals: &[T], num_items: usize) -> Vec<T> {
@@ -401,7 +463,7 @@ pub struct YamlFrameReader {
     yaml_string: String,
     keyframes: Option<Yaml>,
 
-    external_image_handler: Option<Box<LocalExternalImageHandler>>,
+    external_image_handler: LocalExternalImages,
 }
 
 impl YamlFrameReader {
@@ -430,7 +492,7 @@ impl YamlFrameReader {
             requested_frame: 0,
             built_frame: usize::MAX,
             keyframes: None,
-            external_image_handler: Some(Box::new(LocalExternalImageHandler::new())),
+            external_image_handler: LocalExternalImages::Gl(LocalExternalImageHandler::new()),
             next_external_scroll_id: 1000,      // arbitrary to easily see in logs which are implicit
         }
     }
@@ -541,14 +603,8 @@ impl YamlFrameReader {
 
         wrench.put_dl_builder(root_pipeline_id, builder);
 
-        // If replaying the same frame during interactive use, the frame gets rebuilt,
-        // but the external image handler has already been consumed by the renderer.
-        if let Some(external_image_handler) = self.external_image_handler.take() {
-            if wrench.renderer.gl_device().is_some() || !external_image_handler.texture_ids.is_empty() {
-                wrench.renderer.install_external_images(external_image_handler)
-                    .expect("External images are unavailable for the selected backend");
-            }
-        }
+        self.external_image_handler.install(&mut wrench.renderer)
+            .expect("External images are unavailable for the selected backend");
     }
 
     fn build_pipeline<R: SceneRenderer>(
@@ -870,8 +926,9 @@ impl YamlFrameReader {
             };
 
             let external_image_data =
-                self.external_image_handler.as_mut().unwrap().add_image(
-                    wrench.gl(),
+                self.external_image_handler.add_image(
+                    &wrench.renderer,
+                    wrench.gl_context(),
                     descriptor,
                     external_target,
                     image_data
@@ -2392,8 +2449,8 @@ impl YamlFrameReader {
 
  }
 
-impl WrenchThing for YamlFrameReader {
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+impl<R: SceneRenderer> WrenchThing<R> for YamlFrameReader {
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         YamlFrameReader::build_frame(self, wrench)
     }
 

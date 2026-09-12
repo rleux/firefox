@@ -208,6 +208,7 @@ pub(super) struct Texture<A: hal::Api> {
     pub base_mip: u32,
     pub mip_count: u32,
     states: Rc<Vec<TextureState>>,
+    lease: Option<Rc<super::external::LeaseState>>,
 }
 
 pub(super) fn texture_format(format: ImageFormat) -> Result<wgt::TextureFormat> {
@@ -302,6 +303,20 @@ impl<A: hal::Api> Texture<A> {
         descriptor.mip_level_count = mip_count;
         let raw = unsafe { device.create_texture(&descriptor) }
             .map_err(|e| format!("Creating {format:?} texture: {e:?}"))?;
+        Self::from_raw(owner, raw, &descriptor, filter, renderable, wgt::TextureUses::UNINITIALIZED)
+    }
+
+    pub fn from_raw(
+        owner: &Rc<Device<A>>, raw: A::Texture, descriptor: &hal::TextureDescriptor,
+        filter: crate::device::TextureFilter, renderable: bool, initial_usage: wgt::TextureUses,
+    ) -> Result<Rc<Self>> {
+        let size = descriptor.size;
+        let (width, height) = (size.width, size.height);
+        let format = descriptor.format;
+        let mip_count = descriptor.mip_level_count;
+        let depth = format == wgt::TextureFormat::Depth32Float;
+        let target_usage = if depth { wgt::TextureUses::DEPTH_STENCIL_WRITE } else { wgt::TextureUses::COLOR_TARGET };
+        let device = &owner.open.device;
         let bytes = (0..mip_count)
             .map(|level| {
                 u64::from((width >> level).max(1))
@@ -360,18 +375,23 @@ impl<A: hal::Api> Texture<A> {
             format,
             filter,
             base_mip: 0,
+            lease: None,
             mip_count,
             states: Rc::new(
                 (0..mip_count)
                     .map(|_| TextureState {
-                        usage: Cell::new(wgt::TextureUses::UNINITIALIZED),
-                        committed: Cell::new(wgt::TextureUses::UNINITIALIZED),
-                        initialized: Cell::new(false),
-                        committed_initialized: Cell::new(false),
+                        usage: Cell::new(initial_usage),
+                        committed: Cell::new(initial_usage),
+                        initialized: Cell::new(initial_usage != wgt::TextureUses::UNINITIALIZED),
+                        committed_initialized: Cell::new(initial_usage != wgt::TextureUses::UNINITIALIZED),
                     })
                     .collect(),
             ),
         }))
+    }
+
+    pub fn belongs_to(&self, owner: &Rc<Device<A>>) -> bool {
+        Rc::ptr_eq(&self.raw.owner, owner)
     }
 
     pub fn mip_view(self: &Rc<Self>, level: u32) -> Result<Rc<Self>> {
@@ -420,6 +440,29 @@ impl<A: hal::Api> Texture<A> {
             base_mip,
             mip_count: 1,
             states: self.states.clone(),
+            lease: self.lease.clone(),
+        }))
+    }
+
+    pub fn current_usage(&self) -> wgt::TextureUses {
+        self.states[self.base_mip as usize].usage.get()
+    }
+
+    pub fn with_lease(&self, lease: Rc<super::external::LeaseState>, filter: crate::device::TextureFilter) -> Result<Rc<Self>> {
+        let owner = &self.raw.owner;
+        let view = |usage, levels| {
+            let raw = unsafe { owner.open.device.create_texture_view(&self.raw, &hal::TextureViewDescriptor {
+                label: Some("WR acquired image view"), format: self.format, dimension: wgt::TextureViewDimension::D2, usage,
+                range: wgt::ImageSubresourceRange { base_mip_level: self.base_mip, mip_level_count: Some(levels), array_layer_count: Some(1), ..Default::default() },
+            }) }.map_err(|error| format!("Creating acquired image view: {error:?}"))?;
+            Ok::<_, String>(Owned::new(owner, raw, A::Device::destroy_texture_view))
+        };
+        Ok(Rc::new(Self {
+            view: view(wgt::TextureUses::RESOURCE, self.mip_count)?,
+            target: if self.target.is_some() { Some(view(wgt::TextureUses::COLOR_TARGET, 1)?) } else { None },
+            raw: self.raw.clone(), size: self.size, format: self.format, filter,
+            allocation_id: self.allocation_id, transient: Cell::new(true), base_mip: self.base_mip,
+            mip_count: self.mip_count, states: self.states.clone(), lease: Some(lease),
         }))
     }
 
@@ -467,6 +510,7 @@ impl<A: hal::Api> Texture<A> {
 
     pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::TextureUses) {
         commands.keep(self.clone());
+        if let Some(lease) = &self.lease { lease.track(commands); }
         let count = if to == wgt::TextureUses::RESOURCE {
             self.mip_count
         } else {
