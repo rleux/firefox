@@ -78,6 +78,7 @@ struct ReadbackRequest {
 }
 
 pub struct Renderer {
+    filtering_locked: bool,
     gpu: FrameRenderer<wgpu_hal::api::Vulkan>,
     ready: Arc<FrameReady>,
     ready_generation: u64,
@@ -90,6 +91,7 @@ pub struct Renderer {
     resource_upload_time: Duration,
     last_upload_time: Duration,
     last_upload_bytes: u64,
+    last_compositor_surfaces: [usize; 2],
     clear_color: api::ColorF,
     last_output: Option<RenderedFrame<wgpu_hal::api::Vulkan>>,
     readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest>>,
@@ -238,6 +240,7 @@ fn create_renderer(
         .map_err(|error| format!("Starting render backend: {error:?}"))?;
     Ok((
         Renderer {
+            filtering_locked: false,
             gpu,
             ready,
             ready_generation: 0,
@@ -250,6 +253,7 @@ fn create_renderer(
             resource_upload_time: Duration::ZERO,
             last_upload_time: Duration::ZERO,
             last_upload_bytes: 0,
+            last_compositor_surfaces: [0; 2],
             clear_color: options.clear_color,
             last_output: None,
             readbacks: RefCell::new(HashMap::new()),
@@ -413,6 +417,7 @@ impl Renderer {
     }
 
     fn process_message(&mut self, message: ResultMsg) -> Result<(), String> {
+        self.filtering_locked = true;
         match message {
             ResultMsg::PublishDocument(_, id, mut document, updates) => {
                 self.check_document(id)?;
@@ -528,6 +533,17 @@ impl Renderer {
 
     pub fn has_frame(&self) -> bool { self.document.is_some() }
 
+    pub fn configure_filtering(&mut self, filtering: crate::device::hal::Filtering) -> Result<(), String> {
+        if self.filtering_locked {
+            return Err("HAL filtering must be configured once, before processing renderer messages".into());
+        }
+        self.gpu.filtering = filtering;
+        self.filtering_locked = true;
+        Ok(())
+    }
+
+    pub fn filtering(&self) -> crate::device::hal::Filtering { self.gpu.filtering }
+
     pub fn has_presentable_output(&self) -> bool {
         self.last_output.as_ref().map_or(false, |output| !output.size.contains(&0))
     }
@@ -613,6 +629,11 @@ impl Renderer {
         self.did_rasterize = did_rasterize;
         self.last_upload_time = std::mem::replace(&mut self.resource_upload_time, Duration::ZERO);
         self.last_upload_bytes = self.gpu.take_resource_upload_bytes();
+        self.last_compositor_surfaces = [
+            document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_OVERLAYS, 0.0) as usize,
+            document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_UNDERLAYS, 0.0) as usize,
+        ];
+        document.profile.clear();
         let composite_time = start.elapsed();
         if self.cpu_timings.len() == 64 { self.cpu_timings.pop_front(); }
         self.cpu_timings.push_back(CpuTiming { completion: FrameCompletion { owner: self.backend_id, serial: output.serial },
@@ -650,8 +671,8 @@ impl Renderer {
         results.stats.alpha_target_count = output.stats.alpha_targets;
         results.stats.resource_upload_time = self.last_upload_time.as_secs_f64() * 1000.0;
         results.stats.texture_upload_mb = self.last_upload_bytes as f64 / (1024.0 * 1024.0);
-        results.compositor_surface_overlays = document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_OVERLAYS, 0.0) as usize;
-        results.compositor_surface_underlays = document.profile.get_or(crate::profiler::COMPOSITOR_SURFACE_UNDERLAYS, 0.0) as usize;
+        results.compositor_surface_overlays = self.last_compositor_surfaces[0];
+        results.compositor_surface_underlays = self.last_compositor_surfaces[1];
         results.dirty_rects.extend_from_slice(&self.damage);
         results.did_rasterize_any_tile = self.did_rasterize;
         results.picture_cache_debug = std::mem::replace(

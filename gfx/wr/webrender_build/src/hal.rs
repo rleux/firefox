@@ -165,6 +165,13 @@ pub fn build(
     )
     .unwrap();
     let mut catalog: Vec<_> = get_hal_shader_features().into_iter().collect();
+    for (name, variants) in &mut catalog {
+        if matches!(*name, "ps_quad_textured" | "ps_quad_repeat" | "composite" | "cs_scale") {
+            let legacy: Vec<_> = variants.iter().filter(|features| features.as_str() == "TEXTURE_2D")
+                .map(|features| format!("{features},HAL_LEGACY_BRILINEAR")).collect();
+            variants.extend(legacy);
+        }
+    }
     catalog.sort_by_key(|entry| entry.0);
     let mut sources = Vec::new();
     let mut textures = BTreeMap::new();
@@ -273,6 +280,11 @@ pub fn build(
         let mut digest = DefaultHasher::new();
         (name, &features, "vulkan1.1", &textures).hash(&mut digest);
         for (index, (path, source)) in stages.into_iter().enumerate() {
+            let legacy = index == 1 && features.ends_with(",HAL_LEGACY_BRILINEAR");
+            let source = if legacy {
+                Regex::new(r"\btexture\s*\(\s*sColor0\s*,").unwrap()
+                    .replace_all(&source, "wr_legacy_sample(").into_owned()
+            } else { source };
             let source = uniforms.replace_all(&source, |declaration: &regex::Captures| {
                 let name = &declaration[2];
                 if name == "uTransform" {
@@ -280,7 +292,24 @@ pub fn build(
                 }
                 let (binding, ty) = bindings[name];
                 let texture_type = ty.replace("sampler", "texture");
-                format!("\nlayout(set = 0, binding = {binding}) uniform {texture_type} t_{name};\nlayout(set = 0, binding = {}) uniform sampler p_{name};\n#define {name} {ty}(t_{name}, p_{name})\n", binding + 1)
+                let mut declaration = format!("\nlayout(set = 0, binding = {binding}) uniform {texture_type} t_{name};\nlayout(set = 0, binding = {}) uniform sampler p_{name};\n#define {name} {ty}(t_{name}, p_{name})\n", binding + 1);
+                if legacy && name == "sColor0" {
+                    declaration.push_str(r#"
+vec4 wr_legacy_sample(vec2 uv) {
+    vec2 dimensions = vec2(textureSize(sColor0, 0));
+    vec2 dx = abs(dFdxCoarse(uv)) * dimensions;
+    vec2 dy = abs(dFdyCoarse(uv)) * dimensions;
+    float rho = max(max(dx.x, dx.y), max(dy.x, dy.y));
+    if (rho <= 1.0) { return textureLod(sColor0, uv, 0.0); }
+    uint bits = floatBitsToUint(rho * 1.2374368670764582);
+    float level = float(int((bits >> 23u) & 255u) - 127);
+    float mantissa = uintBitsToFloat((bits & 8388607u) | 1065353216u);
+    float weight = clamp(2.0 * mantissa - 3.0, 0.0, 1.0);
+    return textureLod(sColor0, uv, max(0.0, level + weight));
+}
+"#);
+                }
+                declaration
             });
             let source = interface.replace_all(&source, |declaration: &regex::Captures| {
                 let direction = &declaration[2];

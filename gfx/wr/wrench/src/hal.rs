@@ -9,6 +9,7 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
     } else if args.value_of("hal_backend").is_some()
         || args.value_of("hal_adapter").is_some()
         || args.is_present("hal_validation")
+        || args.value_of("hal_filtering").is_some()
         || args.value_of("hal_compositor").is_some()
         || args.value_of("hal_frames").is_some()
         || args.value_of("hal_windows").is_some()
@@ -40,6 +41,60 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn filtering_profiles_and_capture() {
+        use crate::wrench::Wrench;
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::DeviceIntSize;
+        use webrender::hal::Filtering;
+        use webrender::render_api::CaptureBits;
+        let size = DeviceIntSize::new(350, 90);
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        let policies = [Filtering::Standard, Filtering::LegacyBrilinear];
+        let mut renderers: Vec<_> = policies.iter().map(|policy| {
+            let mut wrench = Wrench::new_hal(&options, size).unwrap();
+            wrench.renderer.configure_filtering(*policy).unwrap();
+            assert!(wrench.renderer.configure_filtering(*policy).is_err());
+            wrench
+        }).collect();
+        let root = std::env::temp_dir().join(format!("wr-hal-filtering-{}", std::process::id()));
+        for mipmaps in [false, true] {
+            let mut outputs = Vec::new();
+            for (index, wrench) in renderers.iter_mut().enumerate() {
+                let mut reader = YamlFrameReader::new(std::path::Path::new("reftests/image/downscale.yaml"));
+                reader.allow_mipmaps(mipmaps);
+                reader.build_frame(wrench);
+                wrench.renderer.prepare_frame(wrench.document_id).unwrap();
+                let pixels = wrench.renderer.render_frame().unwrap().pixels;
+                assert!(wrench.renderer.configure_filtering(policies[index]).is_err());
+                assert!(wrench.renderer.render_frame().unwrap().pixels == pixels);
+                if mipmaps {
+                    let path = root.join(policies[index].name());
+                    wrench.api.save_capture(path.clone(), CaptureBits::all());
+                    capture_barrier(wrench);
+                    let mut replay = Wrench::new_hal(&options, size).unwrap();
+                    replay.renderer.configure_filtering(policies[index]).unwrap();
+                    let documents = replay.api.load_capture(path.clone(), None);
+                    assert_eq!(documents.len(), 1);
+                    replay.renderer.prepare_frame(documents[0].document_id).unwrap();
+                    assert!(replay.renderer.render_frame().unwrap().pixels == pixels);
+                    replay.api.shut_down(true);
+                    let mut wrong = Wrench::new_hal(&options, size).unwrap();
+                    wrong.renderer.configure_filtering(policies[1 - index]).unwrap();
+                    let documents = wrong.api.load_capture(path, None);
+                    let error = wrong.renderer.prepare_frame(documents[0].document_id).unwrap_err();
+                    assert!(error.contains("Capture filtering"), "{}", error);
+                    wrong.api.shut_down(true);
+                }
+                outputs.push(pixels);
+            }
+            assert_eq!(outputs[0] != outputs[1], mipmaps);
+        }
+        for wrench in renderers { wrench.api.shut_down(true); }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -809,6 +864,15 @@ fn run(_: &clap::ArgMatches) -> Result<(), String> {
 }
 
 #[cfg(feature = "hal-vulkan")]
+pub(crate) fn filtering(args: &clap::ArgMatches) -> webrender::hal::Filtering {
+    match args.value_of("hal_filtering").unwrap_or("standard") {
+        "standard" => webrender::hal::Filtering::Standard,
+        "legacy-brilinear" => webrender::hal::Filtering::LegacyBrilinear,
+        _ => unreachable!(),
+    }
+}
+
+#[cfg(feature = "hal-vulkan")]
 pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
     match args.value_of("hal_compositor").unwrap_or("draw") {
         "draw" => Ok(webrender::hal::CompositorConfig::Draw),
@@ -821,6 +885,11 @@ pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::ha
 #[cfg(feature = "hal-vulkan")]
 fn run(args: &clap::ArgMatches) -> Result<(), String> {
     use webrender::hal::{create_vulkan_device, Options, Readback};
+
+    if args.value_of("hal_filtering").is_some()
+        && !matches!(args.subcommand_name(), Some("png" | "show" | "reftest" | "rawtest" | "test_invalidation")) {
+        return Err("--hal-filtering requires a renderer command".into());
+    }
 
     if args.subcommand_name() == Some("test_surface") {
         if args.is_present("headless") || args.is_present("software") || args.is_present("angle") {
@@ -882,6 +951,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         use crate::wrench::Wrench;
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
+        wrench.renderer.configure_filtering(filtering(args))?;
         println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
         let show = args.subcommand_matches("show").unwrap();
         let path = std::path::Path::new(show.value_of("INPUT").unwrap());
@@ -903,6 +973,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let (notifier, rx) = crate::create_notifier();
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?)?;
+        wrench.renderer.configure_filtering(filtering(args))?;
         println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
         let mut window = HeadlessTestWindow(size);
         let result = if command == "rawtest" {
@@ -923,6 +994,8 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
             webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench =
             Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
+        wrench.renderer.configure_filtering(filtering(args))?;
+        println!("HAL filtering: {}", wrench.renderer.filtering().name());
         println!(
             "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}",
             wrench.renderer.info().backend,
@@ -1022,6 +1095,7 @@ fn render_png(
     use std::convert::TryFrom;
     let enable_subpixel_aa = !args.is_present("no_subpixel_aa");
     let compositor = compositor_config(args)?;
+    let filtering = filtering(args);
     let args = args.subcommand_matches("png").unwrap();
     if args
         .value_of("surface")
@@ -1035,6 +1109,7 @@ fn render_png(
     );
     let mut wrench =
         Wrench::new_hal_with_compositor(options, size, enable_subpixel_aa, None, compositor)?;
+    wrench.renderer.configure_filtering(filtering)?;
     let info = wrench.renderer.info();
     println!(
         "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}; driver: {} {}",

@@ -48,6 +48,22 @@ pub struct Options {
     pub validation: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Filtering {
+    #[default]
+    Standard,
+    LegacyBrilinear,
+}
+
+impl Filtering {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::LegacyBrilinear => "legacy-brilinear",
+        }
+    }
+}
+
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
     open: hal::OpenDevice<A>,
