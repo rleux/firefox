@@ -37,6 +37,11 @@ args:
       takes_value: true
       global: true
       help: Stop HAL show after this many frames (headless defaults to one)
+  - hal_windows:
+      long: hal-windows
+      takes_value: true
+      global: true
+      help: Number of independent HAL show windows (default one)
   - precache:
       short: c
       long: precache

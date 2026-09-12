@@ -18,14 +18,14 @@ impl FrameRenderer<hal::api::Vulkan> {
     pub fn surface_info(&self) -> Option<SurfaceInfo> { self.surface.as_ref().map(|surface| surface.info.clone()) }
 
     pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<()> {
-        if self.failed.get() { return Err("Cannot configure a failed renderer".into()); }
+        if self.is_failed() { return Err("Cannot configure a failed renderer".into()); }
         self.discard_surface()?;
         self.submissions.wait()?;
         self.surface.as_mut().ok_or("Renderer has no window surface")?.configure(size)
     }
 
     pub fn acquire_surface(&mut self) -> Result<PresentationStatus> {
-        if self.failed.get() { return Err("Cannot acquire on a failed renderer".into()); }
+        if self.is_failed() { return Err("Cannot acquire on a failed renderer".into()); }
         let surface = self.surface.as_mut().ok_or("Renderer has no window surface")?;
         if surface.dirty {
             self.submissions.wait()?;
@@ -38,7 +38,7 @@ impl FrameRenderer<hal::api::Vulkan> {
     }
 
     pub fn discard_surface(&mut self) -> Result<()> {
-        if self.failed.get() { return Err("Cannot discard on a failed renderer; destroy it".into()); }
+        if self.is_failed() { return Err("Cannot discard on a failed renderer; destroy it".into()); }
         let surface = self.surface.as_mut().ok_or("Renderer has no window surface")?;
         if let Some(acquired) = &surface.acquired {
             drop(self.submissions.recording()?);
@@ -50,7 +50,7 @@ impl FrameRenderer<hal::api::Vulkan> {
     }
 
     pub fn present_output(&mut self, output: &RenderedFrame<hal::api::Vulkan>) -> Result<PresentationStatus> {
-        if self.failed.get() { return Err("Cannot present a failed renderer".into()); }
+        if self.is_failed() { return Err("Cannot present a failed renderer".into()); }
         if output.texture.is_none() { self.discard_surface()?; return Ok(PresentationStatus::Suspended); }
         if self.surface.as_ref().ok_or("Renderer has no window surface")?.acquired.is_none() {
             let status = self.acquire_surface()?;

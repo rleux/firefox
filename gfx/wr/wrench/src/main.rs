@@ -28,6 +28,8 @@ mod hal;
 mod hal_compositor;
 #[cfg(feature = "hal-vulkan")]
 mod hal_surface;
+#[cfg(feature = "hal-vulkan")]
+mod hal_window;
 mod parse_function;
 mod perf;
 mod png;

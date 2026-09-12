@@ -225,6 +225,20 @@ pub(crate) struct FrameRenderer<A: hal::Api> {
 }
 
 impl<A: hal::Api> FrameRenderer<A> {
+    pub fn is_failed(&self) -> bool { self.failed.get() || self.owner.lost.get() }
+
+    #[cfg(any(test, feature = "hal-testing"))]
+    pub fn inject_failure(&self, point: FailurePoint) { self.owner.fault.set(Some(point)); }
+
+    fn abort(&mut self) {
+        self.failed.set(true);
+        self.submissions.discard_recording();
+        self.external_images.clear();
+        self.native_targets.clear();
+        self.layer_targets.clear();
+        dispatch_releases(&self.releases);
+    }
+
     pub fn external_image_device(&self) -> ExternalImageDevice {
         ExternalImageDevice::new(&self.owner)
     }
@@ -495,6 +509,11 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn poll(&self) -> Result<()> {
+        if self.is_failed() {
+            let _ = self.submissions.poll();
+            dispatch_releases(&self.releases);
+            return Err("HAL renderer requires recreation".into());
+        }
         let result = self.submissions.poll().and_then(|completed| self.queries.borrow_mut().poll(completed));
         dispatch_releases(&self.releases);
         if result.is_err() { self.failed.set(true); }
@@ -2154,16 +2173,16 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn update_resources(&mut self, updates: Vec<ResourceUpdateList>) -> Result<()> {
-        if self.failed.get() {
+        if self.is_failed() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         self.failed.set(true);
-        for update in updates {
-            self.update(update)?;
-        }
-        self.submissions.submit()?;
-        self.failed.set(false);
-        Ok(())
+        let result = (|| {
+            for update in updates { self.update(update)?; }
+            self.submissions.submit()
+        })();
+        if result.is_err() { self.abort(); } else { self.failed.set(false); }
+        result
     }
 
     pub fn render(
@@ -2187,13 +2206,13 @@ impl<A: hal::Api> FrameRenderer<A> {
         clear: ColorF,
         composite: bool,
     ) -> Result<RenderedFrame<A>> {
-        if self.failed.get() {
+        if self.is_failed() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         self.poll()?;
         self.failed.set(true);
         let result = self.render_inner(frame, updates, clear, composite);
-        if result.is_err() { self.submissions.discard_recording(); }
+        if result.is_err() { self.abort(); }
         self.external_images.clear();
         self.native_targets.clear();
         self.layer_targets.clear();
@@ -2525,7 +2544,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn scaled_readback(&mut self, frame: &RenderedFrame<A>, rect: DeviceIntRect, size: DeviceIntSize) -> Result<PendingReadback<A>> {
-        if self.failed.get() { return Err("HAL renderer requires recreation".into()); }
+        if self.is_failed() { return Err("HAL renderer requires recreation".into()); }
         let mut source = frame.texture.as_ref().ok_or("No HAL output to capture")?.clone();
         if rect.is_empty() || size.is_empty() || !DeviceIntRect::from_size(DeviceIntSize::new(frame.size[0] as i32, frame.size[1] as i32)).contains_box(&rect) {
             return Err("Invalid HAL screenshot rectangle or size".into());
@@ -2557,6 +2576,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn poll_completion(&self, serial: u64) -> Result<bool> {
+        if self.is_failed() { return Err("HAL renderer requires recreation".into()); }
         let result = self.submissions.poll();
         dispatch_releases(&self.releases);
         match result {
@@ -2566,7 +2586,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn start_readback(&self, frame: &RenderedFrame<A>, rect: DeviceIntRect) -> Result<PendingReadback<A>> {
-        if self.failed.get() {
+        if self.is_failed() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         let output = frame.texture.as_ref().ok_or("HAL frame has no output target")?;
@@ -2610,6 +2630,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn poll_readback(&self, readback: &PendingReadback<A>, wait: bool) -> Result<Option<Vec<u8>>> {
+        if self.is_failed() { return Err("HAL renderer requires recreation".into()); }
         let result = (|| {
             if wait {
                 self.submissions.wait_for(readback.serial)?;
@@ -2626,7 +2647,7 @@ impl<A: hal::Api> FrameRenderer<A> {
 
 impl<A: hal::Api> Drop for FrameRenderer<A> {
     fn drop(&mut self) {
-        if !self.failed.get() {
+        if !self.is_failed() {
             if let Some(acquired) = self.surface.as_ref().and_then(|surface| surface.acquired.as_ref()) {
                 if self.submissions.recording().is_ok() {
                     let _ = self.submissions.submit_surfaces(&[&acquired.texture]);

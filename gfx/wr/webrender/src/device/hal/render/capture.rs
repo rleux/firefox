@@ -78,7 +78,7 @@ impl<A: hal::Api> FrameRenderer<A> {
 
     #[cfg(feature = "capture")]
     pub fn save_capture(&mut self, config: CaptureConfig, mut externals: Vec<ExternalCaptureImage>, device_size: Option<DeviceIntSize>) -> Result<()> {
-        if self.failed.get() { return Err("Cannot capture a failed HAL renderer".into()); }
+        if self.is_failed() { return Err("Cannot capture a failed HAL renderer".into()); }
         let root = config.resource_root();
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         if config.bits.contains(CaptureBits::EXTERNAL_RESOURCES) && !externals.is_empty() {

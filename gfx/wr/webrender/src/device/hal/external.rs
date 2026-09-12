@@ -54,7 +54,7 @@ pub(super) struct Producer<A: hal::Api> {
 
 impl<A: hal::Api> Producer<A> {
     fn upload(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
-        if self.failed.get() { return Err("Native image producer requires recreation".into()); }
+        if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         if image.leases.get() != 0 { return Err("Native image is acquired by the renderer".into()); }
         validate_buffer(descriptor, bytes)?;
         if image.descriptor.size != descriptor.size || image.descriptor.format != descriptor.format {
@@ -72,14 +72,14 @@ impl<A: hal::Api> Producer<A> {
 
 impl<A: hal::Api> ImageDevice for Producer<A> {
     fn target(&self, descriptor: ImageDescriptor) -> Result<NativeImage> {
-        if self.failed.get() { return Err("Native image producer requires recreation".into()); }
+        if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         validate_descriptor(descriptor)?;
         let texture = Texture::new(&self.owner, descriptor.size.width as u32, descriptor.size.height as u32,
                                   texture_format(descriptor.format)?, crate::device::TextureFilter::Linear, true)?;
         Ok(NativeImage::new(texture, descriptor))
     }
     fn create(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage> {
-        if self.failed.get() { return Err("Native image producer requires recreation".into()); }
+        if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         validate_buffer(descriptor, bytes)?;
         let texture = Texture::new(&self.owner, descriptor.size.width as u32, descriptor.size.height as u32,
                                   texture_format(descriptor.format)?, crate::device::TextureFilter::Linear, false)?;
@@ -243,7 +243,7 @@ fn validate_buffer(descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
     use super::*;
     use api::{ImageFormat, ImageDescriptorFlags};
@@ -306,6 +306,15 @@ mod tests {
         let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let done = released.clone();
         let texture = image.texture(&first).unwrap();
+        first.fault.set(Some(FailurePoint::Import));
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notice = rejected.clone();
+        assert!(unsafe { producer.import_vulkan_image(VulkanImageDescriptor {
+            image: texture.raw.raw_handle(), device: context.device.handle(), queue: context.queue,
+            queue_family: context.queue_family, descriptor, initial_usage: texture.current_usage(), renderable: false,
+        }, Box::new(move || notice.store(true, std::sync::atomic::Ordering::SeqCst))) }.is_err());
+        assert!(rejected.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!first.lost.get());
         let imported = unsafe {
             producer.import_vulkan_image(VulkanImageDescriptor {
                 image: texture.raw.raw_handle(), device: context.device.handle(), queue: context.queue,

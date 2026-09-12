@@ -9,6 +9,10 @@ use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Qu
 use wgpu_types as wgt;
 
 mod pool;
+#[cfg(any(test, feature = "hal-testing"))]
+mod fault;
+#[cfg(any(test, feature = "hal-testing"))]
+pub use self::fault::FailurePoint;
 mod external;
 mod compositor;
 pub use self::compositor::{CompositorConfig, CompositorTarget, LayerCompositor, NativeCompositor};
@@ -16,7 +20,6 @@ pub use crate::composite::{CompositeDescriptor, CompositorInputLayer, NativeSurf
 pub use self::external::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource, NativeImage};
 #[cfg(feature = "hal-vulkan")]
 pub(crate) mod render;
-#[cfg(feature = "hal-vulkan")]
 mod resources;
 mod submission;
 mod surface;
@@ -27,9 +30,15 @@ pub(crate) mod vulkan;
 #[cfg(feature = "hal-vulkan")]
 pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDescriptor};
 #[cfg(feature = "hal-vulkan")]
-pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, CpuTiming, FrameCompletion, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, Renderer, RendererMemoryReport, ScreenshotHandle};
+pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, CpuTiming, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, Renderer, RendererMemoryReport, ScreenshotHandle};
 #[cfg(feature = "hal-vulkan")]
 pub use self::render::{DrawStats, FrameOutput};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameCompletion {
+    pub(crate) owner: api::RenderBackendId,
+    pub(crate) serial: u64,
+}
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -42,6 +51,9 @@ pub struct Options {
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
     open: hal::OpenDevice<A>,
+    lost: std::cell::Cell<bool>,
+    #[cfg(any(test, feature = "hal-testing"))]
+    fault: std::cell::Cell<Option<FailurePoint>>,
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
     features: wgt::Features,
@@ -349,6 +361,9 @@ impl<A: hal::Api> Device<A> {
         .map_err(|e| format!("Opening {}: {e:?}", exposed.info.name))?;
         Ok((Self {
             open,
+            lost: std::cell::Cell::new(false),
+            #[cfg(any(test, feature = "hal-testing"))]
+            fault: std::cell::Cell::new(None),
             info: exposed.info,
             capabilities: exposed.capabilities,
             features,
@@ -413,12 +428,14 @@ impl<A: hal::Api> Device<A> {
     }
 
     fn map_readback(&self, buffer: &A::Buffer, layout: &ReadbackLayout) -> Result<Vec<u8>> {
+        #[cfg(any(test, feature = "hal-testing"))]
+        self.check_fault(FailurePoint::Map)?;
         unsafe {
             let mapping = self
                 .open
                 .device
                 .map_buffer(buffer, 0..layout.size)
-                .map_err(|e| format!("Mapping readback: {e:?}"))?;
+                .map_err(|e| { self.lost.set(true); format!("Mapping readback: {e:?}") })?;
             if !mapping.is_coherent {
                 self.open
                     .device

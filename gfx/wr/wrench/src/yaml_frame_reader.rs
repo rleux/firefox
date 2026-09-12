@@ -2450,6 +2450,11 @@ impl YamlFrameReader {
  }
 
 impl<R: SceneRenderer> WrenchThing<R> for YamlFrameReader {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, scale: f32) {
+        self.set_device_pixel_scale(scale);
+        self.built_frame = usize::MAX;
+    }
+
     fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         YamlFrameReader::build_frame(self, wrench)
     }

@@ -105,7 +105,7 @@ fn elapsed_ticks(start: u64, end: u64, bits: u32) -> u64 {
     end.wrapping_sub(start) & (u64::MAX >> (64 - bits))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
     #[test]
     #[ignore = "Requires Vulkan and validation"]

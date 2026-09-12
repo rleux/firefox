@@ -52,6 +52,8 @@ impl ExternalImageDevice {
         let producer = self.0.as_any().downcast_ref::<Producer<hal::api::Vulkan>>()
             .ok_or("External image device is not Vulkan")?;
         let owner = &producer.owner;
+        #[cfg(any(test, feature = "hal-testing"))]
+        owner.check_fault(FailurePoint::Import)?;
         let device = &owner.open.device;
         if source.image == vk::Image::null() || source.device != device.raw_device().handle()
             || source.queue != device.raw_queue() || source.queue_family != device.queue_family_index() {

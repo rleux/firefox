@@ -11,6 +11,7 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
         || args.is_present("hal_validation")
         || args.value_of("hal_compositor").is_some()
         || args.value_of("hal_frames").is_some()
+        || args.value_of("hal_windows").is_some()
         || matches!(args.subcommand_name(), Some("test_hal" | "test_surface"))
     {
         Err("HAL options and test_hal require --backend hal".into())
@@ -361,6 +362,18 @@ mod tests {
         use webrender::api::*;
         use webrender::api::units::*;
         use webrender::render_api::{Transaction, DebugCommand, ClearCache};
+        use std::{rc::Rc, cell::RefCell};
+        use webrender::hal::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageSource, ExternalImageRelease, NativeImage, ReadbackHandle};
+        struct Provider { current: Rc<RefCell<Option<NativeImage>>>, releases: Rc<RefCell<Vec<ExternalImageRelease>>> }
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease, String> {
+                let image = self.current.borrow().as_ref().unwrap().clone();
+                let descriptor = image.descriptor();
+                let releases = self.releases.clone();
+                ExternalImageLease::new(descriptor, TexelRect::new(0.0, 0.0, descriptor.size.width as f32, descriptor.size.height as f32),
+                    image.generation(), ExternalImageSource::Native(image), move |status| releases.borrow_mut().push(status))
+            }
+        }
         struct State {
             wrench: Wrench<webrender::hal::Renderer>,
             image: ImageKey,
@@ -368,6 +381,10 @@ mod tests {
             glyphs: Vec<u32>,
             color: [u8; 4],
             previous: Option<Vec<u8>>,
+            producer: ExternalImageDevice,
+            native: Rc<RefCell<Option<NativeImage>>>,
+            releases: Rc<RefCell<Vec<ExternalImageRelease>>>,
+            pending: Vec<(ReadbackHandle, DeviceIntSize, [u8; 4])>,
         }
         let mut states = Vec::new();
         for _ in 0..2 {
@@ -408,13 +425,17 @@ mod tests {
             );
             wrench.api.send_transaction(wrench.document_id, transaction);
             let image = wrench.api.generate_image_key();
+            let producer = wrench.renderer.external_image_device();
+            let native = Rc::new(RefCell::new(None));
+            let releases = Rc::new(RefCell::new(Vec::new()));
+            wrench.renderer.set_external_image_provider(Box::new(Provider { current: native.clone(), releases: releases.clone() })).unwrap();
             states.push(State {
                 wrench,
                 image,
                 font,
                 glyphs,
                 color: [255, 0, 0, 255],
-                previous: None,
+                previous: None, producer, native, releases, pending: Vec::new(),
             });
         }
         let mut observed_pending = false;
@@ -423,7 +444,19 @@ mod tests {
             let which = index % 2;
             let serial = index / 2;
             let state = &mut states[which];
+            let producer = &state.producer;
             let wrench = &mut state.wrench;
+            wrench.renderer.poll().unwrap();
+            let mut pending = 0;
+            while pending < state.pending.len() {
+                let (handle, extent, color) = state.pending[pending];
+                if let Some(pixels) = wrench.renderer.poll_readback(handle).unwrap() {
+                    let offset = ((extent.height as usize - 1 - 20) * extent.width as usize + 20) * 4;
+                    assert_eq!(&pixels[offset..offset + 4], &color);
+                    state.pending.remove(pending);
+                } else { pending += 1; }
+            }
+            assert!(state.pending.len() < 8);
             let size = DeviceIntSize::new(257 + if serial / 40 % 2 == 0 { 0 } else { 7 }, 129);
             let replace = serial % 100 == 0;
             let rebuild = serial % 5 == 0 || replace;
@@ -448,7 +481,16 @@ mod tests {
                     ImageFormat::RGBA8,
                     ImageDescriptorFlags::IS_OPAQUE,
                 );
-                let data = ImageData::new(state.color.repeat(width as usize * 7));
+                let bytes = state.color.repeat(width as usize * 7);
+                let data = if which == 0 {
+                    ImageData::new(bytes)
+                } else {
+                    let update = state.native.borrow().as_ref().map_or(false, |image|
+                        image.descriptor().size == descriptor.size && producer.update_image(image, descriptor, &bytes).is_ok());
+                    if !update { *state.native.borrow_mut() = Some(state.producer.create_image(descriptor, &bytes).unwrap()); }
+                    ImageData::External(ExternalImageData { id: ExternalImageId(22), channel_index: 0,
+                        image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D), normalized_uvs: false })
+                };
                 if replace {
                     if serial != 0 {
                         transaction.delete_image(state.image);
@@ -591,6 +633,8 @@ mod tests {
                     }
                 }
                 state.previous = Some(frame.pixels);
+                let handle = wrench.renderer.request_readback(FramebufferIntRect::from_size(FramebufferIntSize::new(size.width, size.height))).unwrap();
+                state.pending.push((handle, size, state.color));
             } else {
                 assert!(frame.pixels.is_empty());
                 state.previous = None;
@@ -609,7 +653,16 @@ mod tests {
                 .collect();
             assert!(values.iter().copied().max().unwrap() < 256 * 1024 * 1024);
             assert!(values.last().unwrap() <= &(values[0] + 32 * 1024 * 1024));
-            states[which].wrench.api.shut_down(true);
+            let state = &mut states[which];
+            for (handle, extent, color) in state.pending.drain(..) {
+                let pixels = state.wrench.renderer.wait_readback(handle).unwrap();
+                let offset = ((extent.height as usize - 1 - 20) * extent.width as usize + 20) * 4;
+                assert_eq!(&pixels[offset..offset + 4], &color);
+            }
+            state.wrench.renderer.poll().unwrap();
+            assert!(!state.releases.borrow().contains(&ExternalImageRelease::Abandoned));
+            if which == 1 { assert!(state.releases.borrow().len() > 100); }
+            state.wrench.api.shut_down(true);
         }
     }
 
@@ -756,7 +809,7 @@ fn run(_: &clap::ArgMatches) -> Result<(), String> {
 }
 
 #[cfg(feature = "hal-vulkan")]
-fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
+pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
     match args.value_of("hal_compositor").unwrap_or("draw") {
         "draw" => Ok(webrender::hal::CompositorConfig::Draw),
         "native" => Ok(crate::hal_compositor::Native::config(webrender::api::units::DeviceIntPoint::new(3, 5)).0),
@@ -778,8 +831,8 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
             validation: args.is_present("hal_validation"),
         });
     }
-    if !args.is_present("headless") {
-        return Err("HAL window presentation is not implemented yet; use --headless".into());
+    if !args.is_present("headless") && args.subcommand_name() != Some("show") {
+        return Err("This HAL command requires --headless".into());
     }
     for option in [
         "software",
@@ -824,6 +877,8 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         return render_png(args, &options, dimensions);
     }
     if command == "show" {
+        if !args.is_present("headless") { return crate::hal_window::run(args, &options, dimensions); }
+        if args.value_of("hal_windows").is_some() { return Err("--hal-windows requires windowed show".into()); }
         use crate::wrench::Wrench;
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
@@ -1010,7 +1065,7 @@ fn render_png(
 }
 
 #[cfg(feature = "hal-vulkan")]
-fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>, path: &std::path::Path,
+pub(crate) fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>, path: &std::path::Path,
             args: Option<&clap::ArgMatches>) -> Result<Box<dyn crate::wrench::WrenchThing<webrender::hal::Renderer>>, String> {
     if path.join("scenes").is_dir() {
         let sequence_id = |name| args.and_then(|args| args.value_of(name)).unwrap_or("1")

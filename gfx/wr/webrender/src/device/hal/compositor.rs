@@ -5,7 +5,7 @@
 use super::{ExternalImageDevice, ExternalImageLease};
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use crate::composite::{CompositeDescriptor, CompositorCapabilities, CompositorInputConfig, CompositorKind, NativeSurfaceOperation, NativeTileId};
-use crate::renderer::hal::FrameCompletion;
+use super::FrameCompletion;
 
 pub struct CompositorTarget {
     pub image: ExternalImageLease,

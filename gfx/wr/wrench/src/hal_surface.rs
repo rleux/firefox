@@ -14,6 +14,8 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub fn run(options: Options) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
     let mut app = Probe { options, window: None, wrench: None, frame: 0,
+        #[cfg(feature = "hal-testing")]
+        failure_index: 0,
         ready_at: None, deadline: Instant::now() + Duration::from_secs(30), error: None };
     event_loop.run_app(&mut app).map_err(|error| error.to_string())?;
     if let Some(wrench) = app.wrench.take() { wrench.api.shut_down(true); drop(wrench); }
@@ -24,6 +26,8 @@ pub fn run(options: Options) -> Result<(), String> {
 
 struct Probe {
     options: Options,
+    #[cfg(feature = "hal-testing")]
+    failure_index: usize,
     window: Option<Rc<Window>>,
     wrench: Option<Wrench<webrender::hal::Renderer>>,
     frame: u32,
@@ -34,6 +38,38 @@ struct Probe {
 
 impl Probe {
     fn draw(&mut self) -> Result<(), String> {
+        #[cfg(feature = "hal-testing")]
+        if self.frame == 1 && std::env::var_os("WR_HAL_SURFACE_FAILURES").is_some() {
+            use webrender::hal::FailurePoint;
+            let points = [FailurePoint::Acquire, FailurePoint::Configure, FailurePoint::Submit, FailurePoint::Record, FailurePoint::Map];
+            if let Some(&point) = points.get(self.failure_index) {
+                let wrench = self.wrench.as_mut().unwrap();
+                let rect = FramebufferIntRect::from_size(FramebufferIntSize::new(128, 96));
+                let pending = wrench.renderer.request_readback(rect)?;
+                if point == FailurePoint::Submit { assert_eq!(wrench.renderer.acquire_surface()?, PresentationStatus::Acquired); }
+                wrench.renderer.inject_failure(point);
+                let result = match point {
+                    FailurePoint::Acquire => wrench.renderer.acquire_surface().map(|_| ()),
+                    FailurePoint::Configure => wrench.renderer.resize_surface([128, 96]),
+                    FailurePoint::Submit => wrench.renderer.present().map(|_| ()),
+                    FailurePoint::Record => wrench.renderer.render().map(|_| ()),
+                    FailurePoint::Map => wrench.renderer.read_pixels_rgba8(rect).map(|_| ()),
+                    _ => unreachable!(),
+                };
+                assert!(result.is_err());
+                assert!(wrench.renderer.is_failed());
+                assert!(wrench.renderer.wait_readback(pending).is_err());
+                assert!(wrench.renderer.render().is_err());
+                let old = self.wrench.take().unwrap();
+                old.api.shut_down(true);
+                drop(old);
+                self.wrench = Some(Wrench::new_hal_for_window(&self.options, DeviceIntSize::new(128, 96), self.window.as_ref().unwrap().clone(), Default::default())?);
+                self.failure_index += 1;
+                self.frame = 0;
+                eprintln!("HAL FAILURE recreated after {point:?}");
+                return Ok(());
+            }
+        }
         let wrench = self.wrench.as_mut().unwrap();
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
