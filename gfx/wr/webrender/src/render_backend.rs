@@ -2274,7 +2274,7 @@ impl RenderBackend {
                 };
                 config.serialize_for_frame(&backend, "backend");
 
-                if !deferred.is_empty() {
+                if !deferred.is_empty() || config.bits.contains(CaptureBits::FRAME) {
                     let msg = ResultMsg::DebugOutput(DebugOutput::SaveCapture(config.clone(), deferred));
                     win.send(msg);
                 }
@@ -2503,6 +2503,14 @@ impl RenderBackend {
                 caches_maybe,
                 &config,
             );
+
+            let resource_updates = win.resource_cache.pending_updates();
+            win.send(ResultMsg::UpdateResources {
+                resource_updates,
+                memory_pressure: false,
+                discard_active_documents: true,
+                trim_upload_buffers: false,
+            });
 
             let msg_load = ResultMsg::DebugOutput(
                 DebugOutput::LoadCapture(config.clone(), plain_externals)

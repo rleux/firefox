@@ -10,7 +10,7 @@ edition = "2018"
 
 [features]
 default = ["static_freetype"]
-hal = ["dep:wgpu-hal", "dep:wgpu-types"]
+hal = ["dep:wgpu-hal", "dep:wgpu-types", "dep:raw-window-handle"]
 hal-vulkan = ["hal", "wgpu-hal/vulkan", "dep:ash"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -33,6 +33,7 @@ webrender_build = { version = "0.0.2", path = "../webrender_build" }
 wgpu-hal = { version = "=30.0.0", optional = true, default-features = false }
 wgpu-types = { version = "=30.0.0", optional = true, default-features = false, features = ["std"] }
 ash = { version = "0.38", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 bincode = "1.0"
 bitflags = { version = "2", features = ["serde"] }
 byteorder = "1.0"

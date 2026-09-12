@@ -15,6 +15,8 @@ pub(super) struct BufferPool<A: hal::Api> {
 }
 
 impl<A: hal::Api> BufferPool<A> {
+    pub fn clear(&self) { self.buffers.borrow_mut().clear(); }
+
     pub fn new(owner: &Rc<Device<A>>) -> Self {
         Self {
             owner: owner.clone(),
@@ -62,6 +64,8 @@ pub(super) struct TexturePool<A: hal::Api> {
 }
 
 impl<A: hal::Api> TexturePool<A> {
+    pub fn clear(&mut self) { self.textures.clear(); }
+
     pub fn new(owner: &Rc<Device<A>>) -> Self {
         Self {
             owner: owner.clone(),

@@ -9,7 +9,9 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
     } else if args.value_of("hal_backend").is_some()
         || args.value_of("hal_adapter").is_some()
         || args.is_present("hal_validation")
-        || args.subcommand_name() == Some("test_hal")
+        || args.value_of("hal_compositor").is_some()
+        || args.value_of("hal_frames").is_some()
+        || matches!(args.subcommand_name(), Some("test_hal" | "test_surface"))
     {
         Err("HAL options and test_hal require --backend hal".into())
     } else {
@@ -26,6 +28,227 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
 
 #[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
+    fn capture_barrier(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>) {
+        wrench.api.flush_scene_builder();
+        let (tx, rx) = webrender::api::channel::unbounded_channel();
+        wrench.api.send_debug_cmd(webrender::render_api::DebugCommand::GetDebugFlags(tx));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            wrench.renderer.update().unwrap();
+            if rx.try_recv().is_ok() { return; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn capture_sequence_replay() {
+        use crate::wrench::{Wrench, WrenchThing, CapturedSequence};
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::DeviceIntSize;
+        use webrender::render_api::CaptureBits;
+        let root = std::env::temp_dir().join(format!("wr-hal-sequence-{}", std::process::id()));
+        let size = DeviceIntSize::new(800, 600);
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        for bits in [CaptureBits::SCENE | CaptureBits::EXTERNAL_RESOURCES, CaptureBits::all()] {
+            let mut original = Wrench::new_hal_with_subpixel(&options, size, false).unwrap();
+            original.api.start_capture_sequence(root.clone(), bits);
+            capture_barrier(&mut original);
+            let mut frames = Vec::new();
+            let mut readers = Vec::new();
+            for source in ["image/texture-rect.yaml", "image/yuv.yaml", "text/shadow-cover-1.yaml"] {
+                let mut reader = YamlFrameReader::new(&std::path::Path::new("reftests").join(source));
+                reader.build_frame(&mut original);
+                original.renderer.prepare_frame(original.document_id).unwrap();
+                frames.push(original.renderer.render_frame().unwrap().pixels);
+                capture_barrier(&mut original);
+                readers.push(reader);
+            }
+            original.api.stop_capture_sequence();
+            capture_barrier(&mut original);
+            original.api.shut_down(true);
+            drop(original);
+            drop(readers);
+            let moved = root.with_extension("moved");
+            std::fs::rename(&root, &moved).unwrap();
+            let mut replay = Wrench::new_hal_with_subpixel(&options, size, false).unwrap();
+            let mut sequence = CapturedSequence::new(moved.clone(), 1, 1);
+            for expected in &frames {
+                sequence.do_frame(&mut replay);
+                replay.renderer.prepare_frame(replay.document_id).unwrap();
+                assert!(&replay.renderer.render_frame().unwrap().pixels == expected, "sequence {bits:?}");
+                <CapturedSequence as WrenchThing<webrender::hal::Renderer>>::next_frame(&mut sequence);
+            }
+            <CapturedSequence as WrenchThing<webrender::hal::Renderer>>::prev_frame(&mut sequence);
+            sequence.do_frame(&mut replay);
+            replay.renderer.prepare_frame(replay.document_id).unwrap();
+            assert!(replay.renderer.render_frame().unwrap().pixels == frames[1]);
+            replay.api.shut_down(true);
+            drop(replay);
+            std::fs::remove_dir_all(moved).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn capture_multiple_documents_and_blob() {
+        use crate::wrench::Wrench;
+        use webrender::api::*;
+        use webrender::api::units::*;
+        use webrender::render_api::{CaptureBits, Transaction};
+        let root = std::env::temp_dir().join(format!("wr-hal-documents-{}", std::process::id()));
+        let size = DeviceIntSize::new(64, 64);
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        let mut original = Wrench::new_hal(&options, size).unwrap();
+        let ids = [original.document_id, original.api.add_document(size)];
+        for (index, id) in ids.iter().copied().enumerate() {
+            let pipeline = PipelineId(0, index as u32);
+            let blob = original.api.generate_blob_image_key();
+            let mut txn = Transaction::new();
+            txn.add_blob_image(blob, ImageDescriptor::new(64, 64, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
+                crate::blob::serialize_blob(if index == 0 { ColorU::new(255, 0, 0, 255) } else { ColorU::new(0, 0, 255, 255) }),
+                DeviceIntRect::from_size(size), Some(32));
+            let mut builder = DisplayListBuilder::new(pipeline);
+            builder.begin(crate::AU_PER_DEV_PX);
+            let rect = LayoutRect::from_size(LayoutSize::new(64.0, 64.0));
+            let info = CommonItemProperties { clip_rect: rect, clip_chain_id: ClipChainId::INVALID,
+                spatial_id: SpatialId::root_scroll_node(pipeline), flags: PrimitiveFlags::default() };
+            builder.push_image(&info, rect, ImageRendering::Pixelated, AlphaType::PremultipliedAlpha, blob.as_image(), ColorF::WHITE);
+            txn.set_root_pipeline(pipeline);
+            txn.set_display_list(Epoch(0), original.api.get_namespace_id(), builder.end());
+            txn.generate_frame(0, true, false, RenderReasons::TESTING);
+            original.api.send_transaction(id, txn);
+        }
+        capture_barrier(&mut original);
+        let mut expected = std::collections::HashMap::new();
+        for id in ids {
+            original.renderer.prepare_frame(id).unwrap();
+            expected.insert(id, original.renderer.render_frame().unwrap().pixels);
+            println!("Captured document {id:?}: {:?}", expected[&id].chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect::<std::collections::BTreeSet<_>>());
+        }
+        assert!(expected[&ids[0]] != expected[&ids[1]]);
+        original.api.save_capture(root.clone(), CaptureBits::all());
+        capture_barrier(&mut original);
+        original.api.shut_down(true);
+        drop(original);
+        let mut replay = Wrench::new_hal(&options, size).unwrap();
+        let documents = replay.api.load_capture(root.clone(), None);
+        assert_eq!(documents.len(), 2);
+        capture_barrier(&mut replay);
+        for document in documents {
+            replay.renderer.prepare_frame(document.document_id).unwrap();
+            assert!(replay.renderer.render_frame().unwrap().pixels == expected[&document.document_id]);
+            let mut txn = Transaction::new();
+            txn.set_root_pipeline(document.root_pipeline_id.unwrap());
+            txn.generate_frame(1, true, false, RenderReasons::TESTING);
+            replay.api.send_transaction(document.document_id, txn);
+            replay.renderer.prepare_frame(document.document_id).unwrap();
+            assert!(replay.renderer.render_frame().unwrap().pixels == expected[&document.document_id]);
+        }
+        replay.api.shut_down(true);
+        drop(replay);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn capture_replay_fresh_renderer() {
+        use crate::wrench::Wrench;
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::*;
+        use webrender::render_api::{CaptureBits, DebugCommand, Transaction};
+        let root = std::env::var_os("WR_CAPTURE_TEST_PATH").map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("wr-hal-capture-{}", std::process::id())));
+        let capture = root.join("current");
+        let moved = root.join("moved");
+        std::fs::create_dir_all(&root).unwrap();
+        let size = DeviceIntSize::new(800, 600);
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        for mode in 0..3 {
+            let config = || match mode {
+                1 => crate::hal_compositor::Native::config(DeviceIntPoint::new(13, 7)).0,
+                2 => crate::hal_compositor::Layer::config(DeviceIntPoint::new(13, 7)).0,
+                _ => webrender::hal::CompositorConfig::Draw,
+            };
+            for source in ["image/texture-rect.yaml", "image/yuv.yaml", "image/yuv-clip.yaml", "text/shadow-cover-1.yaml"] {
+                let mut original = Wrench::new_hal_with_compositor(&options, size, false, None, config()).unwrap();
+                let mut reader = YamlFrameReader::new(&std::path::Path::new("reftests").join(source));
+                reader.build_frame(&mut original);
+                original.renderer.prepare_frame(original.document_id).unwrap();
+                let expected = original.renderer.render_frame().unwrap().pixels;
+                original.api.save_capture(capture.clone(), CaptureBits::all());
+                let (tx, rx) = webrender::api::channel::unbounded_channel();
+                original.api.send_debug_cmd(DebugCommand::GetDebugFlags(tx));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    original.renderer.update().unwrap();
+                    if rx.try_recv().is_ok() { break; }
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+                original.api.flush_scene_builder();
+                original.api.shut_down(true);
+                drop(original);
+                drop(reader);
+                std::fs::rename(&capture, &moved).unwrap();
+                let mut replay = Wrench::new_hal_with_compositor(&options, size, false, None, config()).unwrap();
+                let documents = replay.api.load_capture(moved.clone(), None);
+                assert_eq!(documents.len(), 1);
+                let document = &documents[0];
+                replay.document_id = document.document_id;
+                replay.renderer.prepare_frame(replay.document_id).unwrap();
+                assert!(replay.renderer.render_frame().unwrap().pixels == expected, "built {mode} {source}");
+                let mut txn = Transaction::new();
+                txn.set_root_pipeline(document.root_pipeline_id.unwrap());
+                txn.generate_frame(1, true, false, webrender::api::RenderReasons::TESTING);
+                replay.api.send_transaction(replay.document_id, txn);
+                replay.renderer.prepare_frame(replay.document_id).unwrap();
+                assert!(replay.renderer.render_frame().unwrap().pixels == expected, "rebuilt {mode} {source}");
+                replay.api.shut_down(true);
+                drop(replay);
+                std::fs::remove_dir_all(&moved).unwrap();
+            }
+        }
+        std::fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn compositor_adapters_use_native_targets() {
+        use crate::wrench::{HeadlessTestWindow, Wrench};
+        use webrender::api::units::{DeviceIntPoint, DeviceIntSize};
+        for native in [true, false] {
+            let (config, trace) = if native {
+                crate::hal_compositor::Native::config(DeviceIntPoint::new(13, 7))
+            } else {
+                crate::hal_compositor::Layer::config(DeviceIntPoint::new(13, 7))
+            };
+            let (notifier, rx) = crate::create_notifier();
+            let size = DeviceIntSize::new(800, 600);
+            let mut wrench = Wrench::new_hal_with_compositor(
+                &webrender::hal::Options { validation: true, ..Default::default() }, size, true, Some(notifier), config,
+            ).unwrap();
+            let mut window = HeadlessTestWindow(size);
+            crate::rawtest::RawtestHarness::new(&mut wrench, &mut window, &rx)
+                .run_selected(Some("test_resize_image")).unwrap();
+            wrench.renderer.poll().unwrap();
+            {
+                let trace = trace.borrow();
+                assert!(trace.commits >= 3);
+                assert!(trace.releases > 0);
+                assert_eq!(trace.abandoned, 0);
+                if native {
+                    assert!(trace.updates > 0);
+                    assert!(!trace.binds.is_empty());
+                } else {
+                    assert!(trace.layers >= 3);
+                }
+            }
+            wrench.api.shut_down(true);
+        }
+    }
+
     #[test]
     #[ignore = "Requires a Vulkan ICD and validation layer"]
     fn retained_image_updates_and_resize() {
@@ -533,11 +756,30 @@ fn run(_: &clap::ArgMatches) -> Result<(), String> {
 }
 
 #[cfg(feature = "hal-vulkan")]
+fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
+    match args.value_of("hal_compositor").unwrap_or("draw") {
+        "draw" => Ok(webrender::hal::CompositorConfig::Draw),
+        "native" => Ok(crate::hal_compositor::Native::config(webrender::api::units::DeviceIntPoint::new(3, 5)).0),
+        "layer" => Ok(crate::hal_compositor::Layer::config(webrender::api::units::DeviceIntPoint::new(3, 5)).0),
+        mode => Err(format!("Unsupported HAL compositor {mode}")),
+    }
+}
+
+#[cfg(feature = "hal-vulkan")]
 fn run(args: &clap::ArgMatches) -> Result<(), String> {
     use webrender::hal::{create_vulkan_device, Options, Readback};
 
+    if args.subcommand_name() == Some("test_surface") {
+        if args.is_present("headless") || args.is_present("software") || args.is_present("angle") {
+            return Err("test_surface requires a native Vulkan window".into());
+        }
+        return crate::hal_surface::run(Options {
+            adapter_name: args.value_of("hal_adapter").map(str::to_owned),
+            validation: args.is_present("hal_validation"),
+        });
+    }
     if !args.is_present("headless") {
-        return Err("HAL bootstrap requires --headless".into());
+        return Err("HAL window presentation is not implemented yet; use --headless".into());
     }
     for option in [
         "software",
@@ -549,17 +791,17 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         "use_unoptimized_shaders",
     ] {
         if args.occurrences_of(option) != 0 {
-            return Err(format!("--{option} is incompatible with the HAL bootstrap"));
+            return Err(format!("--{option} is not supported by the HAL command path"));
         }
     }
     let command = args.subcommand_name().unwrap_or("");
-    if !matches!(command, "test_init" | "test_hal" | "png" | "reftest") {
+    if !matches!(command, "test_init" | "test_hal" | "png" | "reftest" | "rawtest" | "test_invalidation" | "show") {
         return Err(format!(
-            "{command:?} is not implemented for HAL yet; use test_init or test_hal"
+            "{command:?} is not implemented for HAL yet"
         ));
     }
     let dimensions = match args.value_of("size") {
-        None if matches!(command, "png" | "reftest") => [1920, 1080],
+        None if matches!(command, "png" | "reftest" | "rawtest" | "test_invalidation" | "show") => [1920, 1080],
         None => [7, 5],
         Some("720p") => [1280, 720],
         Some("1080p") => [1920, 1080],
@@ -581,6 +823,43 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
     if command == "png" {
         return render_png(args, &options, dimensions);
     }
+    if command == "show" {
+        use crate::wrench::Wrench;
+        let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
+        let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
+        println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
+        let show = args.subcommand_matches("show").unwrap();
+        let path = std::path::Path::new(show.value_of("INPUT").unwrap());
+        let mut thing = playback(&mut wrench, path, Some(show))?;
+        let count: usize = args.value_of("hal_frames").unwrap_or("1").parse().map_err(|_| "Invalid HAL frame count")?;
+        if count == 0 { return Err("HAL frame count must be positive".into()); }
+        for _ in 0..count {
+            thing.do_frame(&mut wrench);
+            wrench.renderer.prepare_frame(wrench.document_id)?;
+            wrench.renderer.render()?;
+            wrench.renderer.poll()?;
+            thing.next_frame();
+        }
+        wrench.api.shut_down(true);
+        return Ok(());
+    }
+    if matches!(command, "rawtest" | "test_invalidation") {
+        use crate::wrench::{HeadlessTestWindow, Wrench};
+        let (notifier, rx) = crate::create_notifier();
+        let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
+        let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?)?;
+        println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
+        let mut window = HeadlessTestWindow(size);
+        let result = if command == "rawtest" {
+            let filter = args.subcommand_matches("rawtest").unwrap().value_of("TEST");
+            crate::rawtest::RawtestHarness::new(&mut wrench, &mut window, &rx).run_selected(filter)
+        } else {
+            let failures = crate::test_invalidation::TestHarness::new(&mut wrench, &mut window, &rx).run();
+            if failures == 0 { Ok(()) } else { Err(format!("{failures} HAL invalidation tests failed")) }
+        };
+        wrench.api.shut_down(true);
+        return result;
+    }
     if command == "reftest" {
         use crate::reftest::{ReftestHarness, ReftestOptions};
         use crate::wrench::Wrench;
@@ -588,7 +867,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let size =
             webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench =
-            Wrench::new_hal_with_subpixel(&options, size, !args.is_present("no_subpixel_aa"))?;
+            Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
         println!(
             "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}",
             wrench.renderer.info().backend,
@@ -684,9 +963,10 @@ fn render_png(
     size: [u32; 2],
 ) -> Result<(), String> {
     use crate::wrench::Wrench;
-    use crate::yaml_frame_reader::YamlFrameReader;
     use webrender::api::units::DeviceIntSize;
     use std::convert::TryFrom;
+    let enable_subpixel_aa = !args.is_present("no_subpixel_aa");
+    let compositor = compositor_config(args)?;
     let args = args.subcommand_matches("png").unwrap();
     if args
         .value_of("surface")
@@ -699,7 +979,7 @@ fn render_png(
         i32::try_from(size[1]).map_err(|_| "Invalid height")?,
     );
     let mut wrench =
-        Wrench::new_hal_with_subpixel(options, size, !args.is_present("no_subpixel_aa"))?;
+        Wrench::new_hal_with_compositor(options, size, enable_subpixel_aa, None, compositor)?;
     let info = wrench.renderer.info();
     println!(
         "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}; driver: {} {}",
@@ -710,8 +990,8 @@ fn render_png(
         .value_of("OUTPUT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| input.with_extension("png"));
-    let mut reader = YamlFrameReader::new(&input);
-    reader.build_frame(&mut wrench);
+    let mut reader = playback(&mut wrench, &input, None)?;
+    reader.do_frame(&mut wrench);
     let prepared = wrench.renderer.prepare_frame(wrench.document_id)?;
     println!("HAL prepared WR frame: {prepared:?}");
     let frame = wrench.renderer.render_frame()?;
@@ -727,4 +1007,25 @@ fn render_png(
     );
     wrench.api.shut_down(true);
     Ok(())
+}
+
+#[cfg(feature = "hal-vulkan")]
+fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>, path: &std::path::Path,
+            args: Option<&clap::ArgMatches>) -> Result<Box<dyn crate::wrench::WrenchThing<webrender::hal::Renderer>>, String> {
+    if path.join("scenes").is_dir() {
+        let sequence_id = |name| args.and_then(|args| args.value_of(name)).unwrap_or("1")
+            .parse::<u32>().map_err(|_| format!("Invalid {name}"));
+        Ok(Box::new(crate::wrench::CapturedSequence::new(path.to_owned(), sequence_id("scene-id")?, sequence_id("frame-id")?)))
+    } else if path.is_dir() {
+        let mut documents = wrench.api.load_capture(path.to_owned(), None);
+        if documents.is_empty() { return Err("Capture contains no documents".into()); }
+        let captured = documents.remove(0);
+        wrench.document_id = captured.document_id;
+        Ok(Box::new(captured))
+    } else {
+        Ok(Box::new(match args {
+            Some(args) => crate::yaml_frame_reader::YamlFrameReader::new_from_show_args(args),
+            None => crate::yaml_frame_reader::YamlFrameReader::new(path),
+        }))
+    }
 }

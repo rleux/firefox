@@ -312,6 +312,9 @@ pub struct ResolvedExternalSurface {
     pub image_buffer_kind: ImageBufferKind,
     // Update information for a native surface if it's dirty
     pub update_params: Option<(NativeSurfaceId, DeviceIntSize)>,
+    #[cfg_attr(feature = "capture", serde(skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(feature = "replay", serde(default))]
+    pub native_surface_id: Option<NativeSurfaceId>,
     /// If using external compositing, a user key for the client
     pub external_image_id: Option<ExternalImageId>,
 }
@@ -1245,6 +1248,7 @@ impl CompositeState {
                         },
                     image_buffer_kind,
                     update_params,
+                    native_surface_id: external_surface.native_surface_id,
                     external_image_id: external_surface.external_image_id,
                 });
             },
@@ -1258,6 +1262,7 @@ impl CompositeState {
                     },
                     image_buffer_kind,
                     update_params,
+                    native_surface_id: external_surface.native_surface_id,
                     external_image_id: external_surface.external_image_id,
                 });
             },

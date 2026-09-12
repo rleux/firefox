@@ -3,6 +3,90 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::external::{ExternalImageDevice, NativeImage as ExternalNativeImage, Producer, validate_descriptor};
+
+pub struct VulkanDeviceContext<'a> {
+    pub device: &'a ash::Device,
+    pub instance: &'a ash::Instance,
+    pub physical_device: vk::PhysicalDevice,
+    pub queue: vk::Queue,
+    pub queue_family: u32,
+}
+
+pub struct VulkanImageDescriptor {
+    pub image: vk::Image,
+    pub device: vk::Device,
+    pub queue: vk::Queue,
+    pub queue_family: u32,
+    pub descriptor: api::ImageDescriptor,
+    pub initial_usage: wgt::TextureUses,
+    pub renderable: bool,
+}
+
+struct ImportLifetime(Option<hal::DropCallback>);
+impl Drop for ImportLifetime {
+    fn drop(&mut self) { if let Some(release) = self.0.take() { release(); } }
+}
+
+impl ExternalImageDevice {
+    pub fn vulkan_context(&self) -> Option<VulkanDeviceContext<'_>> {
+        let producer = self.0.as_any().downcast_ref::<Producer<hal::api::Vulkan>>()?;
+        let device = &producer.owner.open.device;
+        Some(VulkanDeviceContext {
+            device: device.raw_device(), instance: device.shared_instance().raw_instance(),
+            physical_device: device.raw_physical_device(), queue: device.raw_queue(),
+            queue_family: device.queue_family_index(),
+        })
+    }
+
+    /// Imports a borrowed image; `release` runs on rejection or after the last HAL reference.
+    ///
+    /// # Safety
+    /// The image and memory must match the descriptor and remain valid until `release`.
+    /// Contents must be initialized unless `initial_usage` is `UNINITIALIZED`.
+    /// Producer work must already be submitted to the specified graphics queue, in
+    /// `initial_usage`. Writes must stop while a renderer lease is active.
+    /// The image must support sampling and copies, plus color attachment use if renderable.
+    pub unsafe fn import_vulkan_image(&self, source: VulkanImageDescriptor, release: hal::DropCallback) -> Result<ExternalNativeImage> {
+        let mut lifetime = ImportLifetime(Some(release));
+        let producer = self.0.as_any().downcast_ref::<Producer<hal::api::Vulkan>>()
+            .ok_or("External image device is not Vulkan")?;
+        let owner = &producer.owner;
+        let device = &owner.open.device;
+        if source.image == vk::Image::null() || source.device != device.raw_device().handle()
+            || source.queue != device.raw_queue() || source.queue_family != device.queue_family_index() {
+            return Err("Vulkan image must belong to this device and graphics queue".into());
+        }
+        validate_descriptor(source.descriptor)?;
+        if source.descriptor.flags.contains(api::ImageDescriptorFlags::ALLOW_MIPMAPS) {
+            return Err("Native Vulkan image import currently requires one mip level".into());
+        }
+        if ![wgt::TextureUses::UNINITIALIZED, wgt::TextureUses::RESOURCE, wgt::TextureUses::COPY_SRC,
+             wgt::TextureUses::COPY_DST, wgt::TextureUses::COLOR_TARGET].contains(&source.initial_usage) {
+            return Err("Unsupported native Vulkan image initial usage".into());
+        }
+        let width = source.descriptor.size.width as u32;
+        let height = source.descriptor.size.height as u32;
+        owner.layout(width, height)?;
+        let format = super::resources::texture_format(source.descriptor.format)?;
+        if !owner.features.contains(format.required_features()) { return Err("Native image format feature is unavailable".into()); }
+        let caps = owner.formats.iter().find(|(candidate, _)| *candidate == format)
+            .ok_or("Unknown native image format")?.1;
+        let mut required = hal::TextureFormatCapabilities::SAMPLED | hal::TextureFormatCapabilities::SAMPLED_LINEAR
+            | hal::TextureFormatCapabilities::COPY_SRC | hal::TextureFormatCapabilities::COPY_DST;
+        if source.renderable {
+            required |= hal::TextureFormatCapabilities::COLOR_ATTACHMENT | hal::TextureFormatCapabilities::COLOR_ATTACHMENT_BLEND;
+        }
+        if !caps.contains(required) { return Err("Unsupported native image format usages".into()); }
+        let mut usage = wgt::TextureUses::RESOURCE | wgt::TextureUses::COPY_SRC | wgt::TextureUses::COPY_DST;
+        if source.renderable { usage |= wgt::TextureUses::COLOR_TARGET; }
+        let descriptor = texture_descriptor(wgt::Extent3d { width, height, depth_or_array_layers: 1 }, format, usage);
+        let raw = device.texture_from_raw(source.image, &descriptor, lifetime.0.take(), hal::vulkan::TextureMemory::External);
+        let texture = super::resources::Texture::from_raw(owner, raw, &descriptor,
+            crate::device::TextureFilter::Linear, source.renderable, source.initial_usage)?;
+        Ok(ExternalNativeImage::new(texture, source.descriptor))
+    }
+}
 use ash::vk;
 use std::ffi::CStr;
 use std::sync::{
@@ -11,6 +95,19 @@ use std::sync::{
 };
 
 pub fn create_vulkan_device(options: &Options) -> Result<Device<hal::api::Vulkan>> {
+    validate_options(options)?;
+    Device::new(options)
+}
+
+pub(crate) fn create_vulkan_device_for_window(options: &Options, window: std::rc::Rc<dyn SurfaceWindow>)
+    -> Result<(Device<hal::api::Vulkan>, super::surface::SurfaceSetup<hal::api::Vulkan>)>
+{
+    validate_options(options)?;
+    let (device, surface) = Device::new_with_window(options, Some(window))?;
+    Ok((device, surface.unwrap()))
+}
+
+fn validate_options(options: &Options) -> Result<()> {
     #[cfg(test)]
     super::validation_logging();
     if options.validation {
@@ -24,7 +121,7 @@ pub fn create_vulkan_device(options: &Options) -> Result<Device<hal::api::Vulkan
             return Err("Requested Vulkan validation layer is unavailable".into());
         }
     }
-    Device::new(options)
+    Ok(())
 }
 
 struct NativeImage<'a> {
@@ -75,6 +172,13 @@ impl Drop for NativeImage<'_> {
 }
 
 impl Device<hal::api::Vulkan> {
+    pub(crate) fn timestamp_valid_bits(&self) -> u32 {
+        let device = &self.open.device;
+        let properties = unsafe { device.shared_instance().raw_instance()
+            .get_physical_device_queue_family_properties(device.raw_physical_device()) };
+        properties[device.queue_family_index() as usize].timestamp_valid_bits
+    }
+
     /// Exercises a borrowed, same-device native image with GPU acquire/release semaphores.
     pub fn test_native_image(&mut self, width: u32, height: u32, color: [u8; 4]) -> Result<()> {
         let layout = self.layout(width, height)?;

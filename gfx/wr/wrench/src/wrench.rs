@@ -134,16 +134,16 @@ impl RenderNotifier for Notifier {
     }
 }
 
-pub trait WrenchThing {
+pub trait WrenchThing<R = webrender::Renderer> {
     fn next_frame(&mut self);
     fn prev_frame(&mut self);
-    fn do_frame(&mut self, _: &mut Wrench) -> u32;
+    fn do_frame(&mut self, _: &mut Wrench<R>) -> u32;
 }
 
-impl WrenchThing for CapturedDocument {
+impl<R> WrenchThing<R> for CapturedDocument {
     fn next_frame(&mut self) {}
     fn prev_frame(&mut self) {}
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         if let Some(root_pipeline_id) = self.root_pipeline_id.take() {
             // skip the first frame - to not overwrite the loaded one
             let mut txn = Transaction::new();
@@ -197,7 +197,7 @@ impl CapturedSequence {
     }
 }
 
-impl WrenchThing for CapturedSequence {
+impl<R> WrenchThing<R> for CapturedSequence {
     fn next_frame(&mut self) {
         if self.frame + 1 < self.frame_set.len() {
             self.frame += 1;
@@ -210,7 +210,7 @@ impl WrenchThing for CapturedSequence {
         }
     }
 
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         let mut documents = wrench.api.load_capture(self.root.clone(), Some(self.frame_set[self.frame]));
         println!("loaded {:?} from {:?}",
             documents.iter().map(|cd| cd.document_id).collect::<Vec<_>>(),
@@ -221,9 +221,34 @@ impl WrenchThing for CapturedSequence {
     }
 }
 
+pub trait TestWindow {
+    fn get_inner_size(&self) -> DeviceIntSize;
+    fn swap_buffers(&self);
+}
+
+impl TestWindow for WindowWrapper {
+    fn get_inner_size(&self) -> DeviceIntSize { self.get_inner_size() }
+    fn swap_buffers(&self) { self.swap_buffers(); }
+}
+
+#[cfg(feature = "hal-vulkan")]
+pub struct HeadlessTestWindow(pub DeviceIntSize);
+
+#[cfg(feature = "hal-vulkan")]
+impl TestWindow for HeadlessTestWindow {
+    fn get_inner_size(&self) -> DeviceIntSize { self.0 }
+    fn swap_buffers(&self) {}
+}
+
 pub trait SceneRenderer {
     fn gl_device(&self) -> Option<&webrender::Device>;
     fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String>;
+    #[cfg(feature = "hal-vulkan")]
+    fn hal_image_device(&self) -> Option<webrender::hal::ExternalImageDevice> { None }
+    #[cfg(feature = "hal-vulkan")]
+    fn install_hal_external_images(&mut self, _: Box<dyn webrender::hal::ExternalImageProvider>) -> Result<(), String> {
+        Err("HAL external images are unavailable on this renderer".into())
+    }
 }
 
 impl SceneRenderer for webrender::Renderer {
@@ -239,6 +264,10 @@ impl SceneRenderer for webrender::hal::Renderer {
     fn gl_device(&self) -> Option<&webrender::Device> { None }
     fn install_external_images(&mut self, _: Box<dyn ExternalImageHandler>) -> Result<(), String> {
         Err("GL external images are unavailable on HAL".into())
+    }
+    fn hal_image_device(&self) -> Option<webrender::hal::ExternalImageDevice> { Some(self.external_image_device()) }
+    fn install_hal_external_images(&mut self, provider: Box<dyn webrender::hal::ExternalImageProvider>) -> Result<(), String> {
+        self.set_external_image_provider(provider)
     }
 }
 
@@ -478,6 +507,8 @@ impl Wrench {
 }
 
 impl<R> Wrench<R> {
+    pub(crate) fn gl_context(&self) -> Option<&dyn gl::Gl> { self.gl.as_deref() }
+
     pub fn gl(&self) -> &dyn gl::Gl {
         self.gl.as_deref().expect("GL context is unavailable for the selected backend")
     }
@@ -848,6 +879,27 @@ impl Wrench<webrender::hal::Renderer> {
     }
 
     pub fn new_hal_with_subpixel(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool) -> Result<Self, String> {
+        Self::new_hal_with_notifier(hal_options, size, enable_subpixel_aa, None)
+    }
+
+    pub fn new_hal_with_notifier(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>) -> Result<Self, String> {
+        Self::new_hal_with_compositor(hal_options, size, enable_subpixel_aa, notifier, webrender::hal::CompositorConfig::Draw)
+    }
+
+    pub fn new_hal_with_compositor(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig) -> Result<Self, String> {
+        Self::new_hal_target(hal_options, size, enable_subpixel_aa, notifier, compositor, None)
+    }
+
+    pub fn new_hal_for_window(hal_options: &webrender::hal::Options, size: DeviceIntSize,
+        window: std::rc::Rc<dyn webrender::hal::SurfaceWindow>, surface_options: webrender::hal::SurfaceOptions) -> Result<Self, String>
+    {
+        Self::new_hal_target(hal_options, size, true, None, webrender::hal::CompositorConfig::Draw, Some((window, surface_options)))
+    }
+
+    fn new_hal_target(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool,
+        notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig,
+        window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
+    {
         if size.width <= 0 || size.height <= 0 { return Err("Invalid HAL window dimensions".into()); }
         let callbacks = Arc::new(Mutex::new(blob::BlobCallbacks::new()));
         let debug_flags = DebugFlags::ECHO_DRIVER_MESSAGES | DebugFlags::MISSING_SNAPSHOT_PINK;
@@ -861,8 +913,12 @@ impl Wrench<webrender::hal::Renderer> {
             ..Default::default()
         };
         let (timing_sender, timing_receiver) = chase_lev::deque();
-        let notifier = Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false)))));
-        let (renderer, sender) = webrender::hal::create_vulkan_renderer(hal_options, options, notifier)?;
+        let notifier = notifier.unwrap_or_else(|| Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false))))));
+        let (renderer, sender) = match window {
+            Some((window, surface_options)) => webrender::hal::create_vulkan_renderer_for_window(hal_options, options,
+                notifier, compositor, window, [size.width as u32, size.height as u32], surface_options)?,
+            None => webrender::hal::create_vulkan_renderer_with_compositor(hal_options, options, notifier, compositor)?,
+        };
         let info = renderer.info();
         let renderer_description = format!("{} - {:?} {}", info.name, info.backend, info.driver_info);
         let api = sender.create_api();
