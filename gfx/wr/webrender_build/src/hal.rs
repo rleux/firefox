@@ -6,6 +6,8 @@ use crate::shader::{build_shader_strings, shader_source_from_file, ShaderVersion
 use crate::shader_features::get_hal_shader_features;
 use regex::Regex;
 mod reflection;
+#[cfg(feature = "hal-translate")]
+pub mod translate;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;

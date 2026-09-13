@@ -178,7 +178,9 @@ if not use_hal:
 #           cause 1.0 / 255.0 pixel differences in a subsequent test. For now, we
 #           run tests with no-scissor mode, which ensures a complete target clear
 #           between test runs. But we should investigate this further...
-headless_flags = ['--headless'] if use_hal else ['--no-scissor', '--headless']
+headless_flags = ['--headless']
+if not use_hal and '--software' not in sys.argv[1:]:
+    headless_flags.insert(0, '--no-scissor')
 cmd = dbg_cmd + [target_folder + 'wrench'] + headless_flags + sys.argv[1:]
 print('Running: `' + ' '.join(cmd) + '`')
 subprocess.check_call(cmd, stderr=subprocess.STDOUT)

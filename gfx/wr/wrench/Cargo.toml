@@ -47,6 +47,7 @@ core-foundation = "0.9"
 default = [ "env_logger" ]
 hal-testing = ["hal-vulkan", "webrender/hal-testing"]
 hal-vulkan = ["webrender/hal-vulkan"]
+hal-naga = ["hal-vulkan", "webrender/hal-naga"]
 headless = [ "osmesa-sys", "osmesa-src" ]
 software = [ "swgl" ]
 debugger = [ "webrender/debugger" ]
