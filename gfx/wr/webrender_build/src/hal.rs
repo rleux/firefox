@@ -167,8 +167,10 @@ pub fn build(
     let mut catalog: Vec<_> = get_hal_shader_features().into_iter().collect();
     for (name, variants) in &mut catalog {
         if matches!(*name, "ps_quad_textured" | "ps_quad_repeat" | "composite" | "cs_scale") {
-            let legacy: Vec<_> = variants.iter().filter(|features| features.as_str() == "TEXTURE_2D")
-                .map(|features| format!("{features},HAL_LEGACY_BRILINEAR")).collect();
+            let legacy: Vec<_> = variants.iter().filter(|features|
+                features.as_str() == "TEXTURE_2D" || (*name == "ps_quad_repeat" && features.is_empty()))
+                .map(|features| if features.is_empty() { "HAL_LEGACY_BRILINEAR".into() }
+                    else { format!("{features},HAL_LEGACY_BRILINEAR") }).collect();
             variants.extend(legacy);
         }
     }
@@ -177,7 +179,8 @@ pub fn build(
     let mut textures = BTreeMap::new();
     for (name, variants) in catalog {
         for features in variants {
-            let defines: Vec<_> = features.split(',').filter(|s| !s.is_empty()).collect();
+            let mut defines: Vec<_> = features.split(',').filter(|s| !s.is_empty()).collect();
+            if name.starts_with("ps_quad") { defines.push("HAL_AA_GRID"); }
             let (vertex, fragment, _, _) =
                 build_shader_strings(ShaderVersion::Gl, &defines, name, &|file| {
                     Cow::Owned(shader_source_from_file(&res.join(format!("{file}.glsl"))))
@@ -280,7 +283,7 @@ pub fn build(
         let mut digest = DefaultHasher::new();
         (name, &features, "vulkan1.1", &textures).hash(&mut digest);
         for (index, (path, source)) in stages.into_iter().enumerate() {
-            let legacy = index == 1 && features.ends_with(",HAL_LEGACY_BRILINEAR");
+            let legacy = index == 1 && features.split(',').any(|feature| feature == "HAL_LEGACY_BRILINEAR");
             let source = if legacy {
                 Regex::new(r"\btexture\s*\(\s*sColor0\s*,").unwrap()
                     .replace_all(&source, "wr_legacy_sample(").into_owned()

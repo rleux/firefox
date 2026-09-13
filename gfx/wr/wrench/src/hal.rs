@@ -44,6 +44,46 @@ mod tests {
     }
 
     #[test]
+    fn compositor_clip_option_parsing() {
+        for (value, expected) in [(None, Ok(None)), (Some("true"), Ok(Some(true))), (Some("false"), Ok(Some(false))), (Some("invalid"), Err(()))] {
+            let app = clap::App::new("test").arg(clap::Arg::with_name("compositor_clips").long("compositor-clips").takes_value(true));
+            let mut arguments = vec!["test"];
+            if let Some(value) = value { arguments.extend(["--compositor-clips", value]); }
+            let matches = app.get_matches_from(arguments);
+            assert_eq!(super::compositor_clips_override(&matches).map_err(|_| ()), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn compositor_clip_override_survives_harness_default() {
+        use crate::wrench::Wrench;
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::DeviceIntSize;
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        let render = |enabled, override_default| {
+            let mut wrench = Wrench::new_hal(&options, DeviceIntSize::new(320, 320)).unwrap();
+            if override_default {
+                wrench.set_compositor_clips_override(enabled);
+                wrench.set_compositor_clips_enabled(!enabled);
+            } else {
+                wrench.set_compositor_clips_enabled(enabled);
+            }
+            let mut reader = YamlFrameReader::new(std::path::Path::new("reftests/clip/sc-mask-with-blur.yaml"));
+            reader.build_frame(&mut wrench);
+            wrench.renderer.prepare_frame(wrench.document_id).unwrap();
+            let frame = wrench.renderer.render_frame().unwrap();
+            wrench.api.shut_down(true);
+            (frame.pixels, frame.stats.wr_draw_calls, frame.stats.color_targets)
+        };
+        let enabled = render(true, false);
+        let disabled = render(false, false);
+        assert!(enabled != disabled);
+        assert!(render(true, true) == enabled);
+        assert!(render(false, true) == disabled);
+    }
+
+    #[test]
     #[ignore = "Requires Vulkan and validation"]
     fn filtering_profiles_and_capture() {
         use crate::wrench::Wrench;
@@ -95,6 +135,71 @@ mod tests {
         }
         for wrench in renderers { wrench.api.shut_down(true); }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn repeated_mipmaps_keep_profiles_isolated() {
+        use crate::wrench::Wrench;
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::DeviceIntSize;
+        use webrender::hal::Filtering;
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        let mut renderers: Vec<_> = [Filtering::Standard, Filtering::LegacyBrilinear].iter().map(|policy| {
+            let mut wrench = Wrench::new_hal(&options, DeviceIntSize::new(320, 224)).unwrap();
+            wrench.renderer.configure_filtering(*policy).unwrap();
+            wrench
+        }).collect();
+        for mipmaps in [false, true] {
+            let mut outputs = Vec::new();
+            for wrench in &mut renderers {
+                let mut reader = YamlFrameReader::new(std::path::Path::new("reftests/hal/repeat-mipmaps.yaml"));
+                reader.allow_mipmaps(mipmaps);
+                reader.build_frame(wrench);
+                wrench.renderer.prepare_frame(wrench.document_id).unwrap();
+                let frame = wrench.renderer.render_frame().unwrap();
+                assert!(frame.pixels.chunks_exact(4).any(|p| p != [255, 255, 255, 255]));
+                assert!(wrench.renderer.render_frame().unwrap().pixels == frame.pixels);
+                outputs.push(frame.pixels);
+                reader.deinit(wrench);
+            }
+            assert_eq!(outputs[0] != outputs[1], mipmaps);
+        }
+        for wrench in renderers { wrench.api.shut_down(true); }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn aa_subdivision_joins_have_coverage() {
+        use crate::wrench::Wrench;
+        use crate::yaml_frame_reader::YamlFrameReader;
+        use webrender::api::units::DeviceIntSize;
+        use webrender::hal::Filtering;
+        let size = DeviceIntSize::new(1920, 1080);
+        let options = webrender::hal::Options { validation: true, ..Default::default() };
+        for filtering in [Filtering::Standard, Filtering::LegacyBrilinear] {
+            let mut wrench = Wrench::new_hal(&options, size).unwrap();
+            wrench.renderer.configure_filtering(filtering).unwrap();
+            for (scene, probes) in [
+                ("rotated-clip", &[(173usize, 126usize, [0u8, 0, 255, 255])][..]),
+                ("perspective-border-radius", &[(283, 182, [0, 0, 255, 255]), (424, 313, [0, 0, 255, 255])][..]),
+                ("perspective", &[(966, 308, [255, 118, 118, 255])][..]),
+                ("near-plane-clip", &[(168, 70, [191, 64, 64, 255]), (643, 394, [255, 127, 127, 255])][..]),
+            ] {
+                let path = std::path::Path::new("reftests/transforms").join(format!("{scene}.yaml"));
+                let mut reader = YamlFrameReader::new(&path);
+                reader.build_frame(&mut wrench);
+                wrench.renderer.prepare_frame(wrench.document_id).unwrap();
+                let frame = wrench.renderer.render_frame().unwrap();
+                for (x, y, expected) in probes {
+                    let offset = (y * size.width as usize + x) * 4;
+                    let actual = &frame.pixels[offset..offset + 4];
+                    assert!(actual.iter().zip(expected).all(|(a, b)| a.abs_diff(*b) <= 1),
+                        "{} {:?} ({}, {}): {:?} != {:?}", scene, filtering, x, y, actual, expected);
+                }
+            }
+            wrench.api.shut_down(true);
+        }
     }
 
     #[test]
@@ -416,9 +521,9 @@ mod tests {
         use crate::wrench::Wrench;
         use webrender::api::*;
         use webrender::api::units::*;
-        use webrender::render_api::{Transaction, DebugCommand, ClearCache};
+        use webrender::render_api::{Transaction, DebugCommand, ClearCache, CaptureBits};
         use std::{rc::Rc, cell::RefCell};
-        use webrender::hal::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageSource, ExternalImageRelease, NativeImage, ReadbackHandle};
+        use webrender::hal::{Filtering, ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageSource, ExternalImageRelease, NativeImage, ReadbackHandle};
         struct Provider { current: Rc<RefCell<Option<NativeImage>>>, releases: Rc<RefCell<Vec<ExternalImageRelease>>> }
         impl ExternalImageProvider for Provider {
             fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease, String> {
@@ -432,6 +537,8 @@ mod tests {
         struct State {
             wrench: Wrench<webrender::hal::Renderer>,
             image: ImageKey,
+            mip_image: ImageKey,
+            mip_color: [u8; 4],
             font: FontInstanceKey,
             glyphs: Vec<u32>,
             color: [u8; 4],
@@ -439,10 +546,10 @@ mod tests {
             producer: ExternalImageDevice,
             native: Rc<RefCell<Option<NativeImage>>>,
             releases: Rc<RefCell<Vec<ExternalImageRelease>>>,
-            pending: Vec<(ReadbackHandle, DeviceIntSize, [u8; 4])>,
+            pending: Vec<(ReadbackHandle, DeviceIntSize, [u8; 4], [u8; 4])>,
         }
         let mut states = Vec::new();
-        for _ in 0..2 {
+        for policy in [Filtering::Standard, Filtering::LegacyBrilinear] {
             let mut wrench = Wrench::new_hal(
                 &webrender::hal::Options {
                     validation: true,
@@ -451,6 +558,8 @@ mod tests {
                 DeviceIntSize::new(257, 129),
             )
             .unwrap();
+            wrench.renderer.configure_filtering(policy).unwrap();
+            println!("HAL_STRESS_PROFILE {:?}", policy);
             let font_key = wrench.font_key_from_bytes(
                 std::fs::read(
                     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -478,6 +587,10 @@ mod tests {
                 None,
                 Vec::new(),
             );
+            let mip_image = wrench.api.generate_image_key();
+            transaction.add_image(mip_image,
+                ImageDescriptor::new(640, 640, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE | ImageDescriptorFlags::ALLOW_MIPMAPS),
+                ImageData::new([255, 255, 0, 255].repeat(640*640)), None);
             wrench.api.send_transaction(wrench.document_id, transaction);
             let image = wrench.api.generate_image_key();
             let producer = wrench.renderer.external_image_device();
@@ -487,6 +600,8 @@ mod tests {
             states.push(State {
                 wrench,
                 image,
+                mip_image,
+                mip_color: [255, 255, 0, 255],
                 font,
                 glyphs,
                 color: [255, 0, 0, 255],
@@ -504,10 +619,12 @@ mod tests {
             wrench.renderer.poll().unwrap();
             let mut pending = 0;
             while pending < state.pending.len() {
-                let (handle, extent, color) = state.pending[pending];
+                let (handle, extent, color, mip_color) = state.pending[pending];
                 if let Some(pixels) = wrench.renderer.poll_readback(handle).unwrap() {
                     let offset = ((extent.height as usize - 1 - 20) * extent.width as usize + 20) * 4;
                     assert_eq!(&pixels[offset..offset + 4], &color);
+                    let offset = ((extent.height as usize - 1 - 12) * extent.width as usize + 248) * 4;
+                    assert_eq!(&pixels[offset..offset + 4], &mip_color);
                     state.pending.remove(pending);
                 } else { pending += 1; }
             }
@@ -518,6 +635,12 @@ mod tests {
             let update = serial % 4 != 0 || replace;
             let present = serial % 31 != 0;
             let mut transaction = Transaction::new();
+            if serial % 40 == 0 {
+                state.mip_color = if serial / 40 % 2 == 0 { [255, 255, 0, 255] } else { [0, 255, 255, 255] };
+                transaction.update_image(state.mip_image,
+                    ImageDescriptor::new(640, 640, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE | ImageDescriptorFlags::ALLOW_MIPMAPS),
+                    ImageData::new(state.mip_color.repeat(640*640)), &DirtyRect::All);
+            }
             if serial % 100 == 99 {
                 wrench
                     .api
@@ -593,6 +716,8 @@ mod tests {
                     state.image,
                     ColorF::WHITE,
                 );
+                builder.push_image(&common, rect(240.0, 4.0, 16.0, 16.0), ImageRendering::Auto,
+                    AlphaType::PremultipliedAlpha, state.mip_image, ColorF::WHITE);
                 builder.push_rect(
                     &common,
                     rect(170.0, 13.0, 60.0, 70.0),
@@ -681,6 +806,7 @@ mod tests {
                 };
                 assert_eq!(pixel(20, 20), state.color, "frame {index} serial {serial}");
                 assert_eq!(pixel(180, 30), [0, 0, 255, 255]);
+                assert_eq!(pixel(248, 12), state.mip_color);
                 assert_eq!(pixel(250, 120), [255, 255, 255, 255]);
                 if !update && !rebuild {
                     if let Some(previous) = &state.previous {
@@ -689,7 +815,7 @@ mod tests {
                 }
                 state.previous = Some(frame.pixels);
                 let handle = wrench.renderer.request_readback(FramebufferIntRect::from_size(FramebufferIntSize::new(size.width, size.height))).unwrap();
-                state.pending.push((handle, size, state.color));
+                state.pending.push((handle, size, state.color, state.mip_color));
             } else {
                 assert!(frame.pixels.is_empty());
                 state.previous = None;
@@ -700,6 +826,7 @@ mod tests {
             }
         }
         assert!(observed_pending);
+        let capture_root = std::env::temp_dir().join(format!("wr-hal-mixed-stress-{}", std::process::id()));
         for which in 0..2 {
             let values: Vec<_> = samples
                 .iter()
@@ -709,16 +836,32 @@ mod tests {
             assert!(values.iter().copied().max().unwrap() < 256 * 1024 * 1024);
             assert!(values.last().unwrap() <= &(values[0] + 32 * 1024 * 1024));
             let state = &mut states[which];
-            for (handle, extent, color) in state.pending.drain(..) {
+            for (handle, extent, color, mip_color) in state.pending.drain(..) {
                 let pixels = state.wrench.renderer.wait_readback(handle).unwrap();
                 let offset = ((extent.height as usize - 1 - 20) * extent.width as usize + 20) * 4;
                 assert_eq!(&pixels[offset..offset + 4], &color);
+                let offset = ((extent.height as usize - 1 - 12) * extent.width as usize + 248) * 4;
+                assert_eq!(&pixels[offset..offset + 4], &mip_color);
             }
             state.wrench.renderer.poll().unwrap();
             assert!(!state.releases.borrow().contains(&ExternalImageRelease::Abandoned));
             if which == 1 { assert!(state.releases.borrow().len() > 100); }
+            let policy = state.wrench.renderer.filtering();
+            let capture = capture_root.join(policy.name());
+            state.wrench.api.save_capture(capture.clone(), CaptureBits::all());
+            capture_barrier(&mut state.wrench);
+            let expected = state.previous.as_ref().unwrap();
+            let size = DeviceIntSize::new((expected.len() / (129*4)) as i32, 129);
+            let mut replay = Wrench::new_hal(&webrender::hal::Options { validation: true, ..Default::default() }, size).unwrap();
+            replay.renderer.configure_filtering(policy).unwrap();
+            let documents = replay.api.load_capture(capture, None);
+            assert_eq!(documents.len(), 1);
+            replay.renderer.prepare_frame(documents[0].document_id).unwrap();
+            assert!(&replay.renderer.render_frame().unwrap().pixels == expected);
+            replay.api.shut_down(true);
             state.wrench.api.shut_down(true);
         }
+        std::fs::remove_dir_all(capture_root).unwrap();
     }
 
     #[test]
@@ -873,6 +1016,16 @@ pub(crate) fn filtering(args: &clap::ArgMatches) -> webrender::hal::Filtering {
 }
 
 #[cfg(feature = "hal-vulkan")]
+pub(crate) fn compositor_clips_override(args: &clap::ArgMatches) -> Result<Option<bool>, String> {
+    match args.value_of("compositor_clips") {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(value) => Err(format!("Unexpected --compositor-clips value {value}")),
+    }
+}
+
+#[cfg(feature = "hal-vulkan")]
 pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
     match args.value_of("hal_compositor").unwrap_or("draw") {
         "draw" => Ok(webrender::hal::CompositorConfig::Draw),
@@ -952,6 +1105,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
         wrench.renderer.configure_filtering(filtering(args))?;
+        if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
         println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
         let show = args.subcommand_matches("show").unwrap();
         let path = std::path::Path::new(show.value_of("INPUT").unwrap());
@@ -974,6 +1128,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?)?;
         wrench.renderer.configure_filtering(filtering(args))?;
+        if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
         println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
         let mut window = HeadlessTestWindow(size);
         let result = if command == "rawtest" {
@@ -995,6 +1150,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let mut wrench =
             Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
         wrench.renderer.configure_filtering(filtering(args))?;
+        if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
         println!("HAL filtering: {}", wrench.renderer.filtering().name());
         println!(
             "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}",
@@ -1096,6 +1252,7 @@ fn render_png(
     let enable_subpixel_aa = !args.is_present("no_subpixel_aa");
     let compositor = compositor_config(args)?;
     let filtering = filtering(args);
+    let compositor_clips = compositor_clips_override(args)?;
     let args = args.subcommand_matches("png").unwrap();
     if args
         .value_of("surface")
@@ -1110,6 +1267,7 @@ fn render_png(
     let mut wrench =
         Wrench::new_hal_with_compositor(options, size, enable_subpixel_aa, None, compositor)?;
     wrench.renderer.configure_filtering(filtering)?;
+    if let Some(enabled) = compositor_clips { wrench.set_compositor_clips_override(enabled); }
     let info = wrench.renderer.info();
     println!(
         "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}; driver: {} {}",
