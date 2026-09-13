@@ -95,6 +95,40 @@ enum Shader {
     LegacyBrilinear(&'static str, &'static str),
 }
 
+// Match vertices at AA strip joins to prevent subpixel rasterization gaps.
+fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
+    let is_quad = match shader {
+        Shader::Quad => true,
+        Shader::Other(name, _) | Shader::LegacyBrilinear(name, _) => {
+            name.starts_with("ps_quad_") && name != "ps_quad_mask"
+        }
+        _ => false,
+    };
+    if !is_quad {
+        return input.to_vec();
+    }
+    assert_eq!(input.len() % 16, 0);
+    let mut output = Vec::with_capacity(input.len());
+    for instance in input.chunks_exact(16) {
+        let word = u32::from_ne_bytes(instance[8..12].try_into().unwrap());
+        let part = (word >> 8) & 255;
+        if (word >> 24) & 8 != 0 && (part == 1 || part == 3) {
+            for replacement in [if part == 1 { 6 } else { 8 }, part, if part == 1 { 7 } else { 9 }] {
+                if replacement != part {
+                    let edge = if replacement == 6 || replacement == 8 { 2 } else { 8 };
+                    if (word >> 16) & edge == 0 { continue; }
+                }
+                output.extend_from_slice(&instance[..8]);
+                output.extend_from_slice(&((word & !0xff00) | (replacement << 8)).to_ne_bytes());
+                output.extend_from_slice(&instance[12..]);
+            }
+        } else {
+            output.extend_from_slice(instance);
+        }
+    }
+    output
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
     shader: Shader,
@@ -197,6 +231,8 @@ struct Descriptor<A: hal::Api> {
 
 pub(crate) struct FrameRenderer<A: hal::Api> {
     pub(crate) filtering: Filtering,
+    #[cfg(test)]
+    projection_override: Option<[f32; 16]>,
     owner: Rc<Device<A>>,
     textures: HashMap<CacheTextureId, Rc<Texture<A>>>,
     pipelines: HashMap<PipelineKey, Rc<Pipeline<A>>>,
@@ -306,6 +342,8 @@ impl<A: hal::Api> FrameRenderer<A> {
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
         Ok(Self {
             filtering: Filtering::Standard,
+            #[cfg(test)]
+            projection_override: None,
             owner,
             textures: HashMap::new(),
             pipelines: HashMap::new(),
@@ -668,12 +706,13 @@ impl<A: hal::Api> FrameRenderer<A> {
         textures: &BatchTextures,
         scissor: DeviceIntRect,
     ) -> Result<Draw<A>> {
+        let packed = pack_instances(shader, bytes(instances));
         Ok(Draw {
             shader,
             blend,
             depth: 0,
-            count: u32::try_from(instances.len()).map_err(|_| "Too many HAL instances")?,
-            instances: bytes(instances).to_vec(),
+            count: u32::try_from(packed.len() / T::SIZE).map_err(|_| "Too many HAL instances")?,
+            instances: packed,
             textures: self.batch_textures(textures)?,
             filter: None,
             clear_color: None,
@@ -1135,7 +1174,8 @@ impl<A: hal::Api> FrameRenderer<A> {
         shaders::SHADERS
             .iter()
             .find(|entry| entry.name == name && if matches!(shader, Shader::LegacyBrilinear(..)) {
-                entry.features.strip_suffix(",HAL_LEGACY_BRILINEAR") == Some(features)
+                (features.is_empty() && entry.features == "HAL_LEGACY_BRILINEAR")
+                    || entry.features.strip_suffix(",HAL_LEGACY_BRILINEAR") == Some(features)
             } else { entry.features == features })
             .unwrap()
     }
@@ -1483,6 +1523,8 @@ impl<A: hal::Api> FrameRenderer<A> {
             depth_ids / depth_span,
             1.0,
         ];
+        #[cfg(test)]
+        let matrix = self.projection_override.unwrap_or(matrix);
         let matrix_bytes: Vec<_> = matrix.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let matrix_key = matrix.map(f32::to_bits);
         let uniform = if let Some(buffer) = self.uniforms.get(&matrix_key) {
@@ -1853,6 +1895,7 @@ impl<A: hal::Api> FrameRenderer<A> {
                     BlendMode::PlusLighter => 8,
                     mode => return Err(format!("Unsupported HAL blend {mode:?}")),
                 };
+                let packed = pack_instances(shader, bytes(&batch.instances));
                 draws.push(Draw {
                     shader,
                     blend,
@@ -1863,8 +1906,8 @@ impl<A: hal::Api> FrameRenderer<A> {
                     } else {
                         2
                     },
-                    count: batch.instances.len() as u32,
-                    instances: bytes(&batch.instances).to_vec(),
+                    count: u32::try_from(packed.len() / 16).map_err(|_| "Too many HAL instances")?,
+                    instances: packed,
                     textures: self.batch_textures(&batch.key.textures)?,
                     filter: None,
                     clear_color: None,
@@ -2873,6 +2916,36 @@ mod shader_tests {
 
     #[test]
     #[ignore = "Requires Vulkan"]
+    fn blend_input_precision() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, true).unwrap();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
+        for (color, background) in [
+            (ColorF::new(0.10018382221460342, 0.06511948257684708, 0.00834865216165781, 0.10686274617910385), [251u8, 212, 46, 255]),
+            (ColorF::new(0.3471840023994446, 0.23284552991390228, 0.04814836010336876, 0.36237290501594543), [253, 221, 48, 255]),
+            (ColorF::new(0.17377522587776184, 0.11590474098920822, 0.02215271070599556, 0.18144430220127106), [253, 224, 48, 255]),
+            (ColorF::new(0.13054342567920685, 0.08800264447927475, 0.01832490786910057, 0.1356818675994873), [253, 224, 48, 255]),
+            (ColorF::new(0.5, 0.24901962280273438, 0.5, 0.5), [0, 128, 0, 255]),
+            (ColorF::new(0.5, 0.24901960790157318, 0.5, 0.5), [0, 128, 0, 255]),
+        ] {
+            target.upload_recorded(&renderer.owner, &renderer.submissions, rect, &background.repeat(16), None, 0, None).unwrap();
+            let mut draw = renderer.clear(rect, color);
+            draw.clear_color = None;
+            draw.blend = 1;
+            renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
+            let data = pixels(&renderer, &target);
+            for ((actual, channel), backdrop) in data[..3].iter().zip([color.r, color.g, color.b]).zip(background) {
+                let ideal = (channel * 255.0 + (1.0 - color.a) * backdrop as f32).clamp(0.0, 255.0);
+                assert!((*actual as f32 - ideal).abs() <= 2.0);
+            }
+            println!("BLEND_INPUT {:?} {:?} {:?}", color, background, &data[..4]);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
     fn unorm_sample_precision() {
         let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
         let mut renderer = FrameRenderer::new(owner).unwrap();
@@ -2997,6 +3070,91 @@ mod shader_tests {
             texture.upload_recorded(&renderer.owner, &renderer.submissions, rect(7, 5), &data, None, 0, None).unwrap();
             assert_eq!(pixels(&renderer, &texture), data);
             assert_eq!(texture.mip_count, 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn transformed_sampler_profiles() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let source = Texture::new(&renderer.owner, 256, 256, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Trilinear, true).unwrap();
+        for level in 0..source.mip_count {
+            let view = source.mip_view(level).unwrap();
+            let rect = DeviceIntRect::from_size(DeviceIntSize::new(view.size.width as i32, view.size.height as i32));
+            view.upload_recorded(&renderer.owner, &renderer.submissions, rect,
+                &[(level * 28) as u8, 0, 0, 255].repeat((view.size.width * view.size.height) as usize), None, 0, None).unwrap();
+        }
+        let target = Texture::new(&renderer.owner, 64, 64, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, true).unwrap();
+        let full = DeviceIntRect::from_size(DeviceIntSize::new(64, 64));
+        let target_rect = DeviceRect::new(DevicePoint::new(16.0, 16.0), DevicePoint::new(48.0, 48.0));
+        let c = std::f32::consts::FRAC_1_SQRT_2;
+        for policy in [Filtering::Standard, Filtering::LegacyBrilinear] {
+            renderer.filtering = policy;
+            for (name, transform, uv, legacy) in [
+                ("identity", [1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 64.0, 64.0], 28),
+                ("rotate45", [c, -c, c, c], [0.0, 0.0, 64.0, 64.0], 14),
+                ("rotate90", [0.0, -1.0, 1.0, 0.0], [0.0, 0.0, 64.0, 64.0], 28),
+                ("shear", [1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 64.0, 64.0], 28),
+                ("anisotropic", [0.5, 0.0, 0.0, 2.0], [0.0, 0.0, 64.0, 64.0], 56),
+                ("cropped", [1.0, 0.0, 0.0, 1.0], [70.0, 30.0, 134.0, 94.0], 28),
+                ("flipped", [1.0, 0.0, 0.0, 1.0], [96.0, 96.0, 32.0, 32.0], 28),
+                ("nonsquare", [1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 128.0, 64.0], 56),
+                ("transition", [c, -c, c, c], [0.0, 0.0, 80.0, 80.0], 28),
+            ] {
+                let [a, b, c, d] = transform;
+                let matrix = [a/32.0, -c/32.0, 0.0, 0.0, b/32.0, -d/32.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, -a-b, c+d, 0.0, 1.0];
+                let source_rect = DeviceRect::new(DevicePoint::new(uv[0], uv[1]), DevicePoint::new(uv[2], uv[3]));
+                for filter in [TextureFilter::Trilinear, TextureFilter::Linear, TextureFilter::Nearest] {
+                    renderer.projection_override = None;
+                    let clear = renderer.clear(full, ColorF::new(1.0, 0.0, 1.0, 1.0));
+                    renderer.draw_pass(&target, &[clear], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                    renderer.projection_override = Some(matrix);
+                    let draw = Draw { shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
+                        instances: bytes(&[ScalingInstance::new(target_rect, source_rect, false)]).to_vec(),
+                        textures: renderer.single_texture(source.clone()), filter: Some(filter), clear_color: None,
+                        count_in_stats: false, readback: None, scissor: full };
+                    renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                    let data = pixels(&renderer, &target);
+                    let pixel = &data[(32*64+32)*4..(32*64+33)*4];
+                    assert_eq!(&pixel[1..], &[0, 0, 255]);
+                    if filter != TextureFilter::Trilinear {
+                        assert_eq!(pixel[0], 0);
+                    } else if policy == Filtering::LegacyBrilinear {
+                        assert!((pixel[0] as i32-legacy).abs()<=1, "{}: {} vs {}", name, pixel[0], legacy);
+                    } else {
+                        let determinant = a*d-b*c;
+                        let ex = (uv[2]-uv[0])/32.0;
+                        let ey = (uv[3]-uv[1])/32.0;
+                        let j = [ex*d/determinant, -ex*b/determinant, -ey*c/determinant, ey*a/determinant];
+                        let lower = j.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                        let upper = std::f32::consts::SQRT_2*(j[0].abs()+j[2].abs()).max(j[1].abs()+j[3].abs());
+                        let low = 28.0*lower.log2().max(0.0)-4.0;
+                        let high = 28.0*upper.log2().max(0.0)+4.0;
+                        assert!((low..=high).contains(&(pixel[0] as f32)), "{}: {} outside {}..{}", name, pixel[0], low, high);
+                    }
+                    println!("TRANSFORMED_SAMPLER {:?} {} {:?} {:?}", policy, name, filter, pixel);
+                }
+            }
+            for level in [0, 2, 5, 8] {
+                renderer.projection_override = None;
+                let clear = renderer.clear(full, ColorF::new(1.0, 0.0, 1.0, 1.0));
+                renderer.draw_pass(&target, &[clear], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                renderer.projection_override = Some([c/32.0, -c/32.0, 0.0, 0.0, -c/32.0, -c/32.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 2.0*c, 0.0, 1.0]);
+                let view = source.mip_view(level).unwrap();
+                let source_rect = DeviceRect::from_size(DeviceSize::new(view.size.width as f32, view.size.height as f32));
+                let draw = Draw { shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
+                    instances: bytes(&[ScalingInstance::new(target_rect, source_rect, false)]).to_vec(),
+                    textures: renderer.single_texture(view), filter: Some(TextureFilter::Trilinear), clear_color: None,
+                    count_in_stats: false, readback: None, scissor: full };
+                renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
+                let data = pixels(&renderer, &target);
+                assert_eq!(&data[(32*64+32)*4..(32*64+33)*4], &[(level*28) as u8, 0, 0, 255]);
+            }
         }
     }
 

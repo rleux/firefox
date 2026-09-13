@@ -216,8 +216,10 @@ impl App<'_> {
         let path = Path::new(show.value_of("INPUT").unwrap());
         let mut thing = crate::hal::playback(&mut wrench, path, Some(show))?;
         thing.on_window_changed(size, scale);
-        let clips = self.args.value_of("compositor_clips").map(|value| value == "true").unwrap_or(path.is_dir());
-        wrench.set_compositor_clips_enabled(clips);
+        match crate::hal::compositor_clips_override(self.args)? {
+            Some(enabled) => wrench.set_compositor_clips_override(enabled),
+            None => wrench.set_compositor_clips_enabled(path.is_dir()),
+        }
         if self.args.is_present("no_batch") {
             wrench.api.send_debug_cmd(DebugCommand::SetFlags(DebugFlags::DISABLE_BATCHING | DebugFlags::MISSING_SNAPSHOT_PINK));
         }

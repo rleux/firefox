@@ -437,6 +437,9 @@ impl Wrench {
             compositor_clips_override,
         };
 
+        if let Some(enabled) = compositor_clips_override {
+            wrench.set_compositor_clips_enabled(enabled);
+        }
         wrench.set_title("start");
         let mut txn = Transaction::new();
         txn.set_root_pipeline(wrench.root_pipeline_id);
@@ -535,6 +538,11 @@ impl<R> Wrench<R> {
         let mut flags = self.debug_flags;
         flags.set(DebugFlags::DISABLE_COMPOSITOR_CLIPS, !enabled);
         self.api.set_debug_flags(flags);
+    }
+
+    pub fn set_compositor_clips_override(&mut self, enabled: bool) {
+        self.compositor_clips_override = Some(enabled);
+        self.set_compositor_clips_enabled(enabled);
     }
 
     pub fn layout_simple_ascii(
