@@ -130,7 +130,36 @@ fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ShaderInputMode {
+    Native,
+    #[cfg(feature = "hal-naga")]
+    Naga,
+}
+
+impl ShaderInputMode {
+    fn from_env() -> Result<Self> {
+        match std::env::var("WR_HAL_SHADER_INPUT") {
+            Err(std::env::VarError::NotPresent) => Ok(Self::Native),
+            Ok(value) if value == "native" => Ok(Self::Native),
+            #[cfg(feature = "hal-naga")]
+            Ok(value) if value == "naga" => Ok(Self::Naga),
+            Ok(value) => Err(format!("Unsupported HAL shader input {value:?}; naga requires hal-naga")),
+            Err(error) => Err(format!("Invalid HAL shader input: {error}")),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native-spirv",
+            #[cfg(feature = "hal-naga")]
+            Self::Naga => "naga30-matrix-io-fetch-offset-v1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
+    shader_input: ShaderInputMode,
     shader: Shader,
     blend: u8,
     depth: u8,
@@ -230,6 +259,9 @@ struct Descriptor<A: hal::Api> {
 }
 
 pub(crate) struct FrameRenderer<A: hal::Api> {
+    shader_input: ShaderInputMode,
+    #[cfg(feature = "hal-naga")]
+    translated_shaders: RefCell<HashMap<(u64, bool), webrender_build::hal::translate::ValidatedShader>>,
     pub(crate) filtering: Filtering,
     #[cfg(test)]
     projection_override: Option<[f32; 16]>,
@@ -282,6 +314,8 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn new(device: Device<A>) -> Result<Self> {
+        let shader_input = ShaderInputMode::from_env()?;
+        println!("HAL shader input: {}", shader_input.name());
         let owner = Rc::new(device);
         let native = &owner.open.device;
         let sampler = |filter, mipmap| -> Result<_> {
@@ -341,6 +375,9 @@ impl<A: hal::Api> FrameRenderer<A> {
         let capture_pool = super::pool::TexturePool::new(&owner);
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
         Ok(Self {
+            shader_input,
+            #[cfg(feature = "hal-naga")]
+            translated_shaders: RefCell::new(HashMap::new()),
             filtering: Filtering::Standard,
             #[cfg(test)]
             projection_override: None,
@@ -1196,6 +1233,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     fn key(
+        &self,
         shader: Shader,
         blend: u8,
         depth: u8,
@@ -1206,6 +1244,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         vertex_layouts(Self::descriptor(shader), artifact)?.hash(&mut hash);
         Ok(PipelineKey {
+            shader_input: self.shader_input,
             shader,
             blend,
             depth,
@@ -1332,18 +1371,36 @@ impl<A: hal::Api> FrameRenderer<A> {
             }),
         ];
         let native = &self.owner.open.device;
-        let module = |data: &[u8]| -> Result<_> {
+        let module = |data: &[u8], fragment: bool| -> Result<_> {
             let words: Vec<_> = data
                 .chunks_exact(4)
                 .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
                 .collect();
+            let input = match self.shader_input {
+                ShaderInputMode::Native => hal::ShaderInput::SpirV(&words),
+                #[cfg(feature = "hal-naga")]
+                ShaderInputMode::Naga => {
+                    let mut cache = self.translated_shaders.borrow_mut();
+                    if !cache.contains_key(&(artifact.digest, fragment)) {
+                        let shader = webrender_build::hal::translate::parse_spirv(data)?;
+                        cache.insert((artifact.digest, fragment), shader);
+                    }
+                    let shader = &cache[&(artifact.digest, fragment)];
+                    hal::ShaderInput::Naga(hal::NagaShader {
+                        module: std::borrow::Cow::Owned(shader.module.clone()),
+                        info: shader.info.clone(),
+                        debug_source: None,
+                    })
+                }
+            };
+            let _ = fragment;
             let raw = unsafe {
                 native.create_shader_module(
                     &hal::ShaderModuleDescriptor {
                         label: Some(artifact.name),
                         runtime_checks: wgt::ShaderRuntimeChecks::default(),
                     },
-                    hal::ShaderInput::SpirV(&words),
+                    input,
                 )
             }
             .map_err(|e| format!("Creating shader {}: {e:?}", artifact.name))?;
@@ -1353,8 +1410,8 @@ impl<A: hal::Api> FrameRenderer<A> {
                 A::Device::destroy_shader_module,
             ))
         };
-        let vs = module(artifact.vertex)?;
-        let fs = module(artifact.fragment)?;
+        let vs = module(artifact.vertex, false)?;
+        let fs = module(artifact.fragment, true)?;
         let constants = Default::default();
         let stage = |module| hal::ProgrammableStage {
             module,
@@ -1558,7 +1615,7 @@ impl<A: hal::Api> FrameRenderer<A> {
                 texture.mip_count > 1 && draw.filter.unwrap_or(texture.filter) == TextureFilter::Trilinear) {
                 return Err("Legacy brilinear requires mipmapped images in sColor0".into());
             }
-            let key = Self::key(shader, draw.blend, depth_mode, target.format)?;
+            let key = self.key(shader, draw.blend, depth_mode, target.format)?;
             self.pipeline(key)?;
             let pipeline = self.pipelines[&key].clone();
             let buffer = self
@@ -2840,12 +2897,37 @@ mod shader_tests {
             } else {
                 wgt::TextureFormat::Rgba8Unorm
             };
-            let key = FrameRenderer::<hal::api::Vulkan>::key(shader, 0, 0, format).unwrap();
+            let key = renderer.key(shader, 0, 0, format).unwrap();
             renderer.pipeline(key).unwrap();
             count += 1;
         }
         println!("Created {count} current HAL shader pipelines");
     }
+    #[cfg(all(feature = "hal-naga", feature = "capture", feature = "replay"))]
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn capture_shader_input_identity() {
+        use crate::capture::CaptureConfig;
+        use crate::render_api::CaptureBits;
+        let owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let root = std::env::temp_dir().join(format!("wr-shader-identity-{}", std::process::id()));
+        let config = || CaptureConfig::new(root.clone(), CaptureBits::all());
+        let marker = config().resource_root().join("hal-shader-input.txt");
+        for mode in [ShaderInputMode::Native, ShaderInputMode::Naga] {
+            renderer.shader_input = mode;
+            renderer.save_capture(config(), Vec::new(), None).unwrap();
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), mode.name());
+            renderer.load_capture(config(), Vec::new()).unwrap();
+            std::fs::write(&marker, "incompatible-translator").unwrap();
+            assert!(renderer.load_capture(config(), Vec::new()).unwrap_err().contains("Capture shader input"));
+            std::fs::remove_file(&marker).unwrap();
+            let legacy = renderer.load_capture(config(), Vec::new());
+            assert_eq!(legacy.is_ok(), mode == ShaderInputMode::Native);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn pixels(
         renderer: &FrameRenderer<hal::api::Vulkan>,
         texture: &Rc<Texture<hal::api::Vulkan>>,

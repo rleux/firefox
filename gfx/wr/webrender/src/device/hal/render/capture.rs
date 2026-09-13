@@ -82,6 +82,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         let root = config.resource_root();
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         fs::write(root.join("hal-filtering.txt"), self.filtering.name()).map_err(|error| error.to_string())?;
+        fs::write(root.join("hal-shader-input.txt"), self.shader_input.name()).map_err(|error| error.to_string())?;
         if config.bits.contains(CaptureBits::EXTERNAL_RESOURCES) && !externals.is_empty() {
             fs::create_dir_all(root.join("externals")).map_err(|error| error.to_string())?;
             for (index, external) in externals.iter_mut().enumerate() {
@@ -151,6 +152,14 @@ impl<A: hal::Api> FrameRenderer<A> {
 
     #[cfg(feature = "replay")]
     pub fn load_capture(&mut self, config: CaptureConfig, externals: Vec<PlainExternalImage>) -> Result<()> {
+        let shader_input = match fs::read_to_string(config.resource_root().join("hal-shader-input.txt")) {
+            Ok(mode) => mode,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "native-spirv".into(),
+            Err(error) => return Err(error.to_string()),
+        };
+        if shader_input != self.shader_input.name() {
+            return Err(format!("Capture shader input {shader_input:?} differs from renderer shader input {:?}", self.shader_input.name()));
+        }
         let policy = match fs::read_to_string(config.resource_root().join("hal-filtering.txt")) {
             Ok(policy) => policy,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
