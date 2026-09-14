@@ -921,8 +921,8 @@ impl ReftestRenderer for webrender::Renderer {
         Ok(())
     }
 }
-#[cfg(feature = "hal-vulkan")]
-impl ReftestRenderer for webrender::hal::Renderer {
+#[cfg(feature = "hal")]
+impl ReftestRenderer for webrender::hal::SelectedRenderer {
     fn trim_test_resources(&mut self, uploads: bool) -> Result<(), String> {
         self.trim_transient_resources(uploads);
         Ok(())
@@ -939,9 +939,9 @@ impl ReftestRenderer for webrender::hal::Renderer {
         self.read_pixels_rgba8(rect).expect("HAL readback failed")
     }
 }
-#[cfg(feature = "hal-vulkan")]
-impl<'a> ReftestHarness<'a, webrender::hal::Renderer> {
-    pub fn new_hal(wrench: &'a mut Wrench<webrender::hal::Renderer>, size: DeviceIntSize) -> Self {
+#[cfg(feature = "hal")]
+impl<'a> ReftestHarness<'a, webrender::hal::SelectedRenderer> {
+    pub fn new_hal(wrench: &'a mut Wrench<webrender::hal::SelectedRenderer>, size: DeviceIntSize) -> Self {
         let environment = ReftestEnvironment { platform: ReftestEnvironment::platform(false),
             version: ReftestEnvironment::version(false), mode: ReftestEnvironment::mode() };
         Self { wrench, window: None, rx: None, size, environment }

@@ -14,9 +14,10 @@ mod windows;
 pub trait SurfaceWindow: HasDisplayHandle + HasWindowHandle {}
 impl<T: HasDisplayHandle + HasWindowHandle> SurfaceWindow for T {}
 
-pub(crate) struct WindowOwner {
-    window: Rc<dyn SurfaceWindow>,
-    display: RawDisplayHandle,
+pub(crate) enum WindowOwner {
+    Window { window: Rc<dyn SurfaceWindow>, display: RawDisplayHandle },
+    #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+    MetalLayer(objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>),
 }
 
 impl WindowOwner {
@@ -39,37 +40,45 @@ impl WindowOwner {
         #[cfg(target_os = "windows")]
         windows::validate(display, window.window_handle()
             .map_err(|error| format!("Getting Win32 native window: {error}"))?.as_raw())?;
-        Ok(Self { window, display })
-    }
-
-    pub fn display_handle(&self) -> Result<DisplayHandle<'_>> {
-        let display = self
-            .window
-            .display_handle()
-            .map_err(|error| format!("Getting display handle: {error}"))?;
-        if display.as_raw() != self.display {
-            return Err(
-                "Surface display changed; recreate the renderer for the new display".into(),
-            );
+        #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+        if !matches!((display, window.window_handle().map_err(|error| error.to_string())?.as_raw()),
+            (RawDisplayHandle::AppKit(_), raw_window_handle::RawWindowHandle::AppKit(_))) {
+            return Err("macOS native surface requires matching AppKit handles".into());
         }
-        Ok(display)
+        Ok(Self::Window { window, display })
     }
 
-    pub fn create_surface<A: hal::Api>(&self, instance: &A::Instance) -> Result<A::Surface> {
-        let display = self.display_handle()?;
-        let window = self
-            .window
-            .window_handle()
-            .map_err(|error| format!("Getting window handle: {error}"))?;
-        #[cfg(target_os = "linux")]
-        linux::validate(display.as_raw(), window.as_raw())?;
-        #[cfg(target_os = "android")]
-        validate_android(display.as_raw(), window.as_raw())?;
-        #[cfg(target_os = "windows")]
-        windows::validate(display.as_raw(), window.as_raw())?;
-        unsafe { instance.create_surface(display.as_raw(), window.as_raw()) }
-            .map_err(|error| format!("Creating native surface: {error}"))
+    pub fn display_handle(&self) -> Result<Option<DisplayHandle<'_>>> {
+        match self {
+            Self::Window { window, display: original } => {
+                let display = window.display_handle().map_err(|error| format!("Getting display handle: {error}"))?;
+                if display.as_raw() != *original { return Err("Surface display changed; recreate the renderer for the new display".into()); }
+                Ok(Some(display))
+            }
+            #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+            Self::MetalLayer(_) => Ok(None),
+        }
     }
+
+    pub fn create_surface<A: super::super::backend::BackendApi>(&self, instance: &A::Instance) -> Result<A::Surface> {
+        match self {
+            Self::Window { window, .. } => {
+                let display = self.display_handle()?.ok_or("Missing surface display")?;
+                let window = window.window_handle().map_err(|error| format!("Getting window handle: {error}"))?;
+                #[cfg(target_os = "linux")]
+                linux::validate(display.as_raw(), window.as_raw())?;
+                #[cfg(target_os = "android")]
+                validate_android(display.as_raw(), window.as_raw())?;
+                #[cfg(target_os = "windows")]
+                windows::validate(display.as_raw(), window.as_raw())?;
+                unsafe { instance.create_surface(display.as_raw(), window.as_raw()) }
+                    .map_err(|error| format!("Creating native surface: {error}"))
+            }
+            #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+            Self::MetalLayer(layer) => A::create_metal_layer_surface(instance, layer),
+        }
+    }
+
 }
 
 #[cfg(test)]

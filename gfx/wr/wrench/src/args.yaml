@@ -14,9 +14,9 @@ args:
   - hal_backend:
       long: hal-backend
       takes_value: true
-      possible_values: [vulkan]
+      possible_values: [vulkan, metal]
       global: true
-      help: Select the HAL graphics API (currently Vulkan)
+      help: Select the HAL graphics API
   - hal_adapter:
       long: hal-adapter
       takes_value: true
@@ -25,7 +25,7 @@ args:
   - hal_validation:
       long: hal-validation
       global: true
-      help: Require the Vulkan validation layer
+      help: Require verified native validation support
   - hal_filtering:
       long: hal-filtering
       takes_value: true
@@ -133,7 +133,7 @@ args:
 
 subcommands:
     - test_surface:
-        about: Exercise Vulkan surface acquisition, presentation, resize, and discard
+        about: Exercise HAL surface acquisition, presentation, resize, and discard
     - test_hal:
         about: Check HAL color/depth readback and same-device native-image ownership
     - png:

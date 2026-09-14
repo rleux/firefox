@@ -129,12 +129,13 @@ extra_flags = extra_flags.split(' ') if extra_flags else []
 
 backend_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 backend_parser.add_argument('--backend', choices=('gl', 'hal'), default='gl')
-backend_parser.add_argument('--hal-backend', choices=('vulkan',))
+backend_parser.add_argument('--hal-backend', choices=('vulkan', 'metal'))
 backend_args, _ = backend_parser.parse_known_args()
 use_hal = backend_args.backend == 'hal'
+hal_backend = backend_args.hal_backend or ('metal' if is_macos() else 'vulkan')
 if backend_args.hal_backend and not use_hal:
     backend_parser.error('--hal-backend requires --backend hal')
-if use_hal:
+if use_hal and hal_backend == 'vulkan':
     icd = os.getenv('WRENCH_VULKAN_ICD')
     if icd:
         if not path.isfile(icd):
@@ -157,7 +158,7 @@ else:
 # This environment variable is used to point to the location of a cross-compiled
 # wrench for the CI on some platforms.
 if not wrench_headless_target:
-    build_cmd = ['cargo', 'build'] + extra_flags + ['--verbose', '--features', 'hal-vulkan' if use_hal else 'headless']
+    build_cmd = ['cargo', 'build'] + extra_flags + ['--verbose', '--features', ('hal-metal' if hal_backend == 'metal' else 'hal-vulkan') if use_hal else 'headless']
     if optimized_build():
         build_cmd += ['--release']
     subprocess.check_call(build_cmd)

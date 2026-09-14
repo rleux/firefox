@@ -66,7 +66,11 @@ fn interface(module: &naga::Module) -> Vec<String> {
     output
 }
 
-fn native_outputs(shader: &webrender_build::hal::translate::ValidatedShader, path: &Path) -> Value {
+fn native_outputs(
+    shader: &webrender_build::hal::translate::ValidatedShader,
+    path: &Path,
+    metal_only: bool,
+) -> Value {
     let mut msl = naga::back::msl::Options {
         lang_version: (2, 4),
         fake_missing_bindings: false,
@@ -135,25 +139,30 @@ fn native_outputs(shader: &webrender_build::hal::translate::ValidatedShader, pat
             Ok((_, info)) => json!({"error": format!("{:?}", info.entry_point_names)}),
             Err(error) => json!({"error": format!("{error:?}")}),
         };
-    let mut source = String::new();
-    let result = naga::back::hlsl::Writer::new(&mut source, &hlsl, &hlsl_options).write(
-        &shader.module,
-        &shader.info,
-        None,
-    );
-    let dx12 = match result {
-        Ok(info) if info.entry_point_names.iter().all(Result::is_ok) => {
-            fs::write(path.with_extension("hlsl"), source).unwrap();
-            json!({"emitted": true})
+    let dx12 = if metal_only {
+        json!({"skipped": true, "reason": "D3D12 is outside the migration scope"})
+    } else {
+        let mut source = String::new();
+        let result = naga::back::hlsl::Writer::new(&mut source, &hlsl, &hlsl_options).write(
+            &shader.module,
+            &shader.info,
+            None,
+        );
+        match result {
+            Ok(info) if info.entry_point_names.iter().all(Result::is_ok) => {
+                fs::write(path.with_extension("hlsl"), source).unwrap();
+                json!({"emitted": true})
+            }
+            Ok(info) => json!({"error": format!("{:?}", info.entry_point_names)}),
+            Err(error) => json!({"error": format!("{error:?}")}),
         }
-        Ok(info) => json!({"error": format!("{:?}", info.entry_point_names)}),
-        Err(error) => json!({"error": format!("{error:?}")}),
     };
     json!({"msl": metal, "hlsl": dx12, "binding_mapping": "explicit diagnostic slots; HAL owns native runtime remapping"})
 }
 
 fn main() {
     let args: Vec<_> = env::args().collect();
+    let metal_only = args.iter().any(|arg| arg == "--metal-only");
     let catalog: Value = serde_json::from_slice(&fs::read(&args[1]).unwrap()).unwrap();
     let mut results = Vec::new();
     for (index, entry) in catalog.as_array().unwrap().iter().enumerate() {
@@ -189,6 +198,7 @@ fn main() {
                     result["native_outputs"] = native_outputs(
                         &shader,
                         &Path::new(directory).join(format!("stage-{index}")),
+                        metal_only,
                     );
                 }
             }
@@ -202,7 +212,7 @@ fn main() {
                 || r["interface_preserved"] != true
                 || (r.get("native_outputs").is_some()
                     && (r["native_outputs"]["msl"]["emitted"] != true
-                        || r["native_outputs"]["hlsl"]["emitted"] != true))
+                        || (!metal_only && r["native_outputs"]["hlsl"]["emitted"] != true)))
         })
         .count();
     fs::write(

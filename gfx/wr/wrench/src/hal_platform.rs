@@ -28,7 +28,15 @@ pub(crate) fn identity(window: &Window) -> Result<(&'static str, u64), String> {
             _ => Err("Expected a Win32 native window".into()),
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match window.window_handle().map_err(|error| error.to_string())?.as_raw() {
+            RawWindowHandle::AppKit(handle) => Ok(("appkit", handle.ns_view.as_ptr() as u64)),
+            _ => Err("Expected an AppKit native view".into()),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")))]
     {
         let _ = window;
         Ok(("native", 0))

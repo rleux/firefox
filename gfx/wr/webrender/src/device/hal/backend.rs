@@ -24,6 +24,10 @@ pub(crate) trait BackendApi: hal::Api + sealed::Sealed {
             .map_err(|error| format!("Opening {}: {error:?}", adapter.info.name))?;
         Ok((open, features))
     }
+    #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+    fn create_metal_layer_surface(_instance: &Self::Instance, _layer: &objc2_quartz_core::CAMetalLayer) -> Result<Self::Surface> {
+        Err("This backend cannot create a direct Metal-layer surface".into())
+    }
     fn timestamp_valid_bits(device: &Device<Self>) -> u32;
     fn shader_input() -> Result<ShaderInputMode>;
     fn create_shader_module(

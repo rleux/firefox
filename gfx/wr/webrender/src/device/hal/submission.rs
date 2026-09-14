@@ -22,6 +22,9 @@ impl<A: hal::Api> Drop for StagedSync<'_, A> {
     fn drop(&mut self) { for sync in self.sync { sync.unstage(self.queue); } }
 }
 
+pub(super) type CompletionCheck = Box<dyn Fn(bool) -> Result<bool>>;
+pub(super) type CompletionProbe<A> = fn(&<A as hal::Api>::CommandEncoder, &Device<A>) -> Result<CompletionCheck>;
+
 pub(super) struct Submission<A: hal::Api> {
     owner: Rc<Device<A>>,
     encoder: Option<A::CommandEncoder>,
@@ -30,6 +33,7 @@ pub(super) struct Submission<A: hal::Api> {
     recording: bool,
     attempted: bool,
     complete: bool,
+    completion_check: Option<CompletionCheck>,
     serial: u64,
     resources: Vec<Box<dyn Any>>,
     sync: Vec<Rc<dyn SubmissionSync<A>>>,
@@ -47,6 +51,7 @@ impl<A: hal::Api> Submission<A> {
             recording: false,
             attempted: false,
             complete: false,
+            completion_check: None,
             serial,
             resources: Vec::new(),
             sync: Vec::new(),
@@ -70,6 +75,7 @@ impl<A: hal::Api> Submission<A> {
                 .map_err(|e| format!("Beginning submission: {e:?}"))?;
         }
         submission.recording = true;
+        submission.completion_check = owner.completion_probe.map(|probe| probe(submission.encoder.as_ref().unwrap(), owner)).transpose()?;
         Ok(submission)
     }
 
@@ -80,6 +86,7 @@ impl<A: hal::Api> Submission<A> {
             self.encoder().reset_all(buffer.into_iter());
         }
         for complete in self.completions.drain(..) { complete(); }
+        self.completion_check = None;
         self.resources.clear();
         self.sync.clear();
     }
@@ -92,6 +99,7 @@ impl<A: hal::Api> Submission<A> {
         unsafe { self.encoder().begin_encoding(Some("WR submission")) }
             .map_err(|error| format!("Reusing command encoder: {error:?}"))?;
         self.recording = true;
+        self.completion_check = self.owner.completion_probe.map(|probe| probe(self.encoder.as_ref().unwrap(), &self.owner)).transpose()?;
         Ok(())
     }
 
@@ -147,6 +155,11 @@ impl<A: hal::Api> Submission<A> {
                 .map_err(|e| format!("Polling WR submission: {e:?}"))?
                 >= self.serial
         };
+        if self.complete {
+            if let Some(check) = &self.completion_check {
+                self.complete = check(false).map_err(|error| { self.owner.lost.set(true); error })?;
+            }
+        }
         Ok(self.complete)
     }
 
@@ -158,6 +171,11 @@ impl<A: hal::Api> Submission<A> {
                 .wait(&self.fence, self.serial, None)
                 .map_err(|e| format!("Waiting for WR submission: {e:?}"))?
         };
+        if self.complete {
+            if let Some(check) = &self.completion_check {
+                self.complete = check(true).map_err(|error| { self.owner.lost.set(true); error })?;
+            }
+        }
         if self.complete {
             Ok(())
         } else {
@@ -400,6 +418,38 @@ impl<A: hal::Api> Drop for SubmissionQueue<A> {
 mod tests {
     use super::*;
     use super::super::resources::{Buffer, Texture};
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn native_completion_probe_gates_retirement_and_errors() {
+        for fail in [false, true] {
+            let mut device = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+            device.completion_probe = Some(if fail {
+                |_, _| Ok(Box::new(|_| Err("native command buffer failed".into())))
+            } else {
+                |_, _| Ok(Box::new(|wait| Ok(wait)))
+            });
+            let owner = Rc::new(device);
+            let queue = SubmissionQueue::new(&owner, 3, false);
+            let complete = Rc::new(std::cell::Cell::new(false));
+            let notice = complete.clone();
+            queue.recording().unwrap().on_complete(move || notice.set(true));
+            queue.submit().unwrap();
+            unsafe { owner.open.queue.wait_for_idle() }.unwrap();
+            let result = queue.poll();
+            assert!(!complete.get());
+            if fail {
+                assert!(result.unwrap_err().contains("native command buffer failed"));
+                assert!(owner.lost.get());
+                assert!(queue.recording().is_err());
+            } else {
+                assert_eq!(result.unwrap(), 0);
+                queue.wait().unwrap();
+                assert!(complete.get());
+                assert!(!owner.lost.get());
+            }
+        }
+    }
 
     #[test]
     #[ignore = "Requires Vulkan"]

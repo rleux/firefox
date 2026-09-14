@@ -6,7 +6,7 @@ use crate::wrench::{Wrench, WrenchThing};
 use std::{collections::HashMap, path::{Path, PathBuf}, rc::Rc, time::{Duration, Instant}};
 use webrender::api::*;
 use webrender::api::units::*;
-use webrender::hal::{Options, PresentationStatus, RecordedFrameHandle, Renderer, SurfaceOptions};
+use webrender::hal::{Options, PresentationStatus, RecordedFrameHandle, SelectedRenderer as Renderer, SurfaceOptions};
 use webrender::render_api::{CaptureBits, ClearCache, DebugCommand, Transaction};
 use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy}, keyboard::{Key, NamedKey}, window::{Window, WindowId}};
@@ -201,15 +201,15 @@ impl App<'_> {
         if self.panes.len() >= 16 { return Err("At most 16 HAL windows are supported".into()); }
         let number = self.next_number;
         self.next_number += 1;
-        let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title(format!("Wrench Vulkan {number}"))
+        let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title(format!("Wrench {:?} {number}", crate::hal::selected_backend(self.args)?))
             .with_inner_size(PhysicalSize::new(self.dimensions[0], self.dimensions[1]))).map_err(|error| error.to_string())?);
         let size = window.inner_size();
         let initial_size = DeviceIntSize::new(size.width as i32, size.height as i32);
         let size = DeviceIntSize::new(size.width.max(1) as i32, size.height.max(1) as i32);
         let scale = window.scale_factor() as f32;
         let notifier = Box::new(Notifier { window: window.id(), generation: number, proxy: self.proxy.clone() });
-        let mut wrench = Wrench::new_hal_window(self.options, size, !self.args.is_present("no_subpixel_aa"), notifier,
-            crate::hal::compositor_config(self.args)?, window.clone(), SurfaceOptions { vsync: self.args.is_present("vsync"), transparent: false })?;
+        let mut wrench = Wrench::new_hal_backend(crate::hal::selected_backend(self.args)?, self.options, size, !self.args.is_present("no_subpixel_aa"), Some(notifier),
+            crate::hal::compositor_config(self.args)?, Some((window.clone(), SurfaceOptions { vsync: self.args.is_present("vsync"), transparent: false })))?;
         wrench.renderer.configure_filtering(crate::hal::filtering(self.args))?;
         wrench.rebuild_display_lists = self.args.is_present("rebuild");
         let show = self.args.subcommand_matches("show").unwrap();

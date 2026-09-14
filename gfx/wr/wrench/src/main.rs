@@ -24,13 +24,13 @@ mod blob;
 mod composite;
 mod egl;
 mod hal;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 mod hal_compositor;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 mod hal_surface;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 mod hal_platform;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 mod hal_window;
 mod parse_function;
 mod perf;

@@ -22,9 +22,19 @@ pub(crate) mod backend;
 pub(crate) mod render;
 mod resources;
 mod submission;
-mod surface;
+pub(crate) mod surface;
 pub use self::surface::{PresentationStatus, SurfaceInfo, SurfaceOptions, SurfaceWindow};
 mod query;
+#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+pub(crate) mod metal;
+#[cfg(feature = "hal-metal")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod metal_layout;
+#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+pub use self::metal::{create_metal_device, create_metal_image_device, MetalEvent, MetalCopy, MetalDeviceContext, MetalPlane};
+pub use crate::renderer::hal::{BackendKind, SelectedRenderer, create_renderer_for_backend};
+#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+pub use crate::renderer::hal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_window, create_metal_renderer_for_layer};
 #[cfg(feature = "hal-vulkan")]
 pub(crate) mod vulkan;
 #[cfg(feature = "hal-vulkan")]
@@ -74,11 +84,19 @@ impl Filtering {
     }
 }
 
+#[derive(Clone, Default)]
+struct DeviceLost(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl DeviceLost {
+    fn get(&self) -> bool { self.0.load(std::sync::atomic::Ordering::Acquire) }
+    fn set(&self, lost: bool) { self.0.store(lost, std::sync::atomic::Ordering::Release); }
+}
+
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
     open: hal::OpenDevice<A>,
     queue_gate: std::sync::Arc<std::sync::Mutex<()>>,
-    lost: std::cell::Cell<bool>,
+    lost: DeviceLost,
+    completion_probe: Option<submission::CompletionProbe<A>>,
     #[cfg(any(test, feature = "hal-testing"))]
     fault: std::cell::Cell<Option<FailurePoint>>,
     info: wgt::AdapterInfo,
@@ -283,8 +301,14 @@ impl<A: backend::BackendApi> Device<A> {
     fn new_with_window(options: &Options, window: Option<std::rc::Rc<dyn SurfaceWindow>>)
         -> Result<(Self, Option<surface::SurfaceSetup<A>>)>
     {
-        let window = window.map(surface::platform::WindowOwner::new).transpose()?;
-        let display = window.as_ref().map(|window| window.display_handle()).transpose()?;
+        Self::new_with_owner(options, window.map(surface::platform::WindowOwner::new).transpose()?)
+    }
+
+    fn new_with_owner(options: &Options, window: Option<surface::platform::WindowOwner>)
+        -> Result<(Self, Option<surface::SurfaceSetup<A>>)>
+    {
+
+        let display = window.as_ref().map(|window| window.display_handle()).transpose()?.flatten();
         let instance = unsafe {
             A::Instance::init(&hal::InstanceDescriptor {
                 name: "WebRender HAL",
@@ -377,7 +401,8 @@ impl<A: backend::BackendApi> Device<A> {
         Ok((Self {
             open,
             queue_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
-            lost: std::cell::Cell::new(false),
+            lost: DeviceLost::default(),
+            completion_probe: None,
             #[cfg(any(test, feature = "hal-testing"))]
             fault: std::cell::Cell::new(None),
             info: exposed.info,
