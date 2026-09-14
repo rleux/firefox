@@ -8,6 +8,8 @@ use std::rc::Rc;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
 
 pub trait SurfaceWindow: HasDisplayHandle + HasWindowHandle {}
 impl<T: HasDisplayHandle + HasWindowHandle> SurfaceWindow for T {}
@@ -34,6 +36,9 @@ impl WindowOwner {
         #[cfg(target_os = "android")]
         validate_android(display, window.window_handle()
             .map_err(|error| format!("Getting Android native window: {error}"))?.as_raw())?;
+        #[cfg(target_os = "windows")]
+        windows::validate(display, window.window_handle()
+            .map_err(|error| format!("Getting Win32 native window: {error}"))?.as_raw())?;
         Ok(Self { window, display })
     }
 
@@ -60,6 +65,8 @@ impl WindowOwner {
         linux::validate(display.as_raw(), window.as_raw())?;
         #[cfg(target_os = "android")]
         validate_android(display.as_raw(), window.as_raw())?;
+        #[cfg(target_os = "windows")]
+        windows::validate(display.as_raw(), window.as_raw())?;
         unsafe { instance.create_surface(display.as_raw(), window.as_raw()) }
             .map_err(|error| format!("Creating native surface: {error}"))
     }

@@ -32,7 +32,11 @@ pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDes
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 pub use self::vulkan::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities};
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
-pub use self::vulkan::{SyncFile, VulkanQueueCoordinator, create_vulkan_image_device};
+pub use self::vulkan::SyncFile;
+#[cfg(feature = "hal-vulkan")]
+pub use self::vulkan::{VulkanQueueCoordinator, create_vulkan_image_device};
+#[cfg(all(target_os = "windows", feature = "hal-win32"))]
+pub use self::vulkan::{Win32Image, Win32ImageLayout, Win32Export, Win32Copy, Win32Semaphore};
 #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
 pub use self::vulkan::{AndroidBufferColor, AndroidBufferAlpha, HardwareBufferCopy};
 #[cfg(feature = "hal-vulkan")]

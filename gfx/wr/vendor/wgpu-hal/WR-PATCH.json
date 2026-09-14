@@ -3,6 +3,19 @@
   "version": "30.0.0",
   "source": "Existing Cargo registry cache; no repository cloned",
   "crate_sha256": "cf765132d8d5f50e192e7880464890c13f4e7457aafe8e5466e8174586e9f101",
-  "patch": "Pass a null acquire fence outside Windows; the pacing fence is only waited/reset on Windows.",
-  "modified_file": "src/vulkan/swapchain/native.rs"
+  "patches": [
+    {
+      "file": "src/vulkan/swapchain/native.rs",
+      "reason": "Pass a null acquire fence outside Windows; the pacing fence is waited/reset only on Windows."
+    },
+    {
+      "file": "src/vulkan/instance.rs",
+      "reason": "Propagate native Xlib/Xcb/Wayland/Android/Win32 surface creation failures as InstanceError instead of panicking."
+    },
+    {
+      "file": "src/vulkan/adapter.rs",
+      "reason": "Expose explicit sampler YCbCr conversion enablement for the Android hardware-buffer path and include the enabled feature in device creation."
+    }
+  ],
+  "integration_status": "Compare these release-crate changes with Firefox\u2019s pinned HAL Git source in 8.12a; remove already-present/avoidable changes before unifying the dependency."
 }

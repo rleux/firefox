@@ -505,7 +505,7 @@ impl super::Instance {
             unsafe {
                 win32_loader
                     .create_win32_surface(&info, None)
-                    .expect("Unable to create Win32 surface")
+                    .map_err(|error| crate::InstanceError::new(format!("Creating Win32 Vulkan surface: {error:?}")))?
             }
         };
 
