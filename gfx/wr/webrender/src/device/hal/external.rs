@@ -29,6 +29,12 @@ impl NativeImage {
     pub fn descriptor(&self) -> ImageDescriptor { self.descriptor }
     pub fn generation(&self) -> u64 { self.generation }
 
+    pub(super) fn ensure_idle(&self) -> Result<()> {
+        if self.leases.get() != 0 { return Err("Native image is acquired by the renderer".into()); }
+        if self.failed.get() { return Err("Native image requires recreation".into()); }
+        Ok(())
+    }
+
     pub(super) fn texture<A: hal::Api>(&self, owner: &Rc<Device<A>>) -> Result<Rc<Texture<A>>> {
         if self.failed.get() { return Err("Native image requires recreation after abandoned GPU use".into()); }
         let texture = self.storage.clone().downcast::<Texture<A>>()
@@ -48,11 +54,15 @@ pub(super) trait ImageDevice: Any {
 
 pub(super) struct Producer<A: hal::Api> {
     pub owner: Rc<Device<A>>,
-    submissions: SubmissionQueue<A>,
+    pub(super) submissions: SubmissionQueue<A>,
     failed: Cell<bool>,
 }
 
 impl<A: hal::Api> Producer<A> {
+    pub(super) fn ensure_healthy(&self) -> Result<()> {
+        if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
+        Ok(())
+    }
     fn upload(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
         if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         if image.leases.get() != 0 { return Err("Native image is acquired by the renderer".into()); }

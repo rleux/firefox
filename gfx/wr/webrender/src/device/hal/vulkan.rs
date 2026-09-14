@@ -5,6 +5,23 @@
 use super::*;
 use super::external::{ExternalImageDevice, NativeImage as ExternalNativeImage, Producer, validate_descriptor};
 
+#[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+mod linux;
+#[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+pub use linux::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities};
+
+#[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
+mod sync_file;
+#[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
+pub use sync_file::{SyncFile, VulkanQueueCoordinator, create_vulkan_image_device};
+#[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
+mod android;
+#[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
+pub use android::{AndroidBufferColor, AndroidBufferAlpha, HardwareBufferCopy};
+#[cfg(feature = "hal-android-ahb")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod conversion;
+
 pub struct VulkanDeviceContext<'a> {
     pub device: &'a ash::Device,
     pub instance: &'a ash::Instance,
@@ -96,6 +113,67 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+impl super::backend::sealed::Sealed for hal::api::Vulkan {}
+
+impl super::backend::BackendApi for hal::api::Vulkan {
+    fn create_device(options: &Options, window: Option<std::rc::Rc<dyn SurfaceWindow>>)
+        -> Result<(Device<Self>, Option<super::surface::SurfaceSetup<Self>>)> {
+        validate_options(options)?;
+        Device::new_with_window(options, window)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+    fn open_adapter(adapter: &hal::ExposedAdapter<Self>, features: wgt::Features)
+        -> Result<(hal::OpenDevice<Self>, wgt::Features)> { linux::open_adapter(adapter, features) }
+
+    #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
+    fn open_adapter(adapter: &hal::ExposedAdapter<Self>, features: wgt::Features)
+        -> Result<(hal::OpenDevice<Self>, wgt::Features)> { android::open_adapter(adapter, features) }
+
+    fn timestamp_valid_bits(device: &Device<Self>) -> u32 {
+        let device = &device.open.device;
+        let properties = unsafe { device.shared_instance().raw_instance()
+            .get_physical_device_queue_family_properties(device.raw_physical_device()) };
+        properties[device.queue_family_index() as usize].timestamp_valid_bits
+    }
+
+    fn shader_input() -> Result<super::backend::ShaderInputMode> {
+        super::backend::ShaderInputMode::from_env()
+    }
+
+    fn create_shader_module(device: &Self::Device, artifact: &webrender_build::hal::ShaderArtifact,
+        fragment: bool, mode: super::backend::ShaderInputMode, cache: &mut super::backend::ShaderCache)
+        -> Result<Self::ShaderModule> {
+        cache.create_module::<Self>(device, artifact, fragment, mode)
+    }
+
+    fn supports_presentation_blit(device: &Device<Self>, format: wgt::TextureFormat) -> bool {
+        let instance = device.open.device.shared_instance().raw_instance();
+        let format = match format {
+            wgt::TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            wgt::TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+            _ => return false,
+        };
+        for (format, usage) in [(vk::Format::R8G8B8A8_UNORM, vk::FormatFeatureFlags::BLIT_SRC), (format, vk::FormatFeatureFlags::BLIT_DST)] {
+            let caps = unsafe { instance.get_physical_device_format_properties(device.open.device.raw_physical_device(), format) };
+            if !caps.optimal_tiling_features.contains(usage) { return false; }
+        }
+        true
+    }
+
+    unsafe fn record_presentation_blit(device: &Self::Device, encoder: &mut Self::CommandEncoder,
+        source: &Self::Texture, target: &Self::Texture, source_size: [u32; 2], target_size: [u32; 2]) -> Result<()> {
+        let raw = device.raw_device();
+        let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        let blit = vk::ImageBlit::default().src_subresource(layers).dst_subresource(layers)
+            .src_offsets([vk::Offset3D::default(), vk::Offset3D { x: source_size[0] as i32, y: source_size[1] as i32, z: 1 }])
+            .dst_offsets([vk::Offset3D::default(), vk::Offset3D { x: target_size[0] as i32, y: target_size[1] as i32, z: 1 }]);
+        raw.cmd_blit_image(encoder.raw_handle(), source.raw_handle(), vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            target.raw_handle(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
+        Ok(())
+    }
+}
+
 pub fn create_vulkan_device(options: &Options) -> Result<Device<hal::api::Vulkan>> {
     validate_options(options)?;
     Device::new(options)
@@ -174,13 +252,6 @@ impl Drop for NativeImage<'_> {
 }
 
 impl Device<hal::api::Vulkan> {
-    pub(crate) fn timestamp_valid_bits(&self) -> u32 {
-        let device = &self.open.device;
-        let properties = unsafe { device.shared_instance().raw_instance()
-            .get_physical_device_queue_family_properties(device.raw_physical_device()) };
-        properties[device.queue_family_index() as usize].timestamp_valid_bits
-    }
-
     /// Exercises a borrowed, same-device native image with GPU acquire/release semaphores.
     pub fn test_native_image(&mut self, width: u32, height: u32, color: [u8; 4]) -> Result<()> {
         let layout = self.layout(width, height)?;

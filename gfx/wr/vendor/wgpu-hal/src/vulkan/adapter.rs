@@ -149,6 +149,12 @@ pub struct PhysicalDeviceFeatures {
 }
 
 impl PhysicalDeviceFeatures {
+    /// The caller must query support before enabling native YCbCr conversion.
+    pub fn enable_sampler_ycbcr_conversion(&mut self) {
+        self.sampler_ycbcr_conversion = Some(vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default()
+            .sampler_ycbcr_conversion(true));
+    }
+
     pub fn get_core(&self) -> vk::PhysicalDeviceFeatures {
         self.core
     }
@@ -159,6 +165,9 @@ impl PhysicalDeviceFeatures {
         mut info: vk::DeviceCreateInfo<'a>,
     ) -> vk::DeviceCreateInfo<'a> {
         info = info.enabled_features(&self.core);
+        if let Some(ref mut feature) = self.sampler_ycbcr_conversion {
+            if feature.sampler_ycbcr_conversion != vk::FALSE { info = info.push_next(feature); }
+        }
         if let Some(ref mut feature) = self.descriptor_indexing {
             info = info.push_next(feature);
         }

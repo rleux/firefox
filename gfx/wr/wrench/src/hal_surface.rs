@@ -8,11 +8,10 @@ use webrender::api::*;
 use webrender::api::units::*;
 use webrender::hal::{Options, PresentationStatus};
 use webrender::render_api::Transaction;
-use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowId}};
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow}, window::{Window, WindowId}};
 
 pub fn run(options: Options) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
+    let event_loop = crate::hal_platform::event_loop::<()>()?;
     let mut app = Probe { options, window: None, wrench: None, frame: 0,
         #[cfg(feature = "hal-testing")]
         failure_index: 0,
@@ -46,13 +45,13 @@ impl Probe {
                 let wrench = self.wrench.as_mut().unwrap();
                 let rect = FramebufferIntRect::from_size(FramebufferIntSize::new(128, 96));
                 let pending = wrench.renderer.request_readback(rect)?;
-                if point == FailurePoint::Submit { assert_eq!(wrench.renderer.acquire_surface()?, PresentationStatus::Acquired); }
+                if matches!(point, FailurePoint::Submit | FailurePoint::Record) { assert_eq!(wrench.renderer.acquire_surface()?, PresentationStatus::Acquired); }
                 wrench.renderer.inject_failure(point);
                 let result = match point {
                     FailurePoint::Acquire => wrench.renderer.acquire_surface().map(|_| ()),
                     FailurePoint::Configure => wrench.renderer.resize_surface([128, 96]),
                     FailurePoint::Submit => wrench.renderer.present().map(|_| ()),
-                    FailurePoint::Record => wrench.renderer.render().map(|_| ()),
+                    FailurePoint::Record => wrench.renderer.present().map(|_| ()),
                     FailurePoint::Map => wrench.renderer.read_pixels_rgba8(rect).map(|_| ()),
                     _ => unreachable!(),
                 };
@@ -73,6 +72,10 @@ impl Probe {
         let wrench = self.wrench.as_mut().unwrap();
         let window = self.window.as_ref().unwrap();
         let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            wrench.renderer.resize_surface([0, 0])?;
+            return Ok(());
+        }
         let size = DeviceIntSize::new(size.width as i32, size.height as i32);
         if self.frame == 2 || self.frame == 4 {
             for _ in 0..3 {
@@ -105,6 +108,7 @@ impl Probe {
         wrench.api.send_transaction(wrench.document_id, txn);
         wrench.renderer.prepare_frame(wrench.document_id)?;
         wrench.renderer.render()?;
+        window.pre_present_notify();
         if !matches!(wrench.renderer.present()?, PresentationStatus::Presented { .. }) { return Err("Surface frame was not presented".into()); }
         wrench.renderer.poll()?;
         self.frame += 1;
@@ -115,13 +119,9 @@ impl Probe {
             assert_eq!(info.presented, 12);
             assert_eq!(info.discarded, 6);
             assert_eq!(info.acquired, info.presented + info.discarded);
-            assert!(info.generation >= 4);
-            let id = match window.window_handle().map_err(|error| error.to_string())?.as_raw() {
-                RawWindowHandle::Xlib(handle) => handle.window as u64,
-                RawWindowHandle::Xcb(handle) => handle.window.get() as u64,
-                _ => 0,
-            };
-            eprintln!("HAL SURFACE READY window={id} width={} height={} info={info:?}", size.width, size.height);
+            assert!(info.generation >= if cfg!(target_os = "android") { 2 } else { 4 });
+            let (platform, id) = crate::hal_platform::identity(window)?;
+            eprintln!("HAL SURFACE READY window={id} width={} height={} platform={platform} info={info:?}", size.width, size.height);
             self.ready_at = Some(Instant::now());
         }
         Ok(())
@@ -130,7 +130,8 @@ impl Probe {
 
 impl ApplicationHandler for Probe {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() { return; }
+        if self.window.is_some() || self.error.is_some() || event_loop.exiting() { return; }
+        self.deadline = Instant::now() + Duration::from_secs(30);
         let result = (|| {
             let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title("WR Vulkan surface probe")
                 .with_inner_size(winit::dpi::PhysicalSize::new(128, 96))).map_err(|error| error.to_string())?);
@@ -144,7 +145,17 @@ impl ApplicationHandler for Probe {
         if let Err(error) = result { self.error = Some(error); event_loop.exit(); }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn suspended(&mut self, _: &ActiveEventLoop) {
+        if cfg!(target_os = "android") {
+            if let Some(wrench) = self.wrench.take() { wrench.api.shut_down(true); drop(wrench); }
+            self.window = None;
+            self.frame = 0;
+            self.ready_at = None;
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.window.as_ref().map(|window| window.id()) != Some(id) { return; }
         if matches!(event, WindowEvent::RedrawRequested) && self.frame < 12 && self.wrench.is_some() {
             if let Err(error) = self.draw() { self.error = Some(error); event_loop.exit(); }
         }
@@ -152,6 +163,7 @@ impl ApplicationHandler for Probe {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() { event_loop.set_control_flow(ControlFlow::Wait); return; }
         if Instant::now() > self.deadline { self.error = Some("Surface probe timed out".into()); event_loop.exit(); return; }
         if self.ready_at.map_or(false, |time| time.elapsed() >= Duration::from_secs(2)) {
             match self.wrench.as_mut().unwrap().renderer.acquire_surface() {

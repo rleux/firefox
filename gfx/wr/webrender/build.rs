@@ -317,7 +317,7 @@ fn write_optimized_shader_file(
 fn main() -> Result<(), std::io::Error> {
     let out_dir = env::var("OUT_DIR").unwrap_or("out".to_owned());
 
-    if env::var_os("CARGO_FEATURE_HAL_VULKAN").is_some() {
+    if env::var_os("CARGO_FEATURE_HAL").is_some() {
         webrender_build::hal::build(Path::new("res"), Path::new(&out_dir), |source, vertex| {
             let optimizer = glslopt::Context::new(glslopt::Target::OpenGl);
             let output = optimizer.optimize(

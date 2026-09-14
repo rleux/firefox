@@ -112,7 +112,7 @@ mod tests {
     fn bounded_queries_wait_for_completion() {
         use super::*;
         let device = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
-        let bits = device.timestamp_valid_bits();
+        let bits = <hal::api::Vulkan as super::backend::BackendApi>::timestamp_valid_bits(&device);
         let owner = Rc::new(device);
         let queue = SubmissionQueue::new(&owner, 3, false);
         let mut queries = QueryPool::new(&owner);

@@ -46,6 +46,8 @@ core-foundation = "0.9"
 [features]
 default = [ "env_logger" ]
 hal-testing = ["hal-vulkan", "webrender/hal-testing"]
+hal-linux-dmabuf = ["hal-vulkan", "webrender/hal-linux-dmabuf"]
+hal-android-ahb = ["hal-vulkan", "webrender/hal-android-ahb"]
 hal-vulkan = ["webrender/hal-vulkan"]
 hal-naga = ["hal-vulkan", "webrender/hal-naga"]
 headless = [ "osmesa-sys", "osmesa-src" ]
