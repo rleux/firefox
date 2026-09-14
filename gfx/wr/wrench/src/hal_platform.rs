@@ -14,13 +14,21 @@ pub(crate) fn identity(window: &Window) -> Result<(&'static str, u64), String> {
     }
     #[cfg(target_os = "android")]
     {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
         match window.window_handle().map_err(|error| error.to_string())?.as_raw() {
             RawWindowHandle::AndroidNdk(handle) => Ok(("android", handle.a_native_window.as_ptr() as u64)),
             _ => Err("Expected an Android native window".into()),
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(target_os = "windows")]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        match window.window_handle().map_err(|error| error.to_string())?.as_raw() {
+            RawWindowHandle::Win32(handle) => Ok(("win32", handle.hwnd.get() as u64)),
+            _ => Err("Expected a Win32 native window".into()),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows")))]
     {
         let _ = window;
         Ok(("native", 0))

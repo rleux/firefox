@@ -9,22 +9,6 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::rc::Rc;
 type V = hal::api::Vulkan;
 
-#[derive(Clone)]
-pub struct VulkanQueueCoordinator(Arc<std::sync::Mutex<()>>);
-impl VulkanQueueCoordinator {
-    pub fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
-        self.0
-            .lock()
-            .map_err(|_| "HAL queue coordinator is poisoned".into())
-    }
-}
-
-pub fn create_vulkan_image_device(options: &Options) -> Result<ExternalImageDevice> {
-    Ok(ExternalImageDevice::new(&Rc::new(create_vulkan_device(
-        options,
-    )?)))
-}
-
 pub struct SyncFile(Option<OwnedFd>);
 impl SyncFile {
     pub fn from_fd(fd: OwnedFd) -> Self {
@@ -143,22 +127,5 @@ impl ExternalImageDevice {
             .ok_or("Sync-file sharing requires Vulkan")?;
         producer.ensure_healthy()?;
         Ok(producer)
-    }
-    pub fn vulkan_queue_coordinator(&self) -> Result<VulkanQueueCoordinator> {
-        Ok(VulkanQueueCoordinator(
-            self.sync_file_producer()?.owner.queue_gate.clone(),
-        ))
-    }
-
-    /// Coordinates raw submissions with WR. Do not reenter WR or leave staged semaphore hooks.
-    /// # Safety
-    /// Raw work must obey Vulkan/HAL resource and queue synchronization contracts.
-    pub unsafe fn with_vulkan_queue<T>(
-        &self,
-        operation: impl FnOnce(VulkanDeviceContext<'_>) -> T,
-    ) -> Result<T> {
-        let producer = self.sync_file_producer()?;
-        let _guard = producer.owner.lock_queue()?;
-        Ok(operation(self.vulkan_context().unwrap()))
     }
 }

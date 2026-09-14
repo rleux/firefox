@@ -47,6 +47,7 @@ core-foundation = "0.9"
 default = [ "env_logger" ]
 hal-testing = ["hal-vulkan", "webrender/hal-testing"]
 hal-linux-dmabuf = ["hal-vulkan", "webrender/hal-linux-dmabuf"]
+hal-win32 = ["hal-vulkan", "webrender/hal-win32"]
 hal-android-ahb = ["hal-vulkan", "webrender/hal-android-ahb"]
 hal-vulkan = ["webrender/hal-vulkan"]
 hal-naga = ["hal-vulkan", "webrender/hal-naga"]

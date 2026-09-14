@@ -13,7 +13,18 @@ pub use linux::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapab
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
 mod sync_file;
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
-pub use sync_file::{SyncFile, VulkanQueueCoordinator, create_vulkan_image_device};
+pub use sync_file::SyncFile;
+mod interop;
+pub use interop::{VulkanQueueCoordinator, create_vulkan_image_device};
+#[cfg(all(target_os = "windows", feature = "hal-win32"))]
+mod win32;
+#[cfg(all(target_os = "windows", feature = "hal-win32"))]
+pub use win32::{Win32Image, Win32Export, Win32Copy, Win32Semaphore};
+#[cfg(feature = "hal-win32")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod win32_layout;
+#[cfg(all(target_os = "windows", feature = "hal-win32"))]
+pub use win32_layout::Win32ImageLayout;
 #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
 mod android;
 #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
@@ -129,6 +140,10 @@ impl super::backend::BackendApi for hal::api::Vulkan {
     #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
     fn open_adapter(adapter: &hal::ExposedAdapter<Self>, features: wgt::Features)
         -> Result<(hal::OpenDevice<Self>, wgt::Features)> { android::open_adapter(adapter, features) }
+
+    #[cfg(all(target_os = "windows", feature = "hal-win32"))]
+    fn open_adapter(adapter: &hal::ExposedAdapter<Self>, features: wgt::Features)
+        -> Result<(hal::OpenDevice<Self>, wgt::Features)> { win32::open_adapter(adapter, features) }
 
     fn timestamp_valid_bits(device: &Device<Self>) -> u32 {
         let device = &device.open.device;
