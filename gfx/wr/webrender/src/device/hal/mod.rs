@@ -25,31 +25,31 @@ mod submission;
 pub(crate) mod surface;
 pub use self::surface::{PresentationStatus, SurfaceInfo, SurfaceOptions, SurfaceWindow};
 mod query;
-#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+#[cfg(wr_hal_metal)]
 pub(crate) mod metal;
 #[cfg(feature = "hal-metal")]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod metal_layout;
-#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+#[cfg(wr_hal_metal)]
 pub use self::metal::{create_metal_device, create_metal_image_device, MetalEvent, MetalCopy, MetalDeviceContext, MetalPlane};
 pub use crate::renderer::hal::{BackendKind, SelectedRenderer, create_renderer_for_backend};
-#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+#[cfg(wr_hal_metal)]
 pub use crate::renderer::hal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_window, create_metal_renderer_for_layer};
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 pub(crate) mod vulkan;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDescriptor};
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 pub use self::vulkan::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities};
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
 pub use self::vulkan::SyncFile;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 pub use self::vulkan::{VulkanQueueCoordinator, create_vulkan_image_device};
 #[cfg(all(target_os = "windows", feature = "hal-win32"))]
 pub use self::vulkan::{Win32Image, Win32ImageLayout, Win32Export, Win32Copy, Win32Semaphore};
 #[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
 pub use self::vulkan::{AndroidBufferColor, AndroidBufferAlpha, HardwareBufferCopy};
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, Renderer};
 pub use crate::renderer::hal::{CpuTiming, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, RendererMemoryReport, ScreenshotHandle};
 pub use self::render::{DrawStats, FrameOutput};
@@ -60,6 +60,20 @@ pub struct FrameCompletion {
     pub(crate) serial: u64,
 }
 
+pub use wgpu_types::Backend as NativeBackend;
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct RendererCapabilities {
+    pub backend: NativeBackend,
+    pub shader_input: &'static str,
+    pub frame_timestamps: bool,
+    pub validation_request_supported: bool,
+    pub validation_requested: bool,
+    pub dual_source_blending: bool,
+    pub max_texture_size: i32,
+}
+
 type Result<T> = std::result::Result<T, String>;
 
 #[derive(Default)]
@@ -68,7 +82,7 @@ pub struct Options {
     pub validation: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Filtering {
     #[default]
     Standard,
@@ -91,12 +105,16 @@ impl DeviceLost {
     fn set(&self, lost: bool) { self.0.store(lost, std::sync::atomic::Ordering::Release); }
 }
 
+static NEXT_DEVICE_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
+    cache_id: u64,
     open: hal::OpenDevice<A>,
     queue_gate: std::sync::Arc<std::sync::Mutex<()>>,
     lost: DeviceLost,
     completion_probe: Option<submission::CompletionProbe<A>>,
+    validation_requested: bool,
     #[cfg(any(test, feature = "hal-testing"))]
     fault: std::cell::Cell<Option<FailurePoint>>,
     info: wgt::AdapterInfo,
@@ -398,11 +416,16 @@ impl<A: backend::BackendApi> Device<A> {
             & (wgt::Features::DUAL_SOURCE_BLENDING | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
                 | wgt::Features::TIMESTAMP_QUERY | wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let (open, features) = A::open_adapter(&exposed, features)?;
+        let cache_id = NEXT_DEVICE_CACHE_ID.fetch_update(std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed, |value| value.checked_add(1))
+            .map_err(|_| "HAL device cache identity exhausted")?;
         Ok((Self {
+            cache_id,
             open,
             queue_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
             lost: DeviceLost::default(),
             completion_probe: None,
+            validation_requested: options.validation,
             #[cfg(any(test, feature = "hal-testing"))]
             fault: std::cell::Cell::new(None),
             info: exposed.info,

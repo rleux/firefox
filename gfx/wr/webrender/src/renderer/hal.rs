@@ -26,6 +26,7 @@ macro_rules! renderer_facade {
     ($name:ident, $api:ty) => {
         pub struct $name { pub(super) core: RendererCore<$api> }
         impl $name {
+            pub fn capabilities(&self) -> crate::device::hal::RendererCapabilities { self.core.gpu.capabilities() }
             pub fn external_image_device(&self) -> crate::device::hal::ExternalImageDevice { self.core.external_image_device() }
             pub fn set_external_image_provider(&mut self, provider: Box<dyn crate::device::hal::ExternalImageProvider>) -> Result<(), String> { self.core.set_external_image_provider(provider) }
             #[cfg(any(test, feature = "hal-testing"))]
@@ -72,16 +73,16 @@ macro_rules! renderer_facade {
     };
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 mod vulkan;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(wr_hal_vulkan)]
 pub use vulkan::{Renderer, create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window};
 
 mod selected;
 pub use selected::{BackendKind, SelectedRenderer, create_renderer_for_backend};
-#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+#[cfg(wr_hal_metal)]
 mod metal;
-#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+#[cfg(wr_hal_metal)]
 pub use metal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_window, create_metal_renderer_for_layer};
 
 pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
@@ -1003,7 +1004,7 @@ impl RenderNotifier for FrameNotifier {
     }
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};

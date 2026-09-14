@@ -286,7 +286,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 &self.owner,
                 A::create_shader_module(
                     native,
-                    &shaders::PRESENT,
+                    shaders::presentation()?,
                     fragment,
                     self.shader_input,
                     cache,
@@ -503,7 +503,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
 

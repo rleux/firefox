@@ -24,7 +24,7 @@ pub(crate) trait BackendApi: hal::Api + sealed::Sealed {
             .map_err(|error| format!("Opening {}: {error:?}", adapter.info.name))?;
         Ok((open, features))
     }
-    #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+    #[cfg(wr_hal_metal)]
     fn create_metal_layer_surface(_instance: &Self::Instance, _layer: &objc2_quartz_core::CAMetalLayer) -> Result<Self::Surface> {
         Err("This backend cannot create a direct Metal-layer surface".into())
     }
@@ -81,7 +81,7 @@ impl ShaderInputMode {
 #[derive(Default)]
 pub(crate) struct ShaderCache {
     #[cfg(feature = "hal-translate")]
-    translated: HashMap<(u64, bool), webrender_build::hal::translate::ValidatedShader>,
+    translated: HashMap<&'static [u8], webrender_build::hal::translate::ValidatedShader>,
 }
 
 impl ShaderCache {
@@ -105,11 +105,11 @@ impl ShaderCache {
             ShaderInputMode::Native => hal::ShaderInput::SpirV(&words),
             #[cfg(feature = "hal-translate")]
             ShaderInputMode::Naga => {
-                if !self.translated.contains_key(&(artifact.digest, fragment)) {
+                if !self.translated.contains_key(data) {
                     let shader = webrender_build::hal::translate::parse_spirv(data)?;
-                    self.translated.insert((artifact.digest, fragment), shader);
+                    self.translated.insert(data, shader);
                 }
-                let shader = &self.translated[&(artifact.digest, fragment)];
+                let shader = &self.translated[data];
                 hal::ShaderInput::Naga(hal::NagaShader {
                     module: std::borrow::Cow::Owned(shader.module.clone()),
                     info: shader.info.clone(),
@@ -127,5 +127,31 @@ impl ShaderCache {
             )
         }
         .map_err(|error| format!("Creating shader {}: {error:?}", artifact.name))
+    }
+}
+
+#[cfg(all(test, wr_hal_vulkan, feature = "hal-translate"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn translated_cache_uses_content_instead_of_supplied_digest() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let shaders = super::super::render::shader_catalog_for_test();
+        let first = &shaders[0];
+        let second = shaders.iter().find(|shader| shader.vertex != first.vertex).unwrap();
+        let mut cache = ShaderCache::default();
+        for artifact in [first, second, first] {
+            let collision = ShaderArtifact {
+                name: artifact.name, features: artifact.features, vertex: artifact.vertex,
+                fragment: artifact.fragment, inputs: artifact.inputs, textures: artifact.textures,
+                projection_stages: artifact.projection_stages, digest: 0,
+            };
+            let module = cache.create_module::<hal::api::Vulkan>(&owner.open.device,
+                &collision, false, ShaderInputMode::Naga).unwrap();
+            unsafe { owner.open.device.destroy_shader_module(module); }
+        }
+        assert_eq!(cache.translated.len(), 2);
     }
 }

@@ -253,7 +253,7 @@ fn validate_buffer(descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
     use api::{ImageFormat, ImageDescriptorFlags};

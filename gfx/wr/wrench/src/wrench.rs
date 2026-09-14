@@ -943,6 +943,7 @@ impl Wrench<webrender::hal::SelectedRenderer> {
         let notifier = notifier.unwrap_or_else(|| Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false))))));
         let (renderer, sender) = webrender::hal::create_renderer_for_backend(backend, hal_options, options, notifier, compositor,
             window.map(|(window, options)| (window, [size.width as u32, size.height as u32], options)))?;
+        println!("HAL capabilities: {:?}", renderer.capabilities());
         let info = renderer.info();
         let renderer_description = format!("{} - {:?} {}", info.name, info.backend, info.driver_info);
         let api = sender.create_api();

@@ -518,3 +518,35 @@ mod tests {
         .is_err());
     }
 }
+
+pub fn native_backends(os: &str, arch: &str, vulkan: bool, metal: bool) -> (bool, bool) {
+    (vulkan && arch != "wasm32" && matches!(os, "linux" | "android" | "windows" | "macos"), metal && os == "macos")
+}
+
+pub fn configure_backends() -> (bool, bool) {
+    let backends = native_backends(&std::env::var("CARGO_CFG_TARGET_OS").unwrap(),
+        &std::env::var("CARGO_CFG_TARGET_ARCH").unwrap(),
+        std::env::var_os("CARGO_FEATURE_HAL_VULKAN").is_some(),
+        std::env::var_os("CARGO_FEATURE_HAL_METAL").is_some());
+    for (name, enabled) in [("wr_hal_vulkan", backends.0), ("wr_hal_metal", backends.1)] {
+        println!("cargo:rustc-check-cfg=cfg({name})");
+        if enabled { println!("cargo:rustc-cfg={name}"); }
+    }
+    backends
+}
+
+#[cfg(test)]
+mod platform_tests {
+    #[test]
+    fn backend_policy_excludes_unimplemented_targets() {
+        for os in ["linux", "windows", "android"] {
+            assert_eq!(super::native_backends(os, "x86_64", true, true), (true, false));
+        }
+        assert_eq!(super::native_backends("macos", "aarch64", true, true), (true, true));
+        for os in ["ios", "freebsd", "unknown", "emscripten"] {
+            assert_eq!(super::native_backends(os, "wasm32", true, true), (false, false));
+        }
+        assert_eq!(super::native_backends("freebsd", "x86_64", true, true), (false, false));
+        assert_eq!(super::native_backends("linux", "x86_64", false, true), (false, false));
+    }
+}
