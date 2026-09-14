@@ -18,7 +18,7 @@ mod compositor;
 pub use self::compositor::{CompositorConfig, CompositorTarget, LayerCompositor, NativeCompositor};
 pub use crate::composite::{CompositeDescriptor, CompositorInputLayer, NativeSurfaceOperation, NativeSurfaceOperationDetails};
 pub use self::external::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource, NativeImage};
-#[cfg(feature = "hal-vulkan")]
+pub(crate) mod backend;
 pub(crate) mod render;
 mod resources;
 mod submission;
@@ -29,9 +29,15 @@ mod query;
 pub(crate) mod vulkan;
 #[cfg(feature = "hal-vulkan")]
 pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDescriptor};
+#[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+pub use self::vulkan::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities};
+#[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
+pub use self::vulkan::{SyncFile, VulkanQueueCoordinator, create_vulkan_image_device};
+#[cfg(all(target_os = "android", feature = "hal-android-ahb"))]
+pub use self::vulkan::{AndroidBufferColor, AndroidBufferAlpha, HardwareBufferCopy};
 #[cfg(feature = "hal-vulkan")]
-pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, CpuTiming, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, Renderer, RendererMemoryReport, ScreenshotHandle};
-#[cfg(feature = "hal-vulkan")]
+pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, Renderer};
+pub use crate::renderer::hal::{CpuTiming, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, RendererMemoryReport, ScreenshotHandle};
 pub use self::render::{DrawStats, FrameOutput};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +73,7 @@ impl Filtering {
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
     open: hal::OpenDevice<A>,
+    queue_gate: std::sync::Arc<std::sync::Mutex<()>>,
     lost: std::cell::Cell<bool>,
     #[cfg(any(test, feature = "hal-testing"))]
     fault: std::cell::Cell<Option<FailurePoint>>,
@@ -264,7 +271,7 @@ impl ReadbackLayout {
     }
 }
 
-impl<A: hal::Api> Device<A> {
+impl<A: backend::BackendApi> Device<A> {
     fn new(options: &Options) -> Result<Self> {
         Self::new_with_window(options, None).map(|(device, _)| device)
     }
@@ -272,8 +279,8 @@ impl<A: hal::Api> Device<A> {
     fn new_with_window(options: &Options, window: Option<std::rc::Rc<dyn SurfaceWindow>>)
         -> Result<(Self, Option<surface::SurfaceSetup<A>>)>
     {
-        let display = window.as_ref().map(|window| window.display_handle()).transpose()
-            .map_err(|error| format!("Getting display handle: {error}"))?;
+        let window = window.map(surface::platform::WindowOwner::new).transpose()?;
+        let display = window.as_ref().map(|window| window.display_handle()).transpose()?;
         let instance = unsafe {
             A::Instance::init(&hal::InstanceDescriptor {
                 name: "WebRender HAL",
@@ -289,12 +296,7 @@ impl<A: hal::Api> Device<A> {
             })
         }
         .map_err(|e| format!("Initializing HAL: {e:?}"))?;
-        let surface = window.as_ref().map(|window| {
-            let display = window.display_handle().map_err(|error| error.to_string())?;
-            let handle = window.window_handle().map_err(|error| error.to_string())?;
-            unsafe { instance.create_surface(display.as_raw(), handle.as_raw()) }
-                .map_err(|error| format!("Creating surface: {error}"))
-        }).transpose()?;
+        let surface = window.as_ref().map(|window| window.create_surface::<A>(&instance)).transpose()?;
         let mut adapters = unsafe { instance.enumerate_adapters(surface.as_ref()) };
         if let Some(name) = &options.adapter_name {
             if name.trim().is_empty() {
@@ -367,16 +369,10 @@ impl<A: hal::Api> Device<A> {
         let features = exposed.features
             & (wgt::Features::DUAL_SOURCE_BLENDING | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
                 | wgt::Features::TIMESTAMP_QUERY | wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
-        let open = unsafe {
-            exposed.adapter.open(
-                features,
-                &exposed.capabilities.limits,
-                &wgt::MemoryHints::default(),
-            )
-        }
-        .map_err(|e| format!("Opening {}: {e:?}", exposed.info.name))?;
+        let (open, features) = A::open_adapter(&exposed, features)?;
         Ok((Self {
             open,
+            queue_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
             lost: std::cell::Cell::new(false),
             #[cfg(any(test, feature = "hal-testing"))]
             fault: std::cell::Cell::new(None),
@@ -389,6 +385,13 @@ impl<A: hal::Api> Device<A> {
             adapter: exposed.adapter,
             _instance: instance,
         }, surface.map(|raw| surface::SurfaceSetup { raw, window: window.unwrap() })))
+    }
+
+}
+
+impl<A: hal::Api> Device<A> {
+    pub(super) fn lock_queue(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.queue_gate.lock().map_err(|_| "HAL queue coordinator is poisoned".into())
     }
 
     pub fn info(&self) -> &wgt::AdapterInfo {

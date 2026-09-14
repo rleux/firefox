@@ -457,7 +457,43 @@ vec4 wr_legacy_sample(vec2 uv) {
             binaries[0].to_str().unwrap(), binaries[1].to_str().unwrap(), active_inputs.join(","), texture_entries.join(","), digest.finish()));
     }
     generated.push_str("];\n");
+    build_presentation(out)?;
+    if std::env::var_os("CARGO_FEATURE_HAL_ANDROID_AHB").is_some() {
+        build_native_conversion(out)?;
+    }
     fs::write(out.join("hal_shaders.rs"), generated)
+}
+
+fn build_presentation(out: &Path) -> io::Result<()> {
+    let compiler = std::env::var_os("GLSLANG_VALIDATOR").unwrap_or_else(|| "glslangValidator".into());
+    let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
+    let mut digest = DefaultHasher::new();
+    let mut binaries = Vec::new();
+    for (stage, source) in [("vert", include_str!("hal/present.vert")), ("frag", include_str!("hal/present.frag"))] {
+        let path = out.join("hal-shaders").join(format!("hal_present.{stage}"));
+        fs::write(&path, source)?;
+        let binary = path.with_extension(format!("{stage}.spv"));
+        run(Command::new(&compiler).args(["-V", "-Os", "--target-env", "vulkan1.1", "-o"]).arg(&binary).arg(path))?;
+        run(Command::new(&validator).args(["--target-env", "vulkan1.1"]).arg(&binary))?;
+        fs::read(&binary)?.hash(&mut digest);
+        binaries.push(binary);
+    }
+    fs::write(out.join("hal_present.rs"), format!(
+        "pub static PRESENT: ShaderArtifact = ShaderArtifact {{ name: \"hal_present\", features: \"\", vertex: include_bytes!({:?}), fragment: include_bytes!({:?}), inputs: &[], textures: &[], projection_stages: 0, digest: {} }};\n",
+        binaries[0].to_str().unwrap(), binaries[1].to_str().unwrap(), digest.finish()))
+}
+
+fn build_native_conversion(out: &Path) -> io::Result<()> {
+    let compiler = std::env::var_os("GLSLANG_VALIDATOR").unwrap_or_else(|| "glslangValidator".into());
+    let validator = std::env::var_os("SPIRV_VAL").unwrap_or_else(|| "spirv-val".into());
+    for (stage, source) in [("vert", include_str!("hal/convert.vert")), ("frag", include_str!("hal/convert.frag"))] {
+        let path = out.join("hal-shaders").join(format!("hal_convert.{stage}"));
+        fs::write(&path, source)?;
+        let binary = path.with_extension(format!("{stage}.spv"));
+        run(Command::new(&compiler).args(["-V", "-Os", "--target-env", "vulkan1.1", "-o"]).arg(&binary).arg(path))?;
+        run(Command::new(&validator).args(["--target-env", "vulkan1.1"]).arg(binary))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

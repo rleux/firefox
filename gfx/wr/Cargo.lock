@@ -6435,6 +6435,7 @@ dependencies = [
  "log",
  "malloc_size_of_derive",
  "mozangle",
+ "ndk",
  "num-traits",
  "peek-poke",
  "plane-split",

@@ -48,7 +48,7 @@ impl ExternalImageProvider for ReplayImages {
     }
 }
 
-impl<A: hal::Api> FrameRenderer<A> {
+impl<A: BackendApi> FrameRenderer<A> {
     fn capture_texture(&self, texture: &Rc<Texture<A>>) -> Result<Vec<u8>> {
         let format = image_format(texture.format)?;
         let layout = ReadbackLayout::with_pixel_size(texture.size.width, texture.size.height,

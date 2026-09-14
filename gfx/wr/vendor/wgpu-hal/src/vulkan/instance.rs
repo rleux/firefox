@@ -404,7 +404,7 @@ impl super::Instance {
                 .dpy(dpy);
 
             unsafe { xlib_loader.create_xlib_surface(&info, None) }
-                .expect("XlibSurface::create_xlib_surface() failed")
+                .map_err(|error| crate::InstanceError::new(format!("Creating Xlib Vulkan surface: {error:?}")))?
         };
 
         Ok(self.create_surface_from_vk_surface_khr(surface, None))
@@ -429,7 +429,7 @@ impl super::Instance {
                 .connection(connection);
 
             unsafe { xcb_loader.create_xcb_surface(&info, None) }
-                .expect("XcbSurface::create_xcb_surface() failed")
+                .map_err(|error| crate::InstanceError::new(format!("Creating Xcb Vulkan surface: {error:?}")))?
         };
 
         Ok(self.create_surface_from_vk_surface_khr(surface, None))
@@ -454,7 +454,8 @@ impl super::Instance {
                 .display(display)
                 .surface(surface);
 
-            unsafe { w_loader.create_wayland_surface(&info, None) }.expect("WaylandSurface failed")
+            unsafe { w_loader.create_wayland_surface(&info, None) }
+                .map_err(|error| crate::InstanceError::new(format!("Creating Wayland Vulkan surface: {error:?}")))?
         };
 
         Ok(self.create_surface_from_vk_surface_khr(surface, None))
@@ -477,7 +478,7 @@ impl super::Instance {
                 .flags(vk::AndroidSurfaceCreateFlagsKHR::empty())
                 .window(window);
 
-            unsafe { a_loader.create_android_surface(&info, None) }.expect("AndroidSurface failed")
+            unsafe { a_loader.create_android_surface(&info, None) }.map_err(|error| crate::InstanceError::new(format!("Creating Android surface: {error:?}")))?
         };
 
         Ok(self.create_surface_from_vk_surface_khr(surface, None))

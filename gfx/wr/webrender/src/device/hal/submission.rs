@@ -9,6 +9,19 @@ use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+pub(super) trait SubmissionSync<A: hal::Api>: 'static {
+    fn stage(&self, queue: &A::Queue);
+    fn unstage(&self, queue: &A::Queue);
+}
+
+struct StagedSync<'a, A: hal::Api> {
+    sync: &'a [Rc<dyn SubmissionSync<A>>],
+    queue: &'a A::Queue,
+}
+impl<A: hal::Api> Drop for StagedSync<'_, A> {
+    fn drop(&mut self) { for sync in self.sync { sync.unstage(self.queue); } }
+}
+
 pub(super) struct Submission<A: hal::Api> {
     owner: Rc<Device<A>>,
     encoder: Option<A::CommandEncoder>,
@@ -19,6 +32,7 @@ pub(super) struct Submission<A: hal::Api> {
     complete: bool,
     serial: u64,
     resources: Vec<Box<dyn Any>>,
+    sync: Vec<Rc<dyn SubmissionSync<A>>>,
     commits: Vec<Box<dyn FnOnce()>>,
     completions: Vec<Box<dyn FnOnce()>>,
 }
@@ -35,6 +49,7 @@ impl<A: hal::Api> Submission<A> {
             complete: false,
             serial,
             resources: Vec::new(),
+            sync: Vec::new(),
             commits: Vec::new(),
             completions: Vec::new(),
         };
@@ -66,6 +81,7 @@ impl<A: hal::Api> Submission<A> {
         }
         for complete in self.completions.drain(..) { complete(); }
         self.resources.clear();
+        self.sync.clear();
     }
 
     fn restart(&mut self, serial: u64) -> Result<()> {
@@ -87,6 +103,8 @@ impl<A: hal::Api> Submission<A> {
         self.resources.push(Box::new(value));
     }
 
+    pub fn synchronize(&mut self, sync: Rc<dyn SubmissionSync<A>>) { self.sync.push(sync); }
+
     pub fn commit(&mut self, commit: impl FnOnce() + 'static) {
         self.commits.push(Box::new(commit));
     }
@@ -104,15 +122,15 @@ impl<A: hal::Api> Submission<A> {
             );
             self.recording = false;
             self.attempted = true;
-            self.owner
-                .open
-                .queue
-                .submit(
-                    &[self.buffer.as_ref().unwrap()],
-                    surfaces,
-                    (&self.fence, self.serial),
-                )
-                .map_err(|e| format!("Submitting WR commands: {e:?}"))?;
+            let result = {
+                let _guard = self.owner.lock_queue()?;
+                let _staged = StagedSync { sync: &self.sync, queue: &self.owner.open.queue };
+                for sync in &self.sync { sync.stage(&self.owner.open.queue); }
+                let result = self.owner.open.queue.submit(
+                    &[self.buffer.as_ref().unwrap()], surfaces, (&self.fence, self.serial));
+                result
+            };
+            result.map_err(|e| format!("Submitting WR commands: {e:?}"))?;
         }
         for commit in self.commits.drain(..) {
             commit();
@@ -152,6 +170,7 @@ impl<A: hal::Api> Drop for Submission<A> {
     fn drop(&mut self) {
         unsafe {
             if self.attempted && !self.complete {
+                let _guard = self.owner.queue_gate.lock().unwrap_or_else(|error| error.into_inner());
                 let _ = self.owner.open.queue.wait_for_idle();
             }
             if let Some(mut encoder) = self.encoder.take() {

@@ -9,16 +9,15 @@ use webrender::api::units::*;
 use webrender::hal::{Options, PresentationStatus, RecordedFrameHandle, Renderer, SurfaceOptions};
 use webrender::render_api::{CaptureBits, ClearCache, DebugCommand, Transaction};
 use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}, keyboard::{Key, NamedKey}, window::{Window, WindowId}};
-use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy}, keyboard::{Key, NamedKey}, window::{Window, WindowId}};
 
 #[derive(Clone)]
-struct Wake { window: WindowId, composite: bool }
+struct Wake { window: WindowId, generation: u64, composite: bool }
 
-struct Notifier { window: WindowId, proxy: EventLoopProxy<Wake> }
+struct Notifier { window: WindowId, generation: u64, proxy: EventLoopProxy<Wake> }
 impl RenderNotifier for Notifier {
-    fn clone(&self) -> Box<dyn RenderNotifier> { Box::new(Self { window: self.window, proxy: self.proxy.clone() }) }
-    fn wake_up(&self, composite: bool) { let _ = self.proxy.send_event(Wake { window: self.window, composite }); }
+    fn clone(&self) -> Box<dyn RenderNotifier> { Box::new(Self { window: self.window, generation: self.generation, proxy: self.proxy.clone() }) }
+    fn wake_up(&self, composite: bool) { let _ = self.proxy.send_event(Wake { window: self.window, generation: self.generation, composite }); }
     fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, params: &FrameReadyParams) { self.wake_up(params.present); }
 }
 
@@ -198,6 +197,7 @@ struct App<'a> {
 
 impl App<'_> {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        if cfg!(target_os = "android") && !self.panes.is_empty() { return Err("Android supports one activity window".into()); }
         if self.panes.len() >= 16 { return Err("At most 16 HAL windows are supported".into()); }
         let number = self.next_number;
         self.next_number += 1;
@@ -207,7 +207,7 @@ impl App<'_> {
         let initial_size = DeviceIntSize::new(size.width as i32, size.height as i32);
         let size = DeviceIntSize::new(size.width.max(1) as i32, size.height.max(1) as i32);
         let scale = window.scale_factor() as f32;
-        let notifier = Box::new(Notifier { window: window.id(), proxy: self.proxy.clone() });
+        let notifier = Box::new(Notifier { window: window.id(), generation: number, proxy: self.proxy.clone() });
         let mut wrench = Wrench::new_hal_window(self.options, size, !self.args.is_present("no_subpixel_aa"), notifier,
             crate::hal::compositor_config(self.args)?, window.clone(), SurfaceOptions { vsync: self.args.is_present("vsync"), transparent: false })?;
         wrench.renderer.configure_filtering(crate::hal::filtering(self.args))?;
@@ -227,12 +227,8 @@ impl App<'_> {
         txn.set_document_view(DeviceIntRect::from_size(size));
         wrench.api.send_transaction(wrench.document_id, txn);
         thing.do_frame(&mut wrench);
-        let xid = match window.window_handle().map_err(|error| error.to_string())?.as_raw() {
-            RawWindowHandle::Xlib(handle) => handle.window as u64,
-            RawWindowHandle::Xcb(handle) => handle.window.get() as u64,
-            _ => 0,
-        };
-        eprintln!("HAL WINDOW opened number={number} window={xid} size={}x{} scale={scale} adapter={}", size.width, size.height, wrench.renderer.info().name);
+        let (platform, xid) = crate::hal_platform::identity(&window)?;
+        eprintln!("HAL WINDOW opened number={number} window={xid} size={}x{} scale={scale} platform={platform} adapter={}", size.width, size.height, wrench.renderer.info().name);
         window.request_redraw();
         self.panes.insert(window.id(), Pane { window, wrench, thing, number, size, scale,
             pending_size: Some(initial_size), pending_scale: None,
@@ -251,6 +247,7 @@ impl App<'_> {
 
 impl ApplicationHandler<Wake> for App<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.error.is_some() || event_loop.exiting() { return; }
         if !self.started {
             self.started = true;
             for _ in 0..self.initial_windows { if let Err(error) = self.open(event_loop) { self.fail(error, event_loop); break; } }
@@ -267,6 +264,13 @@ impl ApplicationHandler<Wake> for App<'_> {
     }
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        if cfg!(target_os = "android") {
+            let pending: usize = self.panes.values().map(|pane| pane.screenshots.len()).sum();
+            self.panes.clear();
+            self.started = false;
+            eprintln!("HAL Android suspended; native surfaces retired, {pending} screenshots cancelled; playback restarts on resume");
+            return;
+        }
         for pane in self.panes.values_mut() {
             pane.suspended = true;
             pane.needs_update = true;
@@ -280,6 +284,7 @@ impl ApplicationHandler<Wake> for App<'_> {
 
     fn user_event(&mut self, _: &ActiveEventLoop, wake: Wake) {
         if let Some(pane) = self.panes.get_mut(&wake.window) {
+            if pane.number != wake.generation { return; }
             pane.needs_update = true;
             pane.redraw |= wake.composite;
             if !pane.hidden() { pane.window.request_redraw(); }
@@ -350,16 +355,16 @@ impl ApplicationHandler<Wake> for App<'_> {
 }
 
 pub fn run<'a>(args: &'a clap::ArgMatches, options: &'a Options, dimensions: [u32; 2]) -> Result<(), String> {
-    if cfg!(target_os = "android") { return Err("HAL Android window lifecycle integration is not implemented".into()); }
     if dimensions.contains(&0) || dimensions.iter().any(|size| *size > i32::MAX as u32) { return Err("Invalid window dimensions".into()); }
     for option in ["no_scissor", "color_target_init", "profiler_ui", "dump_shader_source", "slow_subpixel"] {
         if args.occurrences_of(option) > 0 { return Err(format!("--{option} is unavailable in HAL show")); }
     }
     let initial_windows: usize = args.value_of("hal_windows").unwrap_or("1").parse().map_err(|_| "Invalid window count")?;
     if !(1..=16).contains(&initial_windows) { return Err("HAL window count must be between 1 and 16".into()); }
+    if cfg!(target_os = "android") && initial_windows != 1 { return Err("Android supports one activity window".into()); }
     let limit = args.value_of("hal_frames").map(|value| value.parse::<u64>().map_err(|_| "Invalid frame count")).transpose()?;
     if limit == Some(0) { return Err("HAL frame count must be positive".into()); }
-    let event_loop = EventLoop::<Wake>::with_user_event().build().map_err(|error| error.to_string())?;
+    let event_loop = crate::hal_platform::event_loop::<Wake>()?;
     let mut app = App { args, options, dimensions, initial_windows, limit, proxy: event_loop.create_proxy(),
         panes: HashMap::new(), next_number: 1, started: false, error: None };
     help();

@@ -10,7 +10,8 @@ use crate::api::{
 };
 use crate::api::channel::{unbounded_channel, Receiver, Sender};
 use crate::composite::{CompositorConfig, CompositorKind};
-use crate::device::hal::{create_vulkan_device, Options, FrameOutput};
+use crate::device::hal::{Options, FrameOutput};
+use crate::device::hal::backend::BackendApi;
 use crate::device::hal::render::{FrameRenderer, RenderedFrame, PendingReadback};
 use crate::frame_builder::FrameBuilderConfig;
 use crate::internal_types::{RenderedDocument, ResourceUpdateList, ResultMsg};
@@ -20,6 +21,61 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+
+macro_rules! renderer_facade {
+    ($name:ident, $api:ty) => {
+        pub struct $name { pub(super) core: RendererCore<$api> }
+        impl $name {
+            pub fn external_image_device(&self) -> crate::device::hal::ExternalImageDevice { self.core.external_image_device() }
+            pub fn set_external_image_provider(&mut self, provider: Box<dyn crate::device::hal::ExternalImageProvider>) -> Result<(), String> { self.core.set_external_image_provider(provider) }
+            #[cfg(any(test, feature = "hal-testing"))]
+            pub fn inject_failure(&self, point: crate::device::hal::FailurePoint) { self.core.inject_failure(point) }
+            pub fn is_failed(&self) -> bool { self.core.is_failed() }
+            pub fn surface_info(&self) -> Option<crate::device::hal::SurfaceInfo> { self.core.surface_info() }
+            pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<(), String> { self.core.resize_surface(size) }
+            pub fn acquire_surface(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.core.acquire_surface() }
+            pub fn discard_surface(&mut self) -> Result<(), String> { self.core.discard_surface() }
+            pub fn present(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.core.present() }
+            pub fn poll(&self) -> Result<(), String> { self.core.poll() }
+            pub fn enable_gpu_profiling(&self, enabled: bool) -> bool { self.core.enable_gpu_profiling(enabled) }
+            pub fn take_gpu_timings(&self) -> Result<Vec<GpuTiming>, String> { self.core.take_gpu_timings() }
+            pub fn take_cpu_timings(&mut self) -> Vec<CpuTiming> { self.core.take_cpu_timings() }
+            pub fn report_memory(&self) -> RendererMemoryReport { self.core.report_memory() }
+            pub fn trim_transient_resources(&self, trim_upload_buffers: bool) { self.core.trim_transient_resources(trim_upload_buffers) }
+            pub fn memory_stats(&self) -> crate::device::hal::MemoryStats { self.core.memory_stats() }
+            pub fn info(&self) -> &wgpu_types::AdapterInfo { self.core.info() }
+            pub fn flush_pipeline_info(&mut self) -> PipelineInfo { self.core.flush_pipeline_info() }
+            pub fn update(&mut self) -> Result<(), String> { self.core.update() }
+            pub fn has_frame(&self) -> bool { self.core.has_frame() }
+            pub fn configure_filtering(&mut self, filtering: crate::device::hal::Filtering) -> Result<(), String> { self.core.configure_filtering(filtering) }
+            pub fn filtering(&self) -> crate::device::hal::Filtering { self.core.filtering() }
+            pub fn has_presentable_output(&self) -> bool { self.core.has_presentable_output() }
+            pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> { self.core.prepare_frame_if_ready(document_id) }
+            pub fn prepare_frame(&mut self, document_id: DocumentId) -> Result<PreparedFrameInfo, String> { self.core.prepare_frame(document_id) }
+            pub fn render_frame(&mut self) -> Result<FrameOutput, String> { self.core.render_frame() }
+            pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> { self.core.render() }
+            pub fn read_pixels_rgba8(&self, rect: api::units::FramebufferIntRect) -> Result<Vec<u8>, String> { self.core.read_pixels_rgba8(rect) }
+            pub fn frame_completion(&self) -> Option<FrameCompletion> { self.core.frame_completion() }
+            pub fn poll_completion(&self, completion: FrameCompletion) -> Result<bool, String> { self.core.poll_completion(completion) }
+            pub fn request_readback(&self, rect: api::units::FramebufferIntRect) -> Result<ReadbackHandle, String> { self.core.request_readback(rect) }
+            pub fn poll_readback(&self, handle: ReadbackHandle) -> Result<Option<Vec<u8>>, String> { self.core.poll_readback(handle) }
+            pub fn wait_readback(&self, handle: ReadbackHandle) -> Result<Vec<u8>, String> { self.core.wait_readback(handle) }
+            pub fn cancel_readback(&self, handle: ReadbackHandle) -> Result<(), String> { self.core.cancel_readback(handle) }
+            pub fn get_screenshot_async(&mut self, window_rect: api::units::DeviceIntRect, buffer_size: api::units::DeviceIntSize, format: ImageFormat) -> Result<(ScreenshotHandle, api::units::DeviceIntSize), String> { self.core.get_screenshot_async(window_rect, buffer_size, format) }
+            pub fn map_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> { self.core.map_and_recycle_screenshot(handle, destination, stride, format) }
+            pub fn record_frame(&self, format: ImageFormat) -> Result<(RecordedFrameHandle, api::units::DeviceIntSize), String> { self.core.record_frame(format) }
+            pub fn map_recorded_frame(&self, handle: RecordedFrameHandle, destination: &mut [u8], stride: usize) -> Result<bool, String> { self.core.map_recorded_frame(handle, destination, stride) }
+            pub fn release_profiler_structures(&mut self) { self.core.release_profiler_structures() }
+            pub fn release_composition_recorder_structures(&mut self) { self.core.release_composition_recorder_structures() }
+            pub fn supports_bgra_readback(&self) -> bool { self.core.supports_bgra_readback() }
+        }
+    };
+}
+
+#[cfg(feature = "hal-vulkan")]
+mod vulkan;
+#[cfg(feature = "hal-vulkan")]
+pub use vulkan::{Renderer, create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window};
 
 pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
 
@@ -70,16 +126,16 @@ pub struct RecordedFrameHandle(ScreenshotHandle);
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ReadbackKind { Pixels, Screenshot, Recording }
 
-struct ReadbackRequest {
-    ticket: PendingReadback<wgpu_hal::api::Vulkan>,
+struct ReadbackRequest<A: BackendApi> {
+    ticket: PendingReadback<A>,
     flip_rows: bool,
     format: ImageFormat,
     kind: ReadbackKind,
 }
 
-pub struct Renderer {
+pub(crate) struct RendererCore<A: BackendApi> {
     filtering_locked: bool,
-    gpu: FrameRenderer<wgpu_hal::api::Vulkan>,
+    gpu: FrameRenderer<A>,
     ready: Arc<FrameReady>,
     ready_generation: u64,
     pending_message: Option<ResultMsg>,
@@ -93,8 +149,8 @@ pub struct Renderer {
     last_upload_bytes: u64,
     last_compositor_surfaces: [usize; 2],
     clear_color: api::ColorF,
-    last_output: Option<RenderedFrame<wgpu_hal::api::Vulkan>>,
-    readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest>>,
+    last_output: Option<RenderedFrame<A>>,
+    readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest<A>>>,
     readback_bytes: Cell<u64>,
     next_readback: Cell<u64>,
     last_descriptor: Option<crate::composite::CompositeDescriptor>,
@@ -112,42 +168,13 @@ pub struct Renderer {
     _pool: Arc<RenderBackendPool>,
 }
 
-pub fn create_vulkan_renderer(
-    hal_options: &Options,
-    options: WebRenderOptions,
-    notifier: Box<dyn RenderNotifier>,
-) -> Result<(Renderer, RenderApiSender), String> {
-    create_vulkan_renderer_with_compositor(hal_options, options, notifier, crate::device::hal::CompositorConfig::Draw)
-}
-
-pub fn create_vulkan_renderer_with_compositor(
-    hal_options: &Options,
-    options: WebRenderOptions,
-    notifier: Box<dyn RenderNotifier>,
-    compositor: crate::device::hal::CompositorConfig,
-) -> Result<(Renderer, RenderApiSender), String> {
-    create_renderer(hal_options, options, notifier, compositor, None)
-}
-
-pub fn create_vulkan_renderer_for_window(
-    hal_options: &Options,
-    options: WebRenderOptions,
-    notifier: Box<dyn RenderNotifier>,
-    compositor: crate::device::hal::CompositorConfig,
-    window: std::rc::Rc<dyn crate::device::hal::SurfaceWindow>,
-    size: [u32; 2],
-    surface_options: crate::device::hal::SurfaceOptions,
-) -> Result<(Renderer, RenderApiSender), String> {
-    create_renderer(hal_options, options, notifier, compositor, Some((window, size, surface_options)))
-}
-
-fn create_renderer(
+pub(crate) fn create_renderer<A: BackendApi>(
     hal_options: &Options,
     mut options: WebRenderOptions,
     notifier: Box<dyn RenderNotifier>,
     compositor: crate::device::hal::CompositorConfig,
     window: Option<(std::rc::Rc<dyn crate::device::hal::SurfaceWindow>, [u32; 2], crate::device::hal::SurfaceOptions)>,
-) -> Result<(Renderer, RenderApiSender), String> {
+) -> Result<(RendererCore<A>, RenderApiSender), String> {
     if !matches!(
         options.compositor_config,
         CompositorConfig::Draw {
@@ -165,12 +192,12 @@ fn create_renderer(
     if matches!(compositor_kind, CompositorKind::Layer { .. }) { options.surface_origin_is_top_left = true; }
     let (device, surface) = match window {
         Some((window, size, options)) => {
-            let (device, setup) = crate::device::hal::vulkan::create_vulkan_device_for_window(hal_options, window)?;
-            (device, Some((setup, size, options)))
+            let (device, setup) = A::create_device(hal_options, Some(window))?;
+            (device, Some((setup.ok_or("HAL window initialization returned no surface")?, size, options)))
         }
-        None => (create_vulkan_device(hal_options)?, None),
+        None => (A::create_device(hal_options, None)?.0, None),
     };
-    let timestamp_bits = device.timestamp_valid_bits();
+    let timestamp_bits = A::timestamp_valid_bits(&device);
     let max_internal_texture_size = options
         .max_internal_texture_size
         .unwrap_or(device.max_texture_size())
@@ -239,7 +266,7 @@ fn create_renderer(
     } = init::create_render_backend(&mut options, notifier, result_tx, config, resources)
         .map_err(|error| format!("Starting render backend: {error:?}"))?;
     Ok((
-        Renderer {
+        RendererCore {
             filtering_locked: false,
             gpu,
             ready,
@@ -277,7 +304,7 @@ fn create_renderer(
     ))
 }
 
-impl Renderer {
+impl<A: BackendApi> RendererCore<A> {
     pub fn external_image_device(&self) -> crate::device::hal::ExternalImageDevice {
         self.gpu.external_image_device()
     }
@@ -590,7 +617,7 @@ impl Renderer {
         })
     }
 
-    fn execute_frame(&mut self) -> Result<RenderedFrame<wgpu_hal::api::Vulkan>, String> {
+    fn execute_frame(&mut self) -> Result<RenderedFrame<A>, String> {
         let start = std::time::Instant::now();
         let document = self.document.as_mut().ok_or("No prepared WR frame")?;
         let frame = &document.frame;
@@ -865,7 +892,7 @@ impl Renderer {
     pub fn supports_bgra_readback(&self) -> bool { true }
 }
 
-impl Drop for Renderer {
+impl<A: BackendApi> Drop for RendererCore<A> {
     fn drop(&mut self) {
         if let Some(sender) = self.api_tx.take() {
             let _ = sender.send(ApiMsg::UnregisterWindow(self.backend_id, None));
@@ -959,7 +986,7 @@ impl RenderNotifier for FrameNotifier {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1082,8 +1109,8 @@ mod tests {
             assert!(renderer.is_failed());
             assert!(renderer.poll().is_err());
             assert!(renderer.wait_readback(second).is_err());
-            assert!(renderer.readbacks.borrow().is_empty());
-            assert_eq!(renderer.readback_bytes.get(), 0);
+            assert!(renderer.core.readbacks.borrow().is_empty());
+            assert_eq!(renderer.core.readback_bytes.get(), 0);
             assert!(renderer.request_readback(rect).is_err());
             assert!(renderer.render().is_err());
             api.shut_down(true);
@@ -1093,7 +1120,14 @@ mod tests {
 
     #[test]
     #[ignore = "Requires Vulkan and validation"]
-    fn external_images_update_crop_flip_and_release() {
+    fn external_images_update_crop_flip_and_release() { external_images_roundtrip(false); }
+
+    #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+    #[test]
+    #[ignore = "Requires DMA-BUF-capable Vulkan hardware"]
+    fn dmabuf_images_render_crop_flip_and_release() { external_images_roundtrip(true); }
+
+    fn external_images_roundtrip(dmabuf: bool) {
         use api::units::*;
         use api::*;
         use crate::device::hal::{ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource};
@@ -1129,12 +1163,31 @@ mod tests {
         let pipeline = PipelineId(0, 0);
         let key = api.generate_image_key();
         let producer = renderer.external_image_device();
+        #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+        let exporting_device = if dmabuf {
+            if !producer.dmabuf_capabilities().unwrap().supported() {
+                println!("DMA-BUF rendering unavailable on this driver");
+                api.shut_down(true);
+                return;
+            }
+            Some(crate::hal::create_vulkan_image_device(&Options { validation: true, ..Default::default() }).unwrap())
+        } else { None };
+        let create_image = |descriptor, data: &[u8]| {
+            #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+            if let Some(exporter) = &exporting_device {
+                let original = exporter.create_image(descriptor, data).unwrap();
+                let export = exporter.export_dmabuf_image(&original, 0).unwrap();
+                let copied = unsafe { producer.copy_dmabuf_planes(std::slice::from_ref(export.plane()), export.ready()) }.unwrap();
+                return copied.images()[0].clone();
+            }
+            producer.create_image(descriptor, data).unwrap()
+        };
         let descriptor = ImageDescriptor::new(7, 5, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE);
         let pixels = |serial: u8| -> Vec<u8> {
             (0..5u8).flat_map(|y| (0..7u8).flat_map(move |x| [x * 31, y * 47, 17 + serial, 255])).collect()
         };
         let image = Rc::new(RefCell::new(ImageState {
-            source: ExternalImageSource::Native(producer.create_image(descriptor, &pixels(0)).unwrap()),
+            source: ExternalImageSource::Native(create_image(descriptor, &pixels(0))),
             descriptor, uv: TexelRect::new(0.0, 0.0, 7.0, 5.0), generation: 0,
         }));
         let acquired = Rc::new(Cell::new(0));
@@ -1153,8 +1206,8 @@ mod tests {
                 let mut state = image.borrow_mut();
                 if serial == 3 {
                     state.source = ExternalImageSource::Buffer(Arc::new(data.clone()));
-                } else if serial == 2 {
-                    state.source = ExternalImageSource::Native(producer.create_image(descriptor, &data).unwrap());
+                } else if serial == 2 || dmabuf {
+                    state.source = ExternalImageSource::Native(create_image(descriptor, &data));
                 } else if let ExternalImageSource::Native(native) = &state.source {
                     producer.update_image(native, descriptor, &data).unwrap();
                 }
@@ -1191,7 +1244,7 @@ mod tests {
             api.send_transaction(document, transaction);
             renderer.prepare_frame(document).unwrap();
             renderer.render().unwrap();
-            if serial == 3 { assert!(renderer.last_upload_bytes >= 7 * 5 * 4); }
+            if serial == 3 { assert!(renderer.core.last_upload_bytes >= 7 * 5 * 4); }
             if serial == 0 {
                 assert!(released.borrow().is_empty());
                 if let ExternalImageSource::Native(native) = &image.borrow().source {
@@ -1233,9 +1286,9 @@ mod tests {
         )
         .unwrap();
         assert!(renderer.enable_gpu_profiling(true));
-        renderer.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, 0.0))).unwrap();
-        assert!(renderer.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, f32::NAN))).is_err());
-        assert!(renderer.process_message(ResultMsg::SetParameter(Parameter::Bool(BoolParameter::PboUploads, true))).is_err());
+        renderer.core.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, 0.0))).unwrap();
+        assert!(renderer.core.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, f32::NAN))).is_err());
+        assert!(renderer.core.process_message(ResultMsg::SetParameter(Parameter::Bool(BoolParameter::PboUploads, true))).is_err());
         let mut api = sender.create_api();
         let id = api.add_document(DeviceIntSize::new(64, 64));
         let pipeline = PipelineId(0, 0);
@@ -1270,10 +1323,10 @@ mod tests {
         let mut generation = 0;
         for serial in 1..=3 {
             send(&mut api, serial, true);
-            generation = renderer.ready.wait(generation).unwrap().0;
+            generation = renderer.core.ready.wait(generation).unwrap().0;
         }
         renderer.prepare_frame(id).unwrap();
-        assert_eq!(renderer.ready_generation, generation);
+        assert_eq!(renderer.core.ready_generation, generation);
         let output = renderer.render_frame().unwrap();
         assert_eq!(&output.pixels[..4], &[255, 0, 0, 255]);
         let completion = renderer.frame_completion().unwrap();
@@ -1283,8 +1336,8 @@ mod tests {
         let cpu_timings = renderer.take_cpu_timings();
         assert_eq!(cpu_timings.last().unwrap().completion, completion);
         assert!(cpu_timings.last().unwrap().is_slow);
-        let original_rect = renderer.document.as_ref().unwrap().frame.device_rect;
-        renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
+        let original_rect = renderer.core.document.as_ref().unwrap().frame.device_rect;
+        renderer.core.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
             DeviceIntPoint::new(5, 7),
             DeviceIntSize::new(40, 40),
         );
@@ -1295,9 +1348,9 @@ mod tests {
             &cropped.pixels[(2 * 40 + 4) * 4..(2 * 40 + 5) * 4],
             &[0, 0, 255, 255]
         );
-        renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
+        renderer.core.document.as_mut().unwrap().frame.device_rect = original_rect;
         renderer.render().unwrap();
-        assert!(renderer.readbacks.borrow().is_empty());
+        assert!(renderer.core.readbacks.borrow().is_empty());
         let completion = renderer.frame_completion().unwrap();
         let crop_rect = FramebufferIntRect::from_origin_and_size(
             FramebufferIntPoint::new(7, 37), FramebufferIntSize::new(19, 21),
@@ -1312,7 +1365,7 @@ mod tests {
         assert!(other.poll_readback(old_crop).is_err());
         assert!(other.poll_completion(completion).is_err());
         drop(other);
-        renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
+        renderer.core.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
             DeviceIntPoint::new(5, 7), DeviceIntSize::new(40, 40),
         );
         renderer.render().unwrap();
@@ -1333,10 +1386,10 @@ mod tests {
         let handles: Vec<_> = (0..8).map(|_| renderer.request_readback(new_rect).unwrap()).collect();
         assert!(renderer.request_readback(new_rect).unwrap_err().contains("budget"));
         for handle in handles { renderer.cancel_readback(handle).unwrap(); }
-        assert_eq!(renderer.readback_bytes.get(), 0);
-        assert!(renderer.readbacks.borrow().is_empty());
+        assert_eq!(renderer.core.readback_bytes.get(), 0);
+        assert!(renderer.core.readbacks.borrow().is_empty());
         assert!(renderer.request_readback(FramebufferIntRect::zero()).is_err());
-        renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
+        renderer.core.document.as_mut().unwrap().frame.device_rect = original_rect;
         let pipeline_info = renderer.flush_pipeline_info();
         renderer.render().unwrap();
         let unchanged = renderer.render().unwrap();
@@ -1360,7 +1413,7 @@ mod tests {
         }
         let (recorded, recorded_size) = renderer.record_frame(ImageFormat::BGRA8).unwrap();
         assert_eq!(recorded_size, DeviceIntSize::new(64, 64));
-        renderer.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
+        renderer.core.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
             DeviceIntPoint::new(5, 7), DeviceIntSize::new(40, 40),
         );
         renderer.render().unwrap();
@@ -1372,7 +1425,7 @@ mod tests {
         let mut expected_recording = output.pixels.clone();
         for pixel in expected_recording.chunks_exact_mut(4) { pixel.swap(0, 2); }
         assert_eq!(recorded_pixels, expected_recording);
-        let capture_rect = renderer.document.as_ref().unwrap().frame.device_rect;
+        let capture_rect = renderer.core.document.as_ref().unwrap().frame.device_rect;
         let (cancelled_shot, _) = renderer.get_screenshot_async(capture_rect, DeviceIntSize::new(8, 8), ImageFormat::RGBA8).unwrap();
         renderer.release_profiler_structures();
         assert!(renderer.poll_readback(cancelled_shot.readback).is_err());
@@ -1382,7 +1435,7 @@ mod tests {
         renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(40, 40))).unwrap();
         renderer.poll().unwrap();
         let before_trim = renderer.memory_stats();
-        renderer.gpu.trim_transient_resources(true).unwrap();
+        renderer.core.gpu.trim_transient_resources(true).unwrap();
         let after_trim = renderer.memory_stats();
         assert_eq!(after_trim.cached_buffer_bytes, 0);
         assert_eq!(after_trim.cached_texture_bytes, 0);
@@ -1392,7 +1445,7 @@ mod tests {
         assert_eq!(report.gpu.buffer_bytes, after_trim.buffer_bytes);
         assert_eq!(report.gpu.texture_bytes, after_trim.texture_bytes);
         assert!(report.cpu.frame_allocator > 0);
-        renderer.document.as_mut().unwrap().frame.device_rect = original_rect;
+        renderer.core.document.as_mut().unwrap().frame.device_rect = original_rect;
         assert_eq!(pipeline_info.epochs[&(pipeline, id)], Epoch(3));
         assert!(renderer.flush_pipeline_info().epochs.is_empty());
 
@@ -1421,19 +1474,19 @@ mod tests {
             *checkpoints.lock().unwrap(),
             [Checkpoint::FrameTexturesUpdated, Checkpoint::FrameRendered]
         );
-        assert!(renderer.notifications.is_empty());
+        assert!(renderer.core.notifications.is_empty());
 
         send(&mut api, 4, false);
         renderer.prepare_frame(id).unwrap();
         assert!(renderer.render_frame().unwrap().pixels.is_empty());
         send(&mut api, 5, true);
         renderer.prepare_frame(id).unwrap();
-        let mut document = renderer.document.take().unwrap();
+        let mut document = renderer.core.document.take().unwrap();
         document.frame.has_texture_cache_tasks = true;
         document.frame.has_been_rendered = false;
-        renderer.document = Some(document);
+        renderer.core.document = Some(document);
         renderer
-            .process_message(ResultMsg::UpdateResources {
+            .core.process_message(ResultMsg::UpdateResources {
                 resource_updates: ResourceUpdateList {
                     native_surface_updates: Vec::new(),
                     texture_updates: crate::internal_types::TextureUpdateList::new(),
@@ -1443,15 +1496,15 @@ mod tests {
                 trim_upload_buffers: true,
             })
             .unwrap();
-        assert!(renderer.document.is_none());
-        assert!(renderer.last_output.is_none());
+        assert!(renderer.core.document.is_none());
+        assert!(renderer.core.last_output.is_none());
         renderer.update().unwrap();
         send(&mut api, 6, true);
         renderer.prepare_frame(id).unwrap();
-        let mut offscreen = renderer.document.take().unwrap();
+        let mut offscreen = renderer.core.document.take().unwrap();
         offscreen.frame.device_rect = DeviceIntRect::zero();
         renderer
-            .process_message(ResultMsg::RenderDocumentOffscreen(
+            .core.process_message(ResultMsg::RenderDocumentOffscreen(
                 id,
                 offscreen,
                 ResourceUpdateList {
@@ -1460,22 +1513,22 @@ mod tests {
                 },
             ))
             .unwrap();
-        assert!(renderer.document.is_none());
-        assert!(renderer.last_output.is_none());
+        assert!(renderer.core.document.is_none());
+        assert!(renderer.core.last_output.is_none());
         for epoch in 0..1000 {
             let mut info = PipelineInfo::default();
             info.epochs.insert((pipeline, id), Epoch(epoch));
             renderer
-                .process_message(ResultMsg::PublishPipelineInfo(info))
+                .core.process_message(ResultMsg::PublishPipelineInfo(info))
                 .unwrap();
         }
         assert_eq!(renderer.flush_pipeline_info().epochs.len(), 1);
         assert!(renderer.flush_pipeline_info().epochs.is_empty());
         send(&mut api, 7, true);
-        renderer.ready.wait(renderer.ready_generation).unwrap();
+        renderer.core.ready.wait(renderer.core.ready_generation).unwrap();
         api.shut_down(true);
         renderer.update().unwrap();
-        renderer.ready_generation = renderer.ready.state.lock().unwrap().generation;
-        assert!(renderer.ready.wait(renderer.ready_generation).is_err());
+        renderer.core.ready_generation = renderer.core.ready.state.lock().unwrap().generation;
+        assert!(renderer.core.ready.wait(renderer.core.ready_generation).is_err());
     }
 }

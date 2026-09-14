@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::backend::{BackendApi, ShaderCache, ShaderInputMode};
 use super::submission::SubmissionQueue;
 use super::resources::{Buffer, Owned, Texture, texture_format};
 use super::external::{ReleaseQueue, dispatch_releases};
@@ -25,6 +26,7 @@ use webrender_build::hal::{ScalarType, ShaderArtifact};
 
 mod shaders {
     include!(concat!(env!("OUT_DIR"), "/hal_shaders.rs"));
+    include!(concat!(env!("OUT_DIR"), "/hal_present.rs"));
 }
 
 #[cfg(any(feature = "capture", feature = "replay"))]
@@ -130,34 +132,6 @@ fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum ShaderInputMode {
-    Native,
-    #[cfg(feature = "hal-naga")]
-    Naga,
-}
-
-impl ShaderInputMode {
-    fn from_env() -> Result<Self> {
-        match std::env::var("WR_HAL_SHADER_INPUT") {
-            Err(std::env::VarError::NotPresent) => Ok(Self::Native),
-            Ok(value) if value == "native" => Ok(Self::Native),
-            #[cfg(feature = "hal-naga")]
-            Ok(value) if value == "naga" => Ok(Self::Naga),
-            Ok(value) => Err(format!("Unsupported HAL shader input {value:?}; naga requires hal-naga")),
-            Err(error) => Err(format!("Invalid HAL shader input: {error}")),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Native => "native-spirv",
-            #[cfg(feature = "hal-naga")]
-            Self::Naga => "naga30-matrix-io-fetch-offset-v1",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
     shader_input: ShaderInputMode,
     shader: Shader,
@@ -258,10 +232,9 @@ struct Descriptor<A: hal::Api> {
     _pipeline: Rc<Pipeline<A>>,
 }
 
-pub(crate) struct FrameRenderer<A: hal::Api> {
+pub(crate) struct FrameRenderer<A: BackendApi> {
     shader_input: ShaderInputMode,
-    #[cfg(feature = "hal-naga")]
-    translated_shaders: RefCell<HashMap<(u64, bool), webrender_build::hal::translate::ValidatedShader>>,
+    shader_cache: RefCell<ShaderCache>,
     pub(crate) filtering: Filtering,
     #[cfg(test)]
     projection_override: Option<[f32; 16]>,
@@ -292,9 +265,10 @@ pub(crate) struct FrameRenderer<A: hal::Api> {
     queries: RefCell<super::query::QueryPool<A>>,
     resource_upload_bytes: u64,
     surface: Option<super::surface::SurfaceState<A>>,
+    presentation_pipelines: HashMap<wgt::TextureFormat, Rc<present::PresentationPipeline<A>>>,
 }
 
-impl<A: hal::Api> FrameRenderer<A> {
+impl<A: BackendApi> FrameRenderer<A> {
     pub fn is_failed(&self) -> bool { self.failed.get() || self.owner.lost.get() }
 
     #[cfg(any(test, feature = "hal-testing"))]
@@ -314,7 +288,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 
     pub fn new(device: Device<A>) -> Result<Self> {
-        let shader_input = ShaderInputMode::from_env()?;
+        let shader_input = A::shader_input()?;
         println!("HAL shader input: {}", shader_input.name());
         let owner = Rc::new(device);
         let native = &owner.open.device;
@@ -376,8 +350,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
         Ok(Self {
             shader_input,
-            #[cfg(feature = "hal-naga")]
-            translated_shaders: RefCell::new(HashMap::new()),
+            shader_cache: RefCell::new(ShaderCache::default()),
             filtering: Filtering::Standard,
             #[cfg(test)]
             projection_override: None,
@@ -408,6 +381,7 @@ impl<A: hal::Api> FrameRenderer<A> {
             queries,
             resource_upload_bytes: 0,
             surface: None,
+            presentation_pipelines: HashMap::new(),
         })
     }
 
@@ -418,7 +392,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         stats.cached_texture_bytes = self.texture_pool.bytes();
         stats.cached_texture_bytes += self.capture_pool.bytes();
         stats.cached_buffer_bytes += self.readback_pool.borrow().iter().map(|buffer| buffer.size).sum::<u64>();
-        stats.pipelines = self.pipelines.len();
+        stats.pipelines = self.pipelines.len() + self.presentation_pipelines.len();
         stats.descriptors = self.descriptors.borrow().len();
         stats
     }
@@ -1371,47 +1345,13 @@ impl<A: hal::Api> FrameRenderer<A> {
             }),
         ];
         let native = &self.owner.open.device;
-        let module = |data: &[u8], fragment: bool| -> Result<_> {
-            let words: Vec<_> = data
-                .chunks_exact(4)
-                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
-                .collect();
-            let input = match self.shader_input {
-                ShaderInputMode::Native => hal::ShaderInput::SpirV(&words),
-                #[cfg(feature = "hal-naga")]
-                ShaderInputMode::Naga => {
-                    let mut cache = self.translated_shaders.borrow_mut();
-                    if !cache.contains_key(&(artifact.digest, fragment)) {
-                        let shader = webrender_build::hal::translate::parse_spirv(data)?;
-                        cache.insert((artifact.digest, fragment), shader);
-                    }
-                    let shader = &cache[&(artifact.digest, fragment)];
-                    hal::ShaderInput::Naga(hal::NagaShader {
-                        module: std::borrow::Cow::Owned(shader.module.clone()),
-                        info: shader.info.clone(),
-                        debug_source: None,
-                    })
-                }
-            };
-            let _ = fragment;
-            let raw = unsafe {
-                native.create_shader_module(
-                    &hal::ShaderModuleDescriptor {
-                        label: Some(artifact.name),
-                        runtime_checks: wgt::ShaderRuntimeChecks::default(),
-                    },
-                    input,
-                )
-            }
-            .map_err(|e| format!("Creating shader {}: {e:?}", artifact.name))?;
-            Ok(Owned::new(
-                &self.owner,
-                raw,
-                A::Device::destroy_shader_module,
-            ))
+        let module = |fragment| -> Result<_> {
+            let raw = A::create_shader_module(native, artifact, fragment, self.shader_input,
+                &mut self.shader_cache.borrow_mut())?;
+            Ok(Owned::new(&self.owner, raw, A::Device::destroy_shader_module))
         };
-        let vs = module(artifact.vertex, false)?;
-        let fs = module(artifact.fragment, true)?;
+        let vs = module(false)?;
+        let fs = module(true)?;
         let constants = Default::default();
         let stage = |module| hal::ProgrammableStage {
             module,
@@ -1559,7 +1499,7 @@ impl<A: hal::Api> FrameRenderer<A> {
         } else {
             None
         };
-        // Convert GL's [-N, N-1] near/far planes to Vulkan's [0, 1] clip depth.
+        // Convert GL's [-N, N-1] near/far planes to HAL's [0, 1] clip depth.
         let depth_ids = crate::renderer::hal::MAX_DEPTH_IDS as f32;
         let depth_span = 2.0 * depth_ids - 1.0;
         let matrix: [f32; 16] = [
@@ -2764,7 +2704,7 @@ impl<A: hal::Api> FrameRenderer<A> {
     }
 }
 
-impl<A: hal::Api> Drop for FrameRenderer<A> {
+impl<A: BackendApi> Drop for FrameRenderer<A> {
     fn drop(&mut self) {
         if !self.is_failed() {
             if let Some(acquired) = self.surface.as_ref().and_then(|surface| surface.acquired.as_ref()) {
@@ -2856,7 +2796,7 @@ fn vertex_layouts(
     Ok((vertex, instances, stride))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hal-vulkan"))]
 mod shader_tests {
     use super::*;
 
@@ -2928,7 +2868,7 @@ mod shader_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn pixels(
+    pub(super) fn pixels(
         renderer: &FrameRenderer<hal::api::Vulkan>,
         texture: &Rc<Texture<hal::api::Vulkan>>,
     ) -> Vec<u8> {

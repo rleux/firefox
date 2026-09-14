@@ -12,8 +12,11 @@ edition = "2018"
 default = ["static_freetype"]
 hal = ["dep:wgpu-hal", "dep:wgpu-types", "dep:raw-window-handle"]
 hal-testing = ["hal-vulkan"]
+hal-linux-dmabuf = ["hal-vulkan"]
+hal-android-ahb = ["hal-vulkan", "dep:ndk"]
 hal-vulkan = ["hal", "wgpu-hal/vulkan", "dep:ash"]
-hal-naga = ["hal-vulkan", "webrender_build/hal-translate"]
+hal-translate = ["hal", "webrender_build/hal-translate"]
+hal-naga = ["hal-vulkan", "hal-translate"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
 replay = ["api/deserialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/replay"]
@@ -80,3 +83,6 @@ base64 = { optional=true, version="0.22" }
 [dev-dependencies]
 mozangle = "0.5.2"
 rand = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", optional = true, features = ["api-level-26"] }

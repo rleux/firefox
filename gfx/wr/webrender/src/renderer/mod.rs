@@ -118,15 +118,15 @@ pub(crate) mod geometry;
 mod debug;
 mod external_image;
 mod gpu_buffer;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) use gpu_buffer::{GpuBufferBlockF, GpuBufferBlockI};
 mod shade;
 mod vertex;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) use vertex::desc as vertex_descriptors;
 mod upload;
 pub(crate) mod init;
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) mod hal;
 
 use composite::LayerCompositorFrameState;

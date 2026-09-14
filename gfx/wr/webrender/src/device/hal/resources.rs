@@ -24,6 +24,8 @@ impl<A: hal::Api, T> Owned<A, T> {
             memory: None,
         }
     }
+    pub(super) fn take(&mut self) -> T { assert!(self.memory.is_none()); self.raw.take().unwrap() }
+
     fn accounted(mut self, texture: bool, bytes: u64) -> Self {
         let mut memory = self.owner.memory.get();
         if texture {
@@ -46,7 +48,7 @@ impl<A: hal::Api, T> Deref for Owned<A, T> {
 }
 impl<A: hal::Api, T> Drop for Owned<A, T> {
     fn drop(&mut self) {
-        unsafe { (self.destroy)(&self.owner.open.device, self.raw.take().unwrap()) }
+        if let Some(raw) = self.raw.take() { unsafe { (self.destroy)(&self.owner.open.device, raw) } }
         if let Some((texture, bytes)) = self.memory {
             let mut memory = self.owner.memory.get();
             if texture {
