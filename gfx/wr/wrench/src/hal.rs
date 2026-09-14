@@ -30,7 +30,7 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
 
 #[cfg(all(test, feature = "hal-vulkan"))]
 mod tests {
-    fn capture_barrier(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>) {
+    fn capture_barrier(wrench: &mut crate::wrench::Wrench<webrender::hal::SelectedRenderer>) {
         wrench.api.flush_scene_builder();
         let (tx, rx) = webrender::api::channel::unbounded_channel();
         wrench.api.send_debug_cmd(webrender::render_api::DebugCommand::GetDebugFlags(tx));
@@ -239,9 +239,9 @@ mod tests {
                 sequence.do_frame(&mut replay);
                 replay.renderer.prepare_frame(replay.document_id).unwrap();
                 assert!(&replay.renderer.render_frame().unwrap().pixels == expected, "sequence {bits:?}");
-                <CapturedSequence as WrenchThing<webrender::hal::Renderer>>::next_frame(&mut sequence);
+                <CapturedSequence as WrenchThing<webrender::hal::SelectedRenderer>>::next_frame(&mut sequence);
             }
-            <CapturedSequence as WrenchThing<webrender::hal::Renderer>>::prev_frame(&mut sequence);
+            <CapturedSequence as WrenchThing<webrender::hal::SelectedRenderer>>::prev_frame(&mut sequence);
             sequence.do_frame(&mut replay);
             replay.renderer.prepare_frame(replay.document_id).unwrap();
             assert!(replay.renderer.render_frame().unwrap().pixels == frames[1]);
@@ -535,7 +535,7 @@ mod tests {
             }
         }
         struct State {
-            wrench: Wrench<webrender::hal::Renderer>,
+            wrench: Wrench<webrender::hal::SelectedRenderer>,
             image: ImageKey,
             mip_image: ImageKey,
             mip_color: [u8; 4],
@@ -1001,12 +1001,12 @@ mod tests {
     }
 }
 
-#[cfg(not(feature = "hal-vulkan"))]
+#[cfg(not(feature = "hal"))]
 fn run(_: &clap::ArgMatches) -> Result<(), String> {
     Err("Vulkan support is not compiled in; build Wrench with --features hal-vulkan".into())
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) fn filtering(args: &clap::ArgMatches) -> webrender::hal::Filtering {
     match args.value_of("hal_filtering").unwrap_or("standard") {
         "standard" => webrender::hal::Filtering::Standard,
@@ -1015,7 +1015,7 @@ pub(crate) fn filtering(args: &clap::ArgMatches) -> webrender::hal::Filtering {
     }
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) fn compositor_clips_override(args: &clap::ArgMatches) -> Result<Option<bool>, String> {
     match args.value_of("compositor_clips") {
         None => Ok(None),
@@ -1025,7 +1025,7 @@ pub(crate) fn compositor_clips_override(args: &clap::ArgMatches) -> Result<Optio
     }
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::hal::CompositorConfig, String> {
     match args.value_of("hal_compositor").unwrap_or("draw") {
         "draw" => Ok(webrender::hal::CompositorConfig::Draw),
@@ -1035,9 +1035,26 @@ pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::ha
     }
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
+pub(crate) fn selected_backend(args: &clap::ArgMatches) -> Result<webrender::hal::BackendKind, String> {
+    use webrender::hal::BackendKind;
+    let backend = match args.value_of("hal_backend") {
+        Some("vulkan") => BackendKind::Vulkan,
+        Some("metal") => BackendKind::Metal,
+        Some(value) => return Err(format!("Unknown HAL backend {value:?}")),
+        None if cfg!(target_os = "macos") && BackendKind::Metal.is_available() => BackendKind::Metal,
+        None if BackendKind::Vulkan.is_available() => BackendKind::Vulkan,
+        None if BackendKind::Metal.is_available() => BackendKind::Metal,
+        None => return Err("No HAL backend is compiled for this target".into()),
+    };
+    if !backend.is_available() { return Err(format!("HAL backend {backend:?} is not compiled for this target")); }
+    Ok(backend)
+}
+
+#[cfg(feature = "hal")]
 fn run(args: &clap::ArgMatches) -> Result<(), String> {
-    use webrender::hal::{create_vulkan_device, Options, Readback};
+    use webrender::hal::{BackendKind, Options};
+    let backend = selected_backend(args)?;
 
     if args.value_of("hal_filtering").is_some()
         && !matches!(args.subcommand_name(), Some("png" | "show" | "reftest" | "rawtest" | "test_invalidation")) {
@@ -1046,9 +1063,9 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
 
     if args.subcommand_name() == Some("test_surface") {
         if args.is_present("headless") || args.is_present("software") || args.is_present("angle") {
-            return Err("test_surface requires a native Vulkan window".into());
+            return Err("test_surface requires a native HAL window".into());
         }
-        return crate::hal_surface::run(Options {
+        return crate::hal_surface::run(backend, Options {
             adapter_name: args.value_of("hal_adapter").map(str::to_owned),
             validation: args.is_present("hal_validation"),
         });
@@ -1103,10 +1120,10 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         if args.value_of("hal_windows").is_some() { return Err("--hal-windows requires windowed show".into()); }
         use crate::wrench::Wrench;
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
-        let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
+        let mut wrench = Wrench::new_hal_backend(backend, &options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?, None)?;
         wrench.renderer.configure_filtering(filtering(args))?;
         if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
-        println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
+        println!("Backend: wgpu-hal/{:?}; adapter: {}", wrench.renderer.info().backend, wrench.renderer.info().name);
         let show = args.subcommand_matches("show").unwrap();
         let path = std::path::Path::new(show.value_of("INPUT").unwrap());
         let mut thing = playback(&mut wrench, path, Some(show))?;
@@ -1126,10 +1143,10 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         use crate::wrench::{HeadlessTestWindow, Wrench};
         let (notifier, rx) = crate::create_notifier();
         let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
-        let mut wrench = Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?)?;
+        let mut wrench = Wrench::new_hal_backend(backend, &options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?, None)?;
         wrench.renderer.configure_filtering(filtering(args))?;
         if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
-        println!("Backend: wgpu-hal/Vulkan; adapter: {}", wrench.renderer.info().name);
+        println!("Backend: wgpu-hal/{:?}; adapter: {}", wrench.renderer.info().backend, wrench.renderer.info().name);
         let mut window = HeadlessTestWindow(size);
         let result = if command == "rawtest" {
             let filter = args.subcommand_matches("rawtest").unwrap().value_of("TEST");
@@ -1148,7 +1165,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         let size =
             webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
         let mut wrench =
-            Wrench::new_hal_with_compositor(&options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?)?;
+            Wrench::new_hal_backend(backend, &options, size, !args.is_present("no_subpixel_aa"), None, compositor_config(args)?, None)?;
         wrench.renderer.configure_filtering(filtering(args))?;
         if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
         println!("HAL filtering: {}", wrench.renderer.filtering().name());
@@ -1175,7 +1192,28 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
             Err(format!("{failures} HAL reftests failed"))
         };
     }
-    let mut device = create_vulkan_device(&options)?;
+    match backend {
+        #[cfg(feature = "hal-vulkan")]
+        BackendKind::Vulkan => {
+            let mut device = webrender::hal::create_vulkan_device(&options)?;
+            bootstrap(&mut device, dimensions, command, options.validation)?;
+            if command == "test_hal" {
+                device.test_native_image(7, 5, [71, 39, 211, 255])?;
+                device.test_native_image(13, 3, [255, 128, 0, 63])?;
+                println!("HAL PASS native-image acquire/read/release (same Vulkan device; not cross-process import)");
+            }
+        }
+        #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+        BackendKind::Metal => bootstrap(&mut webrender::hal::create_metal_device(&options)?, dimensions, command, options.validation)?,
+        _ => return Err("Selected HAL backend is unavailable".into()),
+    }
+    println!("HAL initialization successful; no GL context created");
+    Ok(())
+}
+
+#[cfg(feature = "hal")]
+fn bootstrap<A: wgpu_hal::Api>(device: &mut webrender::hal::Device<A>, dimensions: [u32; 2], command: &str, validation: bool) -> Result<(), String> {
+    use webrender::hal::Readback;
     let info = device.info();
     println!(
         "Backend: wgpu-hal/{:?}; adapter: {}; type: {:?}; vendor: {:#x}; device: {:#x}",
@@ -1183,7 +1221,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
     );
     println!(
         "Driver: {} {}; validation requested: {}",
-        info.driver, info.driver_info, options.validation
+        info.driver, info.driver_info, validation
     );
     println!(
         "ICD selection: {:?}",
@@ -1232,15 +1270,11 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         {
             return Err("Invalid target dimensions were accepted".into());
         }
-        device.test_native_image(7, 5, [71, 39, 211, 255])?;
-        device.test_native_image(13, 3, [255, 128, 0, 63])?;
-        println!("HAL PASS native-image acquire/read/release (same Vulkan device; not cross-process import)");
     }
-    println!("HAL initialization successful; no GL context created");
     Ok(())
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 fn render_png(
     args: &clap::ArgMatches,
     options: &webrender::hal::Options,
@@ -1249,6 +1283,7 @@ fn render_png(
     use crate::wrench::Wrench;
     use webrender::api::units::DeviceIntSize;
     use std::convert::TryFrom;
+    let backend = selected_backend(args)?;
     let enable_subpixel_aa = !args.is_present("no_subpixel_aa");
     let compositor = compositor_config(args)?;
     let filtering = filtering(args);
@@ -1265,7 +1300,7 @@ fn render_png(
         i32::try_from(size[1]).map_err(|_| "Invalid height")?,
     );
     let mut wrench =
-        Wrench::new_hal_with_compositor(options, size, enable_subpixel_aa, None, compositor)?;
+        Wrench::new_hal_backend(backend, options, size, enable_subpixel_aa, None, compositor, None)?;
     wrench.renderer.configure_filtering(filtering)?;
     if let Some(enabled) = compositor_clips { wrench.set_compositor_clips_override(enabled); }
     let info = wrench.renderer.info();
@@ -1297,9 +1332,9 @@ fn render_png(
     Ok(())
 }
 
-#[cfg(feature = "hal-vulkan")]
-pub(crate) fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::Renderer>, path: &std::path::Path,
-            args: Option<&clap::ArgMatches>) -> Result<Box<dyn crate::wrench::WrenchThing<webrender::hal::Renderer>>, String> {
+#[cfg(feature = "hal")]
+pub(crate) fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::SelectedRenderer>, path: &std::path::Path,
+            args: Option<&clap::ArgMatches>) -> Result<Box<dyn crate::wrench::WrenchThing<webrender::hal::SelectedRenderer>>, String> {
     if path.join("scenes").is_dir() {
         let sequence_id = |name| args.and_then(|args| args.value_of(name)).unwrap_or("1")
             .parse::<u32>().map_err(|_| format!("Invalid {name}"));
@@ -1315,5 +1350,20 @@ pub(crate) fn playback(wrench: &mut crate::wrench::Wrench<webrender::hal::Render
             Some(args) => crate::yaml_frame_reader::YamlFrameReader::new_from_show_args(args),
             None => crate::yaml_frame_reader::YamlFrameReader::new(path),
         }))
+    }
+}
+
+#[cfg(all(test, feature = "hal"))]
+mod backend_selection_tests {
+    #[test]
+    fn explicit_backend_does_not_fall_back() {
+        use webrender::hal::BackendKind;
+        for (name, kind) in [("vulkan", BackendKind::Vulkan), ("metal", BackendKind::Metal)] {
+            let matches = clap::App::new("test").arg(clap::Arg::with_name("hal_backend")
+                .long("hal-backend").takes_value(true)).get_matches_from(vec!["test", "--hal-backend", name]);
+            let result = super::selected_backend(&matches);
+            if kind.is_available() { assert_eq!(result.unwrap(), kind); }
+            else { assert!(result.unwrap_err().contains("not compiled")); }
+        }
     }
 }

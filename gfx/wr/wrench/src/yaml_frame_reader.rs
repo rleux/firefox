@@ -199,14 +199,14 @@ impl ExternalImageHandler for LocalExternalImageHandler {
     fn unlock(&mut self, _key: ExternalImageId, _channel_index: u8) {}
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 #[derive(Clone)]
 struct LocalHalImageProvider {
     device: webrender::hal::ExternalImageDevice,
     images: Rc<RefCell<Vec<webrender::hal::NativeImage>>>,
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 impl webrender::hal::ExternalImageProvider for LocalHalImageProvider {
     fn acquire(&mut self, id: ExternalImageId, channel: u8, _: bool) -> Result<webrender::hal::ExternalImageLease, String> {
         if channel != 0 { return Err("Invalid Wrench native image channel".into()); }
@@ -220,20 +220,20 @@ impl webrender::hal::ExternalImageProvider for LocalHalImageProvider {
 
 enum LocalExternalImages {
     Gl(LocalExternalImageHandler),
-    #[cfg(feature = "hal-vulkan")]
+    #[cfg(feature = "hal")]
     Hal(LocalHalImageProvider),
 }
 
 impl LocalExternalImages {
     fn add_image<R: SceneRenderer>(&mut self, renderer: &R, gl: Option<&dyn gl::Gl>, descriptor: ImageDescriptor, target: ImageBufferKind, data: ImageData) -> ImageData {
-        #[cfg(feature = "hal-vulkan")]
+        #[cfg(feature = "hal")]
         if matches!(self, Self::Gl(_)) && renderer.gl_device().is_none() {
             let device = renderer.hal_image_device().expect("No native image device available");
             *self = Self::Hal(LocalHalImageProvider { device, images: Rc::new(RefCell::new(Vec::new())) });
         }
         match self {
             Self::Gl(handler) => handler.add_image(gl.expect("No GL context"), descriptor, target, data),
-            #[cfg(feature = "hal-vulkan")]
+            #[cfg(feature = "hal")]
             Self::Hal(handler) => {
                 let data = match data { ImageData::Raw(data) => data, _ => panic!("Native external image requires pixel data") };
                 let image = handler.device.create_image(descriptor, &data).expect("Creating native external image failed");
@@ -251,7 +251,7 @@ impl LocalExternalImages {
             Self::Gl(handler) if renderer.gl_device().is_some() || !handler.texture_ids.borrow().is_empty() =>
                 renderer.install_external_images(Box::new(handler.clone())),
             Self::Gl(_) => Ok(()),
-            #[cfg(feature = "hal-vulkan")]
+            #[cfg(feature = "hal")]
             Self::Hal(handler) => renderer.install_hal_external_images(Box::new(handler.clone())),
         }
     }

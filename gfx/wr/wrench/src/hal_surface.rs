@@ -10,9 +10,9 @@ use webrender::hal::{Options, PresentationStatus};
 use webrender::render_api::Transaction;
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::{ActiveEventLoop, ControlFlow}, window::{Window, WindowId}};
 
-pub fn run(options: Options) -> Result<(), String> {
+pub fn run(backend: webrender::hal::BackendKind, options: Options) -> Result<(), String> {
     let event_loop = crate::hal_platform::event_loop::<()>()?;
-    let mut app = Probe { options, window: None, wrench: None, frame: 0,
+    let mut app = Probe { backend, options, window: None, wrench: None, frame: 0,
         #[cfg(feature = "hal-testing")]
         failure_index: 0,
         ready_at: None, deadline: Instant::now() + Duration::from_secs(30), error: None };
@@ -24,11 +24,12 @@ pub fn run(options: Options) -> Result<(), String> {
 }
 
 struct Probe {
+    backend: webrender::hal::BackendKind,
     options: Options,
     #[cfg(feature = "hal-testing")]
     failure_index: usize,
     window: Option<Rc<Window>>,
-    wrench: Option<Wrench<webrender::hal::Renderer>>,
+    wrench: Option<Wrench<webrender::hal::SelectedRenderer>>,
     frame: u32,
     ready_at: Option<Instant>,
     deadline: Instant,
@@ -62,7 +63,7 @@ impl Probe {
                 let old = self.wrench.take().unwrap();
                 old.api.shut_down(true);
                 drop(old);
-                self.wrench = Some(Wrench::new_hal_for_window(&self.options, DeviceIntSize::new(128, 96), self.window.as_ref().unwrap().clone(), Default::default())?);
+                self.wrench = Some(Wrench::new_hal_backend(self.backend, &self.options, DeviceIntSize::new(128, 96), true, None, webrender::hal::CompositorConfig::Draw, Some((self.window.as_ref().unwrap().clone(), Default::default())))?);
                 self.failure_index += 1;
                 self.frame = 0;
                 eprintln!("HAL FAILURE recreated after {point:?}");
@@ -133,9 +134,9 @@ impl ApplicationHandler for Probe {
         if self.window.is_some() || self.error.is_some() || event_loop.exiting() { return; }
         self.deadline = Instant::now() + Duration::from_secs(30);
         let result = (|| {
-            let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title("WR Vulkan surface probe")
+            let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title(format!("WR {:?} surface probe", self.backend))
                 .with_inner_size(winit::dpi::PhysicalSize::new(128, 96))).map_err(|error| error.to_string())?);
-            let wrench = Wrench::new_hal_for_window(&self.options, DeviceIntSize::new(128, 96), window.clone(), Default::default())?;
+            let wrench = Wrench::new_hal_backend(self.backend, &self.options, DeviceIntSize::new(128, 96), true, None, webrender::hal::CompositorConfig::Draw, Some((window.clone(), Default::default())))?;
             eprintln!("HAL SURFACE adapter={} backend={:?}", wrench.renderer.info().name, wrench.renderer.info().backend);
             window.request_redraw();
             self.window = Some(window);

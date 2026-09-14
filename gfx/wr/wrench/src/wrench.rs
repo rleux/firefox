@@ -232,10 +232,10 @@ impl TestWindow for WindowWrapper {
     fn swap_buffers(&self) { self.swap_buffers(); }
 }
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 pub struct HeadlessTestWindow(pub DeviceIntSize);
 
-#[cfg(feature = "hal-vulkan")]
+#[cfg(feature = "hal")]
 impl TestWindow for HeadlessTestWindow {
     fn get_inner_size(&self) -> DeviceIntSize { self.0 }
     fn swap_buffers(&self) {}
@@ -244,9 +244,9 @@ impl TestWindow for HeadlessTestWindow {
 pub trait SceneRenderer {
     fn gl_device(&self) -> Option<&webrender::Device>;
     fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String>;
-    #[cfg(feature = "hal-vulkan")]
+    #[cfg(feature = "hal")]
     fn hal_image_device(&self) -> Option<webrender::hal::ExternalImageDevice> { None }
-    #[cfg(feature = "hal-vulkan")]
+    #[cfg(feature = "hal")]
     fn install_hal_external_images(&mut self, _: Box<dyn webrender::hal::ExternalImageProvider>) -> Result<(), String> {
         Err("HAL external images are unavailable on this renderer".into())
     }
@@ -260,8 +260,8 @@ impl SceneRenderer for webrender::Renderer {
     }
 }
 
-#[cfg(feature = "hal-vulkan")]
-impl SceneRenderer for webrender::hal::Renderer {
+#[cfg(feature = "hal")]
+impl SceneRenderer for webrender::hal::SelectedRenderer {
     fn gl_device(&self) -> Option<&webrender::Device> { None }
     fn install_external_images(&mut self, _: Box<dyn ExternalImageHandler>) -> Result<(), String> {
         Err("GL external images are unavailable on HAL".into())
@@ -882,8 +882,8 @@ impl<R> Wrench<R> {
 
 }
 
-#[cfg(feature = "hal-vulkan")]
-impl Wrench<webrender::hal::Renderer> {
+#[cfg(feature = "hal")]
+impl Wrench<webrender::hal::SelectedRenderer> {
     #[cfg(test)]
     pub fn new_hal(hal_options: &webrender::hal::Options, size: DeviceIntSize) -> Result<Self, String> {
         Self::new_hal_with_subpixel(hal_options, size, true)
@@ -918,6 +918,14 @@ impl Wrench<webrender::hal::Renderer> {
         notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig,
         window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
     {
+        Self::new_hal_backend(webrender::hal::BackendKind::Vulkan, hal_options, size, enable_subpixel_aa, notifier, compositor, window)
+    }
+
+    pub fn new_hal_backend(backend: webrender::hal::BackendKind, hal_options: &webrender::hal::Options,
+        size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>,
+        compositor: webrender::hal::CompositorConfig,
+        window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
+    {
         if size.width <= 0 || size.height <= 0 { return Err("Invalid HAL window dimensions".into()); }
         let callbacks = Arc::new(Mutex::new(blob::BlobCallbacks::new()));
         let debug_flags = DebugFlags::ECHO_DRIVER_MESSAGES | DebugFlags::MISSING_SNAPSHOT_PINK;
@@ -933,11 +941,8 @@ impl Wrench<webrender::hal::Renderer> {
         let (timing_sender, timing_receiver) = chase_lev::deque();
         let record_frame_start = notifier.is_none();
         let notifier = notifier.unwrap_or_else(|| Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false))))));
-        let (renderer, sender) = match window {
-            Some((window, surface_options)) => webrender::hal::create_vulkan_renderer_for_window(hal_options, options,
-                notifier, compositor, window, [size.width as u32, size.height as u32], surface_options)?,
-            None => webrender::hal::create_vulkan_renderer_with_compositor(hal_options, options, notifier, compositor)?,
-        };
+        let (renderer, sender) = webrender::hal::create_renderer_for_backend(backend, hal_options, options, notifier, compositor,
+            window.map(|(window, options)| (window, [size.width as u32, size.height as u32], options)))?;
         let info = renderer.info();
         let renderer_description = format!("{} - {:?} {}", info.name, info.backend, info.driver_info);
         let api = sender.create_api();

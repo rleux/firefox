@@ -77,6 +77,13 @@ mod vulkan;
 #[cfg(feature = "hal-vulkan")]
 pub use vulkan::{Renderer, create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window};
 
+mod selected;
+pub use selected::{BackendKind, SelectedRenderer, create_renderer_for_backend};
+#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+mod metal;
+#[cfg(all(target_os = "macos", feature = "hal-metal"))]
+pub use metal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_window, create_metal_renderer_for_layer};
+
 pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
 
 #[derive(Debug)]
@@ -170,10 +177,26 @@ pub(crate) struct RendererCore<A: BackendApi> {
 
 pub(crate) fn create_renderer<A: BackendApi>(
     hal_options: &Options,
-    mut options: WebRenderOptions,
+    options: WebRenderOptions,
     notifier: Box<dyn RenderNotifier>,
     compositor: crate::device::hal::CompositorConfig,
     window: Option<(std::rc::Rc<dyn crate::device::hal::SurfaceWindow>, [u32; 2], crate::device::hal::SurfaceOptions)>,
+) -> Result<(RendererCore<A>, RenderApiSender), String> {
+    create_renderer_with_factory(hal_options, options, notifier, compositor, || {
+        match window {
+        Some((window, size, options)) => {
+            let (device, setup) = A::create_device(hal_options, Some(window))?;
+            Ok((device, Some((setup.ok_or("HAL window initialization returned no surface")?, size, options))))
+        }
+        None => Ok((A::create_device(hal_options, None)?.0, None)),
+        }
+    })
+}
+
+pub(crate) fn create_renderer_with_factory<A: BackendApi>(
+    _hal_options: &Options, mut options: WebRenderOptions, notifier: Box<dyn RenderNotifier>,
+    compositor: crate::device::hal::CompositorConfig,
+    factory: impl FnOnce() -> Result<(crate::device::hal::Device<A>, Option<(crate::device::hal::surface::SurfaceSetup<A>, [u32; 2], crate::device::hal::SurfaceOptions)>), String>,
 ) -> Result<(RendererCore<A>, RenderApiSender), String> {
     if !matches!(
         options.compositor_config,
@@ -190,13 +213,7 @@ pub(crate) fn create_renderer<A: BackendApi>(
     init::initialize_process();
     let compositor_kind = compositor.kind();
     if matches!(compositor_kind, CompositorKind::Layer { .. }) { options.surface_origin_is_top_left = true; }
-    let (device, surface) = match window {
-        Some((window, size, options)) => {
-            let (device, setup) = A::create_device(hal_options, Some(window))?;
-            (device, Some((setup.ok_or("HAL window initialization returned no surface")?, size, options)))
-        }
-        None => (A::create_device(hal_options, None)?.0, None),
-    };
+    let (device, surface) = factory()?;
     let timestamp_bits = A::timestamp_valid_bits(&device);
     let max_internal_texture_size = options
         .max_internal_texture_size
