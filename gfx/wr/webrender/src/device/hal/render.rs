@@ -25,13 +25,29 @@ use crate::renderer::{vertex_descriptors as desc, MAX_VERTEX_TEXTURE_WIDTH};
 use webrender_build::hal::{ScalarType, ShaderArtifact};
 
 mod shaders {
+    #[cfg(any(wr_hal_vulkan, wr_hal_metal))]
     include!(concat!(env!("OUT_DIR"), "/hal_shaders.rs"));
+    #[cfg(any(wr_hal_vulkan, wr_hal_metal))]
     include!(concat!(env!("OUT_DIR"), "/hal_present.rs"));
+    #[cfg(not(any(wr_hal_vulkan, wr_hal_metal)))]
+    pub static SHADERS: &[webrender_build::hal::ShaderArtifact] = &[];
+
+    pub fn presentation() -> Result<&'static webrender_build::hal::ShaderArtifact, String> {
+        #[cfg(any(wr_hal_vulkan, wr_hal_metal))]
+        { Ok(&PRESENT) }
+        #[cfg(not(any(wr_hal_vulkan, wr_hal_metal)))]
+        { Err("No native HAL shader catalog was compiled for this target".into()) }
+    }
 }
 
 #[cfg(any(feature = "capture", feature = "replay"))]
 mod capture;
 mod present;
+
+const PIPELINE_ABI: u32 = 1;
+
+#[cfg(all(test, wr_hal_vulkan, feature = "hal-translate"))]
+pub(super) fn shader_catalog_for_test() -> &'static [ShaderArtifact] { shaders::SHADERS }
 
 // Only audited, fully initialized numeric GPU layouts may expose their bytes.
 unsafe trait GpuData {
@@ -133,6 +149,11 @@ fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
+    device: u64,
+    backend: wgt::Backend,
+    abi: u32,
+    filtering: Filtering,
+    dual_source: bool,
     shader_input: ShaderInputMode,
     shader: Shader,
     blend: u8,
@@ -570,6 +591,18 @@ impl<A: BackendApi> FrameRenderer<A> {
         dispatch_releases(&self.releases);
         if result.is_err() { self.failed.set(true); }
         result
+    }
+
+    pub fn capabilities(&self) -> RendererCapabilities {
+        RendererCapabilities {
+            backend: self.owner.info.backend,
+            shader_input: self.shader_input.name(),
+            frame_timestamps: self.queries.borrow().supported(),
+            validation_request_supported: self.owner.info.backend == wgt::Backend::Vulkan,
+            validation_requested: self.owner.validation_requested,
+            dual_source_blending: self.owner.supports_dual_source_blending(),
+            max_texture_size: self.owner.max_texture_size(),
+        }
     }
 
     pub fn configure_timestamps(&self, bits: u32) { self.queries.borrow_mut().configure(bits); }
@@ -1218,6 +1251,11 @@ impl<A: BackendApi> FrameRenderer<A> {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         vertex_layouts(Self::descriptor(shader), artifact)?.hash(&mut hash);
         Ok(PipelineKey {
+            device: self.owner.cache_id,
+            backend: self.owner.info.backend,
+            abi: PIPELINE_ABI,
+            filtering: self.filtering,
+            dual_source: self.owner.supports_dual_source_blending(),
             shader_input: self.shader_input,
             shader,
             blend,
@@ -1313,6 +1351,9 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     fn pipeline(&mut self, key: PipelineKey) -> Result<()> {
+        if key.device != self.owner.cache_id || key.backend != self.owner.info.backend {
+            return Err("HAL pipeline key belongs to another device/backend".into());
+        }
         if self.pipelines.contains_key(&key) {
             return Ok(());
         }
@@ -2796,9 +2837,40 @@ fn vertex_layouts(
     Ok((vertex, instances, stride))
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod shader_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn pipeline_device_and_cache_isolation() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let mut first = FrameRenderer::new(owner).unwrap();
+        let shader = Shader::Other("ps_clear", "");
+        let format = wgt::TextureFormat::Rgba8Unorm;
+        let key = first.key(shader, 0, 0, format).unwrap();
+        first.pipeline(key).unwrap();
+        let warm = first.pipelines[&key].clone();
+        first.pipeline(key).unwrap();
+        assert!(Rc::ptr_eq(&warm, &first.pipelines[&key]));
+        first.pipelines.clear();
+        first.pipeline(key).unwrap();
+        assert!(!Rc::ptr_eq(&warm, &first.pipelines[&key]));
+        first.filtering = Filtering::LegacyBrilinear;
+        assert_ne!(key, first.key(shader, 0, 0, format).unwrap());
+        first.filtering = Filtering::Standard;
+        assert_ne!(key, first.key(shader, 0, 1, format).unwrap());
+        let other_owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let mut other = FrameRenderer::new(other_owner).unwrap();
+        let other_key = other.key(shader, 0, 0, format).unwrap();
+        assert_ne!(key, other_key);
+        assert!(other.pipeline(key).unwrap_err().contains("another device/backend"));
+        assert!(other.pipelines.is_empty());
+        other.pipeline(other_key).unwrap();
+        drop(first);
+        other.pipeline(other_key).unwrap();
+        assert_eq!(other.pipelines.len(), 1);
+    }
 
     #[test]
     fn all_shader_vertex_interfaces_match_wr_descriptors() {

@@ -318,6 +318,37 @@ fn main() -> Result<(), std::io::Error> {
     let out_dir = env::var("OUT_DIR").unwrap_or("out".to_owned());
 
     if env::var_os("CARGO_FEATURE_HAL").is_some() {
+        fn inputs(root: &Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+            for entry in read_dir(root)? {
+                let path = entry?.path();
+                if path.is_dir() { inputs(&path, files)?; }
+                else if path.extension().and_then(|value| value.to_str()) == Some("rs") { files.push(path); }
+            }
+            Ok(())
+        }
+        let mut files = vec![Path::new("build.rs").to_owned(), Path::new("Cargo.toml").to_owned(),
+            Path::new("../Cargo.toml").to_owned(), Path::new("../Cargo.lock").to_owned()];
+        inputs(Path::new("src"), &mut files)?;
+        inputs(Path::new("../webrender_api/src"), &mut files)?;
+        inputs(Path::new("../webrender_build/src"), &mut files)?;
+        let vendor = Path::new("../vendor/wgpu-hal");
+        println!("cargo:rerun-if-changed={}", vendor.display());
+        if vendor.is_dir() {
+            files.push(vendor.join("Cargo.toml"));
+            files.push(vendor.join("build.rs"));
+            inputs(&vendor.join("src"), &mut files)?;
+        }
+        files.sort();
+        let mut identity = std::collections::hash_map::DefaultHasher::new();
+        for path in files {
+            println!("cargo:rerun-if-changed={}", path.display());
+            identity.write(path.to_str().unwrap().as_bytes());
+            identity.write(&std::fs::read(path)?);
+        }
+        println!("cargo:rustc-env=WR_HAL_CAPTURE_SOURCE={:016x}", identity.finish());
+    }
+    let (vulkan, metal) = webrender_build::hal::configure_backends();
+    if vulkan || metal {
         webrender_build::hal::build(Path::new("res"), Path::new(&out_dir), |source, vertex| {
             let optimizer = glslopt::Context::new(glslopt::Target::OpenGl);
             let output = optimizer.optimize(

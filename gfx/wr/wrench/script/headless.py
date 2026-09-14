@@ -133,6 +133,8 @@ backend_parser.add_argument('--hal-backend', choices=('vulkan', 'metal'))
 backend_args, _ = backend_parser.parse_known_args()
 use_hal = backend_args.backend == 'hal'
 hal_backend = backend_args.hal_backend or ('metal' if is_macos() else 'vulkan')
+if use_hal and not (is_linux() or is_macos() or sys.platform == 'win32'):
+    backend_parser.error('No supported HAL backend for this platform')
 if backend_args.hal_backend and not use_hal:
     backend_parser.error('--hal-backend requires --backend hal')
 if use_hal and hal_backend == 'vulkan':

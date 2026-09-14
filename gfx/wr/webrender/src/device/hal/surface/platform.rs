@@ -16,7 +16,7 @@ impl<T: HasDisplayHandle + HasWindowHandle> SurfaceWindow for T {}
 
 pub(crate) enum WindowOwner {
     Window { window: Rc<dyn SurfaceWindow>, display: RawDisplayHandle },
-    #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+    #[cfg(wr_hal_metal)]
     MetalLayer(objc2::rc::Retained<objc2_quartz_core::CAMetalLayer>),
 }
 
@@ -40,7 +40,7 @@ impl WindowOwner {
         #[cfg(target_os = "windows")]
         windows::validate(display, window.window_handle()
             .map_err(|error| format!("Getting Win32 native window: {error}"))?.as_raw())?;
-        #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+        #[cfg(wr_hal_metal)]
         if !matches!((display, window.window_handle().map_err(|error| error.to_string())?.as_raw()),
             (RawDisplayHandle::AppKit(_), raw_window_handle::RawWindowHandle::AppKit(_))) {
             return Err("macOS native surface requires matching AppKit handles".into());
@@ -55,7 +55,7 @@ impl WindowOwner {
                 if display.as_raw() != *original { return Err("Surface display changed; recreate the renderer for the new display".into()); }
                 Ok(Some(display))
             }
-            #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+            #[cfg(wr_hal_metal)]
             Self::MetalLayer(_) => Ok(None),
         }
     }
@@ -74,7 +74,7 @@ impl WindowOwner {
                 unsafe { instance.create_surface(display.as_raw(), window.as_raw()) }
                     .map_err(|error| format!("Creating native surface: {error}"))
             }
-            #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+            #[cfg(wr_hal_metal)]
             Self::MetalLayer(layer) => A::create_metal_layer_surface(instance, layer),
         }
     }

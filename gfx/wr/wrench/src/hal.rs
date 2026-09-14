@@ -28,7 +28,7 @@ pub fn dispatch(args: &clap::ArgMatches) -> Option<i32> {
     })
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     fn capture_barrier(wrench: &mut crate::wrench::Wrench<webrender::hal::SelectedRenderer>) {
         wrench.api.flush_scene_builder();
@@ -1003,7 +1003,7 @@ mod tests {
 
 #[cfg(not(feature = "hal"))]
 fn run(_: &clap::ArgMatches) -> Result<(), String> {
-    Err("Vulkan support is not compiled in; build Wrench with --features hal-vulkan".into())
+    Err("HAL support is not compiled in; enable hal-vulkan or hal-metal for the target".into())
 }
 
 #[cfg(feature = "hal")]
@@ -1038,17 +1038,12 @@ pub(crate) fn compositor_config(args: &clap::ArgMatches) -> Result<webrender::ha
 #[cfg(feature = "hal")]
 pub(crate) fn selected_backend(args: &clap::ArgMatches) -> Result<webrender::hal::BackendKind, String> {
     use webrender::hal::BackendKind;
-    let backend = match args.value_of("hal_backend") {
-        Some("vulkan") => BackendKind::Vulkan,
-        Some("metal") => BackendKind::Metal,
-        Some(value) => return Err(format!("Unknown HAL backend {value:?}")),
-        None if cfg!(target_os = "macos") && BackendKind::Metal.is_available() => BackendKind::Metal,
-        None if BackendKind::Vulkan.is_available() => BackendKind::Vulkan,
-        None if BackendKind::Metal.is_available() => BackendKind::Metal,
-        None => return Err("No HAL backend is compiled for this target".into()),
-    };
-    if !backend.is_available() { return Err(format!("HAL backend {backend:?} is not compiled for this target")); }
-    Ok(backend)
+    let requested = args.value_of("hal_backend").map(str::parse::<BackendKind>).transpose()?;
+    let mut permitted = Vec::new();
+    if cfg!(wr_hal_vulkan) { permitted.push(BackendKind::Vulkan); }
+    if cfg!(wr_hal_metal) { permitted.push(BackendKind::Metal); }
+    BackendKind::select(requested, &permitted)
+
 }
 
 #[cfg(feature = "hal")]
@@ -1193,7 +1188,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         };
     }
     match backend {
-        #[cfg(feature = "hal-vulkan")]
+        #[cfg(wr_hal_vulkan)]
         BackendKind::Vulkan => {
             let mut device = webrender::hal::create_vulkan_device(&options)?;
             bootstrap(&mut device, dimensions, command, options.validation)?;
@@ -1203,7 +1198,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
                 println!("HAL PASS native-image acquire/read/release (same Vulkan device; not cross-process import)");
             }
         }
-        #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+        #[cfg(wr_hal_metal)]
         BackendKind::Metal => bootstrap(&mut webrender::hal::create_metal_device(&options)?, dimensions, command, options.validation)?,
         _ => return Err("Selected HAL backend is unavailable".into()),
     }
@@ -1223,12 +1218,14 @@ fn bootstrap<A: wgpu_hal::Api>(device: &mut webrender::hal::Device<A>, dimension
         "Driver: {} {}; validation requested: {}",
         info.driver, info.driver_info, validation
     );
+    if info.backend == webrender::hal::NativeBackend::Vulkan {
     println!(
         "ICD selection: {:?}",
         std::env::var("VK_DRIVER_FILES")
             .or_else(|_| std::env::var("VK_ICD_FILENAMES"))
             .ok()
     );
+    }
 
     fn check(readback: Readback, color: [u8; 4], depth: f32) -> Result<(), String> {
         let count = readback.size[0] as usize * readback.size[1] as usize;

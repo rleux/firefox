@@ -46,7 +46,7 @@ core-foundation = "0.9"
 
 [features]
 default = [ "env_logger" ]
-hal-testing = ["hal-vulkan", "webrender/hal-testing"]
+hal-testing = ["hal", "webrender/hal-testing"]
 hal-linux-dmabuf = ["hal-vulkan", "webrender/hal-linux-dmabuf"]
 hal-win32 = ["hal-vulkan", "webrender/hal-win32"]
 hal-android-ahb = ["hal-vulkan", "webrender/hal-android-ahb"]
@@ -88,3 +88,4 @@ debuggable = true
 
 [build-dependencies]
 cc = "1.0"
+webrender_build = { path = "../webrender_build" }

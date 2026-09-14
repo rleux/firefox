@@ -7,6 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    webrender_build::hal::configure_backends();
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let out_dir = PathBuf::from(out_dir);

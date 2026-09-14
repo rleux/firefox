@@ -34,10 +34,14 @@ impl<A: hal::Api> QueryPool<A> {
     }
 
     pub fn enable(&mut self, enabled: bool) -> bool {
-        let supported = (1..=64).contains(&self.bits) && self.period.is_finite() && self.period > 0.0
-            && self.owner.features.contains(wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let supported = self.supported();
         self.enabled = enabled && supported;
         supported
+    }
+
+    pub fn supported(&self) -> bool {
+        (1..=64).contains(&self.bits) && self.period.is_finite() && self.period > 0.0
+            && self.owner.features.contains(wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
     }
 
     fn layout() -> ReadbackLayout { ReadbackLayout { row_bytes: 16, pitch: 16, size: 16 } }
@@ -105,7 +109,7 @@ fn elapsed_ticks(start: u64, end: u64, bits: u32) -> u64 {
     end.wrapping_sub(start) & (u64::MAX >> (64 - bits))
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     #[test]
     #[ignore = "Requires Vulkan and validation"]

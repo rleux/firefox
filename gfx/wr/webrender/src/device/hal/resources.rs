@@ -683,7 +683,7 @@ impl<A: hal::Api> Texture<A> {
     }
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
 

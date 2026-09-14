@@ -414,7 +414,7 @@ impl<A: hal::Api> Drop for SubmissionQueue<A> {
     }
 }
 
-#[cfg(all(test, feature = "hal-vulkan"))]
+#[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
     use super::super::resources::{Buffer, Texture};

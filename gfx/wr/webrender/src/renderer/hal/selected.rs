@@ -10,24 +10,56 @@ pub enum BackendKind {
     Vulkan,
     Metal,
 }
+impl std::str::FromStr for BackendKind {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "vulkan" => Ok(Self::Vulkan),
+            "metal" => Ok(Self::Metal),
+            _ => Err(format!("Unknown HAL backend {value:?}")),
+        }
+    }
+}
 impl BackendKind {
+    pub fn select(requested: Option<Self>, permitted: &[Self]) -> Result<Self, String> {
+        let available = |kind: Self| kind.is_available() && permitted.contains(&kind);
+        if let Some(kind) = requested {
+            return if available(kind) {
+                Ok(kind)
+            } else {
+                Err(format!(
+                    "HAL backend {kind:?} is not compiled for this target/entry point"
+                ))
+            };
+        }
+        let order = if cfg!(target_os = "macos") {
+            [Self::Metal, Self::Vulkan]
+        } else {
+            [Self::Vulkan, Self::Metal]
+        };
+        order
+            .iter()
+            .copied()
+            .find(|kind| available(*kind))
+            .ok_or("No HAL backend is compiled for this target/entry point".into())
+    }
+    pub fn default_available() -> Option<Self> {
+        Self::select(None, &[Self::Vulkan, Self::Metal]).ok()
+    }
     pub fn is_available(self) -> bool {
         match self {
-            Self::Vulkan => cfg!(feature = "hal-vulkan"),
-            Self::Metal => cfg!(all(target_os = "macos", feature = "hal-metal")),
+            Self::Vulkan => cfg!(wr_hal_vulkan),
+            Self::Metal => cfg!(wr_hal_metal),
         }
     }
 }
 
 enum Inner {
-    #[cfg(feature = "hal-vulkan")]
+    #[cfg(wr_hal_vulkan)]
     Vulkan(super::vulkan::Renderer),
-    #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+    #[cfg(wr_hal_metal)]
     Metal(super::metal::MetalRenderer),
-    #[cfg(not(any(
-        feature = "hal-vulkan",
-        all(target_os = "macos", feature = "hal-metal")
-    )))]
+    #[cfg(not(any(wr_hal_vulkan, wr_hal_metal)))]
     Unavailable(std::convert::Infallible),
 }
 
@@ -38,17 +70,20 @@ pub struct SelectedRenderer {
 macro_rules! dispatch {
     ($renderer:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match $renderer {
-            #[cfg(feature = "hal-vulkan")]
+            #[cfg(wr_hal_vulkan)]
             Inner::Vulkan(renderer) => renderer.$method($($arg),*),
-            #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+            #[cfg(wr_hal_metal)]
             Inner::Metal(renderer) => renderer.$method($($arg),*),
-            #[cfg(not(any(feature = "hal-vulkan", all(target_os = "macos", feature = "hal-metal"))))]
+            #[cfg(not(any(wr_hal_vulkan, wr_hal_metal)))]
             Inner::Unavailable(never) => match *never {},
         }
     };
 }
 
 impl SelectedRenderer {
+    pub fn capabilities(&self) -> crate::device::hal::RendererCapabilities {
+        dispatch!(&self.inner, capabilities())
+    }
     pub fn external_image_device(&self) -> crate::device::hal::ExternalImageDevice {
         dispatch!(&self.inner, external_image_device())
     }
@@ -228,7 +263,7 @@ pub fn create_renderer_for_backend(
     )>,
 ) -> Result<(SelectedRenderer, RenderApiSender), String> {
     match kind {
-        #[cfg(feature = "hal-vulkan")]
+        #[cfg(wr_hal_vulkan)]
         BackendKind::Vulkan => {
             let (core, sender) = create_renderer::<wgpu_hal::api::Vulkan>(
                 hal_options,
@@ -244,7 +279,7 @@ pub fn create_renderer_for_backend(
                 sender,
             ))
         }
-        #[cfg(all(target_os = "macos", feature = "hal-metal"))]
+        #[cfg(wr_hal_metal)]
         BackendKind::Metal => {
             let (core, sender) = create_renderer::<wgpu_hal::api::Metal>(
                 hal_options,
@@ -271,14 +306,22 @@ pub fn create_renderer_for_backend(
 mod tests {
     use super::*;
     #[test]
+    fn selection_respects_entry_point_features_and_never_substitutes() {
+        assert!(BackendKind::select(None, &[]).is_err());
+        assert!(BackendKind::select(Some(BackendKind::Vulkan), &[BackendKind::Metal]).is_err());
+        assert!(BackendKind::select(Some(BackendKind::Metal), &[BackendKind::Vulkan]).is_err());
+        assert!("dx12".parse::<BackendKind>().is_err());
+        for kind in [BackendKind::Vulkan, BackendKind::Metal] {
+            let result = BackendKind::select(None, &[kind]);
+            assert_eq!(result.is_ok(), kind.is_available());
+            if kind.is_available() {
+                assert_eq!(result.unwrap(), kind);
+            }
+        }
+    }
+    #[test]
     fn backend_availability_matches_compiled_target() {
-        assert_eq!(
-            BackendKind::Vulkan.is_available(),
-            cfg!(feature = "hal-vulkan")
-        );
-        assert_eq!(
-            BackendKind::Metal.is_available(),
-            cfg!(all(target_os = "macos", feature = "hal-metal"))
-        );
+        assert_eq!(BackendKind::Vulkan.is_available(), cfg!(wr_hal_vulkan));
+        assert_eq!(BackendKind::Metal.is_available(), cfg!(wr_hal_metal));
     }
 }

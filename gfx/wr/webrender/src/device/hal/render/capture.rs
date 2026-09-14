@@ -8,11 +8,84 @@ use crate::renderer::{PlainExternalResources, PlainRenderer, PlainTexture};
 use crate::render_api::CaptureBits;
 use std::{fs, path::Path};
 
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "capture", derive(serde::Serialize))]
+#[cfg_attr(feature = "replay", derive(serde::Deserialize))]
+#[serde(deny_unknown_fields)]
+struct CaptureIdentity {
+    version: u32,
+    backend: String,
+    source: String,
+    shaders: u64,
+    pipeline_abi: u32,
+    shader_input: String,
+    filtering: String,
+    dual_source: bool,
+    byte_order: String,
+}
+
 #[cfg_attr(feature = "capture", derive(serde::Serialize))]
 #[cfg_attr(feature = "replay", derive(serde::Deserialize))]
 struct NativeCapture {
     operations: Vec<crate::composite::NativeSurfaceOperation>,
     tiles: Vec<(NativeTileId, DeviceIntSize, PlainTexture)>,
+}
+
+#[cfg(all(test, wr_hal_vulkan, feature = "capture", feature = "replay"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn snapshot_identity_and_legacy_replay() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let root = std::env::temp_dir().join(format!("wr-snapshot-identity-{}", std::process::id()));
+        let config = || CaptureConfig::new(root.clone(), CaptureBits::all());
+        let marker = config().resource_root().join("hal-identity.ron");
+        let id = CacheTextureId(812);
+        let texture = Texture::new(&renderer.owner, 2, 2, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Linear, false).unwrap();
+        renderer.textures.insert(id, texture.clone());
+        renderer.save_capture(config(), Vec::new(), None).unwrap();
+        let original = renderer.capture_identity();
+        for field in ["version", "backend", "source", "shaders", "pipeline_abi", "shader_input", "filtering", "dual_source", "byte_order"] {
+            let mut changed = original.clone();
+            match field {
+                "version" => changed.version += 1,
+                "backend" => changed.backend = "Metal".into(),
+                "source" => changed.source = "other-build".into(),
+                "shaders" => changed.shaders ^= 1,
+                "pipeline_abi" => changed.pipeline_abi += 1,
+                "shader_input" => changed.shader_input = "other-translator".into(),
+                "filtering" => changed.filtering = "other-filtering".into(),
+                "dual_source" => changed.dual_source = !changed.dual_source,
+                "byte_order" => changed.byte_order = "other-byte-order".into(),
+                _ => unreachable!(),
+            }
+            write_ron(&marker, &changed).unwrap();
+            assert!(renderer.load_capture(config(), Vec::new()).unwrap_err()
+                .contains("Incompatible HAL capture identity"), "{field}");
+            assert!(Rc::ptr_eq(&renderer.textures[&id], &texture), "{field}");
+        }
+        fs::write(&marker, "capture-in-progress").unwrap();
+        assert!(renderer.load_capture(config(), Vec::new()).unwrap_err().contains("Invalid HAL capture identity"));
+        assert!(Rc::ptr_eq(&renderer.textures[&id], &texture));
+        write_ron(&marker, &original).unwrap();
+        let other_owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let mut other = FrameRenderer::new(other_owner).unwrap();
+        other.load_capture(config(), Vec::new()).unwrap();
+        assert!(!Rc::ptr_eq(&other.textures[&id], &texture));
+        assert_eq!(super::super::shader_tests::pixels(&other, &other.textures[&id]), vec![0; 16]);
+        fs::remove_file(&marker).unwrap();
+        renderer.load_capture(config(), Vec::new()).unwrap();
+        fs::remove_file(config().resource_root().join("hal-filtering.txt")).unwrap();
+        renderer.filtering = Filtering::LegacyBrilinear;
+        assert!(renderer.load_capture(config(), Vec::new()).unwrap_err().contains("Capture filtering"));
+        renderer.filtering = Filtering::Standard;
+        renderer.load_capture(config(), Vec::new()).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn image_format(format: wgt::TextureFormat) -> Result<api::ImageFormat> {
@@ -49,6 +122,50 @@ impl ExternalImageProvider for ReplayImages {
 }
 
 impl<A: BackendApi> FrameRenderer<A> {
+    fn capture_identity(&self) -> CaptureIdentity {
+        use std::hash::{Hash, Hasher};
+        let mut shaders = std::collections::hash_map::DefaultHasher::new();
+        for artifact in shaders::SHADERS.iter().chain(shaders::presentation().ok()) {
+            artifact.name.hash(&mut shaders);
+            artifact.features.hash(&mut shaders);
+            artifact.vertex.hash(&mut shaders);
+            artifact.fragment.hash(&mut shaders);
+        }
+        CaptureIdentity {
+            version: 1,
+            backend: format!("{:?}", self.owner.info.backend),
+            source: env!("WR_HAL_CAPTURE_SOURCE").into(),
+            shaders: shaders.finish(),
+            pipeline_abi: PIPELINE_ABI,
+            shader_input: self.shader_input.name().into(),
+            filtering: self.filtering.name().into(),
+            dual_source: self.owner.supports_dual_source_blending(),
+            byte_order: if cfg!(target_endian = "little") { "little" } else { "big" }.into(),
+        }
+    }
+
+    #[cfg(feature = "replay")]
+    fn check_capture_identity(&self, root: &Path) -> Result<()> {
+        let data = match fs::read_to_string(root.join("hal-identity.ron")) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if self.owner.info.backend != wgt::Backend::Vulkan {
+                    return Err("Legacy HAL captures are supported only by Vulkan; submit a fresh scene for another backend".into());
+                }
+                eprintln!("Legacy Vulkan capture: source identity unavailable; retaining historical replay compatibility");
+                return Ok(());
+            }
+            Err(error) => return Err(format!("Reading HAL capture identity: {error}")),
+        };
+        let saved: CaptureIdentity = ron::de::from_str(&data)
+            .map_err(|error| format!("Invalid HAL capture identity: {error}"))?;
+        let expected = self.capture_identity();
+        if saved != expected {
+            return Err(format!("Incompatible HAL capture identity: saved {saved:?}, renderer {expected:?}; submit a fresh scene instead of replaying this snapshot"));
+        }
+        Ok(())
+    }
+
     fn capture_texture(&self, texture: &Rc<Texture<A>>) -> Result<Vec<u8>> {
         let format = image_format(texture.format)?;
         let layout = ReadbackLayout::with_pixel_size(texture.size.width, texture.size.height,
@@ -81,6 +198,8 @@ impl<A: BackendApi> FrameRenderer<A> {
         if self.is_failed() { return Err("Cannot capture a failed HAL renderer".into()); }
         let root = config.resource_root();
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        fs::write(root.join("hal-identity.ron"), "capture-in-progress")
+            .map_err(|error| error.to_string())?;
         fs::write(root.join("hal-filtering.txt"), self.filtering.name()).map_err(|error| error.to_string())?;
         fs::write(root.join("hal-shader-input.txt"), self.shader_input.name()).map_err(|error| error.to_string())?;
         if config.bits.contains(CaptureBits::EXTERNAL_RESOURCES) && !externals.is_empty() {
@@ -147,7 +266,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             write_ron(root.join("renderer.ron"), &renderer)?;
         }
         dispatch_releases(&self.releases);
-        Ok(())
+        write_ron(root.join("hal-identity.ron"), &self.capture_identity())
     }
 
     #[cfg(feature = "replay")]
@@ -171,16 +290,17 @@ impl<A: BackendApi> FrameRenderer<A> {
         if policy != self.filtering.name() {
             return Err(format!("Capture filtering {policy:?} differs from renderer filtering {:?}", self.filtering.name()));
         }
+        let root = config.resource_root();
+        self.check_capture_identity(&root)?;
+        let native = config.deserialize_for_resource::<NativeCapture, _>("hal-native");
+        if native.is_some() && !matches!(self.compositor, CompositorConfig::Native { .. }) {
+            return Err("HAL native frame replay requires a native compositor; rebuild the scene for another backend".into());
+        }
         self.submissions.wait()?;
         self.descriptors.borrow_mut().clear();
         self.textures.clear();
         self.depths.clear();
         self.external_images.clear();
-        let root = config.resource_root();
-        let native = config.deserialize_for_resource::<NativeCapture, _>("hal-native");
-        if native.is_some() && !matches!(self.compositor, CompositorConfig::Native { .. }) {
-            return Err("HAL native frame replay requires a native compositor; rebuild the scene for another backend".into());
-        }
         let device = self.external_image_device();
         if let CompositorConfig::Native { compositor, .. } = &mut self.compositor {
             use crate::composite::{NativeSurfaceOperation, NativeSurfaceOperationDetails as Op};

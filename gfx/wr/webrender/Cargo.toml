@@ -11,7 +11,7 @@ edition = "2018"
 [features]
 default = ["static_freetype"]
 hal = ["dep:wgpu-hal", "dep:wgpu-types", "dep:raw-window-handle"]
-hal-testing = ["hal-vulkan"]
+hal-testing = ["hal"]
 hal-linux-dmabuf = ["hal-vulkan"]
 hal-win32 = ["hal-vulkan"]
 hal-android-ahb = ["hal-vulkan", "dep:ndk"]
@@ -39,7 +39,6 @@ webrender_build = { version = "0.0.2", path = "../webrender_build" }
 [dependencies]
 wgpu-hal = { version = "=30.0.0", optional = true, default-features = false }
 wgpu-types = { version = "=30.0.0", optional = true, default-features = false, features = ["std"] }
-ash = { version = "0.38", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
 bincode = "1.0"
 bitflags = { version = "2", features = ["serde"] }
@@ -96,3 +95,6 @@ objc2-metal = { version = "0.3.2", optional = true, default-features = false, fe
 objc2-io-surface = { version = "0.3.2", optional = true }
 objc2-core-foundation = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true, default-features = false, features = ["std", "CALayer", "CAMetalLayer"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))'.dependencies]
+ash = { version = "0.38", optional = true }

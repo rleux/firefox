@@ -1,6 +1,6 @@
 # Experimental HAL renderer
 
-The optional `hal-vulkan` feature provides a Vulkan bootstrap and a staged WR
+The `hal-vulkan` feature provides a Vulkan bootstrap and a staged WR
 frame executor using `wgpu-hal` 30.0.0 directly. The original GL Renderer remains
 the default and retains its constructor and resource/cache interfaces. Only Linux
 has been built and executed; this is not a completed replacement renderer.
@@ -37,7 +37,7 @@ python3 script/headless.py --backend hal --hal-validation png scene.yaml output.
 ```
 
 GL remains `python3 script/headless.py reftest`. A dual-feature build can use both
-selectors. The launcher builds `hal-vulkan` for HAL and bypasses OSMesa setup.
+selectors. The launcher selects `hal-vulkan` or `hal-metal` for HAL and bypasses OSMesa setup.
 `WRENCH_VULKAN_ICD` optionally selects an ICD manifest through `VK_DRIVER_FILES`;
 otherwise the loader environment/configuration applies. `--hal-adapter NAME`
 requires one case-insensitive substring match. Without a filter, selection prefers
@@ -57,6 +57,23 @@ Nearest, non-mip linear, data-texture and single-level external reads retain the
 existing paths. Shader/pipeline identity includes the profile. Captures record it
 in `hal-filtering.txt`; mismatched replay is rejected. Older captures without a
 marker use the existing standard HAL replay policy, with an explicit diagnostic.
+
+New HAL snapshots also write `hal-identity.ron` after GPU resources are saved.
+Its version, backend, WR/API/build source and local HAL patch fingerprint, shader
+catalog, pipeline ABI, shader route, filtering, dual-source capability and byte
+order must match at replay. An incomplete save or incompatible identity fails
+before replacing the renderer's GPU caches. Native handles and pipeline binaries
+are never portable capture payloads: external images are materialized as bytes,
+then uploaded into destination-owned storage. A matching snapshot can therefore
+replay on a fresh device; it does not require the original device or driver ID.
+Legacy captures without this identity retain Vulkan replay compatibility and the
+existing filtering/shader markers; their source compatibility cannot be verified.
+They are not accepted by Metal.
+
+Cross-API scene rebuilding means submitting the original display list/YAML and
+CPU image/font resources to a newly created renderer, with its native import
+contracts. Built-frame capture replay does not perform that conversion. Removing
+or changing capture markers is not a supported migration path.
 
 `test_init` checks bootstrap clear/readback; `test_hal` also checks native-image
 ownership. The ignored Wrench tests under `hal::tests` exercise real frame
@@ -83,6 +100,9 @@ reference ownership. Uploads validate bounds, pitch, formats and owner identity.
 Buffers/views/bindings and encoders remain alive through GPU completion, including
 cleanup. Cached descriptor identity includes physical allocation/view, sampler and
 pipeline identity; reset/free operations invalidate affected cached bindings.
+Pipeline keys also carry a process-local device identity, backend, ABI, shader
+route, filtering, dual-source support and vertex layout. Native caches remain
+renderer-owned; immutable translated shader IR is keyed by its actual input bytes.
 
 One graphics queue uses at most three in-flight contexts with completion-based
 retirement and backpressure. Transfers and passes share submissions. Upload and
@@ -120,3 +140,25 @@ full Gecko resolution, patched-source compatibility, bindings and linking remain
 unverified in the partial checkout. GL/GLES behavior on non-Linux platforms also
 requires native verification. No global enablement or production-readiness claim
 is made by this staged Linux result.
+
+## Backend and feature policy
+
+GL remains the default. Select HAL explicitly with `--backend hal`, and optionally
+`--hal-backend vulkan|metal`. macOS prefers compiled Metal; other implemented
+platforms prefer Vulkan. Explicit unavailable selections fail before renderer
+initialization and never select another API or adapter after an initialization error.
+
+`hal` enables common interfaces. `hal-vulkan` and `hal-metal` enable their native
+backends; `hal-testing` only adds failure hooks and must be combined with a backend
+feature for GPU tests. Native availability is gated by both feature and target;
+unsupported configurations expose no renderer and do not compile a shader catalog.
+GL-only/common-only builds do not invoke glslang or SPIR-V validation tools.
+Vulkan's existing macOS entry points remain conditional compatibility APIs, not a
+MoltenVK implementation/verification commitment; direct Metal is the macOS target.
+
+Wrench reports `RendererCapabilities` from the created renderer, including its
+actual API, shader route, frame-timestamp support, texture limit and validation
+request state. `validation_request_supported` describes the backend's request
+mechanism, not the presence of a validation layer. A requested Vulkan layer must
+be available at construction; the Metal validation request remains unsupported.
+Native OS execution and WebGPU/Gecko browser integration remain separate gates.
