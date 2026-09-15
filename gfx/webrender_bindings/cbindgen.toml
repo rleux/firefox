@@ -16,7 +16,7 @@ namespaces = ["mozilla", "wr"]
 
 [export]
 item_types = ["globals", "enums", "structs", "unions", "typedefs", "opaque", "functions", "constants"]
-include = ["POLYGON_CLIP_VERTEX_MAX", "WrHalBuffer"]
+include = ["POLYGON_CLIP_VERTEX_MAX", "WrHalImage", "WrHalImageLease", "WrHalImageRelease"]
 
 [parse]
 parse_deps = true

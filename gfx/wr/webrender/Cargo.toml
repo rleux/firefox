@@ -98,3 +98,8 @@ objc2-quartz-core = { version = "0.3.2", optional = true, default-features = fal
 
 [target.'cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))'.dependencies]
 ash = { version = "0.38", optional = true }
+
+[[test]]
+name = "browser_hal_image_leases"
+path = "../../webrender_bindings/tests/hal_image.rs"
+required-features = ["hal-naga", "hal-linux-dmabuf"]

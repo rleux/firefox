@@ -38,6 +38,7 @@ extern crate core_graphics;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 extern crate foreign_types;
 
+pub mod hal_image;
 mod program_cache;
 mod renderer;
 

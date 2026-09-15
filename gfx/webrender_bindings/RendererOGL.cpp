@@ -115,22 +115,26 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
   }
 }
 
-extern "C" bool wr_renderer_lock_hal_buffer(void* aObj, wr::ExternalImageId aId,
-                                            uint8_t aChannelIndex,
-                                            wr::WrHalBuffer* aBuffer) {
+struct WrHalImageLease {
+  RefPtr<RenderTextureHost> mTexture;
+};
+
+extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
+    void* aObj, wr::ExternalImageId aId, uint8_t aChannelIndex,
+    WrHalImage* aImage) {
   auto* renderer = static_cast<RendererOGL*>(aObj);
-  auto* texture = renderer->GetRenderTexture(aId);
-  return texture && !texture->IsFromDRMSource() &&
-         texture->LockHalBuffer(aChannelIndex, aBuffer);
+  RefPtr<RenderTextureHost> texture = renderer->GetRenderTexture(aId);
+  if (!texture || texture->IsFromDRMSource() ||
+      !texture->LockHalImage(aChannelIndex, aImage)) {
+    return nullptr;
+  }
+  return new WrHalImageLease{std::move(texture)};
 }
 
-extern "C" void wr_renderer_unlock_hal_buffer(void* aObj,
-                                              wr::ExternalImageId aId,
-                                              uint8_t) {
-  auto* renderer = static_cast<RendererOGL*>(aObj);
-  if (auto* texture = renderer->GetRenderTexture(aId)) {
-    texture->UnlockHalBuffer();
-  }
+extern "C" void wr_renderer_release_hal_image(WrHalImageLease* aLease,
+                                              WrHalImageRelease aStatus) {
+  UniquePtr<WrHalImageLease> lease(aLease);
+  lease->mTexture->UnlockHalImage(aStatus);
 }
 
 RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
