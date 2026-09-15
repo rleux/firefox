@@ -250,11 +250,14 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         auto* const swgl = compositor->swgl();
         auto* const gl =
             (compositor->gl() && !swgl) ? compositor->gl() : nullptr;
+        WrHalSurface halSurface{};
+        const bool useHal = compositor->GetHalSurface(&halSurface);
         RenderThread* const renderThread = RenderThread::Get();
-        auto* const progCache = (renderThread->GetProgramCache() && !swgl)
-                                    ? renderThread->GetProgramCache()->Raw()
-                                    : nullptr;
-        auto* const shaders = (renderThread->GetShaders() && !swgl)
+        auto* const progCache =
+            (renderThread->GetProgramCache() && !swgl && !useHal)
+                ? renderThread->GetProgramCache()->Raw()
+                : nullptr;
+        auto* const shaders = (renderThread->GetShaders() && !swgl && !useHal)
                                   ? renderThread->GetShaders()->RawShaders()
                                   : nullptr;
 
@@ -284,6 +287,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
                 supportLowPriorityThreadpool, gfx::gfxVars::UseGLSwizzle(),
                 gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl,
+                useHal ? &halSurface : nullptr,
                 compositor->SurfaceOriginIsTopLeft(), progCache, shaders,
                 renderThread->ThreadPool().Raw(),
                 renderThread->ThreadPoolLP().Raw(),
@@ -312,6 +316,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         }
         MOZ_ASSERT(wrRenderer);
         MOZ_ASSERT(docHandle);
+        compositor->SetRenderer(wrRenderer);
 
         const WebRenderBackend backend = compositor->BackendType();
         const WebRenderCompositor compositorType = compositor->CompositorType();

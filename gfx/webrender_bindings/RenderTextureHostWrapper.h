@@ -29,6 +29,8 @@ class RenderTextureHostWrapper final : public RenderTextureHostSWGL {
   // RenderTextureHost
   wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL) override;
   void Unlock() override;
+  bool LockHalBuffer(uint8_t aChannelIndex, WrHalBuffer* aBuffer) override;
+  void UnlockHalBuffer() override;
   void ClearCachedResources() override;
   void PrepareForUse() override;
   void NotifyForUse() override;

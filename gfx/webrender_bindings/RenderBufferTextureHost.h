@@ -18,6 +18,10 @@ class RenderBufferTextureHost final : public RenderTextureHostSWGL {
   // RenderTextureHost
   wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL) override;
   void Unlock() override;
+  bool LockHalBuffer(uint8_t aChannelIndex, WrHalBuffer* aBuffer) override {
+    return LockMappedHalBuffer(aChannelIndex, aBuffer);
+  }
+  void UnlockHalBuffer() override { UnmapPlanes(); }
 
   size_t Bytes() override {
     return mSize.width * mSize.height * BytesPerPixel(mFormat);

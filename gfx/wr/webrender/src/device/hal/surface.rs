@@ -218,7 +218,13 @@ fn negotiate(caps: &hal::SurfaceCapabilities, size: [u32; 2], options: SurfaceOp
             .copied().find(|format| available(*format)).ok_or("Surface has no supported sRGB presentation format")?;
         (format, PresentationMethod::Draw, wgt::TextureUses::COLOR_TARGET)
     };
-    let alpha = if options.transparent { wgt::CompositeAlphaMode::PreMultiplied } else { wgt::CompositeAlphaMode::Opaque };
+    let alpha = if options.transparent {
+        if caps.composite_alpha_modes.contains(&wgt::CompositeAlphaMode::PreMultiplied) {
+            wgt::CompositeAlphaMode::PreMultiplied
+        } else {
+            wgt::CompositeAlphaMode::Inherit
+        }
+    } else { wgt::CompositeAlphaMode::Opaque };
     if !caps.composite_alpha_modes.contains(&alpha) { return Err("Requested surface alpha mode is unsupported".into()); }
     let preferred = if options.vsync { wgt::PresentMode::Fifo } else { wgt::PresentMode::Immediate };
     let present_mode = if caps.present_modes.contains(&preferred) { preferred } else { wgt::PresentMode::Fifo };
@@ -301,6 +307,9 @@ mod tests {
         caps.usage = wgt::TextureUses::COLOR_TARGET;
         assert!(negotiate(&caps, [128, 96], SurfaceOptions::default(), 4096).is_err());
         caps = capabilities();
+        caps.composite_alpha_modes = vec![wgt::CompositeAlphaMode::Inherit];
+        let config = negotiate(&caps, [128, 96], SurfaceOptions { transparent: true, ..Default::default() }, 4096).unwrap();
+        assert_eq!(config.composite_alpha_mode, wgt::CompositeAlphaMode::Inherit);
         caps.composite_alpha_modes = vec![wgt::CompositeAlphaMode::Opaque];
         assert!(negotiate(&caps, [128, 96], SurfaceOptions { transparent: true, ..Default::default() }, 4096).is_err());
     }

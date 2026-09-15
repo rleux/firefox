@@ -2382,6 +2382,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixedbitset"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
 name = "flagset"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5488,6 +5494,7 @@ dependencies = [
  "naga-types",
  "num-traits",
  "once_cell",
+ "petgraph",
  "rustc-hash 1.999.999",
  "serde",
  "spirv",
@@ -6225,6 +6232,17 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "petgraph"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8701b58ea97060d5e5b155d383a69952a60943f0e6dfe30b04c287beb0b27455"
+dependencies = [
+ "fixedbitset",
+ "hashbrown 0.15.999",
+ "indexmap",
+]
 
 [[package]]
 name = "phf"
@@ -9154,6 +9172,7 @@ name = "webrender"
 version = "0.62.0"
 dependencies = [
  "allocator-api2",
+ "ash",
  "base64 0.22.1",
  "bincode",
  "bitflags 2.10.0",
@@ -9176,6 +9195,7 @@ dependencies = [
  "num-traits",
  "peek-poke",
  "plane-split",
+ "raw-window-handle",
  "rayon",
  "ron",
  "rustc-hash 2.1.1",
@@ -9191,6 +9211,8 @@ dependencies = [
  "url",
  "webrender_api",
  "webrender_build",
+ "wgpu-hal",
+ "wgpu-types",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
@@ -9233,6 +9255,7 @@ dependencies = [
  "nsstring",
  "num_cpus",
  "objc",
+ "raw-window-handle",
  "rayon",
  "rustc-hash 2.1.1",
  "static_prefs",
@@ -9251,6 +9274,7 @@ version = "0.0.2"
 dependencies = [
  "bitflags 2.10.0",
  "lazy_static",
+ "naga",
  "regex",
  "serde",
 ]

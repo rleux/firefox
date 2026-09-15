@@ -3,6 +3,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RenderCompositor.h"
+#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
+#  include "RenderCompositorVulkan.h"
+#  include "prenv.h"
+#endif
 
 #include "GLContext.h"
 #include "gfxConfig.h"
@@ -200,6 +204,17 @@ void wr_partial_present_compositor_set_buffer_damage_region(
 /* static */
 UniquePtr<RenderCompositor> RenderCompositor::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
+#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
+  if (const char* backend = PR_GetEnv("MOZ_WR_BACKEND")) {
+    if (!strcmp(backend, "vulkan")) {
+      return RenderCompositorVulkan::Create(aWidget, aError);
+    }
+    if (strcmp(backend, "gl")) {
+      aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
+      return nullptr;
+    }
+  }
+#endif
   if (aWidget->GetCompositorOptions().UseSoftwareWebRender()) {
 #ifdef XP_DARWIN
     // Mac uses NativeLayerCA
