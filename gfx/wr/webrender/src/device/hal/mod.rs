@@ -554,13 +554,14 @@ impl<A: hal::Api> Device<A> {
         )?;
         let depth_texture = make_texture(
             wgt::TextureFormat::Depth32Float,
-            wgt::TextureUses::DEPTH_STENCIL_WRITE | wgt::TextureUses::COPY_SRC,
+            wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::COPY_SRC,
         )?;
         let make_view = |texture: &A::Texture, format, usage| -> Result<_> {
             let view = unsafe {
                 device.create_texture_view(
                     texture,
                     &hal::TextureViewDescriptor {
+                        swizzle: Default::default(),
                         label: Some("WR offscreen view"),
                         format,
                         dimension: wgt::TextureViewDimension::D2,
@@ -580,7 +581,7 @@ impl<A: hal::Api> Device<A> {
         let depth_view = make_view(
             &depth_texture,
             wgt::TextureFormat::Depth32Float,
-            wgt::TextureUses::DEPTH_STENCIL_WRITE,
+            wgt::TextureUses::DEPTH_WRITE,
         )?;
         let color_buffer = self.readback_buffer(&layout)?;
         let depth_buffer = self.readback_buffer(&layout)?;
@@ -598,7 +599,7 @@ impl<A: hal::Api> Device<A> {
                     barrier::<A::Texture>(
                         &depth_texture,
                         wgt::TextureUses::UNINITIALIZED,
-                        wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                        wgt::TextureUses::DEPTH_WRITE,
                     ),
                 ]));
             commands
@@ -623,9 +624,11 @@ impl<A: hal::Api> Device<A> {
                         },
                     })],
                     depth_stencil_attachment: Some(hal::DepthStencilAttachment {
+                        depth_read_only: false,
+                        stencil_read_only: true,
                         target: hal::Attachment {
                             view: &depth_view,
-                            usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                            usage: wgt::TextureUses::DEPTH_WRITE,
                         },
                         depth_ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
                         stencil_ops: hal::AttachmentOps::LOAD_DONT_CARE
@@ -648,7 +651,7 @@ impl<A: hal::Api> Device<A> {
                     ),
                     barrier::<A::Texture>(
                         &depth_texture,
-                        wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                        wgt::TextureUses::DEPTH_WRITE,
                         wgt::TextureUses::COPY_SRC,
                     ),
                 ]));
@@ -722,6 +725,7 @@ fn barrier<T: hal::DynTexture>(
     to: wgt::TextureUses,
 ) -> hal::TextureBarrier<'_, T> {
     hal::TextureBarrier {
+        queue_family_ownership_transfer: None,
         texture,
         range: wgt::ImageSubresourceRange::default(),
         usage: hal::StateTransition { from, to },

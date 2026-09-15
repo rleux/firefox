@@ -1740,7 +1740,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         target.transition(&mut commands, wgt::TextureUses::COLOR_TARGET);
         if let Some(depth) = &depth {
-            depth.transition(&mut commands, wgt::TextureUses::DEPTH_STENCIL_WRITE);
+            depth.transition(&mut commands, wgt::TextureUses::DEPTH_WRITE);
         }
         unsafe {
             commands
@@ -1773,9 +1773,11 @@ impl<A: BackendApi> FrameRenderer<A> {
                     })],
                     depth_stencil_attachment: depth.as_ref().map(|texture| {
                         hal::DepthStencilAttachment {
+                            depth_read_only: false,
+                            stencil_read_only: true,
                             target: hal::Attachment {
                                 view: &*texture.view,
-                                usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                                usage: wgt::TextureUses::DEPTH_WRITE,
                             },
                             depth_ops: (if texture.initialized() {
                                 hal::AttachmentOps::LOAD

@@ -133,6 +133,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 commands
                     .encoder()
                     .transition_textures(std::iter::once(hal::TextureBarrier {
+                        queue_family_ownership_transfer: None,
                         texture: target,
                         range: range.clone(),
                         usage: hal::StateTransition {
@@ -151,6 +152,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 commands
                     .encoder()
                     .transition_textures(std::iter::once(hal::TextureBarrier {
+                        queue_family_ownership_transfer: None,
                         texture: target,
                         range,
                         usage: hal::StateTransition {
@@ -362,7 +364,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             .iter()
             .chain(region.target.iter())
             .copied()
-            .chain([u32::from(format.is_srgb()), 0, 0, 0])
+            .chain([u32::from(format.has_srgb_suffix()), 0, 0, 0])
         {
             parameters.extend_from_slice(&word.to_ne_bytes());
         }
@@ -376,6 +378,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 native.create_texture_view(
                     target,
                     &hal::TextureViewDescriptor {
+                        swizzle: Default::default(),
                         label: Some("WR presentation target"),
                         format,
                         dimension: wgt::TextureViewDimension::D2,
@@ -429,6 +432,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             commands
                 .encoder()
                 .transition_textures(std::iter::once(hal::TextureBarrier {
+                    queue_family_ownership_transfer: None,
                     texture: target,
                     range: presentation_range(),
                     usage: hal::StateTransition {
@@ -490,6 +494,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             commands
                 .encoder()
                 .transition_textures(std::iter::once(hal::TextureBarrier {
+                    queue_family_ownership_transfer: None,
                     texture: target,
                     range: presentation_range(),
                     usage: hal::StateTransition {
@@ -674,7 +679,7 @@ mod tests {
                             }
                             for channel in 0..4 {
                                 let actual = pixels[((y * 19 + x) * 4) as usize + channel];
-                                let bound = u8::from(inside && format.is_srgb() && channel != 3);
+                                let bound = u8::from(inside && format.has_srgb_suffix() && channel != 3);
                                 assert!(
                                     actual.abs_diff(expected[channel]) <= bound,
                                     "{:?} -> {:?} {:?} {:?} ({}, {}) channel {}: {} != {}",
