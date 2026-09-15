@@ -17,17 +17,6 @@ pub struct WrHalSurface {
     pub transparent: bool,
 }
 
-#[repr(C)]
-pub struct WrHalBuffer {
-    pub data: *const u8,
-    pub length: usize,
-    pub width: i32,
-    pub height: i32,
-    pub stride: i32,
-    pub format: ImageFormat,
-    pub opaque: bool,
-}
-
 pub enum Renderer {
     Gl(webrender::Renderer),
     #[cfg(target_os = "linux")]
@@ -76,74 +65,6 @@ impl raw_window_handle::HasDisplayHandle for Window {
             RawDisplayHandle::Xlib(XlibDisplayHandle::new(Some(display), self.0.screen))
         };
         Ok(unsafe { DisplayHandle::borrow_raw(raw) })
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct BufferImages(WrExternalImageHandler);
-
-#[cfg(target_os = "linux")]
-impl webrender::hal::ExternalImageProvider for BufferImages {
-    fn acquire(
-        &mut self,
-        id: ExternalImageId,
-        channel: u8,
-        _: bool,
-    ) -> Result<webrender::hal::ExternalImageLease, String> {
-        extern "C" {
-            fn wr_renderer_lock_hal_buffer(
-                obj: *mut c_void,
-                id: ExternalImageId,
-                channel: u8,
-                data: *mut WrHalBuffer,
-            ) -> bool;
-            fn wr_renderer_unlock_hal_buffer(obj: *mut c_void, id: ExternalImageId, channel: u8);
-        }
-        let mut data = std::mem::MaybeUninit::<WrHalBuffer>::uninit();
-        let obj = self.0.object();
-        if !unsafe { wr_renderer_lock_hal_buffer(obj, id, channel, data.as_mut_ptr()) } {
-            return Err(format!(
-                "HAL external image {:?}/{} has no supported buffer representation",
-                id, channel
-            ));
-        }
-        let data = unsafe { data.assume_init() };
-        let result = (|| {
-            if data.data.is_null() || data.width <= 0 || data.height <= 0 || data.stride <= 0 {
-                return Err("Invalid HAL external buffer".into());
-            }
-            let row = (data.width as usize)
-                .checked_mul(data.format.bytes_per_pixel() as usize)
-                .ok_or("HAL external buffer row overflow")?;
-            let needed = (data.stride as usize)
-                .checked_mul(data.height as usize - 1)
-                .and_then(|n| n.checked_add(row))
-                .ok_or("HAL external buffer size overflow")?;
-            if row > data.stride as usize || needed > data.length {
-                return Err("HAL external buffer layout exceeds its allocation".into());
-            }
-            let mut bytes = unsafe { std::slice::from_raw_parts(data.data, needed) }.to_vec();
-            if data.opaque && matches!(data.format, ImageFormat::BGRA8 | ImageFormat::RGBA8) {
-                for y in 0..data.height as usize {
-                    for x in 0..data.width as usize {
-                        bytes[y * data.stride as usize + x * 4 + 3] = 255;
-                    }
-                }
-            }
-            let mut desc = ImageDescriptor::new(data.width, data.height, data.format, ImageDescriptorFlags::empty());
-            desc.stride = Some(data.stride);
-            webrender::hal::ExternalImageLease::new(
-                desc,
-                TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32),
-                0,
-                webrender::hal::ExternalImageSource::Buffer(std::sync::Arc::new(bytes)),
-                |_| {},
-            )
-        })();
-        unsafe {
-            wr_renderer_unlock_hal_buffer(obj, id, channel);
-        }
-        result
     }
 }
 
@@ -224,7 +145,13 @@ impl Renderer {
             Self::Gl(r) => r.set_external_image_handler(Box::new(handler)),
             #[cfg(target_os = "linux")]
             Self::Vulkan(r) => {
-                if let Err(e) = r.renderer.set_external_image_provider(Box::new(BufferImages(handler))) {
+                if let Err(e) = r
+                    .renderer
+                    .set_external_image_provider(Box::new(crate::hal_image::ExternalImages::new(
+                        handler,
+                        r.renderer.external_image_device(),
+                    )))
+                {
                     r.error = Some(e);
                 }
             },
