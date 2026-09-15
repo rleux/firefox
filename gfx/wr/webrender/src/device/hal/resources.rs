@@ -257,7 +257,7 @@ impl<A: hal::Api> Texture<A> {
         let renderable = renderable || mip_count > 1;
         let depth = format == wgt::TextureFormat::Depth32Float;
         let target_usage = if depth {
-            wgt::TextureUses::DEPTH_STENCIL_WRITE
+            wgt::TextureUses::DEPTH_WRITE
         } else {
             wgt::TextureUses::COLOR_TARGET
         };
@@ -317,7 +317,7 @@ impl<A: hal::Api> Texture<A> {
         let format = descriptor.format;
         let mip_count = descriptor.mip_level_count;
         let depth = format == wgt::TextureFormat::Depth32Float;
-        let target_usage = if depth { wgt::TextureUses::DEPTH_STENCIL_WRITE } else { wgt::TextureUses::COLOR_TARGET };
+        let target_usage = if depth { wgt::TextureUses::DEPTH_WRITE } else { wgt::TextureUses::COLOR_TARGET };
         let device = &owner.open.device;
         let bytes = (0..mip_count)
             .map(|level| {
@@ -333,6 +333,7 @@ impl<A: hal::Api> Texture<A> {
                 device.create_texture_view(
                     &raw,
                     &hal::TextureViewDescriptor {
+                        swizzle: Default::default(),
                         label: Some("WR HAL view"),
                         format,
                         dimension: wgt::TextureViewDimension::D2,
@@ -410,6 +411,7 @@ impl<A: hal::Api> Texture<A> {
                 owner.open.device.create_texture_view(
                     &self.raw,
                     &hal::TextureViewDescriptor {
+                        swizzle: Default::default(),
                         label: Some("WR mip view"),
                         format: self.format,
                         dimension: wgt::TextureViewDimension::D2,
@@ -454,6 +456,7 @@ impl<A: hal::Api> Texture<A> {
         let owner = &self.raw.owner;
         let view = |usage, levels| {
             let raw = unsafe { owner.open.device.create_texture_view(&self.raw, &hal::TextureViewDescriptor {
+                swizzle: Default::default(),
                 label: Some("WR acquired image view"), format: self.format, dimension: wgt::TextureViewDimension::D2, usage,
                 range: wgt::ImageSubresourceRange { base_mip_level: self.base_mip, mip_level_count: Some(levels), array_layer_count: Some(1), ..Default::default() },
             }) }.map_err(|error| format!("Creating acquired image view: {error:?}"))?;
@@ -527,6 +530,7 @@ impl<A: hal::Api> Texture<A> {
                     commands
                         .encoder()
                         .transition_textures(std::iter::once(hal::TextureBarrier {
+                            queue_family_ownership_transfer: None,
                             texture: &**self.raw,
                             range: wgt::ImageSubresourceRange {
                                 base_mip_level: level,

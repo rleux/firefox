@@ -59,7 +59,7 @@ in `hal-filtering.txt`; mismatched replay is rejected. Older captures without a
 marker use the existing standard HAL replay policy, with an explicit diagnostic.
 
 New HAL snapshots also write `hal-identity.ron` after GPU resources are saved.
-Its version, backend, WR/API/build source and local HAL patch fingerprint, shader
+Its version, backend, WR/API/build source and vendored HAL fingerprint, shader
 catalog, pipeline ABI, shader route, filtering, dual-source capability and byte
 order must match at replay. An incomplete save or incompatible identity fails
 before replacing the renderer's GPU caches. Native handles and pipeline binaries
@@ -134,9 +134,15 @@ DMA-BUF, cross-process/device imports, video planes, queue-family ownership tran
 or native compositor integration. Those adapters must retain explicit device,
 format/plane, subresource, valid/dirty-region and acquire/release contracts.
 
-Standalone Cargo.lock pins released HAL/types 30.0.0 while retaining HAL 27 GUI
-dependencies. Firefox's root workspace patches 30.0.0 to a distinct Git revision;
-full Gecko resolution, patched-source compatibility, bindings and linking remain
+WR and Firefox use HAL/types/Naga from wgpu revision
+`4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8`. The standalone workspace resolves that
+Git source from Firefox's existing `third_party/rust` vendor directory through
+`gfx/wr/.cargo/config.toml`; run Cargo from within `gfx/wr` so that configuration
+is loaded. Older HAL 27 GUI dependencies remain separate. No additional wgpu
+repository checkout is needed. The local release-crate HAL fork is removed;
+native surface errors and acquire fences use upstream fixes, and Android YCbCr
+enablement uses the device creation callback's public `pNext` chain. Browser
+bindings and linking remain
 unverified in the partial checkout. GL/GLES behavior on non-Linux platforms also
 requires native verification. No global enablement or production-readiness claim
 is made by this staged Linux result.

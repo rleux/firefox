@@ -77,13 +77,14 @@ pub(super) fn open_adapter(
                 | vk::ExternalSemaphoreFeatureFlags::EXPORTABLE,
         );
     let callback: Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> = if supported {
-        Some(Box::new(move |args| {
+        ycbcr.sampler_ycbcr_conversion = vk::TRUE;
+        Some(Box::new(|args| {
             for extension in extensions {
                 if !args.extensions.contains(&extension) {
                     args.extensions.push(extension);
                 }
             }
-            args.device_features.enable_sampler_ycbcr_conversion();
+            *args.create_info = std::mem::take(args.create_info).push_next(&mut ycbcr);
         }))
     } else {
         None

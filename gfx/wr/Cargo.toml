@@ -28,7 +28,9 @@ opt-level = 2
 opt-level = 2
 
 [patch.crates-io]
-wgpu-hal = { path = "vendor/wgpu-hal" }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
 firefox-on-glean = { path = "fog" }
 # gleam 0.15.1 + https://github.com/servo/gleam/pull/235
 gleam = { git = "https://github.com/jamienicol/gleam", rev = "68ca4e5cc31135b843af07ff213a94b9ddce64cf" }

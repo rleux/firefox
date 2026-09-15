@@ -209,6 +209,9 @@ inherits = "release"
 panic = "unwind"
 
 [patch.crates-io]
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
 # The build system doesn't want those to be used, but they are pulled anyways (because
 # dependencies can't be disabled based on features), but remain unused. We ensure they
 # stay unused by overriding them with crates that contain enough to build the current

@@ -327,11 +327,11 @@ fn main() -> Result<(), std::io::Error> {
             Ok(())
         }
         let mut files = vec![Path::new("build.rs").to_owned(), Path::new("Cargo.toml").to_owned(),
-            Path::new("../Cargo.toml").to_owned(), Path::new("../Cargo.lock").to_owned()];
+            Path::new("../Cargo.toml").to_owned(), Path::new("../Cargo.lock").to_owned(), Path::new("../../../Cargo.lock").to_owned()];
         inputs(Path::new("src"), &mut files)?;
         inputs(Path::new("../webrender_api/src"), &mut files)?;
         inputs(Path::new("../webrender_build/src"), &mut files)?;
-        let vendor = Path::new("../vendor/wgpu-hal");
+        let vendor = Path::new("../../../third_party/rust/wgpu-hal");
         println!("cargo:rerun-if-changed={}", vendor.display());
         if vendor.is_dir() {
             files.push(vendor.join("Cargo.toml"));
