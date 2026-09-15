@@ -47,6 +47,10 @@ macro_rules! renderer_facade {
             pub fn info(&self) -> &wgpu_types::AdapterInfo { self.core.info() }
             pub fn flush_pipeline_info(&mut self) -> PipelineInfo { self.core.flush_pipeline_info() }
             pub fn update(&mut self) -> Result<(), String> { self.core.update() }
+            pub fn set_target_frame_publish_id(&mut self, id: api::FramePublishId) { self.core.target_frame_publish_id = Some(id); }
+            pub fn set_clear_color(&mut self, color: api::ColorF) { self.core.clear_color = color; self.core.force_redraw = true; }
+            pub fn force_redraw(&mut self) { self.core.force_redraw = true; }
+            pub fn select_document(&mut self, id: DocumentId) -> Result<(), String> { self.core.check_document(id) }
             pub fn has_frame(&self) -> bool { self.core.has_frame() }
             pub fn configure_filtering(&mut self, filtering: crate::device::hal::Filtering) -> Result<(), String> { self.core.configure_filtering(filtering) }
             pub fn filtering(&self) -> crate::device::hal::Filtering { self.core.filtering() }
@@ -64,8 +68,10 @@ macro_rules! renderer_facade {
             pub fn cancel_readback(&self, handle: ReadbackHandle) -> Result<(), String> { self.core.cancel_readback(handle) }
             pub fn get_screenshot_async(&mut self, window_rect: api::units::DeviceIntRect, buffer_size: api::units::DeviceIntSize, format: ImageFormat) -> Result<(ScreenshotHandle, api::units::DeviceIntSize), String> { self.core.get_screenshot_async(window_rect, buffer_size, format) }
             pub fn map_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> { self.core.map_and_recycle_screenshot(handle, destination, stride, format) }
+            pub fn cancel_screenshot(&self, handle: ScreenshotHandle) -> Result<(), String> { self.core.cancel_readback(handle.readback) }
             pub fn record_frame(&self, format: ImageFormat) -> Result<(RecordedFrameHandle, api::units::DeviceIntSize), String> { self.core.record_frame(format) }
             pub fn map_recorded_frame(&self, handle: RecordedFrameHandle, destination: &mut [u8], stride: usize) -> Result<bool, String> { self.core.map_recorded_frame(handle, destination, stride) }
+            pub fn cancel_recorded_frame(&self, handle: RecordedFrameHandle) -> Result<(), String> { self.core.cancel_readback(handle.0.readback) }
             pub fn release_profiler_structures(&mut self) { self.core.release_profiler_structures() }
             pub fn release_composition_recorder_structures(&mut self) { self.core.release_composition_recorder_structures() }
             pub fn supports_bgra_readback(&self) -> bool { self.core.supports_bgra_readback() }
@@ -142,6 +148,7 @@ struct ReadbackRequest<A: BackendApi> {
 }
 
 pub(crate) struct RendererCore<A: BackendApi> {
+    target_frame_publish_id: Option<api::FramePublishId>,
     filtering_locked: bool,
     gpu: FrameRenderer<A>,
     ready: Arc<FrameReady>,
@@ -215,6 +222,9 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
     let compositor_kind = compositor.kind();
     if matches!(compositor_kind, CompositorKind::Layer { .. }) { options.surface_origin_is_top_left = true; }
     let (device, surface) = factory()?;
+    if options.reject_software_rasterizer && device.info().device_type == wgpu_types::DeviceType::Cpu {
+        return Err("Software Vulkan adapter rejected by the embedding policy".into());
+    }
     let timestamp_bits = A::timestamp_valid_bits(&device);
     let max_internal_texture_size = options
         .max_internal_texture_size
@@ -285,6 +295,7 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
         .map_err(|error| format!("Starting render backend: {error:?}"))?;
     Ok((
         RendererCore {
+            target_frame_publish_id: None,
             filtering_locked: false,
             gpu,
             ready,
@@ -390,7 +401,7 @@ impl<A: BackendApi> RendererCore<A> {
 
     pub fn update(&mut self) -> Result<(), String> {
         self.gpu.poll()?;
-        self.update_until(None)
+        self.update_until(self.target_frame_publish_id)
     }
 
     fn check_document(&mut self, id: DocumentId) -> Result<(), String> {
@@ -520,11 +531,14 @@ impl<A: BackendApi> RendererCore<A> {
                 self.slow_cpu_frame_threshold = Duration::try_from_secs_f64(threshold as f64 / 1000.0)
                     .map_err(|_| "CPU frame threshold exceeds supported duration")?;
             }
-            ResultMsg::SetParameter(parameter) => {
-                return Err(format!(
-                    "HAL has no consumer for renderer parameter {parameter:?}"
-                ));
-            }
+            // These tune GL upload/copy strategies; HAL uses explicit staging and transfers.
+            ResultMsg::SetParameter(api::Parameter::Bool(
+                api::BoolParameter::PboUploads
+                | api::BoolParameter::BatchedUploads
+                | api::BoolParameter::DrawCallsForTextureCopy,
+                _,
+            ))
+            | ResultMsg::SetParameter(api::Parameter::Int(api::IntParameter::BatchedUploadThreshold, _)) => {}
             ResultMsg::ForceRedraw => self.force_redraw = true,
             ResultMsg::DebugCommand(command) => {
                 use crate::render_api::DebugCommand;
@@ -539,6 +553,7 @@ impl<A: BackendApi> RendererCore<A> {
                     DebugCommand::SetFlags(flags) => {
                         let allowed = api::DebugFlags::ECHO_DRIVER_MESSAGES
                             | api::DebugFlags::MISSING_SNAPSHOT_PINK
+                            | api::DebugFlags::TEXTURE_CACHE_DBG_CLEAR_EVICTED
                             | api::DebugFlags::DISABLE_COMPOSITOR_CLIPS
                             | api::DebugFlags::DISABLE_BATCHING;
                         let allowed = allowed | api::DebugFlags::GPU_TIME_QUERIES;
@@ -988,6 +1003,9 @@ impl RenderNotifier for FrameNotifier {
     fn wake_up(&self, composite_needed: bool) {
         self.inner.wake_up(composite_needed);
     }
+    fn external_event(&self, event: api::ExternalEvent) {
+        self.inner.external_event(event);
+    }
     fn shut_down(&self) {
         self.ready.state.lock().unwrap().shutdown = true;
         self.ready.changed.notify_all();
@@ -1022,6 +1040,10 @@ mod tests {
             _: &api::FrameReadyParams,
         ) {
         }
+        fn external_event(&self, event: api::ExternalEvent) {
+            assert_eq!(event.unwrap(), 42);
+            self.0.store(true, Ordering::SeqCst);
+        }
         fn shut_down(&self) {
             self.0.store(true, Ordering::SeqCst);
         }
@@ -1038,6 +1060,17 @@ mod tests {
         notifier.clone().shut_down();
         assert!(notified.load(Ordering::SeqCst));
     }
+    #[test]
+    fn forwards_external_events() {
+        let notified = Arc::new(AtomicBool::new(false));
+        let notifier = FrameNotifier {
+            inner: Box::new(ShutdownNotice(notified.clone())),
+            ready: Arc::new(FrameReady::default()),
+        };
+        notifier.clone().external_event(api::ExternalEvent::from_raw(42));
+        assert!(notified.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn coalesces_ready_notifications_and_wakes_on_shutdown() {
         let ready = FrameReady::default();
@@ -1306,7 +1339,12 @@ mod tests {
         assert!(renderer.enable_gpu_profiling(true));
         renderer.core.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, 0.0))).unwrap();
         assert!(renderer.core.process_message(ResultMsg::SetParameter(Parameter::Float(FloatParameter::SlowCpuFrameThreshold, f32::NAN))).is_err());
-        assert!(renderer.core.process_message(ResultMsg::SetParameter(Parameter::Bool(BoolParameter::PboUploads, true))).is_err());
+        for parameter in [BoolParameter::PboUploads, BoolParameter::BatchedUploads, BoolParameter::DrawCallsForTextureCopy] {
+            for enabled in [false, true] {
+                renderer.core.process_message(ResultMsg::SetParameter(Parameter::Bool(parameter, enabled))).unwrap();
+            }
+        }
+        renderer.core.process_message(ResultMsg::SetParameter(Parameter::Int(api::IntParameter::BatchedUploadThreshold, 65536))).unwrap();
         let mut api = sender.create_api();
         let id = api.add_document(DeviceIntSize::new(64, 64));
         let pipeline = PipelineId(0, 0);

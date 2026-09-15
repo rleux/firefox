@@ -90,6 +90,10 @@ class RenderTextureHost {
   virtual wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL);
 
   virtual void Unlock() {}
+  virtual bool LockHalBuffer(uint8_t aChannelIndex, WrHalBuffer* aBuffer) {
+    return false;
+  }
+  virtual void UnlockHalBuffer() {}
 
   virtual wr::WrExternalImage LockSWGL(uint8_t aChannelIndex, void* aContext,
                                        RenderCompositor* aCompositor);

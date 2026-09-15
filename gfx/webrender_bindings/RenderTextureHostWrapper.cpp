@@ -50,6 +50,18 @@ void RenderTextureHostWrapper::Unlock() {
   }
 }
 
+bool RenderTextureHostWrapper::LockHalBuffer(uint8_t aChannelIndex,
+                                             WrHalBuffer* aBuffer) {
+  EnsureTextureHost();
+  return mTextureHost && mTextureHost->LockHalBuffer(aChannelIndex, aBuffer);
+}
+
+void RenderTextureHostWrapper::UnlockHalBuffer() {
+  if (mTextureHost) {
+    mTextureHost->UnlockHalBuffer();
+  }
+}
+
 wr::WrExternalImage RenderTextureHostWrapper::LockSWGL(
     uint8_t aChannelIndex, void* aContext, RenderCompositor* aCompositor) {
   if (!mTextureHost) {

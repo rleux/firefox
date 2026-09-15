@@ -115,6 +115,24 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
   }
 }
 
+extern "C" bool wr_renderer_lock_hal_buffer(void* aObj, wr::ExternalImageId aId,
+                                            uint8_t aChannelIndex,
+                                            wr::WrHalBuffer* aBuffer) {
+  auto* renderer = static_cast<RendererOGL*>(aObj);
+  auto* texture = renderer->GetRenderTexture(aId);
+  return texture && !texture->IsFromDRMSource() &&
+         texture->LockHalBuffer(aChannelIndex, aBuffer);
+}
+
+extern "C" void wr_renderer_unlock_hal_buffer(void* aObj,
+                                              wr::ExternalImageId aId,
+                                              uint8_t) {
+  auto* renderer = static_cast<RendererOGL*>(aObj);
+  if (auto* texture = renderer->GetRenderTexture(aId)) {
+    texture->UnlockHalBuffer();
+  }
+}
+
 RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
                          UniquePtr<RenderCompositor> aCompositor,
                          wr::WindowId aWindowId, wr::Renderer* aRenderer,
@@ -273,10 +291,15 @@ RenderedFrameId RendererOGL::UpdateAndRender(
       if (!mCompositor->MaybeReadback(aReadbackSize.ref(),
                                       aReadbackFormat.ref(),
                                       aReadbackBuffer.ref(), aNeedsYFlip)) {
-        wr_renderer_readback(mRenderer, aReadbackSize.ref().width,
-                             aReadbackSize.ref().height, aReadbackFormat.ref(),
-                             &aReadbackBuffer.ref()[0],
-                             aReadbackBuffer.ref().length());
+        if (!wr_renderer_readback(
+                mRenderer, aReadbackSize.ref().width,
+                aReadbackSize.ref().height, aReadbackFormat.ref(),
+                &aReadbackBuffer.ref()[0], aReadbackBuffer.ref().length())) {
+          mCompositor->CancelFrame();
+          mCompositor->GetWidget()->PostRender(&widgetContext);
+          RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
+          return RenderedFrameId();
+        }
         if (aNeedsYFlip != nullptr) {
           *aNeedsYFlip = !mCompositor->SurfaceOriginIsTopLeft();
         }
