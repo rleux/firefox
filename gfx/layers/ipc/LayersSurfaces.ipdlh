@@ -84,6 +84,11 @@ namespace layers {
   uint64_t generation;
 };
 
+[Comparable] struct ForeignRGBImageState {
+  uint64_t generation;
+  FileHandleWrapper accessLock;
+};
+
 [Comparable] struct SurfaceDescriptorDMABuf {
   uint32_t bufferType;
   uint32_t fourccFormat;
@@ -110,6 +115,7 @@ namespace layers {
   bool semaphoreFdIsSyncFd;
   HDRMetadata hdrMetadata;
   VulkanImageState? vulkanImageState;
+  ForeignRGBImageState? foreignRGBImageState;
 };
 
 [Comparable] struct SurfaceTextureDescriptor {

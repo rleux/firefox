@@ -3,6 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RendererOGL.h"
+#ifdef MOZ_WIDGET_GTK
+#  include "RenderDMABUFTextureHost.h"
+#endif
 
 #include "GLContext.h"
 #include "base/task.h"
@@ -117,7 +120,19 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
 
 struct WrHalImageLease {
   RefPtr<RenderTextureHost> mTexture;
+  bool mForeignLocked = false;
 };
+
+extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (texture && texture->GetSurface()->LockForeignRGB()) {
+    aLease->mForeignLocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
 
 extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
     void* aObj, wr::ExternalImageId aId, uint8_t aChannelIndex,
@@ -134,6 +149,13 @@ extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
 extern "C" void wr_renderer_release_hal_image(WrHalImageLease* aLease,
                                               WrHalImageRelease aStatus) {
   UniquePtr<WrHalImageLease> lease(aLease);
+#ifdef MOZ_WIDGET_GTK
+  if (lease->mForeignLocked) {
+    lease->mTexture->AsRenderDMABUFTextureHost()
+        ->GetSurface()
+        ->UnlockForeignRGB(aStatus == WrHalImageRelease::Abandoned);
+  }
+#endif
   lease->mTexture->UnlockHalImage(aStatus);
 }
 

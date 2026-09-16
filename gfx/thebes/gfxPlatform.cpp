@@ -3374,9 +3374,10 @@ void gfxPlatform::InitWebGLConfig() {
                       discardFailureId);
     }
 #  ifdef XP_LINUX
-    if (wr::RenderCompositorVulkan::IsRequested()) {
+    if (wr::RenderCompositorVulkan::IsRequested() &&
+        !wr::RenderCompositorVulkan::SupportsWebGL()) {
       feature.Disable(FeatureStatus::Unavailable,
-                      "Vulkan WebRender requires WebGL readback surfaces",
+                      "Vulkan WebRender cannot share native WebGL surfaces",
                       "FEATURE_FAILURE_WEBGL_VULKAN_SHARING"_ns);
     }
 #  endif

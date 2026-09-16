@@ -3,6 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "WebGLContext.h"
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1529,7 +1532,7 @@ Maybe<uvec2> WebGLContext::FrontBufferSnapshotInto(
 
   // -
 
-  front->BeginRead();
+  if (!front->BeginRead()) return {};
   auto reset = MakeScopeExit([&] { front->EndRead(); });
 
   // -
@@ -1703,6 +1706,11 @@ WebGLContext::GetBackBufferSnapshotSharedSurface(layers::TextureType texType,
     return nullptr;
   }
 
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    texType = layers::TextureType::Unknown;
+  }
+#endif
   InitSwapChain(*gl, mSnapshotSwapChain, texType, true);
 
   {

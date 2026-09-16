@@ -5,6 +5,12 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <unistd.h>
+#ifdef XP_LINUX
+#  include <sys/eventfd.h>
+#  include <sys/syscall.h>
+
+#  include "base/linux_memfd_defs.h"
+#endif
 
 #include "gtest/gtest.h"
 #include "mozilla/NotNull.h"
@@ -44,7 +50,7 @@ static SurfaceDescriptor MakeRGBADescriptor(RefPtr<FileHandleWrapper> fd) {
       width, height, width, height, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing()));
 }
 
 // Matches what DMABufSurfaceYUV::Serialize() produces for a two-plane 128×128
@@ -67,7 +73,7 @@ static SurfaceDescriptor MakeYUVDescriptor(RefPtr<FileHandleWrapper> fd0,
       height, widthAligned, heightAligned, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing()));
 }
 
 // Run 3 serialize → import cycles for a single-plane RGBA surface.
@@ -130,7 +136,11 @@ TEST(DMABufSurface, RGBARoundtrip)
   {
     RefPtr<FileHandleWrapper> fd = MakeFd();
     ASSERT_NE(fd, nullptr);
-    webgpu::ffi::WGPUDMABufInfo info{true, 0, 1, {}, {512}};
+    webgpu::ffi::WGPUDMABufInfo info{};
+    info.is_valid = true;
+    info.is_rgba = true;
+    info.plane_count = 1;
+    info.strides[0] = 512;
     RefPtr<DMABufSurface> surface =
         DMABufSurfaceRGBA::CreateDMABufSurface(std::move(fd), info, 128, 128);
     ASSERT_NE(surface, nullptr);
@@ -157,3 +167,58 @@ TEST(DMABufSurface, YUVRoundtrip)
   EXPECT_EQ(surface->GetHeight(1), 64);
   YUVRoundtrip(surface);
 }
+
+#ifdef XP_LINUX
+TEST(DMABufSurface, ForeignRGBRejectsMissingAccessLock)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  auto descriptor = MakeRGBADescriptor(fd);
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  image.fence().AppendElement(WrapNotNull(fd));
+  image.refCount().AppendElement(ipc::FileDescriptor(fd->GetHandle()));
+  image.foreignRGBImageState() = Some(ForeignRGBImageState(1, WrapNotNull(fd)));
+  RefPtr<DMABufSurface> rejected =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  EXPECT_FALSE(rejected);
+}
+#endif
+
+#ifdef XP_LINUX
+TEST(DMABufSurface, ForeignRGBAccessLockIsSharedAndAbandonmentPersists)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  int rawLock = syscall(SYS_memfd_create, "foreign-rgb-test",
+                        MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  ASSERT_GE(rawLock, 0);
+  RefPtr<FileHandleWrapper> lock =
+      new FileHandleWrapper(UniqueFileHandle(rawLock));
+  ASSERT_EQ(ftruncate(rawLock, sizeof(uint32_t)), 0);
+  ASSERT_EQ(
+      fcntl(rawLock, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL),
+      0);
+  int rawRef = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  ASSERT_GE(rawRef, 0);
+  RefPtr<FileHandleWrapper> refs =
+      new FileHandleWrapper(UniqueFileHandle(rawRef));
+  auto descriptor = MakeRGBADescriptor(fd);
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  image.fence().AppendElement(WrapNotNull(fd));
+  image.refCount().AppendElement(ipc::FileDescriptor(rawRef));
+  image.foreignRGBImageState() =
+      Some(ForeignRGBImageState(1, WrapNotNull(lock)));
+  RefPtr<DMABufSurface> first = DMABufSurface::CreateDMABufSurface(descriptor);
+  RefPtr<DMABufSurface> second = DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->LockForeignRGB());
+  first->UnlockForeignRGB();
+  ASSERT_TRUE(second->LockForeignRGB());
+  second->UnlockForeignRGB(true);
+  EXPECT_FALSE(first->ForeignRGBUsable());
+  EXPECT_FALSE(first->LockForeignRGB());
+  first->UnlockForeignRGB();
+  EXPECT_FALSE(second->ForeignRGBUsable());
+}
+#endif

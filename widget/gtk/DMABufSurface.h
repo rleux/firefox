@@ -107,6 +107,16 @@ class DMABufSurface : public BufferSurface {
       mozilla::layers::Image::BuildSdbFlags aFlags,
       const std::function<mozilla::layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
+  bool EnableForeignRGB();
+  bool IsForeignRGB() const { return mForeignRGB; }
+  bool ForeignRGBUsable() const;
+  bool LockForeignRGB();
+  void UnlockForeignRGB(bool aAbandon = false);
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetForeignRGBDescriptor()
+      const {
+    return mForeignRGBDescriptor.get();
+  }
+
   void FenceSet();
   void FenceWait(mozilla::gl::GLContext* aGLContext = nullptr);
   static void FenceWaitFd(RefPtr<mozilla::gl::GLContext> aGL,
@@ -230,6 +240,14 @@ class DMABufSurface : public BufferSurface {
   RefPtr<mozilla::gfx::FileHandleWrapper> mSyncFd;
   RefPtr<mozilla::gfx::FileHandleWrapper> mSemaphoreFd;
   bool mSemaphoreFdIsSyncFd = false;
+  bool mForeignRGB = false;
+  uint64_t mForeignRGBGeneration = 0;
+  RefPtr<mozilla::gfx::FileHandleWrapper> mForeignRGBLockFd;
+  // The FD retains this shared mapping until ReleaseDMABuf unmaps it.
+  uint32_t* mForeignRGBLock = nullptr;
+  bool MapForeignRGBLock();
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
+      mForeignRGBDescriptor;
   mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
       mVulkanDescriptor;
 
