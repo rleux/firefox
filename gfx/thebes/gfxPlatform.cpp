@@ -80,6 +80,9 @@
 #elif defined(MOZ_WIDGET_GTK)
 #  include "DMABufFormats.h"
 #  include "gfxPlatformGtk.h"
+#  ifdef XP_LINUX
+#    include "mozilla/webrender/RenderCompositorVulkan.h"
+#  endif
 #elif defined(ANDROID)
 #  include "gfxAndroidPlatform.h"
 #endif
@@ -3022,6 +3025,14 @@ void gfxPlatform::InitHardwareVideoConfig() {
                                   "Force disabled by gfxInfo", failureId);
   }
 
+#  ifdef XP_LINUX
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    featureVulkanDec.ForceDisable(
+        FeatureStatus::Unavailable,
+        "Vulkan WebRender does not support decoder DMA-BUFs",
+        "FEATURE_FAILURE_WEBRENDER_VIDEO_SHARING"_ns);
+  }
+#  endif
   gfxVars::SetCanUseVulkanHardwareVideoDecoding(featureVulkanDec.IsEnabled());
 #endif
 
@@ -3152,6 +3163,15 @@ void gfxPlatform::InitHardwareVideoConfig() {
 
   InitPlatformHardwareVideoConfig();
   InitPlatformHardwareDRMConfig();
+
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    featureDec.ForceDisable(
+        FeatureStatus::Unavailable,
+        "Vulkan WebRender does not support decoder DMA-BUFs",
+        "FEATURE_FAILURE_WEBRENDER_VIDEO_SHARING"_ns);
+  }
+#endif
 
   nsCString message;
   gfxVars::SetCanUseHardwareVideoDecoding(featureDec.IsEnabled());
@@ -3353,6 +3373,13 @@ void gfxPlatform::InitWebGLConfig() {
       feature.Disable(FeatureStatus::Blocked, "Blocklisted by gfxInfo",
                       discardFailureId);
     }
+#  ifdef XP_LINUX
+    if (wr::RenderCompositorVulkan::IsRequested()) {
+      feature.Disable(FeatureStatus::Unavailable,
+                      "Vulkan WebRender requires WebGL readback surfaces",
+                      "FEATURE_FAILURE_WEBGL_VULKAN_SHARING"_ns);
+    }
+#  endif
     gfxVars::SetUseDMABufWebGL(feature.IsEnabled());
   }
 #endif
