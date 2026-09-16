@@ -137,10 +137,14 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
         aConfig.mFormat == dom::GPUTextureFormat::Rgba8unorm) {
       client_can_use = true;
     }
+    if (!wr::RenderCompositorVulkan::IsRequested() &&
+        !aConfig.mViewFormats.IsEmpty()) {
+      client_can_use = false;
+    }
 #endif
     if (!client_can_use) {
       gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
-                         "canvas configuration format not supported";
+                         "canvas configuration format or views not supported";
       mUseSharedTextureInSwapChain = false;
     }
   }
