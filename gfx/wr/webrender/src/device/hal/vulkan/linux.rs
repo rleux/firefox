@@ -12,6 +12,9 @@ use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use super::sync_file::{SyncFile, TransferSync};
 use std::os::unix::fs::MetadataExt;
 
+mod foreign_rgb;
+pub use foreign_rgb::{ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
+
 type V = hal::api::Vulkan;
 
 #[derive(Clone, Copy, Debug)]
@@ -199,6 +202,9 @@ pub(super) fn open_adapter(
     let callback: Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> = if supported {
         Some(Box::new(|args| {
             args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+            if caps.supports_extension(ash::ext::queue_family_foreign::NAME) {
+                args.extensions.push(ash::ext::queue_family_foreign::NAME);
+            }
         }))
     } else {
         None
