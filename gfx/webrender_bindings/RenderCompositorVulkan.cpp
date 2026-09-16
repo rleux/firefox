@@ -4,6 +4,9 @@
 
 #include "RenderCompositorVulkan.h"
 
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -73,6 +76,21 @@ extern "C" bool wr_vulkan_supports_dmabuf(const uint8_t* aDevice,
     }
   }
   return true;
+}
+
+extern "C" bool wr_vulkan_supports_foreign_webgl(uint64_t aMajor,
+                                                 uint64_t aMinor);
+
+bool RenderCompositorVulkan::SupportsWebGL() {
+  nsCString node(PR_GetEnv("MOZ_DRM_DEVICE"));
+  if (node.IsEmpty()) {
+    node = gfx::gfxVars::DrmRenderDevice();
+  }
+  struct stat device;
+  return !node.IsEmpty() && !stat(node.get(), &device) &&
+         S_ISCHR(device.st_mode) &&
+         wr_vulkan_supports_foreign_webgl(major(device.st_rdev),
+                                          minor(device.st_rdev));
 }
 
 bool RenderCompositorVulkan::IsRequested() {

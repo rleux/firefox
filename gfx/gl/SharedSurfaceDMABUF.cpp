@@ -10,6 +10,10 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/LayersSurfaces.h"  // for SurfaceDescriptor, etc
 #include "mozilla/widget/DMABufDevice.h"
+#include "mozilla/widget/DMABufFormats.h"
+#ifdef XP_LINUX
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
+#endif
 
 namespace mozilla::gl {
 
@@ -21,8 +25,24 @@ UniquePtr<SharedSurface_DMABUF> SharedSurface_DMABUF::Create(
 
   const auto flags = static_cast<DMABufSurfaceFlags>(
       DMABUF_SCANOUT | DMABUF_TEXTURE | DMABUF_USE_MODIFIERS | DMABUF_ALPHA);
-  surface = DMABufSurfaceRGBA::CreateDMABufSurface(desc.gl, desc.size.width,
-                                                   desc.size.height, flags);
+  bool foreignRGB = false;
+#ifdef XP_LINUX
+  foreignRGB = wr::RenderCompositorVulkan::IsRequested();
+#endif
+  RefPtr<widget::DRMFormat> format;
+  if (foreignRGB) {
+    const auto& egl = GLContextEGL::Cast(desc.gl)->mEgl;
+    if (!egl->IsExtensionSupported(EGLExtension::KHR_fence_sync) ||
+        !egl->IsExtensionSupported(EGLExtension::ANDROID_native_fence_sync)) {
+      return nullptr;
+    }
+    format = new widget::DRMFormat(GBM_FORMAT_ARGB8888, uint64_t(0));
+  }
+  surface = DMABufSurfaceRGBA::CreateDMABufSurface(
+      desc.gl, desc.size.width, desc.size.height, flags, format);
+  if (surface && foreignRGB && !surface->EnableForeignRGB()) {
+    return nullptr;
+  }
   if (!surface || !surface->CreateTexture(desc.gl)) {
     return nullptr;
   }

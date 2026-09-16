@@ -23,12 +23,7 @@ mod hal_image;
 use hal_image::*;
 
 extern "C" {
-    fn wr_snapshot_vulkan_dmabuf(
-        data: &WrHalDmaBuf,
-        destination: *mut u8,
-        length: usize,
-        stride: usize,
-    ) -> bool;
+    fn wr_snapshot_vulkan_dmabuf(data: &WrHalDmaBuf, destination: *mut u8, length: usize, stride: usize) -> bool;
 }
 
 #[test]
@@ -38,7 +33,8 @@ fn native_snapshots_preserve_format_and_validate_destination() {
     let producer = hal::create_vulkan_image_device(&hal::Options {
         validation: true,
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
     for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
         let desc = ImageDescriptor::new(4, 4, format, ImageDescriptorFlags::empty());
         let pixels = [23, 47, 89, 128].repeat(16);
@@ -60,14 +56,10 @@ fn native_snapshots_preserve_format_and_validate_destination() {
         };
         let mut destination = [0xa5; 80];
         for (length, stride) in [(79, 20), (80, 15)] {
-            assert!(!unsafe {
-                wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), length, stride)
-            });
+            assert!(!unsafe { wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), length, stride) });
             assert_eq!(destination, [0xa5; 80]);
         }
-        assert!(unsafe {
-            wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), destination.len(), 20)
-        });
+        assert!(unsafe { wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), destination.len(), 20) });
         for (src, dst) in pixels.chunks_exact(16).zip(destination.chunks_exact(20)) {
             assert_eq!(src, &dst[..16]);
             assert_eq!(&dst[16..], &[0; 4]);
@@ -103,6 +95,11 @@ unsafe extern "C" fn wr_renderer_acquire_hal_image(
         fixture: fixture.clone(),
         _export: fixture.export.borrow_mut().take(),
     })) as *mut WrHalImageLease
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_lock_foreign_rgb(_: *mut WrHalImageLease) -> bool {
+    true
 }
 
 #[no_mangle]

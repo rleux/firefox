@@ -84,6 +84,22 @@ void RenderDMABUFTextureHost::Unlock() {}
 
 bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
                                            WrHalImage* aImage) {
+  if (mVulkanFailed || aChannelIndex) {
+    return false;
+  }
+  if (const auto* foreign = mSurface->GetForeignRGBDescriptor()) {
+    WrHalForeignRGB image{};
+    image.fd = foreign->fds()[0]->GetHandle();
+    image.ready_fd = foreign->fence()[0]->GetHandle();
+    image.width = foreign->width()[0];
+    image.height = foreign->height()[0];
+    image.fourcc = foreign->fourccFormat();
+    image.stride = foreign->strides()[0];
+    image.offset = foreign->offsets()[0];
+    *aImage = WrHalImage{foreign->foreignRGBImageState()->generation(),
+                         WrHalImageSource::ForeignRGB(image)};
+    return true;
+  }
   const auto* desc = mSurface->GetVulkanDescriptor();
   if (mVulkanFailed || aChannelIndex || !desc || !desc->vulkanImageState() ||
       desc->fds().Length() != 1 || !desc->semaphoreFdIsSyncFd()) {
@@ -119,6 +135,9 @@ bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
 
 void RenderDMABUFTextureHost::UnlockHalImage(WrHalImageRelease aStatus) {
   if (aStatus == WrHalImageRelease::Abandoned) {
+    if (!mVulkanFailed && mSurface->IsForeignRGB()) {
+      mSurface->GlobalRefAdd();
+    }
     mVulkanFailed = true;
   }
 }

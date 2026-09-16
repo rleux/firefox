@@ -282,6 +282,36 @@ impl ForeignRgbImage {
 }
 
 impl ExternalImageDevice {
+    pub fn foreign_rgb_drm_node(&self) -> Result<Option<[u64; 2]>> {
+        let owner = &self.dmabuf_producer()?.owner;
+        if !owner
+            .adapter
+            .physical_device_capabilities()
+            .supports_extension(ash::ext::physical_device_drm::NAME)
+        {
+            return Ok(None);
+        }
+        let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+        unsafe {
+            owner
+                .open
+                .device
+                .shared_instance()
+                .raw_instance()
+                .get_physical_device_properties2(
+                    owner.open.device.raw_physical_device(),
+                    &mut vk::PhysicalDeviceProperties2::default().push_next(&mut drm),
+                );
+        }
+        Ok(
+            if drm.has_render != 0 && drm.render_major >= 0 && drm.render_minor >= 0 {
+                Some([drm.render_major as u64, drm.render_minor as u64])
+            } else {
+                None
+            },
+        )
+    }
+
     pub fn foreign_rgb_formats(&self) -> Result<Vec<ForeignRgbFormat>> {
         let owner = &self.dmabuf_producer()?.owner;
         Ok([ForeignRgbFormat::Rgba8, ForeignRgbFormat::Bgra8]

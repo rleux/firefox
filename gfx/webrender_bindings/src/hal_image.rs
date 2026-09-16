@@ -32,6 +32,18 @@ pub struct WrHalDmaBuf {
     pub driver_uuid: [u8; 16],
 }
 
+/// cbindgen:derive-ostream=false
+#[repr(C)]
+pub struct WrHalForeignRGB {
+    pub fd: i32,
+    pub ready_fd: i32,
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    pub stride: u64,
+    pub offset: u64,
+}
+
 /// cbindgen:derive-eq=false
 /// cbindgen:derive-ostream=false
 #[repr(C)]
@@ -41,6 +53,8 @@ pub enum WrHalImageSource {
     /// cbindgen:derive-eq=false
     /// cbindgen:derive-ostream=false
     VulkanDmaBuf(WrHalDmaBuf),
+    /// cbindgen:derive-ostream=false
+    ForeignRGB(WrHalForeignRGB),
 }
 
 /// cbindgen:derive-eq=false
@@ -71,6 +85,8 @@ extern "C" {
         channel: u8,
         image: *mut WrHalImage,
     ) -> *mut WrHalImageLease;
+    /// cbindgen:ignore
+    pub fn wr_renderer_lock_foreign_rgb(lease: *mut WrHalImageLease) -> bool;
     pub fn wr_renderer_release_hal_image(lease: *mut WrHalImageLease, status: WrHalImageRelease);
 }
 
@@ -83,6 +99,42 @@ mod linux {
     use std::sync::Arc;
     use webrender::api::{units::TexelRect, ExternalImageId, ImageDescriptor, ImageDescriptorFlags};
     use webrender::hal::{self, ExternalImageDevice, ExternalImageLease, ExternalImageSource};
+
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::os::unix::fs::MetadataExt;
+
+    struct ForeignEntry {
+        consumer: usize,
+        generation: u64,
+        layout: hal::ForeignRgbLayout,
+        image: hal::WeakForeignRgbImage,
+    }
+
+    thread_local! {
+        static FOREIGN_IMAGES: RefCell<HashMap<(u64, u64), ForeignEntry>> = RefCell::new(HashMap::new());
+    }
+
+    /// cbindgen:ignore
+    #[no_mangle]
+    pub extern "C" fn wr_vulkan_supports_foreign_webgl(major: u64, minor: u64) -> bool {
+        let result = (|| -> Result<bool, String> {
+            let device = hal::create_vulkan_image_device(&hal::Options {
+                validation: std::env::var_os("MOZ_WR_VULKAN_VALIDATION").is_some(),
+                adapter_name: std::env::var("MOZ_WR_VULKAN_ADAPTER").ok(),
+            })?;
+            Ok(device.foreign_rgb_drm_node()? == Some([major, minor])
+                && device.foreign_rgb_formats()?.contains(&hal::ForeignRgbFormat::Bgra8))
+        })();
+        match result {
+            Ok(supported) => supported,
+            Err(error) => {
+                log::info!("Native WebGL capability unavailable: {error}");
+                false
+            },
+        }
+    }
 
     struct Lease {
         raw: NonNull<WrHalImageLease>,
@@ -140,6 +192,70 @@ mod linux {
                 ExternalImageSource::Buffer(Arc::new(bytes)),
                 |_| {},
             )
+        }
+
+        fn foreign_rgb(
+            &self,
+            data: WrHalForeignRGB,
+            generation: u64,
+            mut lease: Lease,
+        ) -> Result<ExternalImageLease, String> {
+            if data.fd < 0 || data.ready_fd < 0 || generation == 0 {
+                return Err("Invalid foreign WebGL handles or generation".into());
+            }
+            let layout =
+                hal::ForeignRgbLayout::new([data.width, data.height], data.fourcc, 0, data.stride, data.offset)?;
+            let fd = unsafe { BorrowedFd::borrow_raw(data.fd) };
+            let metadata = File::from(fd.try_clone_to_owned().map_err(|e| e.to_string())?)
+                .metadata()
+                .map_err(|e| e.to_string())?;
+            let key = (metadata.dev(), metadata.ino());
+            let consumer = self.handler.object() as usize;
+            let uv = TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32);
+            FOREIGN_IMAGES.with(|images| {
+                let mut images = images.borrow_mut();
+                images.retain(|_, entry| entry.image.upgrade().is_some());
+                if let Some(entry) = images.get(&key) {
+                    if let Some(image) = entry.image.upgrade() {
+                        if entry.consumer != consumer || entry.generation != generation || entry.layout != layout {
+                            return Err(
+                                "Foreign WebGL allocation already has a different live consumer/publication".into(),
+                            );
+                        }
+                        return image.lease(uv);
+                    }
+                }
+                if !unsafe { wr_renderer_lock_foreign_rgb(lease.raw.as_ptr()) } {
+                    return Err("Foreign WebGL publication is unavailable for sampling".into());
+                }
+                let ready = hal::SyncFile::from_fd(
+                    unsafe { BorrowedFd::borrow_raw(data.ready_fd) }
+                        .try_clone_to_owned()
+                        .map_err(|e| e.to_string())?,
+                );
+                let image = unsafe {
+                    self.device
+                        .import_foreign_rgb_dmabuf(fd, layout, &ready, generation, move |status| {
+                            lease.status = match status {
+                                hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
+                                hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
+                                hal::ExternalImageRelease::Abandoned => WrHalImageRelease::Abandoned,
+                            };
+                            drop(lease);
+                        })
+                }?;
+                images.insert(
+                    key,
+                    ForeignEntry {
+                        consumer,
+                        generation,
+                        layout,
+                        image: image.downgrade(),
+                    },
+                );
+                log::info!("WebGL canvas transport: direct Vulkan DMA-BUF sampling, generation={generation}");
+                image.lease(uv)
+            })
         }
 
         fn dmabuf(&self, data: WrHalDmaBuf, generation: u64, mut lease: Lease) -> Result<ExternalImageLease, String> {
@@ -210,7 +326,9 @@ mod linux {
     ) -> bool {
         let result = SNAPSHOT_DEVICE.with(|slot| -> Result<(), String> {
             let row = (data.width as usize).checked_mul(4).ok_or("Snapshot row overflow")?;
-            let needed = stride.checked_mul(data.height as usize).ok_or("Snapshot size overflow")?;
+            let needed = stride
+                .checked_mul(data.height as usize)
+                .ok_or("Snapshot size overflow")?;
             if destination.is_null() || data.height == 0 || row == 0 || stride < row || length < needed {
                 return Err("Invalid Vulkan snapshot destination".into());
             }
@@ -257,6 +375,7 @@ mod linux {
             match image.source {
                 WrHalImageSource::Buffer(data) => Self::buffer(data, image.generation, lease),
                 WrHalImageSource::VulkanDmaBuf(data) => self.dmabuf(data, image.generation, lease),
+                WrHalImageSource::ForeignRGB(data) => self.foreign_rgb(data, image.generation, lease),
             }
         }
     }

@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <getopt.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,6 +23,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#ifdef XP_LINUX
+#  include <linux/futex.h>
+#  include <sys/syscall.h>
+
+#  include "base/linux_memfd_defs.h"
+#endif
 #include <sys/time.h>
 #include <unistd.h>
 #ifdef HAVE_EVENTFD
@@ -450,6 +458,12 @@ void DMABufSurface::GlobalRefCountDelete() {
 
 bool DMABufSurface::ReleaseDMABuf() {
   mVulkanDescriptor = nullptr;
+  mForeignRGBDescriptor = nullptr;
+  if (mForeignRGBLock) {
+    munmap(mForeignRGBLock, sizeof(uint32_t));
+    mForeignRGBLock = nullptr;
+  }
+  mForeignRGBLockFd = nullptr;
   LOGDMABUF("DMABufSurface::ReleaseDMABuf() UID %d", mUID);
 #ifdef MOZ_LOGGING
   for (int i = 0; i < mBufferPlaneCount; i++) {
@@ -503,34 +517,138 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
   return surf.forget();
 }
 
+bool DMABufSurface::MapForeignRGBLock() {
+#ifdef XP_LINUX
+  struct stat info;
+  if (!mForeignRGBLockFd || fstat(mForeignRGBLockFd->GetHandle(), &info) ||
+      info.st_size != sizeof(uint32_t)) {
+    return false;
+  }
+  const int seals = fcntl(mForeignRGBLockFd->GetHandle(), F_GET_SEALS);
+  if (seals < 0 || (seals & (F_SEAL_SHRINK | F_SEAL_GROW)) !=
+                       (F_SEAL_SHRINK | F_SEAL_GROW)) {
+    return false;
+  }
+  auto* memory = mmap(nullptr, sizeof(uint32_t), PROT_READ | PROT_WRITE,
+                      MAP_SHARED, mForeignRGBLockFd->GetHandle(), 0);
+  if (memory == MAP_FAILED) {
+    return false;
+  }
+  mForeignRGBLock = static_cast<uint32_t*>(memory);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::ForeignRGBUsable() const {
+  return !mForeignRGB ||
+         (mForeignRGBLock &&
+          __atomic_load_n(mForeignRGBLock, __ATOMIC_ACQUIRE) <= 1);
+}
+
+bool DMABufSurface::LockForeignRGB() {
+#ifdef XP_LINUX
+  if (!mForeignRGB || !mForeignRGBLock) {
+    return false;
+  }
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(mForeignRGBLock, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return true;
+    }
+    if (expected != 1) {
+      return false;
+    }
+    const struct timespec timeout = {0, 100000000};
+    if (syscall(SYS_futex, mForeignRGBLock, FUTEX_WAIT, 1, &timeout, nullptr,
+                0) < 0 &&
+        errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+      break;
+    }
+  }
+  UnlockForeignRGB(true);
+#endif
+  return false;
+}
+
+void DMABufSurface::UnlockForeignRGB(bool aAbandon) {
+#ifdef XP_LINUX
+  if (!mForeignRGBLock) {
+    return;
+  }
+  if (aAbandon) {
+    __atomic_store_n(mForeignRGBLock, 2, __ATOMIC_RELEASE);
+  } else {
+    uint32_t expected = 1;
+    __atomic_compare_exchange_n(mForeignRGBLock, &expected, 0, false,
+                                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+  }
+  syscall(SYS_futex, mForeignRGBLock, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+#endif
+}
+
+bool DMABufSurface::EnableForeignRGB() {
+  auto* rgba = GetAsDMABufSurfaceRGBA();
+  if (!rgba || mBufferPlaneCount != 1) {
+    return false;
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor) ||
+      descriptor.get_SurfaceDescriptorDMABuf().modifier()[0] != 0) {
+    return false;
+  }
+#ifdef XP_LINUX
+  int fd = syscall(SYS_memfd_create, "wr-webgl-access",
+                   MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return false;
+  }
+  mForeignRGBLockFd = new gfx::FileHandleWrapper(UniqueFileHandle(fd));
+  if (ftruncate(fd, sizeof(uint32_t)) ||
+      fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) ||
+      !MapForeignRGBLock()) {
+    return false;
+  }
+  __atomic_store_n(mForeignRGBLock, 0, __ATOMIC_RELEASE);
+#else
+  return false;
+#endif
+  GlobalRefCountCreate();
+  if (!mGlobalRefCountFd) {
+    return false;
+  }
+  mForeignRGB = true;
+  return true;
+}
+
 void DMABufSurface::FenceSet() {
   MutexAutoLock lock(mSurfaceLock);
-
-  if (!mGL) {
+  mSyncFd = nullptr;
+  if (!mGL || !mGL->MakeCurrent()) {
     gfxCriticalNoteOnce
         << "DMABufSurface::FenceSet() failed: missing GL context";
     return;
   }
-
-  mGL->MakeCurrent();
-
-  const auto& gle = gl::GLContextEGL::Cast(mGL);
-  const auto& egl = gle->mEgl;
-
-  LOGDMABUF("DMABufSurface::FenceSet() UID %d", mUID);
-
+  if (mForeignRGB) {
+    MOZ_RELEASE_ASSERT(mForeignRGBGeneration != UINT64_MAX);
+    ++mForeignRGBGeneration;
+  }
+  const auto& egl = gl::GLContextEGL::Cast(mGL)->mEgl;
   if (egl->IsExtensionSupported(EGLExtension::KHR_fence_sync) &&
       egl->IsExtensionSupported(EGLExtension::ANDROID_native_fence_sync)) {
     if (EGLSyncKHR sync =
             egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr)) {
       auto rawFd = egl->fDupNativeFenceFDANDROID(sync);
-      mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
       egl->fDestroySync(sync);
-      mGL->fFlush();
-      return;
+      if (rawFd >= 0) {
+        mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
+        mGL->fFlush();
+        return;
+      }
     }
   }
-
   mGL->fFinish();
 }
 
@@ -733,6 +851,12 @@ nsresult DMABufSurface::ReadIntoBuffer(mozilla::gl::GLContext* aGLContext,
 
 already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
   LOGDMABUF("DMABufSurface::GetAsSourceSurface UID %d", mUID);
+  if (mForeignRGB && !LockForeignRGB()) {
+    return nullptr;
+  }
+  auto unlockForeign = MakeScopeExit([&] {
+    if (mForeignRGB) UnlockForeignRGB();
+  });
 
   gfx::IntSize size(GetWidth(), GetHeight());
   const auto format = gfx::SurfaceFormat::B8G8R8A8;
@@ -1104,6 +1228,24 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     return false;
   }
 
+  if (desc.foreignRGBImageState()) {
+    if (desc.vulkanImageState() || mBufferPlaneCount != 1 ||
+        desc.modifier()[0] != 0 || desc.fence().Length() != 1 ||
+        desc.fence()[0]->GetHandle() < 0 ||
+        !desc.foreignRGBImageState()->generation() ||
+        desc.refCount().Length() != 1 ||
+        (desc.fourccFormat() != GBM_FORMAT_ARGB8888 &&
+         desc.fourccFormat() != GBM_FORMAT_ABGR8888)) {
+      return false;
+    }
+    mForeignRGBLockFd = desc.foreignRGBImageState()->accessLock();
+    if (!MapForeignRGBLock()) {
+      return false;
+    }
+    mForeignRGB = true;
+    mForeignRGBDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(desc);
+  }
+
   if (desc.vulkanImageState()) {
     const auto& state = desc.vulkanImageState().ref();
     if (mBufferPlaneCount != 1 || !desc.semaphoreFdIsSyncFd() ||
@@ -1163,6 +1305,14 @@ bool DMABufSurfaceRGBA::Serialize(
     aOutDescriptor = *mVulkanDescriptor;
     return true;
   }
+  if (mForeignRGBDescriptor) {
+    aOutDescriptor = *mForeignRGBDescriptor;
+    return true;
+  }
+  if (mForeignRGB && mForeignRGBGeneration &&
+      (!mSyncFd || mSyncFd->GetHandle() < 0)) {
+    return false;
+  }
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> width;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> height;
   AutoTArray<NotNull<RefPtr<gfx::FileHandleWrapper>>, DMABUF_BUFFER_PLANES> fds;
@@ -1201,7 +1351,11 @@ bool DMABufSurfaceRGBA::Serialize(
       mozilla::gfx::TransferFunction::Default, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
       /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata,
-      Nothing());
+      Nothing(),
+      mForeignRGBGeneration
+          ? Some(layers::ForeignRGBImageState(mForeignRGBGeneration,
+                                              WrapNotNull(mForeignRGBLockFd)))
+          : Nothing());
   return true;
 }
 
@@ -2052,7 +2206,8 @@ bool DMABufSurfaceYUV::Serialize(
       height, widthBytes, heightBytes, format, strides, offsets,
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
-      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing());
+      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing(),
+      Nothing());
   return true;
 }
 
