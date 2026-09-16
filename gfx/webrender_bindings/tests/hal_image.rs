@@ -22,6 +22,59 @@ mod bindings {
 mod hal_image;
 use hal_image::*;
 
+extern "C" {
+    fn wr_snapshot_vulkan_dmabuf(
+        data: &WrHalDmaBuf,
+        destination: *mut u8,
+        length: usize,
+        stride: usize,
+    ) -> bool;
+}
+
+#[test]
+#[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
+fn native_snapshots_preserve_format_and_validate_destination() {
+    init_log();
+    let producer = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    }).unwrap();
+    for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
+        let desc = ImageDescriptor::new(4, 4, format, ImageDescriptorFlags::empty());
+        let pixels = [23, 47, 89, 128].repeat(16);
+        let original = producer.create_image(desc, &pixels).unwrap();
+        assert_eq!(producer.read_image(&original).unwrap(), pixels);
+        let export = producer.export_dmabuf_image(&original, 0).unwrap();
+        let layout = export.plane().layout();
+        let data = WrHalDmaBuf {
+            fd: export.plane().as_fd().as_raw_fd(),
+            ready_fd: export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd()),
+            width: 4,
+            height: 4,
+            format,
+            modifier: layout.modifier(),
+            stride: layout.stride(),
+            offset: layout.offset(),
+            device_uuid: layout.device_uuid(),
+            driver_uuid: layout.driver_uuid(),
+        };
+        let mut destination = [0xa5; 80];
+        for (length, stride) in [(79, 20), (80, 15)] {
+            assert!(!unsafe {
+                wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), length, stride)
+            });
+            assert_eq!(destination, [0xa5; 80]);
+        }
+        assert!(unsafe {
+            wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), destination.len(), 20)
+        });
+        for (src, dst) in pixels.chunks_exact(16).zip(destination.chunks_exact(20)) {
+            assert_eq!(src, &dst[..16]);
+            assert_eq!(&dst[16..], &[0; 4]);
+        }
+    }
+}
+
 struct Fixture {
     image: RefCell<Option<WrHalImage>>,
     export: RefCell<Option<hal::DmaBufExport>>,
@@ -74,7 +127,7 @@ impl RenderNotifier for Notifier {
     fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {}
 }
 
-fn renderer() -> (hal::Renderer, webrender::render_api::RenderApiSender) {
+fn init_log() {
     struct Logger;
     impl log::Log for Logger {
         fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -93,6 +146,10 @@ fn renderer() -> (hal::Renderer, webrender::render_api::RenderApiSender) {
         log::set_logger(&LOGGER).unwrap();
         log::set_max_level(log::LevelFilter::Warn);
     });
+}
+
+fn renderer() -> (hal::Renderer, webrender::render_api::RenderApiSender) {
+    init_log();
     hal::create_vulkan_renderer(
         &hal::Options {
             validation: true,

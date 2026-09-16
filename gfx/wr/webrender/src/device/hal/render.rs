@@ -406,6 +406,17 @@ impl<A: BackendApi> FrameRenderer<A> {
         })
     }
 
+    pub fn has_acquired_surface(&self) -> bool {
+        self.surface.as_ref().map_or(false, |surface| surface.acquired.is_some())
+    }
+
+    pub fn submit_work(&self) -> Result<u64> {
+        if self.is_failed() { return Err("HAL renderer requires recreation".into()); }
+        let result = self.submissions.submit_serial();
+        if result.is_err() { self.failed.set(true); }
+        result
+    }
+
     pub fn memory_stats(&self) -> MemoryStats {
         let mut stats = self.owner.memory.get();
         (stats.query_slots, stats.pending_queries) = self.queries.borrow().counts();

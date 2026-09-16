@@ -201,6 +201,7 @@ void CanvasContext::Unconfigure() {
         mChild->GetClient(), mRemoteTextureOwnerId->mId, txn_type, txn_id);
   }
   mRemoteTextureOwnerId = Nothing();
+  mLastRemoteTextureId = Nothing();
   mFwdTransactionTracker = nullptr;
   mChild = nullptr;
   mConfiguration = nullptr;
@@ -480,6 +481,11 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::GetFrontBuffer(
     auto desc = SwapChainPresent();
     MOZ_ASSERT(!mPendingSwapChainPresent);
     return desc;
+  }
+  if (mChild && mChild->CanSend() && mLastRemoteTextureId &&
+      mRemoteTextureOwnerId) {
+    return Some(layers::SurfaceDescriptorRemoteTexture(*mLastRemoteTextureId,
+                                                       *mRemoteTextureOwnerId));
   }
   return Nothing();
 }
