@@ -678,6 +678,16 @@ const SNAPSHOT_SCHEMA = {
         webgpuDefaultAdapter: {
           type: "object",
         },
+        webRenderBackend: {
+          type: "object",
+          properties: {
+            backend: { required: true, type: "string" },
+            renderer: { required: true, type: "string" },
+            driver: { required: true, type: "string" },
+            maxTextureSize: { required: true, type: "number" },
+            process: { required: true, type: "string" },
+          },
+        },
         webgpuFallbackAdapter: {
           type: "object",
         },

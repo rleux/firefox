@@ -1399,6 +1399,9 @@ interface nsIDOMWindowUtils : nsISupports {
    */
   readonly attribute AString layerManagerType;
 
+  /** Resolves to JSON describing the window's current WebRender backend. */
+  Promise getWebRenderBackendInfo();
+
   /**
    * True if the layer manager for the widget associated with this window is
    * forwarding layers to a remote compositor, false otherwise. Throws an

@@ -23,6 +23,30 @@ pub enum Renderer {
     Vulkan(VulkanRenderer),
 }
 
+#[no_mangle]
+pub extern "C" fn wr_renderer_get_backend_info(
+    renderer: &Renderer,
+    backend: &mut nsstring::nsACString,
+    adapter: &mut nsstring::nsACString,
+    driver: &mut nsstring::nsACString,
+) {
+    match renderer {
+        Renderer::Gl(renderer) => {
+            let info = renderer.get_graphics_api_info();
+            backend.assign("OpenGL");
+            adapter.assign(&info.renderer);
+            driver.assign(&info.version);
+        },
+        #[cfg(target_os = "linux")]
+        Renderer::Vulkan(renderer) => {
+            let info = renderer.renderer.info();
+            backend.assign("Vulkan (wgpu-hal)");
+            adapter.assign(&info.name);
+            driver.assign(&format!("{} ({})", info.driver, info.driver_info));
+        },
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub struct VulkanRenderer {
     _dmabuf_registration: crate::hal_image::DeviceRegistration,
