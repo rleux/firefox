@@ -449,6 +449,7 @@ void DMABufSurface::GlobalRefCountDelete() {
 }
 
 bool DMABufSurface::ReleaseDMABuf() {
+  mVulkanDescriptor = nullptr;
   LOGDMABUF("DMABufSurface::ReleaseDMABuf() UID %d", mUID);
 #ifdef MOZ_LOGGING
   for (int i = 0; i < mBufferPlaneCount; i++) {
@@ -1073,8 +1074,8 @@ bool DMABufSurfaceRGBA::Create(
   mHeight = aHeight;
   mBufferModifier = aDMABufInfo.modifier;
 
-  // TODO: Read Vulkan modifiers from DMABufFormats?
-  mFOURCCFormat = GBM_FORMAT_ARGB8888;
+  mFOURCCFormat =
+      aDMABufInfo.is_rgba ? GBM_FORMAT_ABGR8888 : GBM_FORMAT_ARGB8888;
   mBufferPlaneCount = aDMABufInfo.plane_count;
 
   RefPtr<gfx::FileHandleWrapper> fd = std::move(aFd);
@@ -1103,6 +1104,16 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     return false;
   }
 
+  if (desc.vulkanImageState()) {
+    const auto& state = desc.vulkanImageState().ref();
+    if (mBufferPlaneCount != 1 || !desc.semaphoreFdIsSyncFd() ||
+        state.deviceUUID().Length() != 16 ||
+        state.driverUUID().Length() != 16 || !state.generation()) {
+      return false;
+    }
+    mVulkanDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(desc);
+  }
+
   mFOURCCFormat = desc.fourccFormat();
   mWidth = desc.width()[0];
   mHeight = desc.height()[0];
@@ -1126,9 +1137,9 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     mSyncFd = desc.fence()[0];
   }
 
+  mSemaphoreFdIsSyncFd = desc.semaphoreFdIsSyncFd();
   if (desc.semaphoreFd()) {
     mSemaphoreFd = desc.semaphoreFd();
-    mSemaphoreFdIsSyncFd = desc.semaphoreFdIsSyncFd();
   }
 
   if (desc.refCount().Length() > 0) {
@@ -1148,6 +1159,10 @@ bool DMABufSurfaceRGBA::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceRGBA::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mVulkanDescriptor) {
+    aOutDescriptor = *mVulkanDescriptor;
+    return true;
+  }
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> width;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> height;
   AutoTArray<NotNull<RefPtr<gfx::FileHandleWrapper>>, DMABUF_BUFFER_PLANES> fds;
@@ -1185,7 +1200,8 @@ bool DMABufSurfaceRGBA::Serialize(
       mColorRange, mozilla::gfx::ColorSpace2::UNKNOWN,
       mozilla::gfx::TransferFunction::Default, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
-      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata);
+      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata,
+      Nothing());
   return true;
 }
 
@@ -2036,7 +2052,7 @@ bool DMABufSurfaceYUV::Serialize(
       height, widthBytes, heightBytes, format, strides, offsets,
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
-      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata);
+      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing());
   return true;
 }
 

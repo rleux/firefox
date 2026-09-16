@@ -1144,10 +1144,10 @@ void WebGPUParent::PostSharedTexture(
     return;
   }
 
-  const auto surfaceFormat = gfx::SurfaceFormat::B8G8R8A8;
   const auto size = aSharedTexture->GetSize();
 
   RefPtr<PresentationData> data = lookup->second.get();
+  const auto surfaceFormat = data->mDesc.format();
 
   Maybe<layers::SurfaceDescriptor> desc = aSharedTexture->ToSurfaceDescriptor();
   if (!desc) {
@@ -1205,6 +1205,21 @@ void WebGPUParent::SwapChainPresent(
     }
 
     MOZ_ASSERT(sharedTexture->GetOwnerId() == aOwnerId);
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (auto* dmabuf = sharedTexture->AsSharedTextureDMABuf()) {
+      if (!dmabuf->PrepareForVulkanPresent(mContext.get(), data->mDeviceId,
+                                           data->mQueueId, aTextureId,
+                                           aRemoteTextureId.mId)) {
+        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+        return;
+      }
+      if (dmabuf->IsForVulkanWebRender()) {
+        MOZ_LOG(sLogger, LogLevel::Info,
+                ("WebGPU canvas transport: Vulkan DMA-BUF, generation=%" PRIu64,
+                 aRemoteTextureId.mId));
+      }
+    }
+#endif
 
     PostSharedTexture(std::move(sharedTexture), aRemoteTextureId, aOwnerId);
     return;

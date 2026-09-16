@@ -12,6 +12,7 @@
 #include "GLTypes.h"
 #include "ImageContainer.h"
 #include "mozilla/Mutex.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/Types.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
 #include "mozilla/widget/BufferSurface.h"
@@ -113,6 +114,9 @@ class DMABufSurface : public BufferSurface {
 
   void MaybeSemaphoreWait(GLuint aGlTexture);
   void SetSemaphoreFd(int aDuppedRawFd, bool aIsSyncFd = false);
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetVulkanDescriptor() const {
+    return mVulkanDescriptor.get();
+  }
 
   // Set and get a global surface UID. The UID is shared across process
   // and it's used to track surface lifetime in various parts of rendering
@@ -226,6 +230,8 @@ class DMABufSurface : public BufferSurface {
   RefPtr<mozilla::gfx::FileHandleWrapper> mSyncFd;
   RefPtr<mozilla::gfx::FileHandleWrapper> mSemaphoreFd;
   bool mSemaphoreFdIsSyncFd = false;
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
+      mVulkanDescriptor;
 
   // Inter process properties, used to share DMABuf among various processes
   // like RDD/Main.

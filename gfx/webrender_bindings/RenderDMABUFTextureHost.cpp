@@ -4,8 +4,11 @@
 
 #include "RenderDMABUFTextureHost.h"
 
+#include <algorithm>
+
 #include "GLContextEGL.h"
 #include "ScopedGLHelpers.h"
+#include "mozilla/gfx/FileHandleWrapper.h"
 #include "mozilla/gfx/Logging.h"
 
 namespace mozilla::wr {
@@ -78,6 +81,47 @@ gfx::IntSize RenderDMABUFTextureHost::GetSize(uint8_t aChannelIndex) const {
 }
 
 void RenderDMABUFTextureHost::Unlock() {}
+
+bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
+                                           WrHalImage* aImage) {
+  const auto* desc = mSurface->GetVulkanDescriptor();
+  if (mVulkanFailed || aChannelIndex || !desc || !desc->vulkanImageState() ||
+      desc->fds().Length() != 1 || !desc->semaphoreFdIsSyncFd()) {
+    return false;
+  }
+  const auto& state = desc->vulkanImageState().ref();
+  ImageFormat format;
+  switch (mSurface->GetFormat()) {
+    case gfx::SurfaceFormat::B8G8R8A8:
+      format = ImageFormat::BGRA8;
+      break;
+    case gfx::SurfaceFormat::R8G8B8A8:
+      format = ImageFormat::RGBA8;
+      break;
+    default:
+      return false;
+  }
+  WrHalDmaBuf image{};
+  image.fd = desc->fds()[0]->GetHandle();
+  image.ready_fd = desc->semaphoreFd() ? desc->semaphoreFd()->GetHandle() : -1;
+  image.width = desc->width()[0];
+  image.height = desc->height()[0];
+  image.format = format;
+  image.modifier = desc->modifier()[0];
+  image.stride = desc->strides()[0];
+  image.offset = desc->offsets()[0];
+  std::copy_n(state.deviceUUID().Elements(), 16, image.device_uuid);
+  std::copy_n(state.driverUUID().Elements(), 16, image.driver_uuid);
+  *aImage =
+      WrHalImage{state.generation(), WrHalImageSource::VulkanDmaBuf(image)};
+  return true;
+}
+
+void RenderDMABUFTextureHost::UnlockHalImage(WrHalImageRelease aStatus) {
+  if (aStatus == WrHalImageRelease::Abandoned) {
+    mVulkanFailed = true;
+  }
+}
 
 void RenderDMABUFTextureHost::DeleteTextureHandle() {
   mSurface->ReleaseTextures();

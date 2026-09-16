@@ -206,7 +206,7 @@ UniquePtr<RenderCompositor> RenderCompositor::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
 #if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
   if (const char* backend = PR_GetEnv("MOZ_WR_BACKEND")) {
-    if (!strcmp(backend, "vulkan")) {
+    if (RenderCompositorVulkan::IsRequested()) {
       return RenderCompositorVulkan::Create(aWidget, aError);
     }
     if (strcmp(backend, "gl")) {

@@ -190,6 +190,8 @@ impl Drop for WebGPUParentWeakPtr {
 
 pub struct Global {
     owner: WebGPUParentPtr,
+    #[cfg(target_os = "linux")]
+    native_exports: Mutex<HashMap<id::TextureId, Arc<wgc::resource::Texture>>>,
     global: wgpu_core_remote::global::Global,
 
     /// Swap chain texture descriptors.
@@ -267,6 +269,8 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
     );
     let global = Global {
         owner,
+        #[cfg(target_os = "linux")]
+        native_exports: Mutex::new(HashMap::new()),
         global,
         swap_chain_configs: Mutex::new(HashMap::new()),
     };
@@ -1076,11 +1080,15 @@ pub unsafe extern "C" fn wgpu_server_device_create_texture(
 
 #[no_mangle]
 pub extern "C" fn wgpu_server_texture_destroy(global: &Global, id: id::TextureId) {
+    #[cfg(target_os = "linux")]
+    global.native_exports.lock().unwrap().remove(&id);
     global.texture_destroy(id);
 }
 
 #[no_mangle]
 pub extern "C" fn wgpu_server_texture_drop(global: &Global, id: id::TextureId) {
+    #[cfg(target_os = "linux")]
+    global.native_exports.lock().unwrap().remove(&id);
     global.texture_remove(id);
 }
 
@@ -1145,6 +1153,10 @@ pub extern "C" fn wgpu_server_get_device_fence_handle(
 #[repr(C)]
 pub struct DMABufInfo {
     pub is_valid: bool,
+    pub for_webrender: bool,
+    pub is_rgba: bool,
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
     pub modifier: u64,
     pub plane_count: u32,
     pub offsets: [u64; 3],
@@ -1237,9 +1249,20 @@ pub extern "C" fn wgpu_vkimage_create_with_dma_buf(
     device_id: id::DeviceId,
     width: u32,
     height: u32,
+    format: wgt::TextureFormat,
+    usage: wgt::TextureUsages,
+    for_webrender: bool,
     out_fd: *mut i32,
 ) -> DMABufInfo {
-    match create_dma_buf(global, device_id, width, height) {
+    match create_dma_buf(
+        global,
+        device_id,
+        width,
+        height,
+        format,
+        usage,
+        for_webrender,
+    ) {
         Ok((info, fd)) => {
             unsafe { *out_fd = fd };
             info
@@ -1253,12 +1276,54 @@ pub extern "C" fn wgpu_vkimage_create_with_dma_buf(
 }
 
 #[cfg(target_os = "linux")]
+fn dmabuf_format(format: wgt::TextureFormat) -> Option<vk::Format> {
+    match format {
+        wgt::TextureFormat::Bgra8Unorm => Some(vk::Format::B8G8R8A8_UNORM),
+        wgt::TextureFormat::Rgba8Unorm => Some(vk::Format::R8G8B8A8_UNORM),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn dmabuf_usage(
+    usage: wgt::TextureUsages,
+    for_webrender: bool,
+) -> (vk::ImageUsageFlags, wgt::TextureUses) {
+    let mut vk = vk::ImageUsageFlags::TRANSFER_DST;
+    let mut hal = wgt::TextureUses::COPY_DST;
+    if usage.contains(wgt::TextureUsages::COPY_SRC) || for_webrender {
+        vk |= vk::ImageUsageFlags::TRANSFER_SRC;
+        hal |= wgt::TextureUses::COPY_SRC;
+    }
+    if usage.contains(wgt::TextureUsages::TEXTURE_BINDING) || for_webrender {
+        vk |= vk::ImageUsageFlags::SAMPLED;
+        hal |= wgt::TextureUses::RESOURCE;
+    }
+    if usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
+        vk |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        hal |= wgt::TextureUses::COLOR_TARGET;
+    }
+    if usage.contains(wgt::TextureUsages::STORAGE_BINDING) {
+        vk |= vk::ImageUsageFlags::STORAGE;
+        hal |= wgt::TextureUses::STORAGE_READ_ONLY
+            | wgt::TextureUses::STORAGE_WRITE_ONLY
+            | wgt::TextureUses::STORAGE_READ_WRITE;
+    }
+    (vk, hal)
+}
+
+#[cfg(target_os = "linux")]
 fn create_dma_buf(
     global: &Global,
     device_id: id::DeviceId,
     width: u32,
     height: u32,
+    format: wgt::TextureFormat,
+    usage: wgt::TextureUsages,
+    for_webrender: bool,
 ) -> Result<(DMABufInfo, i32), CString> {
+    let vk_format =
+        dmabuf_format(format).ok_or_else(|| c"Unsupported DMA-BUF format".to_owned())?;
     let device = global.resolve_device_id(device_id);
     unsafe {
         let hal_device = device
@@ -1277,7 +1342,7 @@ fn create_dma_buf(
 
             instance.get_physical_device_format_properties2(
                 physical_device,
-                vk::Format::B8G8R8A8_UNORM,
+                vk_format,
                 &mut format_properties_2,
             );
             drm_format_modifier_props_list.drm_format_modifier_count
@@ -1297,34 +1362,60 @@ fn create_dma_buf(
 
         instance.get_physical_device_format_properties2(
             physical_device,
-            vk::Format::B8G8R8A8_UNORM,
+            vk_format,
             &mut format_properties_2,
         );
 
-        let mut usage_flags = vk::ImageUsageFlags::empty();
-        usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        let (usage_flags, _) = dmabuf_usage(usage, for_webrender);
+        let mut ids = vk::PhysicalDeviceIDProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut ids);
+        instance.get_physical_device_properties2(physical_device, &mut properties);
+        if for_webrender {
+            let mut properties = vk::ExternalSemaphoreProperties::default();
+            instance.get_physical_device_external_semaphore_properties(
+                physical_device,
+                &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
+                &mut properties,
+            );
+            if !properties
+                .external_semaphore_features
+                .contains(vk::ExternalSemaphoreFeatureFlags::EXPORTABLE)
+            {
+                return Err(c"Vulkan sync-file export is unavailable".to_owned());
+            }
+        }
 
         modifier_props.retain(|modifier_prop| {
-            is_dmabuf_supported(
-                instance,
-                physical_device,
-                vk::Format::B8G8R8A8_UNORM,
-                modifier_prop.drm_format_modifier,
-                usage_flags,
-            )
+            (!for_webrender || modifier_prop.drm_format_modifier_plane_count == 1)
+                && is_dmabuf_supported(
+                    instance,
+                    physical_device,
+                    vk_format,
+                    modifier_prop.drm_format_modifier,
+                    usage_flags,
+                )
         });
 
         if modifier_props.is_empty() {
             return Err(c"format not supported for dmabuf import".to_owned());
         }
 
-        let Some(consumer_modifiers) = get_linux_dmabuf_modifiers() else {
-            return Err(c"failed to get consumer dmabuf modifiers".to_owned());
-        };
-
-        modifier_props.retain(|modifier_prop| {
-            consumer_modifiers.contains(&modifier_prop.drm_format_modifier)
-        });
+        if for_webrender {
+            modifier_props.retain(|entry| {
+                wr_vulkan_supports_dmabuf(
+                    ids.device_uuid.as_ptr(),
+                    ids.driver_uuid.as_ptr(),
+                    format == wgt::TextureFormat::Rgba8Unorm,
+                    entry.drm_format_modifier,
+                )
+            });
+        } else {
+            let Some(consumer_modifiers) = get_linux_dmabuf_modifiers() else {
+                return Err(c"failed to get consumer dmabuf modifiers".to_owned());
+            };
+            modifier_props.retain(|entry| consumer_modifiers.contains(&entry.drm_format_modifier));
+        }
 
         if modifier_props.is_empty() {
             let msg =
@@ -1353,12 +1444,8 @@ fn create_dma_buf(
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
 
         let vk_info = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::ALIAS)
             .image_type(vk::ImageType::TYPE_2D)
-            // Bug 1971883: Rather than hard-coding this format, we should use
-            // whatever format was negotiated between `GPUCanvasContext.configure`
-            // and the GPU process.
-            .format(vk::Format::B8G8R8A8_UNORM)
+            .format(vk_format)
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
@@ -1482,6 +1569,10 @@ fn create_dma_buf(
         Ok((
             DMABufInfo {
                 is_valid: true,
+                for_webrender,
+                is_rgba: format == wgt::TextureFormat::Rgba8Unorm,
+                device_uuid: ids.device_uuid,
+                driver_uuid: ids.driver_uuid,
                 modifier: image_modifier_properties.drm_format_modifier,
                 plane_count,
                 offsets,
@@ -1521,6 +1612,14 @@ pub extern "C" fn wgpu_server_get_device_fence_metal_shared_event(
 }
 
 extern "C" {
+    #[cfg(target_os = "linux")]
+    /// cbindgen:ignore
+    fn wr_vulkan_supports_dmabuf(
+        device: *const u8,
+        driver: *const u8,
+        rgba: bool,
+        modifier: u64,
+    ) -> bool;
     #[allow(dead_code)]
     fn gfx_critical_note(msg: *const c_char);
     fn wgpu_server_use_shared_texture_for_swap_chain(
@@ -1881,8 +1980,13 @@ impl Global {
                 height: desc.size.height,
                 depth: 1,
             };
-            let mut usage_flags = vk::ImageUsageFlags::empty();
-            usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+            let (usage_flags, hal_usage) = dmabuf_usage(desc.usage, info.for_webrender);
+            let Some(vk_format) = dmabuf_format(desc.format) else {
+                return false;
+            };
+            if info.is_rgba != (desc.format == wgt::TextureFormat::Rgba8Unorm) {
+                return false;
+            }
 
             let mut external_image_create_info = vk::ExternalMemoryImageCreateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
@@ -1915,20 +2019,13 @@ impl Global {
             // creating the original DMABuf image, if we pass the same
             // parameters, including the DRM format modifier and plane layouts,
             // we can assume that this call will succeed too.
-            //
-            // The only thing we're adding is the `ALIAS` flag, because this
-            // aliases the original image.
             let mut modifier_list = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
                 .drm_format_modifier(info.modifier)
                 .plane_layouts(&memory_plane_layouts);
 
             let vk_info = vk::ImageCreateInfo::default()
-                .flags(vk::ImageCreateFlags::ALIAS)
                 .image_type(vk::ImageType::TYPE_2D)
-                // Bug 1971883: Rather than hard-coding this format, we should use
-                // whatever format was negotiated between `GPUCanvasContext.configure`
-                // and the GPU process.
-                .format(vk::Format::B8G8R8A8_UNORM)
+                .format(vk_format)
                 .extent(extent)
                 .mip_levels(1)
                 .array_layers(1)
@@ -2039,7 +2136,7 @@ impl Global {
                 sample_count: desc.sample_count,
                 dimension: desc.dimension,
                 format: desc.format,
-                usage: wgt::TextureUses::COPY_DST | wgt::TextureUses::COLOR_TARGET,
+                usage: hal_usage,
                 memory_flags: wgh::MemoryFlags::empty(),
                 view_formats: vec![],
             };
@@ -2051,6 +2148,40 @@ impl Global {
                 None,
                 wgh::vulkan::TextureMemory::Dedicated(memory),
             );
+
+            scoped_image.release();
+            if info.for_webrender {
+                let export_desc = wgc::resource::TextureDescriptor {
+                    label: None,
+                    size: desc.size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: desc.dimension,
+                    format: desc.format,
+                    usage: wgt::TextureUsages::COPY_DST
+                        | wgt::TextureUsages::COPY_SRC
+                        | wgt::TextureUsages::TEXTURE_BINDING,
+                    view_formats: vec![],
+                };
+                let (export, error) = self.resolve_device_id(device_id).create_texture_from_hal(
+                    Box::new(hal_texture),
+                    &export_desc,
+                    wgt::TextureUses::UNINITIALIZED,
+                    false,
+                );
+                if let Some(error) = error {
+                    let message =
+                        CString::new(format!("Creating Vulkan canvas export: {error:?}")).unwrap();
+                    gfx_critical_note(message.as_ptr());
+                    return false;
+                }
+                self.native_exports
+                    .lock()
+                    .unwrap()
+                    .insert(texture_id, export);
+                self.device_create_texture(device_id, desc, texture_id);
+                return true;
+            }
 
             let (_, error) = self.create_texture_from_hal(
                 Box::new(hal_texture),
@@ -2066,9 +2197,6 @@ impl Global {
                 gfx_critical_note(msg.as_ptr());
                 return false;
             }
-
-            // wgpu-core now owns the image and its memory.
-            scoped_image.release();
 
             true
         }
@@ -2928,6 +3056,8 @@ unsafe fn process_message(
         }
         Message::DestroyTexture(id) => {
             wgpu_server_remove_shared_texture(global.owner, id);
+            #[cfg(target_os = "linux")]
+            global.native_exports.lock().unwrap().remove(&id);
             global.texture_destroy(id);
         }
         Message::DestroyExternalTexture(id) => global.external_texture_destroy(id),
@@ -2988,6 +3118,8 @@ unsafe fn process_message(
         }
         Message::DropTexture(id) => {
             wgpu_server_remove_shared_texture(global.owner, id);
+            #[cfg(target_os = "linux")]
+            global.native_exports.lock().unwrap().remove(&id);
             global.texture_remove(id);
         }
         Message::DropTextureView(id) => {
@@ -3078,6 +3210,176 @@ pub extern "C" fn wgpu_server_submit_copy_texture_to_buffer(
         }
     }
     error.is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn push_present_error_scopes(global: &Global, device: id::DeviceId) {
+    for filter in [
+        ErrorFilter::Validation,
+        ErrorFilter::OutOfMemory,
+        ErrorFilter::Internal,
+    ] {
+        global.device_push_error_scope(device, filter);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pop_present_error_scopes(global: &Global, device: id::DeviceId) -> Option<String> {
+    let mut error = None;
+    for _ in 0..3 {
+        if let Some(value) = global.device_pop_error_scope(device).unwrap() {
+            error = Some(format!("{value:?}"));
+        }
+    }
+    error
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_vkimage_prepare_webrender_present(
+    global: &Global,
+    device_id: id::DeviceId,
+    queue_id: id::QueueId,
+    texture_id: id::TextureId,
+    out_fd: *mut i32,
+) -> u64 {
+    use ash::vk::Handle as _;
+    *out_fd = -2;
+    let result = (|| -> Result<u64, String> {
+        let device = global.resolve_device_id(device_id);
+        device.check_is_valid().map_err(|e| format!("{e:?}"))?;
+        let source = global.resolve_texture_id(texture_id);
+        let texture = global
+            .native_exports
+            .lock()
+            .unwrap()
+            .remove(&texture_id)
+            .ok_or("Missing native canvas export")?;
+        let size = source.descriptor().size;
+        let queue = global.resolve_queue_id(queue_id);
+        let hal_device = device
+            .clone()
+            .as_hal::<wgc::api::Vulkan>()
+            .ok_or("Vulkan device unavailable")?;
+        let hal_queue = queue
+            .clone()
+            .as_hal::<wgc::api::Vulkan>()
+            .ok_or("Vulkan queue unavailable")?;
+        push_present_error_scopes(global, device_id);
+        let prepare = device.create_command_encoder(&wgt::CommandEncoderDescriptor { label: None });
+        // Core initializes the source, and the full copy initializes the imported destination.
+        prepare.copy_texture_to_texture(
+            &wgt::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: 0,
+                origin: wgt::Origin3d::ZERO,
+                aspect: wgt::TextureAspect::All,
+            },
+            &wgt::TexelCopyTextureInfo {
+                texture: texture.clone(),
+                mip_level: 0,
+                origin: wgt::Origin3d::ZERO,
+                aspect: wgt::TextureAspect::All,
+            },
+            &size,
+        );
+        prepare.transition_resources(
+            std::iter::empty(),
+            std::iter::once(wgt::TextureTransition {
+                texture: texture.clone(),
+                selector: None,
+                state: wgt::TextureUses::RESOURCE | wgt::TextureUses::COPY_SRC,
+            }),
+        );
+        let prepare = prepare.finish(&wgt::CommandBufferDescriptor { label: None });
+        let release = device.create_command_encoder(&wgt::CommandEncoderDescriptor { label: None });
+        let hal_texture = texture.as_hal::<wgc::api::Vulkan>();
+        let recorded = release.as_hal_mut::<wgc::api::Vulkan, _, _>(|encoder| {
+            let (Some(encoder), Some(texture)) = (encoder, hal_texture.as_ref()) else {
+                return false;
+            };
+            let raw_image = texture.raw_handle();
+            hal_device.raw_device().cmd_pipeline_barrier(
+                encoder.raw_handle(),
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+                    .old_layout(vk::ImageLayout::GENERAL)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(hal_device.queue_family_index())
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+                    .image(raw_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })],
+            );
+            true
+        });
+        let release = release.finish(&wgt::CommandBufferDescriptor { label: None });
+        drop(hal_texture);
+        if let Some(error) = pop_present_error_scopes(global, device_id) {
+            return Err(error);
+        }
+        if !recorded {
+            return Err("Could not encode Vulkan ownership release".into());
+        }
+
+        let mut export = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+        let semaphore = hal_device
+            .raw_device()
+            .create_semaphore(
+                &vk::SemaphoreCreateInfo::default().push_next(&mut export),
+                None,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        hal_queue.add_signal_semaphore(semaphore, None);
+        push_present_error_scopes(global, device_id);
+        // Both encoders share the submission index retaining the tracked source texture.
+        let serial = queue.submit(&[prepare, release]);
+        let error = pop_present_error_scopes(global, device_id);
+        let succeeded = error.is_none() && device.is_valid();
+        let fd = if succeeded {
+            khr::external_semaphore_fd::Device::new(
+                hal_device.shared_instance().raw_instance(),
+                hal_device.raw_device(),
+            )
+            .get_semaphore_fd(
+                &vk::SemaphoreGetFdInfoKHR::default()
+                    .semaphore(semaphore)
+                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
+            )
+            .map_err(|e| format!("{e:?}"))
+        } else {
+            Err(error.unwrap_or_else(|| "Vulkan canvas device lost".into()))
+        };
+        enqueue_signal_semaphores_destruction(
+            global,
+            device_id,
+            queue_id,
+            &[VkSemaphoreHandle(semaphore.as_raw())],
+            !succeeded,
+        );
+        *out_fd = fd?;
+        Ok(serial)
+    })();
+    match result {
+        Ok(serial) => serial,
+        Err(error) => {
+            let message =
+                CString::new(format!("Vulkan canvas publication failed: {error}")).unwrap();
+            gfx_critical_note(message.as_ptr());
+            0
+        }
+    }
 }
 
 #[no_mangle]

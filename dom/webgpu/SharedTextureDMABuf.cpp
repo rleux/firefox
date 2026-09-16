@@ -6,6 +6,7 @@
 
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/webgpu/WebGPUParent.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/widget/DMABufDevice.h"
 #include "mozilla/widget/DMABufSurface.h"
 
@@ -17,7 +18,9 @@ UniquePtr<SharedTextureDMABuf> SharedTextureDMABuf::Create(
     const uint32_t aWidth, const uint32_t aHeight,
     const struct ffi::WGPUTextureFormat aFormat,
     const ffi::WGPUTextureUsages aUsage) {
-  if (aFormat.tag != ffi::WGPUTextureFormat_Bgra8Unorm) {
+  const bool forWebRender = wr::RenderCompositorVulkan::IsRequested();
+  if (aFormat.tag != ffi::WGPUTextureFormat_Bgra8Unorm &&
+      !(forWebRender && aFormat.tag == ffi::WGPUTextureFormat_Rgba8Unorm)) {
     gfxCriticalNoteOnce << "Non supported format: " << aFormat.tag;
     return nullptr;
   }
@@ -25,7 +28,8 @@ UniquePtr<SharedTextureDMABuf> SharedTextureDMABuf::Create(
   auto* context = aParent->GetContext();
   int32_t rawFd = -1;
   ffi::WGPUDMABufInfo dmaBufInfo = ffi::wgpu_vkimage_create_with_dma_buf(
-      context, aDeviceId, aWidth, aHeight, &rawFd);
+      context, aDeviceId, aWidth, aHeight, aFormat, aUsage, forWebRender,
+      &rawFd);
   if (!dmaBufInfo.is_valid || rawFd < 0) {
     gfxCriticalNoteOnce << "Failed to create dma-buf backed VkImage";
     return nullptr;
@@ -80,7 +84,11 @@ SharedTextureDMABuf::~SharedTextureDMABuf() = default;
 
 void SharedTextureDMABuf::CleanForRecycling() {
   SharedTexture::CleanForRecycling();
+  if (mDMABufInfo.for_webrender) {
+    ClearTextureHost();
+  }
   mSemaphoreFd = nullptr;
+  mVulkanGeneration = 0;
 }
 
 Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
@@ -97,6 +105,18 @@ Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
 
   auto& sdDMABuf = sd.get_SurfaceDescriptorDMABuf();
   sdDMABuf.semaphoreFd() = mSemaphoreFd;
+  if (mDMABufInfo.for_webrender) {
+    if (!mVulkanGeneration) {
+      return Nothing();
+    }
+    nsTArray<uint8_t> device;
+    nsTArray<uint8_t> driver;
+    device.AppendElements(mDMABufInfo.device_uuid, 16);
+    driver.AppendElements(mDMABufInfo.driver_uuid, 16);
+    sdDMABuf.vulkanImageState() =
+        Some(layers::VulkanImageState(device, driver, mVulkanGeneration));
+    sdDMABuf.semaphoreFdIsSyncFd() = true;
+  }
 
   return Some(sd);
 }
@@ -141,6 +161,29 @@ void SharedTextureDMABuf::GetSnapshot(const ipc::Shmem& aDestShmem,
   }
 }
 
+bool SharedTextureDMABuf::PrepareForVulkanPresent(
+    const ffi::WGPUGlobal* aContext, RawId aDeviceId, RawId aQueueId,
+    RawId aTextureId, uint64_t aGeneration) {
+  if (!mDMABufInfo.for_webrender) {
+    return true;
+  }
+  if (!aGeneration || mVulkanGeneration) {
+    return false;
+  }
+  int32_t fd = -2;
+  uint64_t serial = ffi::wgpu_vkimage_prepare_webrender_present(
+      aContext, aDeviceId, aQueueId, aTextureId, &fd);
+  if (!serial || fd < -1) {
+    return false;
+  }
+  if (fd >= 0) {
+    mSemaphoreFd = new gfx::FileHandleWrapper(UniqueFileHandle(fd));
+  }
+  mVulkanGeneration = aGeneration;
+  SetSubmissionIndex(serial);
+  return true;
+}
+
 UniqueFileHandle SharedTextureDMABuf::CloneDmaBufFd() {
   return mSurfaceDescriptor.fds()[0]->ClonePlatformHandle();
 }
@@ -150,6 +193,9 @@ void SharedTextureDMABuf::onBeforeQueueSubmit(
     nsTArray<ffi::WGPUVkSemaphoreHandle>& aSignalSemaphores) {
   SharedTexture::onBeforeQueueSubmit(aContext, aDeviceId, aQueueId,
                                      aSignalSemaphores);
+  if (mDMABufInfo.for_webrender) {
+    return;
+  }
 
   int32_t rawFd = -1;
   auto semaphore = ffi::wgpu_vksemaphore_create_signal_semaphore(

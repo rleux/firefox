@@ -25,6 +25,7 @@ pub enum Renderer {
 
 #[cfg(target_os = "linux")]
 pub struct VulkanRenderer {
+    _dmabuf_registration: crate::hal_image::DeviceRegistration,
     pub renderer: webrender::hal::Renderer,
     pub document: Option<DocumentId>,
     error: Option<String>,
@@ -101,8 +102,10 @@ impl Renderer {
             renderer.info().name
         );
         let max_texture_size = max_texture_size.min(renderer.capabilities().max_texture_size);
+        let dmabuf_registration = crate::hal_image::DeviceRegistration::new(&renderer.external_image_device())?;
         Ok((
             Self::Vulkan(VulkanRenderer {
+                _dmabuf_registration: dmabuf_registration,
                 renderer,
                 document: None,
                 error: None,
