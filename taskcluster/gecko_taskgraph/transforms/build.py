@@ -221,6 +221,20 @@ def use_artifact(config, jobs):
 
 
 @transforms.add
+def fetch_webrender_shader_tools(config, jobs):
+    for job in jobs:
+        if (
+            config.kind in ("build", "instrumented-build")
+            and job["name"].startswith("linux")
+            and not job.get("attributes", {}).get("artifact-build")
+        ):
+            job.setdefault("fetches", {}).setdefault("toolchain", []).append(
+                "linux64-shader-tools"
+            )
+        yield job
+
+
+@transforms.add
 def use_profile_data(config, jobs):
     for job in jobs:
         use_pgo = job.pop("use-pgo", False)

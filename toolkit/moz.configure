@@ -1178,6 +1178,8 @@ def webrender_debugger(value):
 set_config("MOZ_WEBRENDER_DEBUGGER", webrender_debugger)
 set_define("MOZ_WEBRENDER_DEBUGGER", webrender_debugger)
 
+include("../build/moz.configure/webrender.configure")
+
 # Additional system headers defined at the application level
 # ==============================================================
 

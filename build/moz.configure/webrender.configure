@@ -1,0 +1,44 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+
+@depends(target, compile_environment)
+def need_webrender_shader_tools(target, compile_environment):
+    return compile_environment and target.kernel == "Linux" and target.os == "GNU"
+
+
+@template
+def webrender_shader_tool(variable, program, pattern, minimum):
+    tool = check_prog(
+        variable,
+        [program],
+        allow_missing=True,
+        bootstrap="shader-tools/bin",
+        when=need_webrender_shader_tools,
+    )
+
+    @depends(tool, when=need_webrender_shader_tools)
+    @checking(f"{program} version")
+    @imports("re")
+    @imports(_from="mozbuild.configure.util", _import="Version")
+    def version(tool):
+        if not tool:
+            die(
+                f"{program} is required for Vulkan WebRender. Run ./mach bootstrap "
+                f"or install the shader tools and set {variable} to its full path."
+            )
+        output = check_cmd_output(tool, "--version")
+        match = re.search(pattern, output)
+        if not match or Version(match.group(1)) < Version(minimum):
+            die(f"Vulkan WebRender requires {program} {minimum} or newer.")
+        return match.group(1)
+
+    set_config(f"{variable}_VERSION", version)
+
+
+webrender_shader_tool(
+    "GLSLANG_VALIDATOR", "glslangValidator", r"Glslang Version: \d+:([\d.]+)", "15.1.0"
+)
+webrender_shader_tool("SPIRV_VAL", "spirv-val", r"SPIRV-Tools v([\d.]+)", "2025.1")
+webrender_shader_tool("SPIRV_DIS", "spirv-dis", r"SPIRV-Tools v([\d.]+)", "2025.1")
