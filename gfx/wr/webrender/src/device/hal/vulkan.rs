@@ -8,7 +8,7 @@ use super::external::{ExternalImageDevice, NativeImage as ExternalNativeImage, P
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 mod linux;
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
-pub use linux::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities};
+pub use linux::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities, ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
 
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
 mod sync_file;
