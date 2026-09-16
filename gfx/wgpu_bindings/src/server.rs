@@ -188,10 +188,17 @@ impl Drop for WebGPUParentWeakPtr {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct NativeExport {
+    device_id: id::DeviceId,
+    swap_chain_id: SwapChainId,
+    texture: Arc<wgc::resource::Texture>,
+}
+
 pub struct Global {
     owner: WebGPUParentPtr,
     #[cfg(target_os = "linux")]
-    native_exports: Mutex<HashMap<id::TextureId, Arc<wgc::resource::Texture>>>,
+    native_exports: Mutex<HashMap<id::TextureId, NativeExport>>,
     global: wgpu_core_remote::global::Global,
 
     /// Swap chain texture descriptors.
@@ -2175,10 +2182,14 @@ impl Global {
                     gfx_critical_note(message.as_ptr());
                     return false;
                 }
-                self.native_exports
-                    .lock()
-                    .unwrap()
-                    .insert(texture_id, export);
+                self.native_exports.lock().unwrap().insert(
+                    texture_id,
+                    NativeExport {
+                        device_id,
+                        swap_chain_id: swap_chain_id.unwrap(),
+                        texture: export,
+                    },
+                );
                 self.device_create_texture(device_id, desc, texture_id);
                 return true;
             }
@@ -3042,6 +3053,12 @@ unsafe fn process_message(
             txn_type,
             txn_id,
         } => {
+            #[cfg(target_os = "linux")]
+            global
+                .native_exports
+                .lock()
+                .unwrap()
+                .retain(|_, export| export.swap_chain_id != SwapChainId(remote_texture_owner_id.0));
             global
                 .swap_chain_configs
                 .lock()
@@ -3064,12 +3081,26 @@ unsafe fn process_message(
         Message::DestroyExternalTextureSource(id) => {
             wgpu_parent_destroy_external_texture_source(global.owner, id);
         }
-        Message::DestroyDevice(id) => global.device_destroy(id),
+        Message::DestroyDevice(id) => {
+            #[cfg(target_os = "linux")]
+            global
+                .native_exports
+                .lock()
+                .unwrap()
+                .retain(|_, export| export.device_id != id);
+            global.device_destroy(id);
+        },
 
         Message::DropAdapter(id) => {
             global.adapter_remove(id);
         }
         Message::DropDevice(id) => {
+            #[cfg(target_os = "linux")]
+            global
+                .native_exports
+                .lock()
+                .unwrap()
+                .retain(|_, export| export.device_id != id);
             wgpu_server_pre_device_drop(global.owner, id);
             global.device_remove(id);
         }
@@ -3249,12 +3280,16 @@ pub unsafe extern "C" fn wgpu_vkimage_prepare_webrender_present(
         let device = global.resolve_device_id(device_id);
         device.check_is_valid().map_err(|e| format!("{e:?}"))?;
         let source = global.resolve_texture_id(texture_id);
-        let texture = global
+        let export = global
             .native_exports
             .lock()
             .unwrap()
             .remove(&texture_id)
             .ok_or("Missing native canvas export")?;
+        if export.device_id != device_id {
+            return Err("Canvas export belongs to another device".into());
+        }
+        let texture = export.texture;
         let size = source.descriptor().size;
         let queue = global.resolve_queue_id(queue_id);
         let hal_device = device

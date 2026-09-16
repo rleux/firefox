@@ -146,29 +146,8 @@ mod linux {
             if data.fd < 0 || data.ready_fd < -1 || generation == 0 {
                 return Err("Invalid Vulkan DMA-BUF handles or generation".into());
             }
-            let layout = hal::DmaBufLayout::new(
-                [data.width, data.height],
-                data.format,
-                data.modifier,
-                data.stride,
-                data.offset,
-                data.device_uuid,
-                data.driver_uuid,
-            )?;
             // The C++ lease owns the borrowed descriptors until release.
-            let fd = unsafe { BorrowedFd::borrow_raw(data.fd) }
-                .try_clone_to_owned()
-                .map_err(|e| e.to_string())?;
-            let ready = if data.ready_fd == -1 {
-                hal::SyncFile::already_signaled()
-            } else {
-                hal::SyncFile::from_fd(
-                    unsafe { BorrowedFd::borrow_raw(data.ready_fd) }
-                        .try_clone_to_owned()
-                        .map_err(|e| e.to_string())?,
-                )
-            };
-            let plane = hal::DmaBufPlane::new(fd, layout);
+            let (plane, ready) = dmabuf_plane(&data)?;
             lease.status = WrHalImageRelease::Abandoned;
             // VulkanDmaBuf denotes an immutable single-plane image released in GENERAL
             // layout to QUEUE_FAMILY_EXTERNAL, on the identified device and driver.
@@ -187,6 +166,83 @@ mod linux {
                 |_| {},
             )
         }
+    }
+
+    fn dmabuf_plane(data: &WrHalDmaBuf) -> Result<(hal::DmaBufPlane, hal::SyncFile), String> {
+        if data.fd < 0 || data.ready_fd < -1 {
+            return Err("Invalid Vulkan DMA-BUF handles".into());
+        }
+        let layout = hal::DmaBufLayout::new(
+            [data.width, data.height],
+            data.format,
+            data.modifier,
+            data.stride,
+            data.offset,
+            data.device_uuid,
+            data.driver_uuid,
+        )?;
+        let fd = unsafe { BorrowedFd::borrow_raw(data.fd) }
+            .try_clone_to_owned()
+            .map_err(|e| e.to_string())?;
+        let ready = if data.ready_fd == -1 {
+            hal::SyncFile::already_signaled()
+        } else {
+            hal::SyncFile::from_fd(
+                unsafe { BorrowedFd::borrow_raw(data.ready_fd) }
+                    .try_clone_to_owned()
+                    .map_err(|e| e.to_string())?,
+            )
+        };
+        let plane = hal::DmaBufPlane::new(fd, layout);
+        Ok((plane, ready))
+    }
+
+    thread_local! {
+        static SNAPSHOT_DEVICE: std::cell::RefCell<Option<ExternalImageDevice>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn wr_snapshot_vulkan_dmabuf(
+        data: &WrHalDmaBuf,
+        destination: *mut u8,
+        length: usize,
+        stride: usize,
+    ) -> bool {
+        let result = SNAPSHOT_DEVICE.with(|slot| -> Result<(), String> {
+            let row = (data.width as usize).checked_mul(4).ok_or("Snapshot row overflow")?;
+            let needed = stride.checked_mul(data.height as usize).ok_or("Snapshot size overflow")?;
+            if destination.is_null() || data.height == 0 || row == 0 || stride < row || length < needed {
+                return Err("Invalid Vulkan snapshot destination".into());
+            }
+            let (plane, ready) = dmabuf_plane(data)?;
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(hal::create_vulkan_image_device(&hal::Options {
+                    validation: std::env::var_os("MOZ_WR_VULKAN_VALIDATION").is_some(),
+                    adapter_name: std::env::var("MOZ_WR_VULKAN_ADAPTER").ok(),
+                })?);
+            }
+            let device = slot.as_ref().unwrap();
+            // The caller retains an immutable image released in GENERAL to QUEUE_FAMILY_EXTERNAL.
+            let copied = unsafe { device.copy_dmabuf_planes(&[plane], &ready) }?;
+            let (mut images, release) = copied.into_parts();
+            device.wait_dmabuf_release(&release)?;
+            let image = images.pop().ok_or("DMA-BUF copy returned no image")?;
+            let pixels = device.read_image(&image)?;
+            let destination = unsafe { std::slice::from_raw_parts_mut(destination, needed) };
+            for (src, dst) in pixels.chunks_exact(row).zip(destination.chunks_exact_mut(stride)) {
+                dst[..row].copy_from_slice(src);
+                dst[row..].fill(0);
+            }
+            log::info!("WebGPU snapshot: Vulkan DMA-BUF readback");
+            Ok(())
+        });
+        if let Err(error) = result {
+            SNAPSHOT_DEVICE.with(|slot| *slot.borrow_mut() = None);
+            log::warn!("Vulkan DMA-BUF snapshot failed: {error}");
+            return false;
+        }
+        true
     }
 
     impl hal::ExternalImageProvider for ExternalImages {

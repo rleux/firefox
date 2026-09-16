@@ -61,6 +61,8 @@ macro_rules! renderer_facade {
             pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> { self.core.render() }
             pub fn read_pixels_rgba8(&self, rect: api::units::FramebufferIntRect) -> Result<Vec<u8>, String> { self.core.read_pixels_rgba8(rect) }
             pub fn frame_completion(&self) -> Option<FrameCompletion> { self.core.frame_completion() }
+            pub fn submit_work(&self) -> Result<FrameCompletion, String> { self.core.gpu.submit_work().map(|serial| FrameCompletion { owner: self.core.backend_id, serial }) }
+            pub fn has_acquired_surface(&self) -> bool { self.core.gpu.has_acquired_surface() }
             pub fn poll_completion(&self, completion: FrameCompletion) -> Result<bool, String> { self.core.poll_completion(completion) }
             pub fn request_readback(&self, rect: api::units::FramebufferIntRect) -> Result<ReadbackHandle, String> { self.core.request_readback(rect) }
             pub fn poll_readback(&self, handle: ReadbackHandle) -> Result<Option<Vec<u8>>, String> { self.core.poll_readback(handle) }
@@ -68,9 +70,11 @@ macro_rules! renderer_facade {
             pub fn cancel_readback(&self, handle: ReadbackHandle) -> Result<(), String> { self.core.cancel_readback(handle) }
             pub fn get_screenshot_async(&mut self, window_rect: api::units::DeviceIntRect, buffer_size: api::units::DeviceIntSize, format: ImageFormat) -> Result<(ScreenshotHandle, api::units::DeviceIntSize), String> { self.core.get_screenshot_async(window_rect, buffer_size, format) }
             pub fn map_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> { self.core.map_and_recycle_screenshot(handle, destination, stride, format) }
+            pub fn wait_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> { self.core.map_capture(handle, destination, stride, format, true) }
             pub fn cancel_screenshot(&self, handle: ScreenshotHandle) -> Result<(), String> { self.core.cancel_readback(handle.readback) }
             pub fn record_frame(&self, format: ImageFormat) -> Result<(RecordedFrameHandle, api::units::DeviceIntSize), String> { self.core.record_frame(format) }
             pub fn map_recorded_frame(&self, handle: RecordedFrameHandle, destination: &mut [u8], stride: usize) -> Result<bool, String> { self.core.map_recorded_frame(handle, destination, stride) }
+            pub fn wait_map_recorded_frame(&self, handle: RecordedFrameHandle, destination: &mut [u8], stride: usize) -> Result<bool, String> { self.core.map_capture(handle.0, destination, stride, handle.0.format, true) }
             pub fn cancel_recorded_frame(&self, handle: RecordedFrameHandle) -> Result<(), String> { self.core.cancel_readback(handle.0.readback) }
             pub fn release_profiler_structures(&mut self) { self.core.release_profiler_structures() }
             pub fn release_composition_recorder_structures(&mut self) { self.core.release_composition_recorder_structures() }
@@ -876,12 +880,19 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     pub fn map_and_recycle_screenshot(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat) -> Result<bool, String> {
+        self.map_capture(handle, destination, stride, format, false)
+    }
+
+    fn map_capture(&self, handle: ScreenshotHandle, destination: &mut [u8], stride: usize, format: ImageFormat, wait: bool) -> Result<bool, String> {
         if !matches!(format, ImageFormat::RGBA8 | ImageFormat::BGRA8) { return Err("Unsupported screenshot destination format".into()); }
         let row = handle.size.width as usize * 4;
         let required = stride.checked_mul(handle.size.height as usize - 1).and_then(|offset| offset.checked_add(row))
             .ok_or("Screenshot destination size overflow")?;
         if stride < row || destination.len() < required { return Err("Screenshot destination is too small".into()); }
-        let Some(mut pixels) = self.poll_readback(handle.readback)? else { return Ok(false); };
+        let mut pixels = if wait { self.wait_readback(handle.readback)? } else {
+            let Some(pixels) = self.poll_readback(handle.readback)? else { return Ok(false); };
+            pixels
+        };
         if format != handle.format {
             for pixel in pixels.chunks_exact_mut(4) { pixel.swap(0, 2); }
         }
@@ -1467,6 +1478,16 @@ mod tests {
             }
             assert!(screenshot[y * 71 + 64..(y + 1) * 71].iter().all(|&value| value == 0xa5));
         }
+        let (blocking_shot, _) = renderer.get_screenshot_async(original_rect, DeviceIntSize::new(16, 16), ImageFormat::BGRA8).unwrap();
+        let mut blocking_pixels = vec![0xa5; 71 * 16];
+        assert!(renderer.wait_and_recycle_screenshot(blocking_shot, &mut blocking_pixels, 71, ImageFormat::RGBA8).unwrap());
+        assert_eq!(blocking_pixels, screenshot);
+        assert!(renderer.core.readbacks.borrow().is_empty());
+        let (blocking_recording, _) = renderer.record_frame(ImageFormat::RGBA8).unwrap();
+        let mut blocking_pixels = vec![0; 64 * 64 * 4];
+        assert!(renderer.wait_map_recorded_frame(blocking_recording, &mut blocking_pixels, 64 * 4).unwrap());
+        assert_eq!(blocking_pixels, output.pixels);
+        assert!(renderer.core.readbacks.borrow().is_empty());
         let (recorded, recorded_size) = renderer.record_frame(ImageFormat::BGRA8).unwrap();
         assert_eq!(recorded_size, DeviceIntSize::new(64, 64));
         renderer.core.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
@@ -1571,6 +1592,14 @@ mod tests {
             .unwrap();
         assert!(renderer.core.document.is_none());
         assert!(renderer.core.last_output.is_none());
+        let completion = renderer.submit_work().unwrap();
+        assert!(completion.serial > 0);
+        assert!(renderer.frame_completion().is_none());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !renderer.poll_completion(completion).unwrap() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
         for epoch in 0..1000 {
             let mut info = PipelineInfo::default();
             info.epochs.insert((pipeline, id), Epoch(epoch));

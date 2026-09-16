@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use super::resources::{Texture, texture_format};
+use super::resources::{Buffer, Texture, texture_format};
 use super::submission::SubmissionQueue;
 use api::{ExternalImageId, ImageDescriptor};
 use api::units::{DeviceIntRect, TexelRect};
@@ -49,6 +49,7 @@ pub(super) trait ImageDevice: Any {
     fn update(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()>;
     fn poll(&self) -> Result<()>;
     fn target(&self, descriptor: ImageDescriptor) -> Result<NativeImage>;
+    fn read(&self, image: &NativeImage) -> Result<Vec<u8>>;
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -81,6 +82,37 @@ impl<A: hal::Api> Producer<A> {
 }
 
 impl<A: hal::Api> ImageDevice for Producer<A> {
+    fn read(&self, image: &NativeImage) -> Result<Vec<u8>> {
+        self.ensure_healthy()?;
+        image.ensure_idle()?;
+        if !matches!(image.descriptor.format, api::ImageFormat::RGBA8 | api::ImageFormat::BGRA8) {
+            return Err("Native image readback requires RGBA8 or BGRA8".into());
+        }
+        let texture = image.texture(&self.owner)?;
+        if !texture.initialized() {
+            return Err("Cannot read an uninitialized native image".into());
+        }
+        let layout = self.owner.layout(texture.size.width, texture.size.height)?;
+        let buffer = Buffer::readback(&self.owner, &layout)?;
+        self.failed.set(true);
+        let mut commands = self.submissions.recording()?;
+        let previous = texture.current_usage();
+        texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+        buffer.transition(&mut commands, wgt::BufferUses::COPY_DST);
+        unsafe {
+            copy_readback::<A>(commands.encoder(), &texture.raw, &buffer.raw,
+                &layout, texture.size, hal::FormatAspects::COLOR);
+        }
+        texture.transition(&mut commands, previous);
+        buffer.transition(&mut commands, wgt::BufferUses::MAP_READ);
+        drop(commands);
+        self.submissions.submit()?;
+        self.submissions.wait()?;
+        let pixels = self.owner.map_readback(&buffer.raw, &layout)?;
+        self.failed.set(false);
+        Ok(pixels)
+    }
+
     fn target(&self, descriptor: ImageDescriptor) -> Result<NativeImage> {
         if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         validate_descriptor(descriptor)?;
@@ -125,6 +157,7 @@ impl ExternalImageDevice {
     }
     pub fn poll(&self) -> Result<()> { self.0.poll() }
     pub fn create_target(&self, descriptor: ImageDescriptor) -> Result<NativeImage> { self.0.target(descriptor) }
+    pub fn read_image(&self, image: &NativeImage) -> Result<Vec<u8>> { self.0.read(image) }
 }
 
 #[derive(Clone)]

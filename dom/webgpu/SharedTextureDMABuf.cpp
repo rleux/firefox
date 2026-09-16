@@ -4,6 +4,8 @@
 
 #include "SharedTextureDMABuf.h"
 
+#include <algorithm>
+
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/webgpu/WebGPUParent.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
@@ -123,6 +125,27 @@ Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
 
 void SharedTextureDMABuf::GetSnapshot(const ipc::Shmem& aDestShmem,
                                       size_t aDestStride) {
+  if (mDMABufInfo.for_webrender) {
+    wr::WrHalDmaBuf image{};
+    image.fd = mSurfaceDescriptor.fds()[0]->GetHandle();
+    image.ready_fd = mSemaphoreFd ? mSemaphoreFd->GetHandle() : -1;
+    image.width = mWidth;
+    image.height = mHeight;
+    image.format =
+        mDMABufInfo.is_rgba ? wr::ImageFormat::RGBA8 : wr::ImageFormat::BGRA8;
+    image.modifier = mDMABufInfo.modifier;
+    image.stride = mDMABufInfo.strides[0];
+    image.offset = mDMABufInfo.offsets[0];
+    std::copy_n(mDMABufInfo.device_uuid, 16, image.device_uuid);
+    std::copy_n(mDMABufInfo.driver_uuid, 16, image.driver_uuid);
+    if (!mVulkanGeneration || !wr::wr_snapshot_vulkan_dmabuf(
+                                  &image, aDestShmem.get<uint8_t>(),
+                                  aDestShmem.Size<uint8_t>(), aDestStride)) {
+      memset(aDestShmem.get<uint8_t>(), 0, aDestShmem.Size<uint8_t>());
+      gfxCriticalNoteOnce << "Vulkan DMA-BUF snapshot failed";
+    }
+    return;
+  }
   const RefPtr<gfx::SourceSurface> surface = mSurface->GetAsSourceSurface();
   if (!surface) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");

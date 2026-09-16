@@ -126,8 +126,12 @@ void RenderCompositorVulkan::CancelFrame() {
 
 RenderedFrameId RenderCompositorVulkan::EndFrame(
     const nsTArray<DeviceIntRect>&) {
+  return UpdateFrameId();
+}
+
+RenderedFrameId RenderCompositorVulkan::UpdateFrameId() {
   auto id = GetNextRenderFrameId();
-  if (!wr_renderer_vulkan_end(mRenderer, id.mId)) {
+  if (mRenderer && !mFailed && !wr_renderer_vulkan_end(mRenderer, id.mId)) {
     mFailed = true;
   }
   return id;

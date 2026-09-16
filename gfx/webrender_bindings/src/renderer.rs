@@ -35,6 +35,7 @@ pub struct VulkanRenderer {
     frames: std::collections::VecDeque<(u64, webrender::hal::FrameCompletion)>,
     completed_frame: u64,
     max_texture_size: i32,
+    notifier: Box<dyn RenderNotifier>,
 }
 
 #[cfg(target_os = "linux")]
@@ -85,6 +86,7 @@ impl Renderer {
             adapter_name: std::env::var("MOZ_WR_VULKAN_ADAPTER").ok(),
         };
         let max_texture_size = options.max_internal_texture_size.unwrap_or(i32::MAX);
+        let retry_notifier = notifier.clone();
         let (renderer, sender) = webrender::hal::create_vulkan_renderer_for_window(
             &hal_options,
             options,
@@ -115,6 +117,7 @@ impl Renderer {
                 frames: Default::default(),
                 completed_frame: 1,
                 max_texture_size,
+                notifier: retry_notifier,
             }),
             sender,
         ))
@@ -340,19 +343,18 @@ impl Renderer {
             #[cfg(target_os = "linux")]
             Self::Vulkan(r) => {
                 let id = handle.into_raw();
-                let Some(&native) = r.screenshots.get(&id) else {
+                let Some(native) = r.screenshots.remove(&id) else {
                     return false;
                 };
-                match r.renderer.map_and_recycle_screenshot(native, dst, stride, format) {
-                    Ok(false) => false,
-                    Ok(true) => {
-                        r.screenshots.remove(&id);
-                        true
+                match r.renderer.wait_and_recycle_screenshot(native, dst, stride, format) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        let _ = r.renderer.cancel_screenshot(native);
+                        false
                     },
                     Err(e) => {
                         warn!("Vulkan screenshot: {}", e);
                         let _ = r.renderer.cancel_screenshot(native);
-                        r.screenshots.remove(&id);
                         false
                     },
                 }
@@ -385,19 +387,18 @@ impl Renderer {
             #[cfg(target_os = "linux")]
             Self::Vulkan(r) => {
                 let id = handle.into_raw();
-                let Some(&native) = r.recordings.get(&id) else {
+                let Some(native) = r.recordings.remove(&id) else {
                     return false;
                 };
-                match r.renderer.map_recorded_frame(native, dst, stride) {
-                    Ok(false) => false,
-                    Ok(true) => {
-                        r.recordings.remove(&id);
-                        true
+                match r.renderer.wait_map_recorded_frame(native, dst, stride) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        let _ = r.renderer.cancel_recorded_frame(native);
+                        false
                     },
                     Err(e) => {
                         warn!("Vulkan recording: {}", e);
                         let _ = r.renderer.cancel_recorded_frame(native);
-                        r.recordings.remove(&id);
                         false
                     },
                 }
@@ -432,11 +433,30 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
-        r.renderer.poll()?;
-        if r.renderer.surface_info().map(|s| s.size) != Some([width, height]) {
-            r.renderer.resize_surface([width, height])?;
-        }
-        Ok(r.renderer.acquire_surface()? == webrender::hal::PresentationStatus::Acquired)
+        let result = (|| {
+            r.renderer.poll()?;
+            if r.renderer.surface_info().map(|s| s.size) != Some([width, height]) {
+                r.renderer.resize_surface([width, height])?;
+            }
+            use webrender::hal::PresentationStatus;
+            for _ in 0..2 {
+                match r.renderer.acquire_surface()? {
+                    PresentationStatus::Acquired => return Ok(true),
+                    PresentationStatus::Outdated | PresentationStatus::Lost => r.renderer.force_redraw(),
+                    PresentationStatus::Timeout => {
+                        r.notifier.wake_up(true);
+                        return Ok(false);
+                    },
+                    _ => return Ok(false),
+                }
+            }
+            r.notifier.wake_up(true);
+            Ok(false)
+        })();
+        result.map_err(|e: String| {
+            r.error = Some(e.clone());
+            e
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -444,14 +464,21 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
-        if !r.renderer.has_presentable_output() {
-            r.renderer.discard_surface()?;
-            return Ok(true);
+        if r.renderer.has_acquired_surface() {
+            if r.renderer.has_presentable_output() {
+                let status = r.renderer.present()?;
+                if !matches!(
+                    status,
+                    webrender::hal::PresentationStatus::Presented { suboptimal: false }
+                ) {
+                    r.renderer.force_redraw();
+                    r.notifier.wake_up(true);
+                }
+            } else {
+                r.renderer.discard_surface()?;
+            }
         }
-        r.renderer.present()?;
-        if let Some(completion) = r.renderer.frame_completion() {
-            r.frames.push_back((frame, completion));
-        }
+        r.frames.push_back((frame, r.renderer.submit_work()?));
         Ok(true)
     }
 

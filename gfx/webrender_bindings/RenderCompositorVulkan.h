@@ -23,6 +23,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
   RenderedFrameId EndFrame(const nsTArray<DeviceIntRect>& aDirtyRects) override;
   bool WaitForGPU() override;
   RenderedFrameId GetLastCompletedFrameId() override;
+  RenderedFrameId UpdateFrameId() override;
   bool MakeCurrent() override { return true; }
   gfx::DeviceResetReason IsContextLost(bool aForce) override;
   void Pause() override;
