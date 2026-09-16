@@ -69,6 +69,8 @@ subsuite = "mozbuild"
 
 ["configure/test_toolkit_moz_configure.py"]
 
+["configure/test_webrender_shader_tools.py"]
+
 ["configure/test_util.py"]
 
 ["controller/test_build_output.py"]
