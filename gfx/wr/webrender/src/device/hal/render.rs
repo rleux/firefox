@@ -1636,7 +1636,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                         .get(name)
                         .ok_or_else(|| format!("Missing HAL binding {name}"))?,
                 };
-                sampled.push(texture.clone());
+                sampled.push((texture.clone(), binding.name, shader, draw.count));
                 texture_owners.push(texture.clone());
                 let filter = if binding.name.starts_with("sColor") {
                     draw.filter.unwrap_or(texture.filter)
@@ -1738,9 +1738,24 @@ impl<A: BackendApi> FrameRenderer<A> {
         for (_, buffer, group) in &resources {
             commands.keep((buffer.clone(), group.clone()));
         }
-        for texture in sampled {
+        for (texture, binding, shader, count) in sampled {
             if !texture.sample_initialized() {
-                return Err("Sampling uninitialized or invalidated HAL texture contents".into());
+                let cache: Vec<_> = self
+                    .textures
+                    .iter()
+                    .filter(|(_, entry)| entry.allocation_id == texture.allocation_id)
+                    .map(|(id, _)| id)
+                    .collect();
+                return Err(format!(
+                    "Sampling uninitialized or invalidated HAL texture contents: shader={shader:?}, binding={binding}, count={count}, texture={}, cache={cache:?}, size={:?}, format={:?}, mip={}+{}, usage={:?}, target={}",
+                    texture.allocation_id,
+                    texture.size,
+                    texture.format,
+                    texture.base_mip,
+                    texture.mip_count,
+                    texture.current_usage(),
+                    target.allocation_id,
+                ));
             }
             texture.transition(&mut commands, wgt::TextureUses::RESOURCE);
         }
