@@ -175,6 +175,7 @@ mod linux {
             let copied = unsafe { self.device.copy_dmabuf_planes(&[plane], &ready) }?;
             let (mut images, release) = copied.into_parts();
             self.device.wait_dmabuf_release(&release)?;
+            log::info!("WebRender Vulkan DMA-BUF materialized: generation={generation}");
             lease.status = WrHalImageRelease::Complete;
             drop(lease);
             let image = images.pop().ok_or("DMA-BUF copy returned no image")?;
@@ -207,3 +208,60 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use self::linux::ExternalImages;
+
+#[cfg(target_os = "linux")]
+pub struct DeviceRegistration(Option<std::ptr::NonNull<c_void>>);
+
+#[cfg(target_os = "linux")]
+impl DeviceRegistration {
+    pub fn new(device: &webrender::hal::ExternalImageDevice) -> Result<Self, String> {
+        extern "C" {
+            /// cbindgen:ignore
+            fn wr_vulkan_register_dmabuf_device(
+                device: *const u8,
+                driver: *const u8,
+                rgba: *const u64,
+                rgba_len: usize,
+                bgra: *const u64,
+                bgra_len: usize,
+            ) -> *mut c_void;
+        }
+        let caps = device.dmabuf_capabilities()?;
+        if !caps.supported() {
+            return Ok(Self(None));
+        }
+        let modifiers = |format| {
+            caps.formats()
+                .iter()
+                .find(|entry| entry.0 == format)
+                .map_or(&[][..], |entry| entry.1.as_slice())
+        };
+        let rgba = modifiers(ImageFormat::RGBA8);
+        let bgra = modifiers(ImageFormat::BGRA8);
+        Ok(Self(std::ptr::NonNull::new(unsafe {
+            wr_vulkan_register_dmabuf_device(
+                caps.device_uuid().as_ptr(),
+                caps.driver_uuid().as_ptr(),
+                rgba.as_ptr(),
+                rgba.len(),
+                bgra.as_ptr(),
+                bgra.len(),
+            )
+        })))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DeviceRegistration {
+    fn drop(&mut self) {
+        extern "C" {
+            /// cbindgen:ignore
+            fn wr_vulkan_unregister_dmabuf_device(registration: *mut c_void);
+        }
+        if let Some(registration) = self.0 {
+            unsafe {
+                wr_vulkan_unregister_dmabuf_device(registration.as_ptr());
+            }
+        }
+    }
+}

@@ -26,6 +26,8 @@ class RenderDMABUFTextureHost final : public RenderTextureHostSWGL {
   gfx::IntSize GetSize(uint8_t aChannelIndex) const;
   wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL) override;
   void Unlock() override;
+  bool LockHalImage(uint8_t aChannelIndex, WrHalImage* aImage) override;
+  void UnlockHalImage(WrHalImageRelease aStatus) override;
   void ClearCachedResources() override;
 
   size_t Bytes() override {
@@ -50,6 +52,7 @@ class RenderDMABUFTextureHost final : public RenderTextureHostSWGL {
   virtual ~RenderDMABUFTextureHost();
   void DeleteTextureHandle();
 
+  bool mVulkanFailed = false;
   RefPtr<DMABufSurface> mSurface;
   RefPtr<gl::GLContext> mGL;
   RefPtr<gfx::DataSourceSurface> mReadback;

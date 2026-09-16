@@ -78,6 +78,12 @@ namespace layers {
   CompositeProcessFencesHolderId? fencesHolderId;
 };
 
+[Comparable] struct VulkanImageState {
+  uint8_t[] deviceUUID;
+  uint8_t[] driverUUID;
+  uint64_t generation;
+};
+
 [Comparable] struct SurfaceDescriptorDMABuf {
   uint32_t bufferType;
   uint32_t fourccFormat;
@@ -103,6 +109,7 @@ namespace layers {
   nullable FileHandleWrapper semaphoreFd;
   bool semaphoreFdIsSyncFd;
   HDRMetadata hdrMetadata;
+  VulkanImageState? vulkanImageState;
 };
 
 [Comparable] struct SurfaceTextureDescriptor {

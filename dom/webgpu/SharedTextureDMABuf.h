@@ -41,6 +41,11 @@ class SharedTextureDMABuf final : public SharedTexture {
       const ffi::WGPUGlobal* aContext, RawId aDeviceId, RawId aQueueId,
       nsTArray<ffi::WGPUVkSemaphoreHandle>& aSignalSemaphores) override;
 
+  bool PrepareForVulkanPresent(const ffi::WGPUGlobal* aContext, RawId aDeviceId,
+                               RawId aQueueId, RawId aTextureId,
+                               uint64_t aGeneration);
+  bool IsForVulkanWebRender() const { return mDMABufInfo.for_webrender; }
+
   void CleanForRecycling() override;
 
   UniqueFileHandle CloneDmaBufFd();
@@ -52,6 +57,7 @@ class SharedTextureDMABuf final : public SharedTexture {
   const layers::SurfaceDescriptorDMABuf mSurfaceDescriptor;
   const ffi::WGPUDMABufInfo mDMABufInfo;
   RefPtr<gfx::FileHandleWrapper> mSemaphoreFd;
+  uint64_t mVulkanGeneration = 0;
 };
 
 }  // namespace webgpu

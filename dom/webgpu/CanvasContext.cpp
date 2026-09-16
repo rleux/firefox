@@ -25,6 +25,9 @@
 #include "mozilla/layers/RenderRootStateManager.h"
 #include "mozilla/layers/WebRenderCanvasRenderer.h"
 #include "nsDisplayList.h"
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
+#endif
 
 namespace mozilla {
 
@@ -129,6 +132,12 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
   if (mUseSharedTextureInSwapChain) {
     bool client_can_use = wgpu_client_use_shared_texture_in_swapChain(
         ConvertTextureFormat(aConfig.mFormat));
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (wr::RenderCompositorVulkan::IsRequested() &&
+        aConfig.mFormat == dom::GPUTextureFormat::Rgba8unorm) {
+      client_can_use = true;
+    }
+#endif
     if (!client_can_use) {
       gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
                          "canvas configuration format not supported";
@@ -153,7 +162,7 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
 #elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
   // When DMABufDevice is not enabled, disable shared texture in swap chain.
   const auto& modifiers = gfx::gfxVars::DMABufModifiersARGB();
-  if (modifiers.IsEmpty()) {
+  if (!wr::RenderCompositorVulkan::IsRequested() && modifiers.IsEmpty()) {
     gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
                        "missing GBM_FORMAT_ARGB8888 dmabuf format";
     mUseSharedTextureInSwapChain = false;
