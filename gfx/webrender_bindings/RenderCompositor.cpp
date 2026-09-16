@@ -205,14 +205,14 @@ void wr_partial_present_compositor_set_buffer_damage_region(
 UniquePtr<RenderCompositor> RenderCompositor::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
 #if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
-  if (const char* backend = PR_GetEnv("MOZ_WR_BACKEND")) {
-    if (RenderCompositorVulkan::IsRequested()) {
-      return RenderCompositorVulkan::Create(aWidget, aError);
-    }
-    if (strcmp(backend, "gl")) {
-      aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
-      return nullptr;
-    }
+  const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
+  if (backend && strcmp(backend, "gl") && strcmp(backend, "vulkan")) {
+    aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
+    return nullptr;
+  }
+  if (RenderCompositorVulkan::IsRequested() &&
+      (backend || !aWidget->GetCompositorOptions().UseSoftwareWebRender())) {
+    return RenderCompositorVulkan::Create(aWidget, aError);
   }
 #endif
   if (aWidget->GetCompositorOptions().UseSoftwareWebRender()) {

@@ -10,7 +10,10 @@
 
 #include "mozilla/StaticMutex.h"
 #include "mozilla/StaticPtr.h"
+#include "mozilla/WidgetUtilsGtk.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/widget/GtkCompositorWidget.h"
+#include "nsXULAppAPI.h"
 #include "prenv.h"
 #ifdef MOZ_X11
 #  include "mozilla/X11Util.h"
@@ -74,7 +77,29 @@ extern "C" bool wr_vulkan_supports_dmabuf(const uint8_t* aDevice,
 
 bool RenderCompositorVulkan::IsRequested() {
   const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
-  return backend && !strcmp(backend, "vulkan");
+  if (backend) {
+    return !strcmp(backend, "vulkan");
+  }
+#ifdef MOZ_X11
+  if (XRE_IsParentProcess()) {
+    if (!gdk_display_get_default()) {
+      return false;
+    }
+    static const bool useVulkan = [] {
+      const bool x11 = widget::GdkIsX11Display();
+      // Content processes have no GTK display; inherit the parent's choice.
+      PR_SetEnv(x11 ? "MOZ_WR_DEFAULT_BACKEND=vulkan"
+                    : "MOZ_WR_DEFAULT_BACKEND=gl");
+      return x11;
+    }();
+    return useVulkan && !gfx::gfxVars::UseSoftwareWebRender();
+  }
+  const char* inherited = PR_GetEnv("MOZ_WR_DEFAULT_BACKEND");
+  return inherited && !strcmp(inherited, "vulkan") &&
+         !gfx::gfxVars::UseSoftwareWebRender();
+#else
+  return false;
+#endif
 }
 
 UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
