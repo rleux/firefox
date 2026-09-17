@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -26,6 +27,7 @@ extern "C" {
 #include <string>
 
 struct Decoder {
+  int accessLock = -1;
   AVBufferRef* device = nullptr;
   AVCodecContext* context = nullptr;
   AVFrame* frame = av_frame_alloc();
@@ -33,6 +35,7 @@ struct Decoder {
   AVFrame* reference = av_frame_alloc();
   AVPacket* packet = av_packet_alloc();
   ~Decoder() {
+    if (accessLock >= 0) close(accessLock);
     av_frame_free(&mapped);
     av_frame_free(&reference);
     av_frame_free(&frame);
@@ -174,6 +177,12 @@ int main(int argc, char** argv) {
     if (layer.nb_planes != 1 || layer.planes[0].object_index != 0) return 1;
   }
   const int fd = drm->objects[0].fd;
+  decoder.accessLock = memfd_create("wr-video-test-access", MFD_ALLOW_SEALING);
+  if (decoder.accessLock < 0 ||
+      ftruncate(decoder.accessLock, sizeof(uint32_t)) ||
+      fcntl(decoder.accessLock, F_ADD_SEALS,
+            F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0)
+    return 1;
   const int flags = fcntl(fd, F_GETFD);
   if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) < 0) return 1;
   std::error_code error;
@@ -193,6 +202,7 @@ int main(int argc, char** argv) {
   reference.close();
   if (!reference || setenv("WR_NV12_REFERENCE", referencePath.c_str(), 1) ||
       !SetNumber("WR_NV12_FD", fd) ||
+      !SetNumber("WR_NV12_ACCESS_LOCK_FD", decoder.accessLock) ||
       !SetNumber("WR_NV12_BYTES", drm->objects[0].size) ||
       !SetNumber("WR_NV12_MODIFIER", drm->objects[0].format_modifier) ||
       !SetNumber("WR_NV12_WIDTH", decoder.frame->width) ||

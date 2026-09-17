@@ -14,6 +14,7 @@
 
 #  include "base/linux_memfd_defs.h"
 #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+#  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #endif
 
 #include "gtest/gtest.h"
@@ -225,7 +226,7 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   planes.AppendElement(
       DMABufVideoPlane(aSeparateObjects ? 1 : 0, image.offsets()[1], 128));
   image.vaapiImageState() = Some(VAAPIImageState(
-      objects, planes, 42, 7, 3, true, WrapNotNull(accessLock)));
+      objects, planes, 42, 7, 3, true, 226, 128, WrapNotNull(accessLock)));
   return Some(std::move(descriptor));
 }
 
@@ -254,6 +255,8 @@ TEST(DMABufSurface, VAAPIObjectAndPlaneRoundtrip)
         EXPECT_EQ(state.allocationId(), 42u);
         EXPECT_EQ(state.generation(), 7u);
         EXPECT_EQ(state.producerEpoch(), 3u);
+        EXPECT_EQ(state.drmRenderMajor(), 226u);
+        EXPECT_EQ(state.drmRenderMinor(), 128u);
         EXPECT_TRUE(state.producerComplete());
         EXPECT_EQ(image.yUVColorSpace(), YUVColorSpace::BT709);
         EXPECT_EQ(image.colorRange(), ColorRange::FULL);
@@ -335,6 +338,10 @@ TEST(DMABufSurface, VAAPIRejectsInvalidDescriptors)
        [](auto& d) { d.vaapiImageState()->generation() = 0; }},
       {"zero producer epoch",
        [](auto& d) { d.vaapiImageState()->producerEpoch() = 0; }},
+      {"missing DRM device",
+       [](auto& d) { d.vaapiImageState()->drmRenderMajor() = 0; }},
+      {"invalid DRM minor",
+       [](auto& d) { d.vaapiImageState()->drmRenderMinor() = UINT64_MAX; }},
       {"producer not complete",
        [](auto& d) { d.vaapiImageState()->producerComplete() = false; }},
       {"unexpected fence",
@@ -411,6 +418,67 @@ TEST(DMABufSurface, VAAPIAbandonmentPreventsForwarding)
   RefPtr<DMABufSurface> rejected =
       DMABufSurface::CreateDMABufSurface(*descriptor);
   EXPECT_FALSE(rejected);
+}
+
+TEST(DMABufSurface, VAAPITryLockDoesNotPoisonBusyPublication)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> first = DMABufSurface::CreateDMABufSurface(*descriptor);
+  RefPtr<DMABufSurface> second =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->TryLockAccess());
+  EXPECT_FALSE(second->TryLockAccess());
+  EXPECT_TRUE(first->AccessLockUsable());
+  first->UnlockAccess();
+  ASSERT_TRUE(second->TryLockAccess());
+  second->UnlockAccess(true);
+  EXPECT_FALSE(first->TryLockAccess());
+  EXPECT_FALSE(first->AccessLockUsable());
+}
+
+TEST(DMABufSurface, VAAPIExportsOneFrameForBothHalChannels)
+{
+  for (bool separate : {false, true}) {
+    auto descriptor = MakeVAAPIDescriptor(separate);
+    ASSERT_TRUE(descriptor);
+    RefPtr<DMABufSurface> surface =
+        DMABufSurface::CreateDMABufSurface(*descriptor);
+    ASSERT_TRUE(surface);
+    wr::WrHalImage image{};
+    const auto getImage = [&](uint8_t aChannel) {
+      return wr::RenderDMABUFTextureHost::GetVAAPIImage(
+          *surface->GetAsDMABufSurfaceYUV(), aChannel, &image);
+    };
+    for (uint8_t channel : {1, 0, 1}) {
+      ASSERT_EQ(getImage(channel), !separate);
+      if (separate) continue;
+      ASSERT_TRUE(image.source.IsNv12());
+      const auto& nv12 = image.source.nv12._0;
+      EXPECT_EQ(image.generation, 7u);
+      EXPECT_EQ(nv12.width, 128u);
+      EXPECT_EQ(nv12.height, 128u);
+      EXPECT_EQ(nv12.allocation_width, 128u);
+      EXPECT_EQ(nv12.allocation_height, 128u);
+      EXPECT_EQ(nv12.allocation_size, 24576u);
+      EXPECT_EQ(nv12.offsets[1], 16384u);
+      EXPECT_EQ(nv12.strides[1], 128u);
+      EXPECT_EQ(nv12.allocation_id, 42u);
+      EXPECT_EQ(nv12.producer_epoch, 3u);
+      EXPECT_EQ(nv12.drm_node[0], 226u);
+      EXPECT_EQ(nv12.drm_node[1], 128u);
+      EXPECT_GE(nv12.fd, 0);
+      EXPECT_GE(nv12.access_lock_fd, 0);
+      ASSERT_TRUE(surface->TryLockAccess());
+      surface->UnlockAccess();
+    }
+    EXPECT_FALSE(getImage(2));
+    ASSERT_TRUE(surface->TryLockAccess());
+    surface->UnlockAccess(true);
+    EXPECT_FALSE(getImage(0));
+  }
 }
 
 TEST(DMABufSurface, VAAPIPublicationIdentitySurvivesForwarding)

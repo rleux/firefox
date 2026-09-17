@@ -110,6 +110,7 @@ class DMABufSurface : public BufferSurface {
   bool EnableForeignRGB();
   bool CreateAccessLock();
   bool AccessLockUsable() const;
+  bool TryLockAccess();
   bool LockAccess();
   void UnlockAccess(bool aAbandon = false);
   RefPtr<mozilla::gfx::FileHandleWrapper> GetAccessLockFd() const {

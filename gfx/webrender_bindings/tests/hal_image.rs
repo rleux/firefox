@@ -22,6 +22,9 @@ mod bindings {
 mod hal_image;
 use hal_image::*;
 
+#[path = "hal_video.rs"]
+mod video;
+
 extern "C" {
     fn wr_snapshot_vulkan_dmabuf(data: &WrHalDmaBuf, destination: *mut u8, length: usize, stride: usize) -> bool;
 }
@@ -72,11 +75,21 @@ struct Fixture {
     export: RefCell<Option<hal::DmaBufExport>>,
     releases: Rc<RefCell<Vec<WrHalImageRelease>>>,
     pixels: Vec<u8>,
+    video_access: RefCell<VideoAccess>,
+}
+
+#[derive(Default)]
+struct VideoAccess {
+    locked: bool,
+    poisoned: bool,
+    locks: usize,
+    unlocks: usize,
 }
 
 struct Token {
     fixture: Rc<Fixture>,
     _export: Option<hal::DmaBufExport>,
+    video_locked: bool,
 }
 
 #[no_mangle]
@@ -94,6 +107,7 @@ unsafe extern "C" fn wr_renderer_acquire_hal_image(
     Box::into_raw(Box::new(Token {
         fixture: fixture.clone(),
         _export: fixture.export.borrow_mut().take(),
+        video_locked: false,
     })) as *mut WrHalImageLease
 }
 
@@ -103,8 +117,25 @@ unsafe extern "C" fn wr_renderer_lock_foreign_rgb(_: *mut WrHalImageLease) -> bo
 }
 
 #[no_mangle]
+unsafe extern "C" fn wr_renderer_try_lock_vaapi_image(raw: *mut WrHalImageLease) -> bool {
+    let token = &mut *(raw as *mut Token);
+    let mut access = token.fixture.video_access.borrow_mut();
+    if access.locked || access.poisoned { return false; }
+    access.locked = true;
+    access.locks += 1;
+    token.video_locked = true;
+    true
+}
+
+#[no_mangle]
 unsafe extern "C" fn wr_renderer_release_hal_image(raw: *mut WrHalImageLease, status: WrHalImageRelease) {
     let token = Box::from_raw(raw as *mut Token);
+    if token.video_locked {
+        let mut access = token.fixture.video_access.borrow_mut();
+        access.locked = false;
+        access.unlocks += 1;
+        access.poisoned |= matches!(status, WrHalImageRelease::Abandoned);
+    }
     token.fixture.releases.borrow_mut().push(status);
 }
 
@@ -168,6 +199,7 @@ fn buffer_acquisitions_release_once_on_success_and_error() {
             export: RefCell::new(None),
             releases: Default::default(),
             pixels: vec![17; 16],
+            video_access: Default::default(),
         });
         *fixture.image.borrow_mut() = Some(WrHalImage {
             generation: 19,
@@ -218,6 +250,7 @@ fn buffer_acquisitions_release_once_on_success_and_error() {
             export: RefCell::new(None),
             releases: Default::default(),
             pixels: Vec::new(),
+            video_access: Default::default(),
         });
         assert!(provider(&fixture, renderer.external_image_device())
             .acquire(ExternalImageId(1), 0, false)
@@ -274,6 +307,7 @@ fn native_descriptor_copy_survives_producer_descriptor_release() {
         export: RefCell::new(Some(export)),
         releases: Default::default(),
         pixels: Vec::new(),
+        video_access: Default::default(),
     });
     let lease = provider(&fixture, device)
         .acquire(ExternalImageId(1), 0, false)

@@ -44,6 +44,25 @@ pub struct WrHalForeignRGB {
     pub offset: u64,
 }
 
+/// cbindgen:derive-ostream=false
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WrHalNv12 {
+    pub fd: i32,
+    pub access_lock_fd: i32,
+    pub width: u32,
+    pub height: u32,
+    pub allocation_width: u32,
+    pub allocation_height: u32,
+    pub allocation_size: u64,
+    pub modifier: u64,
+    pub strides: [u64; 2],
+    pub offsets: [u64; 2],
+    pub allocation_id: u64,
+    pub producer_epoch: u64,
+    pub drm_node: [u64; 2],
+}
+
 /// cbindgen:derive-eq=false
 /// cbindgen:derive-ostream=false
 #[repr(C)]
@@ -55,6 +74,9 @@ pub enum WrHalImageSource {
     VulkanDmaBuf(WrHalDmaBuf),
     /// cbindgen:derive-ostream=false
     ForeignRGB(WrHalForeignRGB),
+    /// cbindgen:derive-eq=false
+    /// cbindgen:derive-ostream=false
+    Nv12(WrHalNv12),
 }
 
 /// cbindgen:derive-eq=false
@@ -87,6 +109,8 @@ extern "C" {
     ) -> *mut WrHalImageLease;
     /// cbindgen:ignore
     pub fn wr_renderer_lock_foreign_rgb(lease: *mut WrHalImageLease) -> bool;
+    /// cbindgen:ignore
+    pub fn wr_renderer_try_lock_vaapi_image(lease: *mut WrHalImageLease) -> bool;
     pub fn wr_renderer_release_hal_image(lease: *mut WrHalImageLease, status: WrHalImageRelease);
 }
 
@@ -112,8 +136,24 @@ mod linux {
         image: hal::WeakForeignRgbImage,
     }
 
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    struct VideoIdentity {
+        allocation: u64,
+        generation: u64,
+        producer_epoch: u64,
+        drm_node: [u64; 2],
+        access_lock: (u64, u64),
+    }
+
+    struct VideoEntry {
+        identity: VideoIdentity,
+        layout: hal::Nv12DmaBufLayout,
+        image: hal::WeakForeignNv12Image,
+    }
+
     thread_local! {
         static FOREIGN_IMAGES: RefCell<HashMap<(u64, u64), ForeignEntry>> = RefCell::new(HashMap::new());
+        static VIDEO_IMAGES: RefCell<HashMap<(u64, u64), VideoEntry>> = RefCell::new(HashMap::new());
     }
 
     /// cbindgen:ignore
@@ -282,6 +322,59 @@ mod linux {
                 |_| {},
             )
         }
+
+        fn nv12(&self, data: WrHalNv12, generation: u64, channel: u8, mut lease: Lease)
+            -> Result<ExternalImageLease, String> {
+            if data.fd < 0 || data.access_lock_fd < 0 || generation == 0
+                || data.allocation_id == 0 || data.producer_epoch == 0 || channel > 1 {
+                return Err("Invalid NV12 publication metadata".into());
+            }
+            let layout = hal::Nv12DmaBufLayout::new(
+                [data.allocation_width, data.allocation_height], [data.width, data.height],
+                data.modifier, data.strides, data.offsets, data.allocation_size,
+            )?;
+            let metadata = |fd: i32| -> Result<_, String> {
+                let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                File::from(fd.try_clone_to_owned().map_err(|error| error.to_string())?)
+                    .metadata().map_err(|error| error.to_string())
+            };
+            let allocation = metadata(data.fd)?;
+            let lock = metadata(data.access_lock_fd)?;
+            let key = (allocation.dev(), allocation.ino());
+            let identity = VideoIdentity {
+                allocation: data.allocation_id, generation, producer_epoch: data.producer_epoch,
+                drm_node: data.drm_node, access_lock: (lock.dev(), lock.ino()),
+            };
+            let uv = TexelRect::new(0.0, 0.0, (data.width >> channel) as f32, (data.height >> channel) as f32);
+            VIDEO_IMAGES.with(|images| {
+                let mut images = images.borrow_mut();
+                images.retain(|_, entry| entry.image.upgrade().is_some());
+                if let Some(entry) = images.get(&key) {
+                    if let Some(image) = entry.image.upgrade() {
+                        if entry.identity != identity || entry.layout != layout || !image.belongs_to(&self.device) {
+                            return Err("NV12 allocation has a different live publication or Vulkan device".into());
+                        }
+                        return image.lease(channel, uv);
+                    }
+                }
+                if !unsafe { wr_renderer_try_lock_vaapi_image(lease.raw.as_ptr()) } {
+                    return Err("NV12 publication is busy or abandoned".into());
+                }
+                let image = unsafe { self.device.import_vaapi_nv12(
+                    BorrowedFd::borrow_raw(data.fd), layout, data.drm_node, generation, move |status| {
+                        lease.status = match status {
+                            hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
+                            hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
+                            hal::ExternalImageRelease::Abandoned => WrHalImageRelease::Abandoned,
+                        };
+                        drop(lease);
+                    },
+                ) }?;
+                images.insert(key, VideoEntry { identity, layout, image: image.downgrade() });
+                log::info!("Video transport: direct Vulkan NV12 sampling, generation={generation}");
+                image.lease(channel, uv)
+            })
+        }
     }
 
     fn dmabuf_plane(data: &WrHalDmaBuf) -> Result<(hal::DmaBufPlane, hal::SyncFile), String> {
@@ -376,6 +469,7 @@ mod linux {
                 WrHalImageSource::Buffer(data) => Self::buffer(data, image.generation, lease),
                 WrHalImageSource::VulkanDmaBuf(data) => self.dmabuf(data, image.generation, lease),
                 WrHalImageSource::ForeignRGB(data) => self.foreign_rgb(data, image.generation, lease),
+                WrHalImageSource::Nv12(data) => self.nv12(data, image.generation, channel, lease),
             }
         }
     }

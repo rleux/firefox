@@ -487,6 +487,15 @@ impl WeakForeignNv12Image {
     }
 }
 impl ForeignNv12Image {
+    pub fn belongs_to(&self, device: &ExternalImageDevice) -> bool {
+        device.dmabuf_producer().map_or(false, |producer| {
+            self.0
+                .release
+                .access
+                .as_ref()
+                .map_or(false, |access| Rc::ptr_eq(&access.owner, &producer.owner))
+        })
+    }
     pub fn downgrade(&self) -> WeakForeignNv12Image {
         WeakForeignNv12Image(Rc::downgrade(&self.0))
     }

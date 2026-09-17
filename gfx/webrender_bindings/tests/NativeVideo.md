@@ -75,6 +75,23 @@ The runner checks process status, a nonempty test result and validation
 diagnostics, and terminates the fixture process group on timeout. It never
 builds anything.
 
+The runner also accepts `--icd`, `--validation-layers` and `--shader-input` to
+set those choices explicitly instead of using the caller's environment.
+
+## Browser bridge tests
+
+Build the `browser_hal_image_leases` target with the same Cargo flags, replacing
+`--lib` with `--test browser_hal_image_leases`, and pass its printed executable
+to the same native runner. The exporter supplies a shared lock handle as well
+as the live decoded frame. These tests use callback shims to exercise the Rust
+browser bridge with real GPU imports, independently of a Firefox rebuild.
+
+They verify UV-first and duplicate channel requests, one lock per publication,
+weak-cache retirement, stale metadata and device rejection, a busy lock without
+poisoning, and one completed frame release after rendering. C++ gtests separately
+cover the actual shared lock and descriptor-to-HAL conversion. Browser decoder
+publication and pool lifetime still require the later integration steps.
+
 Native tests compare decoded Y/UV bytes and rendered pixels with controls,
 including nearest/linear modes, cropped visible dimensions and downscaling.
 They verify shared image identity, retention while either plane lease is alive,

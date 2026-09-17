@@ -82,9 +82,48 @@ gfx::IntSize RenderDMABUFTextureHost::GetSize(uint8_t aChannelIndex) const {
 
 void RenderDMABUFTextureHost::Unlock() {}
 
+bool RenderDMABUFTextureHost::GetVAAPIImage(const DMABufSurfaceYUV& aSurface,
+                                            uint8_t aChannelIndex,
+                                            WrHalImage* aImage) {
+  const auto* desc = aSurface.GetVAAPIDescriptor();
+  if (!desc || aChannelIndex > 1 || !aSurface.AccessLockUsable()) {
+    return false;
+  }
+  const auto& state = desc->vaapiImageState().ref();
+  if (state.objects().Length() != 1) {
+    return false;
+  }
+  const auto& object = state.objects()[0];
+  WrHalNv12 image{};
+  image.fd = object.fd()->GetHandle();
+  image.access_lock_fd = state.accessLock()->GetHandle();
+  image.width = desc->width()[0];
+  image.height = desc->height()[0];
+  image.allocation_width = desc->widthAligned()[0];
+  image.allocation_height = desc->heightAligned()[0];
+  image.allocation_size = object.size();
+  image.modifier = object.modifier();
+  for (size_t i = 0; i < 2; ++i) {
+    image.strides[i] = state.planes()[i].stride();
+    image.offsets[i] = state.planes()[i].offset();
+  }
+  image.allocation_id = state.allocationId();
+  image.producer_epoch = state.producerEpoch();
+  image.drm_node[0] = state.drmRenderMajor();
+  image.drm_node[1] = state.drmRenderMinor();
+  *aImage = WrHalImage{state.generation(), WrHalImageSource::Nv12(image)};
+  return true;
+}
+
 bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
                                            WrHalImage* aImage) {
-  if (mVulkanFailed || aChannelIndex) {
+  if (mVulkanFailed) {
+    return false;
+  }
+  if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
+    return GetVAAPIImage(*yuv, aChannelIndex, aImage);
+  }
+  if (aChannelIndex) {
     return false;
   }
   if (const auto* foreign = mSurface->GetForeignRGBDescriptor()) {
@@ -144,7 +183,9 @@ void RenderDMABUFTextureHost::UnlockHalImage(WrHalImageRelease aStatus) {
     mVulkanLocked = false;
   }
   if (aStatus == WrHalImageRelease::Abandoned) {
-    if (!mVulkanFailed && mSurface->IsForeignRGB()) {
+    auto* yuv = mSurface->GetAsDMABufSurfaceYUV();
+    if (!mVulkanFailed &&
+        (mSurface->IsForeignRGB() || (yuv && yuv->GetVAAPIDescriptor()))) {
       mSurface->GlobalRefAdd();
     }
     mVulkanFailed = true;
