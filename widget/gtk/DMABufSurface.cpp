@@ -61,6 +61,7 @@
 #include "GLReadTexImageHelper.h"
 #include "ImageContainer.h"
 #include "ScopedGLHelpers.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
@@ -499,6 +500,10 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
     const mozilla::layers::SurfaceDescriptor& aDesc) {
   const SurfaceDescriptorDMABuf& desc = aDesc.get_SurfaceDescriptorDMABuf();
   RefPtr<DMABufSurface> surf;
+
+  if (desc.vaapiImageState() && desc.bufferType() != SURFACE_YUV) {
+    return nullptr;
+  }
 
   switch (desc.bufferType()) {
     case SURFACE_RGBA:
@@ -1373,7 +1378,8 @@ bool DMABufSurfaceRGBA::Serialize(
       mForeignRGBGeneration
           ? Some(layers::ForeignRGBImageState(mForeignRGBGeneration,
                                               WrapNotNull(mAccessLockFd)))
-          : Nothing());
+          : Nothing(),
+      Nothing());
   return true;
 }
 
@@ -2122,8 +2128,115 @@ bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
   return ImportSurfaceDescriptor(aDesc);
 }
 
+static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
+#ifdef XP_LINUX
+  const auto& state = aDesc.vaapiImageState().ref();
+  if (aDesc.vulkanImageState() || aDesc.foreignRGBImageState() ||
+      aDesc.fourccFormat() != VA_FOURCC_NV12 || !state.allocationId() ||
+      !state.generation() || !state.producerEpoch() ||
+      !state.producerComplete() || aDesc.semaphoreFd() ||
+      aDesc.semaphoreFdIsSyncFd() || !aDesc.fence().IsEmpty() ||
+      aDesc.refCount().Length() != 1 || !aDesc.refCount()[0].IsValid() ||
+      state.objects().IsEmpty() || state.objects().Length() > 2 ||
+      state.planes().Length() != 2 || aDesc.fds().Length() != 2 ||
+      aDesc.width().Length() != 2 || aDesc.height().Length() != 2 ||
+      aDesc.widthAligned().Length() != 2 ||
+      aDesc.heightAligned().Length() != 2 || aDesc.format().Length() != 2 ||
+      aDesc.strides().Length() != 2 || aDesc.offsets().Length() != 2 ||
+      aDesc.modifier().Length() != 2 || aDesc.format()[0] != DRM_FORMAT_R8 ||
+      aDesc.format()[1] != DRM_FORMAT_GR88) {
+    return false;
+  }
+  const uint32_t width = aDesc.width()[0];
+  const uint32_t height = aDesc.height()[0];
+  const uint32_t alignedWidth = aDesc.widthAligned()[0];
+  const uint32_t alignedHeight = aDesc.heightAligned()[0];
+  if (!width || !height || width > alignedWidth || height > alignedHeight ||
+      alignedWidth > INT_MAX || alignedHeight > INT_MAX ||
+      ((width | height | alignedWidth | alignedHeight) & 1) ||
+      aDesc.width()[1] != width / 2 || aDesc.height()[1] != height / 2 ||
+      aDesc.widthAligned()[1] != alignedWidth / 2 ||
+      aDesc.heightAligned()[1] != alignedHeight / 2) {
+    return false;
+  }
+
+  struct stat objects[2]{};
+  bool used[2]{};
+  for (size_t i = 0; i < state.objects().Length(); ++i) {
+    const auto& object = state.objects()[i];
+    if (fstat(object.fd()->GetHandle(), &objects[i]) ||
+        objects[i].st_size <= 0 ||
+        object.size() != uint64_t(objects[i].st_size) ||
+        (object.modifier() != DRM_FORMAT_MOD_LINEAR &&
+         object.modifier() != I915_FORMAT_MOD_Y_TILED)) {
+      return false;
+    }
+    if (i && objects[0].st_dev == objects[i].st_dev &&
+        objects[0].st_ino == objects[i].st_ino) {
+      return false;
+    }
+  }
+  uint64_t ends[2]{};
+  for (size_t i = 0; i < 2; ++i) {
+    const auto& plane = state.planes()[i];
+    if (plane.objectIndex() >= state.objects().Length()) {
+      return false;
+    }
+    const auto& object = state.objects()[plane.objectIndex()];
+    const auto& identity = objects[plane.objectIndex()];
+    struct stat legacy{};
+    if (fstat(aDesc.fds()[i]->GetHandle(), &legacy) ||
+        legacy.st_dev != identity.st_dev || legacy.st_ino != identity.st_ino ||
+        aDesc.modifier()[i] != object.modifier() ||
+        aDesc.strides()[i] != plane.stride() ||
+        aDesc.offsets()[i] != plane.offset() ||
+        plane.offset() >= object.size() || plane.stride() < alignedWidth) {
+      return false;
+    }
+    used[plane.objectIndex()] = true;
+    if (object.modifier() == DRM_FORMAT_MOD_LINEAR) {
+      const auto end = CheckedInt<uint64_t>(plane.offset()) +
+                       CheckedInt<uint64_t>(plane.stride()) *
+                           (aDesc.heightAligned()[i] - 1) +
+                       alignedWidth;
+      if (!end.isValid() || end.value() > object.size()) {
+        return false;
+      }
+      ends[i] = end.value();
+    }
+  }
+  for (size_t i = 0; i < state.objects().Length(); ++i) {
+    if (!used[i]) {
+      return false;
+    }
+  }
+  if (state.planes()[0].objectIndex() == state.planes()[1].objectIndex()) {
+    const auto yOffset = state.planes()[0].offset();
+    const auto uvOffset = state.planes()[1].offset();
+    if (yOffset == uvOffset ||
+        (ends[0] && !(ends[0] <= uvOffset || ends[1] <= yOffset))) {
+      return false;
+    }
+  }
+  // Tiled allocation bounds and modifier memory planes need Vulkan validation.
+  return true;
+#else
+  return false;
+#endif
+}
+
 bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
     const SurfaceDescriptorDMABuf& aDesc) {
+  if (aDesc.vaapiImageState()) {
+    if (!ValidateVAAPIImageState(aDesc)) {
+      return false;
+    }
+    mAccessLockFd = aDesc.vaapiImageState()->accessLock();
+    if (!MapAccessLock() || !AccessLockUsable()) {
+      return false;
+    }
+    mVAAPIDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(aDesc);
+  }
   mBufferPlaneCount = aDesc.fds().Length();
   MOZ_RELEASE_ASSERT(mBufferPlaneCount <= DMABUF_BUFFER_PLANES);
   if (mBufferPlaneCount <= 0 ||
@@ -2185,6 +2298,13 @@ bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
 
 bool DMABufSurfaceYUV::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mVAAPIDescriptor) {
+    if (!AccessLockUsable()) {
+      return false;
+    }
+    aOutDescriptor = *mVAAPIDescriptor;
+    return true;
+  }
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> width;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> height;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> widthBytes;
@@ -2225,7 +2345,7 @@ bool DMABufSurfaceYUV::Serialize(
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
       refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing(),
-      Nothing());
+      Nothing(), Nothing());
   return true;
 }
 
@@ -2524,6 +2644,7 @@ int DMABufSurfaceYUV::GetTextureCount() { return mBufferPlaneCount; }
 
 void DMABufSurfaceYUV::ReleaseSurface() {
   LOGDMABUF("DMABufSurfaceYUV::ReleaseSurface() UID %d", mUID);
+  mVAAPIDescriptor = nullptr;
   ReleaseTextures();
   if (ReleaseDMABuf()) {
     LogMemorySubYUV(GetUID(), GetUsedMemory(mWidth[0], mHeight[0]));
