@@ -133,3 +133,23 @@ publication remains disabled until negotiation and fallback are implemented.
 Separate consumer paths, including WebGL video uploads and live snapshots, still
 need browser validation before enablement. These pool tests do not establish
 end-to-end playback or performance.
+
+## Capability probe
+
+The startup probe queries the same mutable NV12 format, plane views, modifier,
+filtering, readback and external-memory support as the importer. It reports
+per-modifier dimension and allocation-size limits, plus Vulkan device/driver
+identity, only when the selected Vulkan adapter matches the decoder DRM node.
+Failed queries clear the result. GL and software WebRender skip the probe.
+`WebRenderVulkanVideoCapabilities` carries these results through graphics IPC.
+
+The native bridge tests compare this probe against the actual VA-API export
+and verify device mismatch clears previously successful results. The importer
+tests also check that the reported limits admit the frame they sample. Unit
+tests cover modifier, dimension and allocation-size boundaries; the C++
+`VideoCapabilitiesSurviveGfxVarIPC` test checks serialization of device identity
+and both modifier records, including sizes above 4 GiB.
+
+A successful probe does not enable publication. Renderer registration,
+per-frame admission and late-failure recovery remain required. Image creation,
+memory compatibility and actual plane layout are still validated at import.

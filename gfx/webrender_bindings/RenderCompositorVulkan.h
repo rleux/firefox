@@ -7,12 +7,17 @@
 
 #include "RenderCompositor.h"
 
+namespace mozilla::gfx {
+class VulkanVideoCapabilities;
+}
+
 namespace mozilla::wr {
 
 class RenderCompositorVulkan final : public RenderCompositor {
  public:
   static bool IsRequested();
   static bool SupportsWebGL();
+  static gfx::VulkanVideoCapabilities ProbeVideoCapabilities();
   static UniquePtr<RenderCompositor> Create(
       const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError);
   RenderCompositorVulkan(const RefPtr<widget::CompositorWidget>& aWidget,

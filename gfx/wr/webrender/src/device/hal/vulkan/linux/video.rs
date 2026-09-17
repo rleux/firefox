@@ -94,7 +94,23 @@ impl Nv12DmaBufLayout {
     }
 }
 
-fn sampled_limits(owner: &Device<V>, layout: &Nv12DmaBufLayout) -> Result<()> {
+#[derive(Clone, Copy, Debug)]
+pub struct Nv12DmaBufCapabilities {
+    pub modifier: u64,
+    pub max_size: [u32; 2],
+    pub max_allocation_size: u64,
+}
+
+impl Nv12DmaBufCapabilities {
+    pub fn supports(&self, layout: &Nv12DmaBufLayout) -> bool {
+        layout.modifier == self.modifier
+            && layout.allocation[0] <= self.max_size[0]
+            && layout.allocation[1] <= self.max_size[1]
+            && layout.bytes <= self.max_allocation_size
+    }
+}
+
+fn sampled_limits(owner: &Device<V>, drm_modifier: u64) -> Result<Nv12DmaBufCapabilities> {
     if !supported(owner)
         || !owner
             .open
@@ -139,7 +155,7 @@ fn sampled_limits(owner: &Device<V>, layout: &Nv12DmaBufLayout) -> Result<()> {
             | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
             | vk::FormatFeatureFlags::TRANSFER_SRC;
         if !properties.iter().any(|property| {
-            property.drm_format_modifier == layout.modifier
+            property.drm_format_modifier == drm_modifier
                 && property.drm_format_modifier_plane_count == count
                 && property
                     .drm_format_modifier_tiling_features
@@ -151,7 +167,7 @@ fn sampled_limits(owner: &Device<V>, layout: &Nv12DmaBufLayout) -> Result<()> {
         }
     }
     let mut modifier = vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
-        .drm_format_modifier(layout.modifier)
+        .drm_format_modifier(drm_modifier)
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     let mut external = vk::PhysicalDeviceExternalImageFormatInfo::default()
         .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
@@ -185,16 +201,21 @@ fn sampled_limits(owner: &Device<V>, layout: &Nv12DmaBufLayout) -> Result<()> {
             .external_memory_properties
             .compatible_handle_types
             .contains(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-        || layout.allocation[0] > limits.max_extent.width
-        || layout.allocation[1] > limits.max_extent.height
+        || limits.max_extent.width < 2
+        || limits.max_extent.height < 2
+        || limits.max_extent.depth == 0
         || limits.max_mip_levels == 0
         || limits.max_array_layers == 0
         || !limits.sample_counts.contains(vk::SampleCountFlags::TYPE_1)
-        || layout.bytes > limits.max_resource_size
+        || limits.max_resource_size == 0
     {
         return Err("NV12 allocation exceeds import capabilities".into());
     }
-    Ok(())
+    Ok(Nv12DmaBufCapabilities {
+        modifier: drm_modifier,
+        max_size: [limits.max_extent.width, limits.max_extent.height],
+        max_allocation_size: limits.max_resource_size,
+    })
 }
 
 fn import(
@@ -202,7 +223,9 @@ fn import(
     fd: BorrowedFd<'_>,
     layout: &Nv12DmaBufLayout,
 ) -> Result<[Rc<Texture<V>>; 2]> {
-    sampled_limits(owner, layout)?;
+    if !sampled_limits(owner, layout.modifier)?.supports(layout) {
+        return Err("NV12 allocation exceeds import capabilities".into());
+    }
     let file = File::from(fd.try_clone_to_owned().map_err(|error| error.to_string())?);
     if file.metadata().map_err(|error| error.to_string())?.len() < layout.bytes {
         return Err("NV12 object size exceeds its handle".into());
@@ -520,6 +543,15 @@ impl ForeignNv12Image {
 }
 
 impl ExternalImageDevice {
+    pub fn vaapi_nv12_capabilities(&self) -> Result<Vec<Nv12DmaBufCapabilities>> {
+        let owner = &self.dmabuf_producer()?.owner;
+        Ok([0, INTEL_Y_TILED]
+            .iter()
+            .copied()
+            .filter_map(|modifier| sampled_limits(owner, modifier).ok())
+            .collect())
+    }
+
     /// Imports one completed VA-API NV12 allocation for direct Y/UV sampling.
     ///
     /// # Safety

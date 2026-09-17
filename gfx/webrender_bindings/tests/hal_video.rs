@@ -4,6 +4,44 @@
 
 use super::*;
 
+extern "C" {
+    fn wr_vulkan_query_nv12(major: u64, minor: u64, output: &mut WrHalNv12Capabilities) -> bool;
+}
+
+#[test]
+#[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
+    let (_, data) = fixture();
+    let mut capabilities = WrHalNv12Capabilities::default();
+    assert!(unsafe { wr_vulkan_query_nv12(data.drm_node[0], data.drm_node[1], &mut capabilities) });
+    assert!((1..=2).contains(&capabilities.format_count));
+    let formats = &capabilities.formats[..capabilities.format_count];
+    assert!(formats.iter().any(|format| {
+        format.modifier == data.modifier
+            && format.max_width >= data.allocation_width
+            && format.max_height >= data.allocation_height
+            && format.max_allocation_size >= data.allocation_size
+    }));
+    let identity = device().dmabuf_capabilities().unwrap();
+    assert_eq!(capabilities.device_uuid, identity.device_uuid());
+    assert_eq!(capabilities.driver_uuid, identity.driver_uuid());
+    assert!(!unsafe { wr_vulkan_query_nv12(u64::MAX, u64::MAX, &mut capabilities) });
+    assert_eq!(capabilities.format_count, 0);
+    assert_eq!(capabilities.device_uuid, [0; 16]);
+    assert_eq!(capabilities.driver_uuid, [0; 16]);
+    for format in capabilities.formats {
+        assert_eq!(
+            (
+                format.modifier,
+                format.max_width,
+                format.max_height,
+                format.max_allocation_size
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+}
+
 fn fixture() -> (Rc<Fixture>, WrHalNv12) {
     init_log();
     let number = |name| {

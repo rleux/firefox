@@ -96,6 +96,35 @@ bool RenderCompositorVulkan::IsRequested() {
          !gfx::gfxVars::UseSoftwareWebRender();
 }
 
+gfx::VulkanVideoCapabilities RenderCompositorVulkan::ProbeVideoCapabilities() {
+  gfx::VulkanVideoCapabilities result;
+  if (!IsRequested()) return result;
+  nsCString node(PR_GetEnv("MOZ_DRM_DEVICE"));
+  if (node.IsEmpty()) node = gfx::gfxVars::DrmRenderDevice();
+  struct stat device;
+  if (node.IsEmpty() || stat(node.get(), &device) || !S_ISCHR(device.st_mode)) {
+    return result;
+  }
+  WrHalNv12Capabilities capabilities{};
+  if (!wr_vulkan_query_nv12(major(device.st_rdev), minor(device.st_rdev),
+                            &capabilities) ||
+      !capabilities.format_count ||
+      capabilities.format_count > std::size(capabilities.formats)) {
+    return result;
+  }
+  result.drmMajor() = major(device.st_rdev);
+  result.drmMinor() = minor(device.st_rdev);
+  result.deviceUUID().AppendElements(capabilities.device_uuid, 16);
+  result.driverUUID().AppendElements(capabilities.driver_uuid, 16);
+  for (size_t i = 0; i < capabilities.format_count; ++i) {
+    const auto& format = capabilities.formats[i];
+    result.formats().AppendElement(
+        gfx::VulkanVideoFormat(format.modifier, format.max_width,
+                               format.max_height, format.max_allocation_size));
+  }
+  return result;
+}
+
 UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
 #ifdef MOZ_X11
