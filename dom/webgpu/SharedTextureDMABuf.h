@@ -50,7 +50,7 @@ class SharedTextureDMABuf final : public SharedTexture {
 
   UniqueFileHandle CloneDmaBufFd();
 
-  const ffi::WGPUDMABufInfo& GetDMABufInfo() const { return mDMABufInfo; }
+  ffi::WGPUDMABufInfo GetDMABufInfo() const;
 
  protected:
   RefPtr<DMABufSurface> mSurface;

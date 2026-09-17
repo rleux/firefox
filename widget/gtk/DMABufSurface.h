@@ -108,6 +108,13 @@ class DMABufSurface : public BufferSurface {
       const std::function<mozilla::layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
   bool EnableForeignRGB();
+  bool CreateAccessLock();
+  bool AccessLockUsable() const;
+  bool LockAccess();
+  void UnlockAccess(bool aAbandon = false);
+  RefPtr<mozilla::gfx::FileHandleWrapper> GetAccessLockFd() const {
+    return mAccessLockFd;
+  }
   bool IsForeignRGB() const { return mForeignRGB; }
   bool ForeignRGBUsable() const;
   bool LockForeignRGB();
@@ -242,10 +249,10 @@ class DMABufSurface : public BufferSurface {
   bool mSemaphoreFdIsSyncFd = false;
   bool mForeignRGB = false;
   uint64_t mForeignRGBGeneration = 0;
-  RefPtr<mozilla::gfx::FileHandleWrapper> mForeignRGBLockFd;
+  RefPtr<mozilla::gfx::FileHandleWrapper> mAccessLockFd;
   // The FD retains this shared mapping until ReleaseDMABuf unmaps it.
-  uint32_t* mForeignRGBLock = nullptr;
-  bool MapForeignRGBLock();
+  uint32_t* mAccessLock = nullptr;
+  bool MapAccessLock();
   mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
       mForeignRGBDescriptor;
   mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
