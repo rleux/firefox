@@ -165,7 +165,10 @@ frame rejection, incompatible simultaneous renderer registrations, removal of
 those registrations and persistent capability revocation. A native Rust test
 checks the actual device-registration payload and its removal.
 
-Publication remains disabled pending recovery and consumer validation. In
-particular, Linux's existing hardware-decoder fallback can fail after playback
-starts when there is no later keyframe; revoking capability alone does not
-establish successful software-decoder recovery for that case.
+Publication remains disabled pending recovery and consumer validation.
+`HardwareDecodeRecoveryTest.*` exercises the Linux media reader's first switch
+to software when there is no later keyframe. Seekable sources replay from an
+earlier keyframe and discard already delivered frames. The tests check frame
+timestamps, software-only decoder selection, remote decoder crashes, failed
+seeks, software decode failure and unseekable input. Browser playback and
+separate video-image consumers still require integration coverage.
