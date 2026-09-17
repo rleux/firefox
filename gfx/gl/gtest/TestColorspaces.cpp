@@ -6,6 +6,7 @@
 #include <limits>
 
 #include "Colorspaces.h"
+#include "GLBlitHelper.h"
 #include "gtest/gtest.h"
 
 namespace mozilla::color {
@@ -16,6 +17,70 @@ mat3 XyzFromLinearRgb(const Chromaticities&);
 }  // namespace mozilla::color
 
 using namespace mozilla::color;
+
+TEST(Colorspaces, GLBlitYUVMatrixHonorsRange)
+{
+  using namespace mozilla;
+  const struct {
+    gfx::YUVColorSpace space;
+    double kr;
+    double kb;
+  } cases[] = {{gfx::YUVColorSpace::BT601, 0.299, 0.114},
+               {gfx::YUVColorSpace::BT709, 0.2126, 0.0722},
+               {gfx::YUVColorSpace::BT2020, 0.2627, 0.0593}};
+  const std::array<std::array<double, 3>, 7> samples = {{{0, 128, 128},
+                                                         {16, 128, 128},
+                                                         {128, 128, 128},
+                                                         {235, 128, 128},
+                                                         {255, 128, 128},
+                                                         {100, 180, 70},
+                                                         {200, 32, 240}}};
+  for (const auto& test : cases) {
+    for (auto range : {gfx::ColorRange::LIMITED, gfx::ColorRange::FULL}) {
+      SCOPED_TRACE(int(test.space));
+      SCOPED_TRACE(int(range));
+      gl::DrawBlitProg::YUVArgs args;
+      args.colorSpaceForMatrix = Some(test.space);
+      args.colorRange = range;
+      const auto matrix = args.ColorMatrix();
+      for (const auto& sample : samples) {
+        const bool full = range == gfx::ColorRange::FULL;
+        const double y = full ? sample[0] : (sample[0] - 16) * 255 / 219;
+        const double u = (sample[1] - 128) * (full ? 1 : 255.0 / 224);
+        const double v = (sample[2] - 128) * (full ? 1 : 255.0 / 224);
+        const double kg = 1 - test.kr - test.kb;
+        const std::array<double, 3> expected = {
+            y + 2 * (1 - test.kr) * v,
+            y - 2 * test.kb * (1 - test.kb) / kg * u -
+                2 * test.kr * (1 - test.kr) / kg * v,
+            y + 2 * (1 - test.kb) * u};
+        for (size_t row = 0; row < 3; ++row) {
+          const double actual =
+              matrix[row] * sample[0] + matrix[4 + row] * sample[1] +
+              matrix[8 + row] * sample[2] + matrix[12 + row] * 255;
+          EXPECT_NEAR(actual, expected[row], 0.01);
+        }
+      }
+    }
+  }
+}
+
+TEST(Colorspaces, GLBlitIdentityDoesNotExpandRange)
+{
+  mozilla::gl::DrawBlitProg::YUVArgs args;
+  args.colorSpaceForMatrix =
+      mozilla::Some(mozilla::gfx::YUVColorSpace::Identity);
+  const auto limited = args.ColorMatrix();
+  args.colorRange = mozilla::gfx::ColorRange::FULL;
+  const auto full = args.ColorMatrix();
+  EXPECT_EQ(full, limited);
+  EXPECT_EQ(full[8], 1.0f);
+  EXPECT_EQ(full[1], 1.0f);
+  EXPECT_EQ(full[6], 1.0f);
+  EXPECT_EQ(full[12], 0.0f);
+  EXPECT_EQ(full[13], 0.0f);
+  EXPECT_EQ(full[14], 0.0f);
+}
 
 auto Calc8From8(const ColorspaceTransform& ct, const ivec3 in8) {
   const auto in = vec3(in8) / vec3(255);

@@ -184,7 +184,9 @@ this snapshot path.
 
 `DMABufSurface.DISABLED_NativeVAAPIGLReaders` requires a live frame from
 `ExportVAAPIFrame` and is disabled in ordinary test runs. It compares native
-and legacy GL snapshot pixels for the same limited-range frame and checks
+and legacy GL snapshot pixels for the same frame under BT.601/BT.709 and
+limited/full-range interpretation. It also checks those pixels against the
+exported NV12 bytes with an independent conversion, along with
 busy/abandoned snapshots and the surface-descriptor blit used by WebGL uploads.
 Run the exporter with a wrapper executable that ignores the Rust test arguments
 and launches the compiled Firefox gtest binary with
@@ -193,6 +195,14 @@ and launches the compiled Firefox gtest binary with
 Use the existing Firefox gtest runtime environment and an available EGL driver.
 
 This establishes a test for GL-reader coordination, not the complete browser
-acceptance matrix. Busy-read recovery in web-facing APIs, full-range color
-conversion, and software-renderer recovery still need validation before native
+acceptance matrix. Busy-read recovery in web-facing APIs, browser color
+acceptance, and software-renderer recovery still need validation before native
 publication is enabled.
+
+NV12 GL blits use an 8-bit range-aware matrix. Other blit inputs keep their
+existing limited-range default until their callers supply a supported range.
+`Colorspaces.GLBlitYUVMatrixHonorsRange` checks neutral endpoints and colored
+values against independent BT.601/BT.709/BT.2020 equations;
+`Colorspaces.GLBlitIdentityDoesNotExpandRange` covers GBR identity. The native
+fixture uses nearest-neighbor chroma sampling to match the GL blit's sampler,
+with a two-value tolerance for 8-bit channel rounding.

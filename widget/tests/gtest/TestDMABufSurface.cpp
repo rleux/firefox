@@ -9,7 +9,9 @@
 #  include <sys/eventfd.h>
 #  include <sys/syscall.h>
 
+#  include <algorithm>
 #  include <chrono>
+#  include <cmath>
 #  include <future>
 
 #  include "GLBlitHelper.h"
@@ -279,30 +281,74 @@ TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
     state.planes()[i].stride() = image.strides()[i];
     state.planes()[i].offset() = image.offsets()[i];
   }
-  RefPtr<DMABufSurface> native =
-      DMABufSurface::CreateDMABufSurface(*descriptor);
-  ASSERT_TRUE(native);
-  auto legacyDescriptor = *descriptor;
-  legacyDescriptor.get_SurfaceDescriptorDMABuf().vaapiImageState().reset();
-  RefPtr<DMABufSurface> legacy =
-      DMABufSurface::CreateDMABufSurface(legacyDescriptor);
-  ASSERT_TRUE(legacy);
-  RefPtr<gfx::DataSourceSurface> expected = legacy->GetAsSourceSurface();
-  RefPtr<gfx::DataSourceSurface> actual = native->GetAsSourceSurface();
-  ASSERT_TRUE(expected);
-  ASSERT_TRUE(actual);
-  gfx::DataSourceSurface::ScopedMap expectedMap(expected,
-                                                gfx::DataSourceSurface::READ);
-  gfx::DataSourceSurface::ScopedMap actualMap(actual,
-                                              gfx::DataSourceSurface::READ);
-  ASSERT_TRUE(expectedMap.IsMapped());
-  ASSERT_TRUE(actualMap.IsMapped());
-  for (int y = 0; y < native->GetHeight(); ++y) {
-    EXPECT_EQ(memcmp(expectedMap.GetData() + y * expectedMap.GetStride(),
-                     actualMap.GetData() + y * actualMap.GetStride(),
-                     native->GetWidth() * 4),
-              0)
-        << y;
+  const char* referencePath = getenv("WR_NV12_REFERENCE");
+  ASSERT_NE(referencePath, nullptr);
+  FILE* reference = fopen(referencePath, "rb");
+  ASSERT_NE(reference, nullptr);
+  auto closeReference = MakeScopeExit([&] { fclose(reference); });
+  const int width = image.width()[0];
+  const int height = image.height()[0];
+  nsTArray<uint8_t> pixels;
+  pixels.SetLength(size_t(width) * height * 3 / 2);
+  ASSERT_EQ(fread(pixels.Elements(), 1, pixels.Length(), reference),
+            pixels.Length());
+  const auto chroma = [&](int x, int y, int component) {
+    return pixels[width * height + (y / 2) * width + (x / 2) * 2 + component];
+  };
+  RefPtr<DMABufSurface> native;
+  for (auto space : {YUVColorSpace::BT601, YUVColorSpace::BT709}) {
+    for (auto range : {ColorRange::LIMITED, ColorRange::FULL}) {
+      SCOPED_TRACE(int(space));
+      SCOPED_TRACE(int(range));
+      image.yUVColorSpace() = space;
+      image.colorRange() = range;
+      native = DMABufSurface::CreateDMABufSurface(*descriptor);
+      ASSERT_TRUE(native);
+      auto legacyDescriptor = *descriptor;
+      legacyDescriptor.get_SurfaceDescriptorDMABuf().vaapiImageState().reset();
+      RefPtr<DMABufSurface> legacy =
+          DMABufSurface::CreateDMABufSurface(legacyDescriptor);
+      ASSERT_TRUE(legacy);
+      RefPtr<gfx::DataSourceSurface> expected = legacy->GetAsSourceSurface();
+      RefPtr<gfx::DataSourceSurface> actual = native->GetAsSourceSurface();
+      ASSERT_TRUE(expected);
+      ASSERT_TRUE(actual);
+      gfx::DataSourceSurface::ScopedMap expectedMap(
+          expected, gfx::DataSourceSurface::READ);
+      gfx::DataSourceSurface::ScopedMap actualMap(actual,
+                                                  gfx::DataSourceSurface::READ);
+      ASSERT_TRUE(expectedMap.IsMapped());
+      ASSERT_TRUE(actualMap.IsMapped());
+      const double kr = space == YUVColorSpace::BT601 ? 0.299 : 0.2126;
+      const double kb = space == YUVColorSpace::BT601 ? 0.114 : 0.0722;
+      const double kg = 1 - kr - kb;
+      const bool full = range == ColorRange::FULL;
+      int maxError = 0;
+      for (int y = 0; y < height; ++y) {
+        const auto* row = actualMap.GetData() + y * actualMap.GetStride();
+        EXPECT_EQ(memcmp(expectedMap.GetData() + y * expectedMap.GetStride(),
+                         row, width * 4),
+                  0)
+            << y;
+        for (int x = 0; x < width; ++x) {
+          const double luma = pixels[y * width + x];
+          const double yy = full ? luma : (luma - 16) * 255 / 219;
+          const double cb = (chroma(x, y, 0) - 128) * (full ? 1 : 255.0 / 224);
+          const double cr = (chroma(x, y, 1) - 128) * (full ? 1 : 255.0 / 224);
+          const double bgr[] = {
+              yy + 2 * (1 - kb) * cb,
+              yy - 2 * kb * (1 - kb) / kg * cb - 2 * kr * (1 - kr) / kg * cr,
+              yy + 2 * (1 - kr) * cr};
+          for (size_t c = 0; c < 3; ++c) {
+            const int value = std::lround(std::clamp(bgr[c], 0.0, 255.0));
+            maxError =
+                std::max(maxError, std::abs(int(row[x * 4 + c]) - value));
+          }
+          maxError = std::max(maxError, std::abs(int(row[x * 4 + 3]) - 255));
+        }
+      }
+      EXPECT_LE(maxError, 2);
+    }
   }
   ASSERT_TRUE(native->TryLockAccess());
   auto releaseAccess = MakeScopeExit([&] { native->UnlockAccess(); });
