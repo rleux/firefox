@@ -380,6 +380,10 @@ class DMABufSurfaceYUV final : public DMABufSurface {
 
   DMABufSurfaceYUV* GetAsDMABufSurfaceYUV() override { return this; };
 
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetVAAPIDescriptor() const {
+    return mVAAPIDescriptor.get();
+  }
+
   nsresult BuildSurfaceDescriptorBuffer(
       mozilla::layers::SurfaceDescriptorBuffer& aSdBuffer,
       mozilla::layers::Image::BuildSdbFlags aFlags,
@@ -472,6 +476,7 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   // Chroma location in wp_color_representation_surface_v1_chroma_location
   // format.
   uint32_t mWPChromaLocation = 0;
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf> mVAAPIDescriptor;
 };
 
 #endif

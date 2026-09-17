@@ -54,7 +54,8 @@ static SurfaceDescriptor MakeRGBADescriptor(RefPtr<FileHandleWrapper> fd) {
       width, height, width, height, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing(),
+      Nothing()));
 }
 
 // Matches what DMABufSurfaceYUV::Serialize() produces for a two-plane 128×128
@@ -77,7 +78,8 @@ static SurfaceDescriptor MakeYUVDescriptor(RefPtr<FileHandleWrapper> fd0,
       height, widthAligned, heightAligned, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing(), Nothing(),
+      Nothing()));
 }
 
 // Run 3 serialize → import cycles for a single-plane RGBA surface.
@@ -173,6 +175,245 @@ TEST(DMABufSurface, YUVRoundtrip)
 }
 
 #ifdef XP_LINUX
+static RefPtr<FileHandleWrapper> MakeVideoMemory(size_t aSize) {
+  int fd = syscall(SYS_memfd_create, "vaapi-descriptor-test",
+                   MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return nullptr;
+  }
+  auto handle = MakeRefPtr<FileHandleWrapper>(UniqueFileHandle(fd));
+  if (ftruncate(fd, aSize) ||
+      fcntl(fd, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) {
+    return nullptr;
+  }
+  return handle;
+}
+
+static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
+                                                    uint64_t aModifier = 0) {
+  auto y = MakeVideoMemory(aSeparateObjects ? 16384 : 24576);
+  auto uv = aSeparateObjects ? MakeVideoMemory(8192) : y;
+  auto accessLock = MakeVideoMemory(sizeof(uint32_t));
+  if (!y || !uv || !accessLock) {
+    return Nothing();
+  }
+  const int uvFd = dup(uv->GetHandle());
+  const int refFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  auto duplicatedUV = MakeRefPtr<FileHandleWrapper>(UniqueFileHandle(uvFd));
+  auto refs = MakeRefPtr<FileHandleWrapper>(UniqueFileHandle(refFd));
+  if (uvFd < 0 || refFd < 0) {
+    return Nothing();
+  }
+  auto descriptor = MakeYUVDescriptor(y, duplicatedUV);
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  image.format()[0] = GBM_FORMAT_R8;
+  image.format()[1] = GBM_FORMAT_GR88;
+  image.modifier()[0] = image.modifier()[1] = aModifier;
+  image.offsets()[1] = aSeparateObjects ? 0 : 16384;
+  image.yUVColorSpace() = YUVColorSpace::BT709;
+  image.colorRange() = ColorRange::FULL;
+  image.chromaLocation() = 1;
+  image.refCount().AppendElement(ipc::FileDescriptor(refs->GetHandle()));
+  AutoTArray<DMABufVideoObject, 2> objects;
+  objects.AppendElement(DMABufVideoObject(
+      WrapNotNull(y), aSeparateObjects ? 16384 : 24576, aModifier));
+  if (aSeparateObjects) {
+    objects.AppendElement(DMABufVideoObject(WrapNotNull(uv), 8192, aModifier));
+  }
+  AutoTArray<DMABufVideoPlane, 2> planes;
+  planes.AppendElement(DMABufVideoPlane(0, 0, 128));
+  planes.AppendElement(
+      DMABufVideoPlane(aSeparateObjects ? 1 : 0, image.offsets()[1], 128));
+  image.vaapiImageState() = Some(VAAPIImageState(
+      objects, planes, 42, 7, 3, true, WrapNotNull(accessLock)));
+  return Some(std::move(descriptor));
+}
+
+TEST(DMABufSurface, VAAPIObjectAndPlaneRoundtrip)
+{
+  for (bool separateObjects : {false, true}) {
+    for (uint64_t modifier : {uint64_t{0}, uint64_t{0x0100000000000002}}) {
+      auto descriptor = MakeVAAPIDescriptor(separateObjects, modifier);
+      ASSERT_TRUE(descriptor);
+      for (int i = 0; i < 3; ++i) {
+        RefPtr<DMABufSurface> surface =
+            DMABufSurface::CreateDMABufSurface(*descriptor);
+        ASSERT_TRUE(surface);
+        ASSERT_TRUE(surface->GetAsDMABufSurfaceYUV()->GetVAAPIDescriptor());
+        ASSERT_TRUE(surface->Serialize(*descriptor));
+        const auto& image = descriptor->get_SurfaceDescriptorDMABuf();
+        ASSERT_TRUE(image.vaapiImageState());
+        const auto& state = image.vaapiImageState().ref();
+        ASSERT_EQ(state.objects().Length(), separateObjects ? 2u : 1u);
+        ASSERT_EQ(state.planes().Length(), 2u);
+        EXPECT_EQ(state.objects()[0].size(), separateObjects ? 16384u : 24576u);
+        EXPECT_EQ(state.objects()[0].modifier(), modifier);
+        EXPECT_EQ(state.planes()[1].objectIndex(), separateObjects ? 1u : 0u);
+        EXPECT_EQ(state.planes()[1].offset(), separateObjects ? 0u : 16384u);
+        EXPECT_EQ(state.planes()[1].stride(), 128u);
+        EXPECT_EQ(state.allocationId(), 42u);
+        EXPECT_EQ(state.generation(), 7u);
+        EXPECT_EQ(state.producerEpoch(), 3u);
+        EXPECT_TRUE(state.producerComplete());
+        EXPECT_EQ(image.yUVColorSpace(), YUVColorSpace::BT709);
+        EXPECT_EQ(image.colorRange(), ColorRange::FULL);
+        EXPECT_EQ(image.chromaLocation(), 1u);
+      }
+    }
+  }
+}
+
+TEST(DMABufSurface, VAAPIRejectsInvalidDescriptors)
+{
+  using Mutate = void (*)(SurfaceDescriptorDMABuf&);
+  const struct {
+    const char* name;
+    Mutate mutate;
+  } cases[] = {
+      {"wrong surface type",
+       [](auto& d) { d.bufferType() = DMABufSurface::SURFACE_RGBA; }},
+      {"wrong fourcc", [](auto& d) { d.fourccFormat() = GBM_FORMAT_ARGB8888; }},
+      {"wrong plane format", [](auto& d) { d.format()[1] = GBM_FORMAT_R8; }},
+      {"missing plane",
+       [](auto& d) { d.vaapiImageState()->planes().RemoveLastElement(); }},
+      {"missing object",
+       [](auto& d) { d.vaapiImageState()->objects().Clear(); }},
+      {"bad object index",
+       [](auto& d) { d.vaapiImageState()->planes()[1].objectIndex() = 1; }},
+      {"duplicate object",
+       [](auto& d) {
+         auto object = d.vaapiImageState()->objects()[0];
+         d.vaapiImageState()->objects().AppendElement(object);
+       }},
+      {"wrong allocation size",
+       [](auto& d) { d.vaapiImageState()->objects()[0].size()++; }},
+      {"unsupported modifier",
+       [](auto& d) {
+         d.vaapiImageState()->objects()[0].modifier() = UINT64_MAX;
+         d.modifier()[0] = d.modifier()[1] = UINT64_MAX;
+       }},
+      {"wrong legacy modifier", [](auto& d) { d.modifier()[1] = 1; }},
+      {"wrong legacy stride", [](auto& d) { d.strides()[1]++; }},
+      {"wrong legacy offset", [](auto& d) { d.offsets()[1]++; }},
+      {"missing dimensions", [](auto& d) { d.heightAligned().Clear(); }},
+      {"too many planes",
+       [](auto& d) {
+         auto fd = d.fds()[0];
+         for (int i = 0; i < 4; ++i) d.fds().AppendElement(fd);
+       }},
+      {"zero width", [](auto& d) { d.width()[0] = 0; }},
+      {"odd width", [](auto& d) { d.width()[0] = 127; }},
+      {"wrong chroma dimensions", [](auto& d) { d.width()[1]++; }},
+      {"oversized allocation dimensions",
+       [](auto& d) { d.widthAligned()[0] = UINT32_MAX; }},
+      {"crop outside allocation", [](auto& d) { d.width()[0] = 130; }},
+      {"short pitch",
+       [](auto& d) {
+         d.strides()[0] = 64;
+         d.vaapiImageState()->planes()[0].stride() = 64;
+       }},
+      {"offset outside allocation",
+       [](auto& d) {
+         d.offsets()[1] = 24576;
+         d.vaapiImageState()->planes()[1].offset() = 24576;
+       }},
+      {"linear extent outside allocation",
+       [](auto& d) {
+         d.strides()[1] = 256;
+         d.vaapiImageState()->planes()[1].stride() = 256;
+       }},
+      {"overlapping planes",
+       [](auto& d) {
+         d.offsets()[1] = 8192;
+         d.vaapiImageState()->planes()[1].offset() = 8192;
+       }},
+      {"overflowing offset",
+       [](auto& d) { d.vaapiImageState()->planes()[1].offset() = UINT64_MAX; }},
+      {"zero allocation identity",
+       [](auto& d) { d.vaapiImageState()->allocationId() = 0; }},
+      {"zero generation",
+       [](auto& d) { d.vaapiImageState()->generation() = 0; }},
+      {"zero producer epoch",
+       [](auto& d) { d.vaapiImageState()->producerEpoch() = 0; }},
+      {"producer not complete",
+       [](auto& d) { d.vaapiImageState()->producerComplete() = false; }},
+      {"unexpected fence",
+       [](auto& d) { d.fence().AppendElement(d.fds()[0]); }},
+      {"unexpected semaphore", [](auto& d) { d.semaphoreFd() = d.fds()[0]; }},
+      {"unexpected sync-file tag",
+       [](auto& d) { d.semaphoreFdIsSyncFd() = true; }},
+      {"missing lifetime reference", [](auto& d) { d.refCount().Clear(); }},
+      {"invalid access lock",
+       [](auto& d) { d.vaapiImageState()->accessLock() = d.fds()[0]; }},
+      {"conflicting producer",
+       [](auto& d) {
+         d.foreignRGBImageState() =
+             Some(ForeignRGBImageState(1, d.vaapiImageState()->accessLock()));
+       }},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.name);
+    auto descriptor = MakeVAAPIDescriptor(false);
+    ASSERT_TRUE(descriptor);
+    test.mutate(descriptor->get_SurfaceDescriptorDMABuf());
+    RefPtr<DMABufSurface> surface =
+        DMABufSurface::CreateDMABufSurface(*descriptor);
+    EXPECT_FALSE(surface);
+  }
+}
+
+TEST(DMABufSurface, VAAPIRejectsMismatchedObjectHandle)
+{
+  auto descriptor = MakeVAAPIDescriptor(true);
+  ASSERT_TRUE(descriptor);
+  auto& image = descriptor->get_SurfaceDescriptorDMABuf();
+  image.fds()[1] = image.fds()[0];
+  RefPtr<DMABufSurface> surface =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  EXPECT_FALSE(surface);
+}
+
+TEST(DMABufSurface, VAAPIAbandonmentPreventsForwarding)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> first = DMABufSurface::CreateDMABufSurface(*descriptor);
+  RefPtr<DMABufSurface> second =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->LockAccess());
+  first->UnlockAccess(true);
+  EXPECT_FALSE(second->AccessLockUsable());
+  SurfaceDescriptor forwarded;
+  EXPECT_FALSE(second->Serialize(forwarded));
+  RefPtr<DMABufSurface> rejected =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  EXPECT_FALSE(rejected);
+}
+
+TEST(DMABufSurface, VAAPIPublicationIdentitySurvivesForwarding)
+{
+  auto original = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(original);
+  auto next = *original;
+  auto& state = next.get_SurfaceDescriptorDMABuf().vaapiImageState().ref();
+  state.generation()++;
+  state.producerEpoch()++;
+  RefPtr<DMABufSurface> surface = DMABufSurface::CreateDMABufSurface(next);
+  ASSERT_TRUE(surface);
+  SurfaceDescriptor forwarded;
+  ASSERT_TRUE(surface->Serialize(forwarded));
+  const auto& result =
+      forwarded.get_SurfaceDescriptorDMABuf().vaapiImageState().ref();
+  EXPECT_EQ(result.allocationId(), 42u);
+  EXPECT_EQ(result.generation(), 8u);
+  EXPECT_EQ(result.producerEpoch(), 4u);
+  EXPECT_EQ(
+      original->get_SurfaceDescriptorDMABuf().vaapiImageState()->generation(),
+      7u);
+}
+
 static void AddVulkanState(SurfaceDescriptor& aDescriptor,
                            RefPtr<FileHandleWrapper> aAccessLock) {
   AutoTArray<uint8_t, 16> identity = {0, 0, 0, 0, 0, 0, 0, 0,
