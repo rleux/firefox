@@ -1657,6 +1657,32 @@ void GLBlitHelper::BlitTextureToTexture(GLuint srcTex, GLuint destTex,
 bool GLBlitHelper::Blit(DMABufSurface* surface, const gfx::IntRect& destRect,
                         OriginPos destOrigin, const gfx::IntSize& fbSize,
                         Maybe<gfxAlphaType> convertAlpha) const {
+  const auto* yuv = surface->GetAsDMABufSurfaceYUV();
+  if (!yuv || !yuv->GetVAAPIDescriptor()) {
+    return BlitDMABuf(surface, destRect, destOrigin, fbSize, convertAlpha);
+  }
+  if (!surface->TryLockAccess()) return false;
+  bool completed = true;
+  auto release = MakeScopeExit([&] { surface->UnlockAccess(!completed); });
+  if (!mGL->MakeCurrent() || !mGL->IsSupported(GLFeature::sync)) return false;
+  completed = false;
+  const bool result =
+      BlitDMABuf(surface, destRect, destOrigin, fbSize, convertAlpha);
+  const auto fence = mGL->fFenceSync(LOCAL_GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!fence) return false;
+  auto deleteFence = MakeScopeExit([&] { mGL->fDeleteSync(fence); });
+  const auto status =
+      mGL->fClientWaitSync(fence, LOCAL_GL_SYNC_FLUSH_COMMANDS_BIT, 5000000000);
+  completed = (status == LOCAL_GL_ALREADY_SIGNALED ||
+               status == LOCAL_GL_CONDITION_SATISFIED) &&
+              !mGL->fGetGraphicsResetStatus();
+  return result && completed;
+}
+
+bool GLBlitHelper::BlitDMABuf(DMABufSurface* surface,
+                              const gfx::IntRect& destRect,
+                              OriginPos destOrigin, const gfx::IntSize& fbSize,
+                              Maybe<gfxAlphaType> convertAlpha) const {
   const auto& srcOrigin = OriginPos::BottomLeft;
 
   DrawBlitProg::BaseArgs baseArgs;

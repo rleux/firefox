@@ -272,8 +272,8 @@ void DMABufSurface::ReleaseSnapshotGLContext() {
 }
 
 bool DMABufSurface::UseDmaBufGL(GLContext* aGLContext) {
-  if (!aGLContext) {
-    LOGDMABUFS("DMABufSurface::UseDmaBufGL(): Missing GLContext!");
+  if (!aGLContext || aGLContext->GetContextType() != GLContextType::EGL) {
+    LOGDMABUFS("DMABufSurface::UseDmaBufGL(): Missing EGL context!");
     return false;
   }
 
@@ -836,17 +836,20 @@ nsresult DMABufSurface::ReadIntoBuffer(mozilla::gl::GLContext* aGLContext,
   LOGDMABUF("DMABufSurface::ReadIntoBuffer UID %d", mUID);
 
   // We're empty, nothing to copy
-  if (!GetTextureCount()) {
+  if (!GetTextureCount() || !aGLContext) {
     return NS_ERROR_FAILURE;
   }
 
   MOZ_ASSERT(aSize.width == GetWidth());
   MOZ_ASSERT(aSize.height == GetHeight());
 
-  for (int i = 0; i < GetTextureCount(); i++) {
-    if (!GetTexture(i) && !CreateTexture(aGLContext, i)) {
-      LOGDMABUF("ReadIntoBuffer: Failed to create DMABuf textures.");
-      return NS_ERROR_FAILURE;
+  const auto* yuv = GetAsDMABufSurfaceYUV();
+  if (!yuv || !yuv->GetVAAPIDescriptor()) {
+    for (int i = 0; i < GetTextureCount(); i++) {
+      if (!GetTexture(i) && !CreateTexture(aGLContext, i)) {
+        LOGDMABUF("ReadIntoBuffer: Failed to create DMABuf textures.");
+        return NS_ERROR_FAILURE;
+      }
     }
   }
 
@@ -880,11 +883,14 @@ nsresult DMABufSurface::ReadIntoBuffer(mozilla::gl::GLContext* aGLContext,
 
 already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
   LOGDMABUF("DMABufSurface::GetAsSourceSurface UID %d", mUID);
-  if (mAccessLockFd && !LockAccess()) {
+  const auto* yuv = GetAsDMABufSurfaceYUV();
+  const bool native = yuv && yuv->GetVAAPIDescriptor();
+  const bool lockAccess = mAccessLockFd && !native;
+  if (lockAccess && !LockAccess()) {
     return nullptr;
   }
   auto unlockAccess = MakeScopeExit([&] {
-    if (mAccessLockFd) UnlockAccess();
+    if (lockAccess) UnlockAccess();
   });
 
   gfx::IntSize size(GetWidth(), GetHeight());
@@ -903,7 +909,7 @@ already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
     return nullptr;
   }
 
-  if (mGL) {
+  if (!native && mGL) {
     if (NS_WARN_IF(NS_FAILED(ReadIntoBuffer(mGL, map.GetData(), map.GetStride(),
                                             size, format)))) {
       LOGDMABUF("GetAsSourceSurface: Reading into buffer failed.");
@@ -914,7 +920,7 @@ already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
     StaticMutexAutoLock lock(sSnapshotContextMutex);
     RefPtr<GLContext> context = ClaimSnapshotGLContext();
     auto releaseTextures = mozilla::MakeScopeExit([&] {
-      ReleaseTextures();
+      if (!native) ReleaseTextures();
       ReturnSnapshotGLContext(context);
     });
     if (NS_WARN_IF(NS_FAILED(ReadIntoBuffer(context, map.GetData(),
@@ -2516,7 +2522,7 @@ bool DMABufSurfaceYUV::CreateTexture(GLContext* aGLContext, int aPlane) {
   const auto& gle = gl::GLContextEGL::Cast(aGLContext);
   const auto& egl = gle->mEgl;
 
-  if ((aPlane == 1) &&
+  if (!mVAAPIDescriptor && (aPlane == 1) &&
       ((GetFOURCCFormat() == VA_FOURCC_NV12) ||
        (GetFOURCCFormat() == VA_FOURCC_P010) ||
        (GetFOURCCFormat() == VA_FOURCC_P016)) &&
@@ -2795,9 +2801,11 @@ nsresult DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer(
     SurfaceDescriptorBuffer& aSdBuffer, Image::BuildSdbFlags aFlags,
     const std::function<MemoryOrShmem(uint32_t)>& aAllocate) {
   LOGDMABUF("DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer UID %d", mUID);
-  if (mAccessLockFd && !TryLockAccess()) return NS_ERROR_NOT_AVAILABLE;
+  const bool native = !!mVAAPIDescriptor;
+  const bool lockAccess = mAccessLockFd && !native;
+  if (lockAccess && !TryLockAccess()) return NS_ERROR_NOT_AVAILABLE;
   auto unlockAccess = MakeScopeExit([&] {
-    if (mAccessLockFd) UnlockAccess();
+    if (lockAccess) UnlockAccess();
   });
 
   gfx::IntSize size(GetWidth(), GetHeight());
@@ -2812,14 +2820,14 @@ nsresult DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer(
     return rv;
   }
 
-  if (mGL) {
+  if (!native && mGL) {
     return ReadIntoBuffer(mGL, buffer, stride, size, format);
   } else {
     // We're missing active GL context - take a snapshot one.
     StaticMutexAutoLock lock(sSnapshotContextMutex);
     RefPtr<GLContext> context = ClaimSnapshotGLContext();
     auto releaseTextures = mozilla::MakeScopeExit([&] {
-      ReleaseTextures();
+      if (!native) ReleaseTextures();
       ReturnSnapshotGLContext(context);
     });
     return ReadIntoBuffer(context, buffer, stride, size, format);
