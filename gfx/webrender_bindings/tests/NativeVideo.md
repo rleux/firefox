@@ -89,8 +89,9 @@ browser bridge with real GPU imports, independently of a Firefox rebuild.
 They verify UV-first and duplicate channel requests, one lock per publication,
 weak-cache retirement, stale metadata and device rejection, a busy lock without
 poisoning, and one completed frame release after rendering. C++ gtests separately
-cover the actual shared lock and descriptor-to-HAL conversion. Browser decoder
-publication and pool lifetime still require the later integration steps.
+cover the actual shared lock and descriptor-to-HAL conversion. Producer lifetime
+tests are described below; browser playback still requires capability negotiation
+and fallback integration.
 
 Native tests compare decoded Y/UV bytes and rendered pixels with controls,
 including nearest/linear modes, cropped visible dimensions and downscaling.
@@ -105,3 +106,30 @@ fit the reported size, and the report must fit the actual backing object.
 Separate-object NV12, P010, cross-device import and protected frames remain
 unsupported by this importer. These tests establish HAL behavior, not browser
 decoder publication, pool recycling or playback performance.
+
+## Producer lifetime tests
+
+`VAAPIFramePool.*` exercises a separate native pool with counted FFmpeg frame
+and context references. Publications retain both references until the caller,
+image readers and shared access lock permit retirement. Repeated output of a
+live allocation shares its immutable publication, including across flush;
+changed layout or color metadata is rejected.
+
+Retirement atomically changes the shared lock from idle to a terminal state,
+preventing late consumers from acquiring a retired publication. Busy access
+retains the frame. Abandonment stops further publication and retains affected
+frames until pool shutdown, which follows codec shutdown. The native pool never
+uses the legacy pressure-copy path: its limit is three quarters of a fixed
+decoder pool, clamped to 1–32 frames, or 32 frames for a dynamic pool. Exhaustion
+fails publication and stops that pool.
+
+The tests cover retained callers and images, repeated output across flush, busy
+access, pressure, abandonment, metadata changes and partial reference failure.
+`DMABufSurface.VAAPIExportCleanupClosesUnreferencedObjects` verifies that export
+cleanup closes objects even when no layer references them.
+
+The internal `UseWebRenderVulkanVideo` capability defaults to false. Production
+publication remains disabled until negotiation and fallback are implemented.
+Separate consumer paths, including WebGL video uploads and live snapshots, still
+need browser validation before enablement. These pool tests do not establish
+end-to-end playback or performance.

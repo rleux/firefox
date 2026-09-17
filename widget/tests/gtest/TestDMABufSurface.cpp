@@ -503,6 +503,27 @@ TEST(DMABufSurface, VAAPIPublicationIdentitySurvivesForwarding)
       7u);
 }
 
+TEST(DMABufSurface, VAAPIExportCleanupClosesUnreferencedObjects)
+{
+  int firstPipe[2], secondPipe[2];
+  ASSERT_EQ(pipe2(firstPipe, O_CLOEXEC | O_NONBLOCK), 0);
+  UniqueFileHandle firstRead(firstPipe[0]), firstWrite(firstPipe[1]);
+  ASSERT_EQ(pipe2(secondPipe, O_CLOEXEC | O_NONBLOCK), 0);
+  UniqueFileHandle secondRead(secondPipe[0]), secondWrite(secondPipe[1]);
+  VADRMPRIMESurfaceDescriptor descriptor{};
+  descriptor.num_objects = 2;
+  descriptor.objects[0].fd = firstWrite.release();
+  descriptor.objects[1].fd = secondWrite.release();
+  descriptor.num_layers = 1;
+  descriptor.layers[0].object_index[0] = 0;
+  DMABufSurfaceYUV::ReleaseVADRMPRIMESurfaceDescriptor(descriptor);
+  EXPECT_EQ(descriptor.objects[0].fd, -1);
+  EXPECT_EQ(descriptor.objects[1].fd, -1);
+  char byte;
+  EXPECT_EQ(read(firstRead.get(), &byte, 1), 0);
+  EXPECT_EQ(read(secondRead.get(), &byte, 1), 0);
+}
+
 static void AddVulkanState(SurfaceDescriptor& aDescriptor,
                            RefPtr<FileHandleWrapper> aAccessLock) {
   AutoTArray<uint8_t, 16> identity = {0, 0, 0, 0, 0, 0, 0, 0,

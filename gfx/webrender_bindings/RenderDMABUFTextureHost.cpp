@@ -25,6 +25,10 @@ RenderDMABUFTextureHost::~RenderDMABUFTextureHost() {
 
 wr::WrExternalImage RenderDMABUFTextureHost::Lock(uint8_t aChannelIndex,
                                                   gl::GLContext* aGL) {
+  if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV();
+      yuv && yuv->GetVAAPIDescriptor()) {
+    return InvalidToWrExternalImage();
+  }
   const gfx::IntSize size(mSurface->GetWidth(aChannelIndex),
                           mSurface->GetHeight(aChannelIndex));
 

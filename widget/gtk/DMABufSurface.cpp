@@ -24,6 +24,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
+#include <algorithm>
+#include <iterator>
 #ifdef XP_LINUX
 #  include <linux/futex.h>
 #  include <sys/syscall.h>
@@ -1832,14 +1835,15 @@ bool DMABufSurfaceYUV::ImportPRIMESurfaceDescriptor(
 
 void DMABufSurfaceYUV::ReleaseVADRMPRIMESurfaceDescriptor(
     VADRMPRIMESurfaceDescriptor& aDesc) {
-  for (unsigned int i = 0; i < aDesc.num_layers; i++) {
-    unsigned int object = aDesc.layers[i].object_index[0];
-    if (object >= aDesc.num_objects) {
-      continue;
-    }
-    if (aDesc.objects[object].fd != -1) {
-      close(aDesc.objects[object].fd);
-      aDesc.objects[object].fd = -1;
+  const size_t count =
+      std::min<size_t>(aDesc.num_objects, std::size(aDesc.objects));
+  for (size_t i = 0; i < count; ++i) {
+    const int fd = aDesc.objects[i].fd;
+    if (fd >= 0) {
+      for (size_t j = i; j < count; ++j) {
+        if (aDesc.objects[j].fd == fd) aDesc.objects[j].fd = -1;
+      }
+      close(fd);
     }
   }
 }
@@ -2231,6 +2235,98 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
 #else
   return false;
 #endif
+}
+
+bool DMABufSurfaceYUV::PublishVAAPIImage(
+    const VADRMPRIMESurfaceDescriptor& aDesc, uint64_t aPublicationId,
+    uint64_t aProducerEpoch, uint64_t aDRMMajor, uint64_t aDRMMinor) {
+  if (mVAAPIDescriptor || !mGlobalRefCountFd || IsGlobalRefSet() ||
+      aDesc.fourcc != VA_FOURCC_NV12 || aDesc.num_objects != 1 ||
+      aDesc.num_layers != 2 || aDesc.layers[0].num_planes != 1 ||
+      aDesc.layers[1].num_planes != 1 || aDesc.layers[0].object_index[0] != 0 ||
+      aDesc.layers[1].object_index[0] != 0 ||
+      aDesc.layers[0].drm_format != DRM_FORMAT_R8 ||
+      aDesc.layers[1].drm_format != DRM_FORMAT_GR88 ||
+      aDesc.width != uint32_t(mWidthAligned[0]) ||
+      aDesc.height != uint32_t(mHeightAligned[0]) || !CreateAccessLock()) {
+    return false;
+  }
+  const int fd = dup(aDesc.objects[0].fd);
+  if (fd < 0) return false;
+  RefPtr<FileHandleWrapper> objectFd =
+      new FileHandleWrapper(UniqueFileHandle(fd));
+  AutoTArray<DMABufVideoObject, 1> objects;
+  objects.AppendElement(
+      DMABufVideoObject(WrapNotNull(objectFd), aDesc.objects[0].size,
+                        aDesc.objects[0].drm_format_modifier));
+  AutoTArray<DMABufVideoPlane, 2> planes;
+  for (size_t i = 0; i < 2; ++i) {
+    planes.AppendElement(DMABufVideoPlane(0, aDesc.layers[i].offset[0],
+                                          aDesc.layers[i].pitch[0]));
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor)) return false;
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  image.vaapiImageState() = Some(VAAPIImageState(
+      objects, planes, aPublicationId, aPublicationId, aProducerEpoch, true,
+      aDRMMajor, aDRMMinor, WrapNotNull(mAccessLockFd)));
+  if (!ValidateVAAPIImageState(image)) return false;
+  mVAAPIDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(image);
+  mVAAPIProducer = true;
+  return true;
+}
+
+bool DMABufSurfaceYUV::SameVAAPIAllocation(
+    const DMABufSurfaceYUV& aOther) const {
+  if (mBufferPlaneCount != 2 || aOther.mBufferPlaneCount != 2) return false;
+  for (size_t i = 0; i < 2; ++i) {
+    if (!mDmabufFds[i] || !aOther.mDmabufFds[i]) return false;
+    struct stat first{}, second{};
+    if (fstat(mDmabufFds[i]->GetHandle(), &first) ||
+        fstat(aOther.mDmabufFds[i]->GetHandle(), &second) ||
+        first.st_dev != second.st_dev || first.st_ino != second.st_ino) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool DMABufSurfaceYUV::SameVAAPIImage(const DMABufSurfaceYUV& aOther) const {
+  if (mBufferPlaneCount != 2 || aOther.mBufferPlaneCount != 2 ||
+      mFOURCCFormat != aOther.mFOURCCFormat ||
+      mColorSpace != aOther.mColorSpace || mColorRange != aOther.mColorRange ||
+      mColorPrimaries != aOther.mColorPrimaries ||
+      mTransferFunction != aOther.mTransferFunction ||
+      mWPChromaLocation != aOther.mWPChromaLocation ||
+      !(mHDRMetadata == aOther.mHDRMetadata)) {
+    return false;
+  }
+  for (size_t i = 0; i < 2; ++i) {
+    if (mWidth[i] != aOther.mWidth[i] || mHeight[i] != aOther.mHeight[i] ||
+        mWidthAligned[i] != aOther.mWidthAligned[i] ||
+        mHeightAligned[i] != aOther.mHeightAligned[i] ||
+        mDrmFormats[i] != aOther.mDrmFormats[i] ||
+        mBufferModifiers[i] != aOther.mBufferModifiers[i] ||
+        mStrides[i] != aOther.mStrides[i] ||
+        mOffsets[i] != aOther.mOffsets[i]) {
+      return false;
+    }
+  }
+  return SameVAAPIAllocation(aOther);
+}
+
+bool DMABufSurfaceYUV::TryRetireVAAPIImage() {
+  if (!mVAAPIProducer || !mAccessLock || IsGlobalRefSet()) return false;
+  uint32_t expected = 0;
+  // Retirement closes the publication to consumers arriving after the ref
+  // check.
+  return __atomic_compare_exchange_n(mAccessLock, &expected, 3, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+bool DMABufSurfaceYUV::VAAPIImageAbandoned() const {
+  return mVAAPIDescriptor && mAccessLock &&
+         __atomic_load_n(mAccessLock, __ATOMIC_ACQUIRE) == 2;
 }
 
 bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
@@ -2653,6 +2749,7 @@ int DMABufSurfaceYUV::GetTextureCount() { return mBufferPlaneCount; }
 void DMABufSurfaceYUV::ReleaseSurface() {
   LOGDMABUF("DMABufSurfaceYUV::ReleaseSurface() UID %d", mUID);
   mVAAPIDescriptor = nullptr;
+  mVAAPIProducer = false;
   ReleaseTextures();
   if (ReleaseDMABuf()) {
     LogMemorySubYUV(GetUID(), GetUsedMemory(mWidth[0], mHeight[0]));
@@ -2663,6 +2760,10 @@ nsresult DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer(
     SurfaceDescriptorBuffer& aSdBuffer, Image::BuildSdbFlags aFlags,
     const std::function<MemoryOrShmem(uint32_t)>& aAllocate) {
   LOGDMABUF("DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer UID %d", mUID);
+  if (mAccessLockFd && !TryLockAccess()) return NS_ERROR_NOT_AVAILABLE;
+  auto unlockAccess = MakeScopeExit([&] {
+    if (mAccessLockFd) UnlockAccess();
+  });
 
   gfx::IntSize size(GetWidth(), GetHeight());
   const auto format = gfx::SurfaceFormat::B8G8R8A8;
