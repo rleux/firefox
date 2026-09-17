@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #ifdef XP_LINUX
 #  include <linux/futex.h>
@@ -566,6 +567,35 @@ bool DMABufSurface::TryLockAccess() {
   return mAccessLock &&
          __atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+bool DMABufSurface::WaitForAccess(uint32_t aTimeoutMs) {
+#ifdef XP_LINUX
+  if (!mAccessLock) return false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(aTimeoutMs);
+  for (;;) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return true;
+    }
+    if (expected != 1) return false;
+    const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               deadline - std::chrono::steady_clock::now())
+                               .count();
+    if (remaining <= 0) return false;
+    const timespec timeout = {static_cast<time_t>(remaining / 1000000000),
+                              static_cast<long>(remaining % 1000000000)};
+    if (syscall(SYS_futex, mAccessLock, FUTEX_WAIT, 1, &timeout, nullptr, 0) <
+            0 &&
+        errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+      return false;
+    }
+  }
+#else
+  return TryLockAccess();
+#endif
 }
 
 bool DMABufSurface::LockAccess() {

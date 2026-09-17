@@ -502,7 +502,14 @@ impl Renderer {
                 r.renderer.discard_surface()?;
             }
         }
-        r.frames.push_back((frame, r.renderer.submit_work()?));
+        let completion = r.renderer.submit_work()?;
+        r.frames.push_back((frame, completion));
+        crate::hal_image::finish_video_images(&r.renderer.external_image_device(), || {
+            r.renderer.poll_completion(completion)
+        }).map_err(|error| {
+            r.error = Some(error.clone());
+            error
+        })?;
         Ok(true)
     }
 

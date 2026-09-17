@@ -117,7 +117,7 @@ unsafe extern "C" fn wr_renderer_lock_foreign_rgb(_: *mut WrHalImageLease) -> bo
 }
 
 #[no_mangle]
-unsafe extern "C" fn wr_renderer_try_lock_vaapi_image(raw: *mut WrHalImageLease) -> bool {
+unsafe extern "C" fn wr_renderer_lock_vaapi_image(raw: *mut WrHalImageLease) -> bool {
     let token = &mut *(raw as *mut Token);
     let mut access = token.fixture.video_access.borrow_mut();
     if access.locked || access.poisoned { return false; }

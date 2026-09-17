@@ -1679,7 +1679,7 @@ bool GLBlitHelper::Blit(DMABufSurface* surface, const gfx::IntRect& destRect,
   if (!yuv || !yuv->GetVAAPIDescriptor()) {
     return BlitDMABuf(surface, destRect, destOrigin, fbSize, convertAlpha);
   }
-  if (!surface->TryLockAccess()) return false;
+  if (!surface->WaitForAccess(5000)) return false;
   bool completed = true;
   auto release = MakeScopeExit([&] { surface->UnlockAccess(!completed); });
   if (!mGL->MakeCurrent() || !mGL->IsSupported(GLFeature::sync)) return false;

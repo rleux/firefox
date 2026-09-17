@@ -177,7 +177,8 @@ separate video-image consumers still require integration coverage.
 
 Native VA-API GL blits acquire the publication lock before creating plane
 textures or drawing. They wait for a GL fence before releasing access. A busy
-publication is rejected without poisoning it; an uncertain GPU completion
+publication is waited on for up to five seconds without poisoning it on timeout;
+an uncertain GPU completion
 abandons it. CPU snapshots delegate source access to the same blit operation,
 then read the owned destination buffer. Ordinary Vulkan playback does not use
 this snapshot path.
@@ -206,3 +207,16 @@ values against independent BT.601/BT.709/BT.2020 equations;
 `Colorspaces.GLBlitIdentityDoesNotExpandRange` covers GBR identity. The native
 fixture uses nearest-neighbor chroma sampling to match the GL blit's sampler,
 with a two-value tolerance for 8-bit channel rounding.
+
+Native Vulkan video frames drain their sampling completion before returning
+from frame end, so ownership can return even if no later frame or readback is
+requested. An unexpected surviving publication or completion timeout fails
+the renderer. This initial policy waits synchronously for native video;
+frames without live native video publications keep the existing polling path.
+
+Both GL readers and the HAL acquire callback use the bounded shared-lock wait.
+The native GL fixture includes a reader waiting on another thread's access.
+`DMABufSurface.VAAPIWait*` covers timeout without ownership changes, successful
+wakeup across separate mappings, and abandonment. The native bridge test
+`vaapi_nv12_frame_completion_releases_before_readback` checks that a rendered
+publication is released without requiring a readback or another frame.

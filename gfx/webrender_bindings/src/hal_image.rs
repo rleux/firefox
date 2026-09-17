@@ -132,7 +132,7 @@ extern "C" {
     /// cbindgen:ignore
     pub fn wr_renderer_lock_foreign_rgb(lease: *mut WrHalImageLease) -> bool;
     /// cbindgen:ignore
-    pub fn wr_renderer_try_lock_vaapi_image(lease: *mut WrHalImageLease) -> bool;
+    pub fn wr_renderer_lock_vaapi_image(lease: *mut WrHalImageLease) -> bool;
     pub fn wr_renderer_release_hal_image(lease: *mut WrHalImageLease, status: WrHalImageRelease);
 }
 
@@ -176,6 +176,30 @@ mod linux {
     thread_local! {
         static FOREIGN_IMAGES: RefCell<HashMap<(u64, u64), ForeignEntry>> = RefCell::new(HashMap::new());
         static VIDEO_IMAGES: RefCell<HashMap<(u64, u64), VideoEntry>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn finish_video_images(
+        device: &ExternalImageDevice,
+        mut poll: impl FnMut() -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let live = || VIDEO_IMAGES.with(|images| {
+            images.borrow().values().any(|entry| {
+                entry.image.upgrade().map_or(false, |image| image.belongs_to(device))
+            })
+        });
+        if !live() { return Ok(()); }
+        let start = std::time::Instant::now();
+        while !poll()? {
+            if start.elapsed() >= std::time::Duration::from_secs(5) {
+                return Err("Timed out completing native video reads".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        device.poll()?;
+        if live() {
+            return Err("Native video publication outlived its frame".into());
+        }
+        Ok(())
     }
 
     /// cbindgen:ignore
@@ -431,7 +455,7 @@ mod linux {
                         return image.lease(channel, uv);
                     }
                 }
-                if !unsafe { wr_renderer_try_lock_vaapi_image(lease.raw.as_ptr()) } {
+                if !unsafe { wr_renderer_lock_vaapi_image(lease.raw.as_ptr()) } {
                     return Err("NV12 publication is busy or abandoned".into());
                 }
                 let image = unsafe { self.device.import_vaapi_nv12(
@@ -550,7 +574,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use self::linux::ExternalImages;
+pub use self::linux::{ExternalImages, finish_video_images};
 
 #[cfg(target_os = "linux")]
 pub struct DeviceRegistration(Option<std::ptr::NonNull<c_void>>);

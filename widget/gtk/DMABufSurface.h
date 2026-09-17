@@ -112,6 +112,7 @@ class DMABufSurface : public BufferSurface {
   bool CreateAccessLock();
   bool AccessLockUsable() const;
   bool TryLockAccess();
+  bool WaitForAccess(uint32_t aTimeoutMs);
   bool LockAccess();
   void UnlockAccess(bool aAbandon = false);
   RefPtr<mozilla::gfx::FileHandleWrapper> GetAccessLockFd() const {
