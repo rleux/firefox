@@ -94,6 +94,9 @@ bool RenderCompositorVulkan::SupportsWebGL() {
 }
 
 bool RenderCompositorVulkan::IsRequested() {
+  if (gfx::gfxVars::UseSoftwareWebRender()) {
+    return false;
+  }
   const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
   if (backend) {
     return !strcmp(backend, "vulkan");
@@ -110,11 +113,10 @@ bool RenderCompositorVulkan::IsRequested() {
                     : "MOZ_WR_DEFAULT_BACKEND=gl");
       return x11;
     }();
-    return useVulkan && !gfx::gfxVars::UseSoftwareWebRender();
+    return useVulkan;
   }
   const char* inherited = PR_GetEnv("MOZ_WR_DEFAULT_BACKEND");
-  return inherited && !strcmp(inherited, "vulkan") &&
-         !gfx::gfxVars::UseSoftwareWebRender();
+  return inherited && !strcmp(inherited, "vulkan");
 #else
   return false;
 #endif
