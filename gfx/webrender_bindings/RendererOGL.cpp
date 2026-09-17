@@ -135,7 +135,7 @@ extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
   return false;
 }
 
-extern "C" bool wr_renderer_try_lock_vaapi_image(WrHalImageLease* aLease) {
+extern "C" bool wr_renderer_lock_vaapi_image(WrHalImageLease* aLease) {
 #ifdef MOZ_WIDGET_GTK
   auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
   if (!texture || aLease->mVAAPILocked) {
@@ -143,7 +143,7 @@ extern "C" bool wr_renderer_try_lock_vaapi_image(WrHalImageLease* aLease) {
   }
   auto surface = texture->GetSurface();
   auto* yuv = surface->GetAsDMABufSurfaceYUV();
-  if (yuv && yuv->GetVAAPIDescriptor() && surface->TryLockAccess()) {
+  if (yuv && yuv->GetVAAPIDescriptor() && surface->WaitForAccess(5000)) {
     aLease->mVAAPILocked = true;
     return true;
   }

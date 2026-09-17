@@ -238,6 +238,70 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   return Some(std::move(descriptor));
 }
 
+TEST(DMABufSurface, VAAPIWaitTimeoutPreservesOwner)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> surface =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(surface);
+  ASSERT_TRUE(surface->WaitForAccess(0));
+  EXPECT_FALSE(surface->WaitForAccess(0));
+  EXPECT_FALSE(surface->WaitForAccess(10));
+  EXPECT_TRUE(surface->AccessLockUsable());
+  EXPECT_FALSE(surface->TryLockAccess());
+  surface->UnlockAccess();
+  EXPECT_TRUE(surface->WaitForAccess(0));
+  surface->UnlockAccess();
+}
+
+TEST(DMABufSurface, VAAPIWaitAcquiresAfterOtherReaderCompletes)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> owner = DMABufSurface::CreateDMABufSurface(*descriptor);
+  RefPtr<DMABufSurface> reader =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(owner && reader);
+  ASSERT_TRUE(owner->TryLockAccess());
+  std::promise<void> started;
+  auto waiting = std::async(std::launch::async, [&] {
+    started.set_value();
+    const bool acquired = reader->WaitForAccess(5000);
+    if (acquired) reader->UnlockAccess();
+    return acquired;
+  });
+  started.get_future().wait();
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  owner->UnlockAccess();
+  EXPECT_TRUE(waiting.get());
+  EXPECT_TRUE(owner->TryLockAccess());
+  owner->UnlockAccess();
+}
+
+TEST(DMABufSurface, VAAPIWaitStopsOnAbandonment)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> owner = DMABufSurface::CreateDMABufSurface(*descriptor);
+  RefPtr<DMABufSurface> reader =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(owner && reader);
+  ASSERT_TRUE(owner->TryLockAccess());
+  std::promise<void> started;
+  auto waiting = std::async(std::launch::async, [&] {
+    started.set_value();
+    return reader->WaitForAccess(5000);
+  });
+  started.get_future().wait();
+  EXPECT_EQ(waiting.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  owner->UnlockAccess(true);
+  EXPECT_FALSE(waiting.get());
+  EXPECT_FALSE(reader->AccessLockUsable());
+}
+
 TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
 {
   ASSERT_NE(getenv("WR_NV12_FD"), nullptr) << "Requires ExportVAAPIFrame";
@@ -350,6 +414,18 @@ TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
       EXPECT_LE(maxError, 2);
     }
   }
+  ASSERT_TRUE(native->TryLockAccess());
+  std::promise<void> readerStarted;
+  auto concurrentRead = std::async(std::launch::async, [&] {
+    readerStarted.set_value();
+    RefPtr<gfx::DataSourceSurface> result = native->GetAsSourceSurface();
+    return result;
+  });
+  readerStarted.get_future().wait();
+  EXPECT_EQ(concurrentRead.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  native->UnlockAccess();
+  EXPECT_TRUE(concurrentRead.get());
   ASSERT_TRUE(native->TryLockAccess());
   auto releaseAccess = MakeScopeExit([&] { native->UnlockAccess(); });
   RefPtr<gfx::DataSourceSurface> snapshot = native->GetAsSourceSurface();

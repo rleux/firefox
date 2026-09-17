@@ -249,13 +249,23 @@ impl hal::ExternalImageProvider for VideoProvider {
 #[test]
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_bridge_rendering_completes_one_frame_lease() {
+    check_rendering_completion(true);
+}
+
+#[test]
+#[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_nv12_frame_completion_releases_before_readback() {
+    check_rendering_completion(false);
+}
+
+fn check_rendering_completion(retain_extra_lease: bool) {
     let (fixture, data) = fixture();
     let (mut renderer, sender) = renderer();
     let device = renderer.external_image_device();
     let mut first = provider(&fixture, device.clone());
-    let keep = acquire(&fixture, &mut first, data, 7, 1).unwrap();
+    let keep = retain_extra_lease.then(|| acquire(&fixture, &mut first, data, 7, 1).unwrap());
     let stable = Box::new(fixture.clone());
-    let images = provider(&stable, device);
+    let images = provider(&stable, device.clone());
     renderer
         .set_external_image_provider(Box::new(VideoProvider {
             fixture: stable,
@@ -327,6 +337,12 @@ fn vaapi_nv12_bridge_rendering_completes_one_frame_lease() {
     api.send_transaction(document, transaction);
     renderer.prepare_frame(document).unwrap();
     renderer.render().unwrap();
+    if !retain_extra_lease {
+        let completion = renderer.submit_work().unwrap();
+        finish_video_images(&device, || renderer.poll_completion(completion)).unwrap();
+        assert!(!fixture.video_access.borrow().locked);
+        assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    }
     let pixels = renderer
         .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(
             data.width as i32,
@@ -337,8 +353,12 @@ fn vaapi_nv12_bridge_rendering_completes_one_frame_lease() {
     assert!(pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
     renderer.poll().unwrap();
     assert_eq!(fixture.video_access.borrow().locks, 1);
-    assert!(fixture.video_access.borrow().locked);
+    if retain_extra_lease {
+        assert!(fixture.video_access.borrow().locked);
+        assert!(finish_video_images(&device, || Ok(true)).is_err());
+    }
     drop(keep);
+    finish_video_images(&device, || panic!("No video publication needs polling")).unwrap();
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
     assert_eq!(
         fixture
