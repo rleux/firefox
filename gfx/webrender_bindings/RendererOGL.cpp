@@ -121,6 +121,7 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
 struct WrHalImageLease {
   RefPtr<RenderTextureHost> mTexture;
   bool mForeignLocked = false;
+  bool mVAAPILocked = false;
 };
 
 extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
@@ -128,6 +129,22 @@ extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
   auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
   if (texture && texture->GetSurface()->LockForeignRGB()) {
     aLease->mForeignLocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
+
+extern "C" bool wr_renderer_try_lock_vaapi_image(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (!texture || aLease->mVAAPILocked) {
+    return false;
+  }
+  auto surface = texture->GetSurface();
+  auto* yuv = surface->GetAsDMABufSurfaceYUV();
+  if (yuv && yuv->GetVAAPIDescriptor() && surface->TryLockAccess()) {
+    aLease->mVAAPILocked = true;
     return true;
   }
 #endif
@@ -150,6 +167,10 @@ extern "C" void wr_renderer_release_hal_image(WrHalImageLease* aLease,
                                               WrHalImageRelease aStatus) {
   UniquePtr<WrHalImageLease> lease(aLease);
 #ifdef MOZ_WIDGET_GTK
+  if (lease->mVAAPILocked) {
+    lease->mTexture->AsRenderDMABUFTextureHost()->GetSurface()->UnlockAccess(
+        aStatus == WrHalImageRelease::Abandoned);
+  }
   if (lease->mForeignLocked) {
     lease->mTexture->AsRenderDMABUFTextureHost()
         ->GetSurface()

@@ -17,14 +17,25 @@ def main():
     parser.add_argument("--clip", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--render-node", default="/dev/dri/renderD128")
+    parser.add_argument("--icd", type=Path)
+    parser.add_argument("--validation-layers", type=Path)
+    parser.add_argument("--shader-input", choices=["native", "naga"])
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     log = args.output / "native-tests.log"
     command = [str(args.exporter.resolve()), args.render_node, str(args.clip.resolve()),
                str(args.binary.resolve()), str(args.output.resolve())]
+    env = os.environ.copy()
+    if args.icd:
+        env["VK_DRIVER_FILES"] = str(args.icd.resolve())
+    if args.validation_layers:
+        env["VK_LAYER_PATH"] = str(args.validation_layers.resolve())
+        env["VK_LAYER_VALIDATE_SYNC"] = "1"
+    if args.shader_input:
+        env["WR_HAL_SHADER_INPUT"] = args.shader_input
     with log.open("w") as output:
         process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+                                   start_new_session=True, env=env)
         try:
             result = process.wait(timeout=120)
         except subprocess.TimeoutExpired:

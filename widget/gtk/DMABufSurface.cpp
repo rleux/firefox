@@ -558,6 +558,13 @@ bool DMABufSurface::AccessLockUsable() const {
   return mAccessLock && __atomic_load_n(mAccessLock, __ATOMIC_ACQUIRE) <= 1;
 }
 
+bool DMABufSurface::TryLockAccess() {
+  uint32_t expected = 0;
+  return mAccessLock &&
+         __atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
 bool DMABufSurface::LockAccess() {
 #ifdef XP_LINUX
   if (!mAccessLock) {
@@ -2134,13 +2141,14 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
   if (aDesc.vulkanImageState() || aDesc.foreignRGBImageState() ||
       aDesc.fourccFormat() != VA_FOURCC_NV12 || !state.allocationId() ||
       !state.generation() || !state.producerEpoch() ||
-      !state.producerComplete() || aDesc.semaphoreFd() ||
-      aDesc.semaphoreFdIsSyncFd() || !aDesc.fence().IsEmpty() ||
-      aDesc.refCount().Length() != 1 || !aDesc.refCount()[0].IsValid() ||
-      state.objects().IsEmpty() || state.objects().Length() > 2 ||
-      state.planes().Length() != 2 || aDesc.fds().Length() != 2 ||
-      aDesc.width().Length() != 2 || aDesc.height().Length() != 2 ||
-      aDesc.widthAligned().Length() != 2 ||
+      !state.drmRenderMajor() || state.drmRenderMajor() > UINT32_MAX ||
+      state.drmRenderMinor() > UINT32_MAX || !state.producerComplete() ||
+      aDesc.semaphoreFd() || aDesc.semaphoreFdIsSyncFd() ||
+      !aDesc.fence().IsEmpty() || aDesc.refCount().Length() != 1 ||
+      !aDesc.refCount()[0].IsValid() || state.objects().IsEmpty() ||
+      state.objects().Length() > 2 || state.planes().Length() != 2 ||
+      aDesc.fds().Length() != 2 || aDesc.width().Length() != 2 ||
+      aDesc.height().Length() != 2 || aDesc.widthAligned().Length() != 2 ||
       aDesc.heightAligned().Length() != 2 || aDesc.format().Length() != 2 ||
       aDesc.strides().Length() != 2 || aDesc.offsets().Length() != 2 ||
       aDesc.modifier().Length() != 2 || aDesc.format()[0] != DRM_FORMAT_R8 ||

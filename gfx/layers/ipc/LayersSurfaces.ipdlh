@@ -110,6 +110,8 @@ namespace layers {
   uint64_t generation;
   uint64_t producerEpoch;
   bool producerComplete;
+  uint64_t drmRenderMajor;
+  uint64_t drmRenderMinor;
   FileHandleWrapper accessLock;
 };
 
