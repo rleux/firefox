@@ -1079,6 +1079,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         src_rect: DeviceIntRect,
         dst_rect: DeviceIntRect,
     ) -> Result<()> {
+        if dst.copy_aspect() != hal::FormatAspects::COLOR {
+            return Err("Cannot copy into a foreign video plane".into());
+        }
         if src.format != dst.format || src_rect.size() != dst_rect.size() || Rc::ptr_eq(src, dst) {
             return Err("Unsupported HAL texture copy".into());
         }
@@ -1124,7 +1127,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 None,
             )?;
         }
-        let base = |rect: DeviceIntRect, mip_level| hal::TextureCopyBase {
+        let base = |rect: DeviceIntRect, mip_level, aspect| hal::TextureCopyBase {
             mip_level,
             array_layer: 0,
             origin: wgt::Origin3d {
@@ -1132,7 +1135,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 y: rect.min.y as u32,
                 z: 0,
             },
-            aspect: hal::FormatAspects::COLOR,
+            aspect,
         };
         let mut commands = self.submissions.recording()?;
         src.transition(&mut commands, wgt::TextureUses::COPY_SRC);
@@ -1143,8 +1146,8 @@ impl<A: BackendApi> FrameRenderer<A> {
                 wgt::TextureUses::COPY_SRC,
                 &dst.raw,
                 std::iter::once(hal::TextureCopy {
-                    src_base: base(src_rect, src.base_mip),
-                    dst_base: base(dst_rect, dst.base_mip),
+                    src_base: base(src_rect, src.base_mip, src.copy_aspect()),
+                    dst_base: base(dst_rect, dst.base_mip, dst.copy_aspect()),
                     size: wgt::Extent3d {
                         width: src_rect.width() as u32,
                         height: src_rect.height() as u32,
@@ -2744,7 +2747,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                         mip_level: output.base_mip,
                         array_layer: 0,
                         origin: wgt::Origin3d { x: rect.min.x as u32, y: rect.min.y as u32, z: 0 },
-                        aspect: hal::FormatAspects::COLOR,
+                        aspect: output.copy_aspect(),
                     },
                     size: wgt::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 }.into(),
                 }),
@@ -2994,7 +2997,7 @@ mod shader_tests {
                         mip_level: texture.base_mip,
                         array_layer: 0,
                         origin: wgt::Origin3d::ZERO,
-                        aspect: hal::FormatAspects::COLOR,
+                        aspect: texture.copy_aspect(),
                     },
                     size: texture.size.into(),
                 }),

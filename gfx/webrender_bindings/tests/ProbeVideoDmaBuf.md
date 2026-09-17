@@ -2,9 +2,11 @@
 
 `ProbeVideoDmaBuf.cpp` is a standalone Linux Vulkan query tool for the native
 video investigation. It matches a Vulkan physical device to a DRM render node
-and queries DMA-BUF import with transfer-source usage for an exported modifier.
-It reports NV12 and separate R8/RG8 layer candidates, including modifier memory
-plane counts and dedicated-allocation requirements.
+and queries DMA-BUF import for an exported modifier. It reports NV12 copy and
+mutable-format sampled-image candidates, plus separate R8/RG8 alias candidates,
+including modifier memory plane counts and dedicated-allocation requirements.
+
+See [Native video tests](NativeVideo.md) for real-frame import and sampling.
 
 A successful query is only a capability prerequisite. It does not establish
 that a particular decoder allocation can be bound, that aliasing is legal, or
@@ -81,6 +83,13 @@ allocations merely because the handles differ.
 
 ## Query result and initial representation
 
+The updated probe was rebuilt and run after the request to pursue zero-copy
+sampling. Both mutable NV12 sampled-image queries passed, with and without
+transfer-source usage for explicit readback. Each reports two modifier memory
+planes, importable external memory and no dedicated-only requirement. These
+are prerequisites only: legal R8/RG8 plane views, filtering and the shared
+publication lifetime still require native validation.
+
 The probe matched DRM device `226:128`. Modifier import, DMA-BUF external
 memory, external memory FDs and foreign queue ownership extensions are present.
 
@@ -96,7 +105,7 @@ The NV12 query reports external-memory features `0x6`, compatible handle types
 with the Xe kernel driver is experimental; the result describes this host and
 driver combination only.
 
-Select a single non-disjoint NV12 image backed by the exported object, with
+The original copy-based proposal selected a single non-disjoint NV12 image backed by the exported object, with
 explicit modifier plane offsets/pitches and plane-aspect copies into owned
 R8/RG8 textures. Use the verified foreign-producer ownership contract, successful
 producer completion, and one lease covering both planes. V2 must validate
@@ -110,7 +119,10 @@ Vulkan images, matching producer device/driver UUIDs and external ownership.
 It rejects aliased allocations. The pinned `texture_from_dmabuf_fd` helper
 accepts one stride/offset. Preserve those contracts and implement the new
 multi-planar importer through a bounded native Vulkan adapter or an additive
-HAL API, as established by the V2 binding audit.
+HAL API, as established by the V2 binding audit. The revised target is direct
+sampling through plane views of that image, retaining the source until the last
+sampling submission completes and foreign ownership is returned. It must not
+materialize the frame into owned textures during ordinary playback.
 
 ## Browser controls
 

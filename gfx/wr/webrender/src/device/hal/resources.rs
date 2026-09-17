@@ -209,6 +209,7 @@ pub(super) struct Texture<A: hal::Api> {
     pub transient: Cell<bool>,
     pub base_mip: u32,
     pub mip_count: u32,
+    aspect: wgt::TextureAspect,
     states: Rc<Vec<TextureState>>,
     lease: Option<Rc<super::external::LeaseState>>,
 }
@@ -380,6 +381,7 @@ impl<A: hal::Api> Texture<A> {
             base_mip: 0,
             lease: None,
             mip_count,
+            aspect: wgt::TextureAspect::All,
             states: Rc::new(
                 (0..mip_count)
                     .map(|_| TextureState {
@@ -395,6 +397,52 @@ impl<A: hal::Api> Texture<A> {
 
     pub fn belongs_to(&self, owner: &Rc<Device<A>>) -> bool {
         Rc::ptr_eq(&self.raw.owner, owner)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+    pub fn from_nv12(
+        owner: &Rc<Device<A>>, raw: A::Texture, size: [u32; 2], bytes: u64,
+    ) -> Result<[Rc<Self>; 2]> {
+        let raw = Rc::new(Owned::new(owner, raw, A::Device::destroy_texture).accounted(true, bytes));
+        let states = Rc::new(vec![TextureState {
+            usage: Cell::new(wgt::TextureUses::RESOURCE),
+            committed: Cell::new(wgt::TextureUses::RESOURCE),
+            initialized: Cell::new(true),
+            committed_initialized: Cell::new(true),
+        }]);
+        let allocation_id = owner.next_texture_id.get();
+        owner.next_texture_id.set(allocation_id.checked_add(1).ok_or("HAL texture identity overflow")?);
+        let plane = |index: u32, aspect, format| -> Result<Rc<Self>> {
+            let view = unsafe { owner.open.device.create_texture_view(&raw, &hal::TextureViewDescriptor {
+                label: Some("WR NV12 plane"), swizzle: Default::default(),
+                format, dimension: wgt::TextureViewDimension::D2, usage: wgt::TextureUses::RESOURCE,
+                range: wgt::ImageSubresourceRange {
+                    aspect, mip_level_count: Some(1), array_layer_count: Some(1), ..Default::default()
+                },
+            }) }.map_err(|error| format!("Creating NV12 plane view: {error:?}"))?;
+            Ok(Rc::new(Self {
+                view: Owned::new(owner, view, A::Device::destroy_texture_view), target: None,
+                raw: raw.clone(), size: wgt::Extent3d {
+                    width: size[0] >> index, height: size[1] >> index, depth_or_array_layers: 1,
+                },
+                format, filter: crate::device::TextureFilter::Linear, allocation_id,
+                transient: Cell::new(true), base_mip: 0, mip_count: 1, aspect,
+                states: states.clone(), lease: None,
+            }))
+        };
+        let y = plane(0, wgt::TextureAspect::Plane0, wgt::TextureFormat::R8Unorm)?;
+        #[cfg(any(test, feature = "hal-testing"))]
+        owner.check_fault(FailurePoint::VideoPlaneView)?;
+        let uv = plane(1, wgt::TextureAspect::Plane1, wgt::TextureFormat::Rg8Unorm)?;
+        Ok([y, uv])
+    }
+
+    pub fn copy_aspect(&self) -> hal::FormatAspects {
+        match self.aspect {
+            wgt::TextureAspect::Plane0 => hal::FormatAspects::PLANE_0,
+            wgt::TextureAspect::Plane1 => hal::FormatAspects::PLANE_1,
+            _ => hal::FormatAspects::COLOR,
+        }
     }
 
     pub fn mip_view(self: &Rc<Self>, level: u32) -> Result<Rc<Self>> {
@@ -443,6 +491,7 @@ impl<A: hal::Api> Texture<A> {
             transient: Cell::new(self.transient.get()),
             base_mip,
             mip_count: 1,
+            aspect: self.aspect,
             states: self.states.clone(),
             lease: self.lease.clone(),
         }))
@@ -458,7 +507,7 @@ impl<A: hal::Api> Texture<A> {
             let raw = unsafe { owner.open.device.create_texture_view(&self.raw, &hal::TextureViewDescriptor {
                 swizzle: Default::default(),
                 label: Some("WR acquired image view"), format: self.format, dimension: wgt::TextureViewDimension::D2, usage,
-                range: wgt::ImageSubresourceRange { base_mip_level: self.base_mip, mip_level_count: Some(levels), array_layer_count: Some(1), ..Default::default() },
+                range: wgt::ImageSubresourceRange { aspect: self.aspect, base_mip_level: self.base_mip, mip_level_count: Some(levels), array_layer_count: Some(1), ..Default::default() },
             }) }.map_err(|error| format!("Creating acquired image view: {error:?}"))?;
             Ok::<_, String>(Owned::new(owner, raw, A::Device::destroy_texture_view))
         };
@@ -467,7 +516,7 @@ impl<A: hal::Api> Texture<A> {
             target: if self.target.is_some() { Some(view(wgt::TextureUses::COLOR_TARGET, 1)?) } else { None },
             raw: self.raw.clone(), size: self.size, format: self.format, filter,
             allocation_id: self.allocation_id, transient: Cell::new(true), base_mip: self.base_mip,
-            mip_count: self.mip_count, states: self.states.clone(), lease: Some(lease),
+            mip_count: self.mip_count, aspect: self.aspect, states: self.states.clone(), lease: Some(lease),
         }))
     }
 
@@ -570,6 +619,9 @@ impl<A: hal::Api> Texture<A> {
         offset: i32,
         source_format: Option<ImageFormat>,
     ) -> Result<()> {
+        if self.aspect != wgt::TextureAspect::All {
+            return Err("Cannot upload into a foreign video plane".into());
+        }
         if rect.min.x < 0
             || rect.min.y < 0
             || rect.width() <= 0

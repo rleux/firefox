@@ -14,6 +14,8 @@ use std::os::unix::fs::MetadataExt;
 
 mod foreign_rgb;
 pub use foreign_rgb::{ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
+mod video;
+pub use video::{Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
 
 type V = hal::api::Vulkan;
 

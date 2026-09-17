@@ -58,7 +58,8 @@ bool HasExtension(const std::vector<VkExtensionProperties>& aExtensions,
 
 bool QueryFormat(VkPhysicalDevice aDevice, VkFormat aFormat, const char* aName,
                  VkImageCreateFlags aFlags, uint64_t aModifier, uint32_t aWidth,
-                 uint32_t aHeight) {
+                 uint32_t aHeight,
+                 VkImageUsageFlags aUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
   VkDrmFormatModifierPropertiesListEXT modifiers{};
   modifiers.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
   VkFormatProperties2 formatProperties{};
@@ -75,8 +76,8 @@ bool QueryFormat(VkPhysicalDevice aDevice, VkFormat aFormat, const char* aName,
   }
   properties.resize(modifiers.drmFormatModifierCount);
 
-  std::printf("\n%s, %ux%u, flags=0x%x, usage=TRANSFER_SRC\n", aName, aWidth,
-              aHeight, aFlags);
+  std::printf("\n%s, %ux%u, flags=0x%x, usage=0x%x\n", aName, aWidth, aHeight,
+              aFlags, aUsage);
   for (const auto& property : properties) {
     if (property.drmFormatModifier == aModifier) {
       std::printf("  modifier-memory-planes=%u, format-features=0x%x\n",
@@ -95,13 +96,22 @@ bool QueryFormat(VkPhysicalDevice aDevice, VkFormat aFormat, const char* aName,
   modifierInfo.pNext = &externalInfo;
   modifierInfo.drmFormatModifier = aModifier;
   modifierInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  const VkFormat viewFormats[] = {VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+                                  VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM};
+  VkImageFormatListCreateInfo viewInfo{};
+  viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+  viewInfo.viewFormatCount = 3;
+  viewInfo.pViewFormats = viewFormats;
+  if (aFlags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
+    externalInfo.pNext = &viewInfo;
+  }
   VkPhysicalDeviceImageFormatInfo2 imageInfo{};
   imageInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
   imageInfo.pNext = &modifierInfo;
   imageInfo.format = aFormat;
   imageInfo.type = VK_IMAGE_TYPE_2D;
   imageInfo.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-  imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  imageInfo.usage = aUsage;
   imageInfo.flags = aFlags;
 
   VkExternalImageFormatProperties externalProperties{};
@@ -243,6 +253,15 @@ int main(int argc, char** argv) {
     }
     if (!QueryFormat(device, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, "NV12", 0,
                      modifier, width, height) ||
+        !QueryFormat(device, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+                     "NV12 direct plane views",
+                     VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, modifier, width,
+                     height, VK_IMAGE_USAGE_SAMPLED_BIT) ||
+        !QueryFormat(
+            device, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
+            "NV12 direct plane views with readback",
+            VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, modifier, width, height,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
         !QueryFormat(device, VK_FORMAT_R8_UNORM, "Y layer (alias candidate)",
                      VK_IMAGE_CREATE_ALIAS_BIT, modifier, width, height) ||
         !QueryFormat(device, VK_FORMAT_R8G8_UNORM, "UV layer (alias candidate)",
