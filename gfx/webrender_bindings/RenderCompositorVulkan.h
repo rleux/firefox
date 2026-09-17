@@ -18,6 +18,8 @@ class RenderCompositorVulkan final : public RenderCompositor {
   static bool IsRequested();
   static bool SupportsWebGL();
   static gfx::VulkanVideoCapabilities ProbeVideoCapabilities();
+  static bool SupportsVideo();
+  static void DisableVideo();
   static UniquePtr<RenderCompositor> Create(
       const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError);
   RenderCompositorVulkan(const RefPtr<widget::CompositorWidget>& aWidget,

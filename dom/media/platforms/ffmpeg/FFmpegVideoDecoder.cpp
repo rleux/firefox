@@ -1040,6 +1040,27 @@ void FFmpegVideoDecoder<LIBAV_VER>::InitHWDecoderIfAllowed() {
     return;
   }
 
+#  ifdef MOZ_WIDGET_GTK
+  if (gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+#    ifdef FFVPX_VERSION
+    if (!StaticPrefs::media_ffvpx_hw_enabled()) return;
+#    endif
+#    ifdef MOZ_ENABLE_VAAPI
+    if (gfx::gfxVars::CanUseHardwareVideoDecoding() &&
+        gfx::gfxVars::UseWebRenderVulkanVideo() &&
+        !gfx::gfxVars::WebRenderVulkanVideoCapabilities().formats().IsEmpty()) {
+      const MediaResult result = InitVAAPIDecoder();
+      if (NS_FAILED(result)) {
+        FFMPEG_LOG("Native VAAPI initialization failed: {}",
+                   result.Message().get());
+      }
+    }
+#    endif
+    return;
+  }
+#  endif
+
 #  ifdef MOZ_USE_HWDECODE_VULKAN
   if (NS_SUCCEEDED(InitVulkanDecoder())) {
     return;
@@ -1590,6 +1611,14 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::DoDecode(
     MediaRawData* aSample, uint8_t* aData, int aSize, bool* aGotFrame,
     MediaDataDecoder::DecodedData& aResults) {
   MOZ_ASSERT(mTaskQueue->IsOnCurrentThread());
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_USE_HWDECODE)
+  if (mNativeVAAPIFramePool && (!gfx::gfxVars::UseWebRenderVulkan() ||
+                                gfx::gfxVars::UseSoftwareWebRender() ||
+                                !gfx::gfxVars::UseWebRenderVulkanVideo())) {
+    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                       RESULT_DETAIL("Vulkan video capability was revoked"));
+  }
+#endif
   AVPacket* packet;
 
 #if LIBAVCODEC_VERSION_MAJOR >= 61
@@ -2296,6 +2325,13 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::CreateImageVAAPI(
     FFMPEG_LOG("CreateImageVAAPI(): failed to get VideoFrameSurface");
     return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
                        RESULT_DETAIL("VAAPI dmabuf allocation error"));
+  }
+  if (native &&
+      !surface->GetDMABufSurface()->GetAsDMABufSurfaceYUV()->SupportsVAAPIImage(
+          gfx::gfxVars::WebRenderVulkanVideoCapabilities())) {
+    return MediaResult(
+        NS_ERROR_DOM_MEDIA_DECODE_ERR,
+        RESULT_DETAIL("VAAPI frame exceeds Vulkan video capabilities"));
   }
 
   FFMPEG_LOG(

@@ -20,6 +20,7 @@
 #include "gtest/gtest.h"
 #include "mozilla/NotNull.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
+#include "mozilla/gfx/GraphicsMessages.h"
 #include "mozilla/ipc/FileDescriptor.h"
 #include "mozilla/layers/LayersSurfaces.h"
 #include "mozilla/widget/DMABufSurface.h"
@@ -228,6 +229,71 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   image.vaapiImageState() = Some(VAAPIImageState(
       objects, planes, 42, 7, 3, true, 226, 128, WrapNotNull(accessLock)));
   return Some(std::move(descriptor));
+}
+
+TEST(DMABufSurface, VAAPICapabilitiesRejectUnsupportedFrames)
+{
+  VulkanVideoCapabilities capabilities;
+  capabilities.drmMajor() = 226;
+  capabilities.drmMinor() = 128;
+  capabilities.deviceUUID().SetLength(16);
+  capabilities.driverUUID().SetLength(16);
+  capabilities.formats().AppendElement(VulkanVideoFormat(0, 128, 128, 24576));
+  const auto supports = [&](const SurfaceDescriptor& aDescriptor,
+                            const VulkanVideoCapabilities& aCapabilities) {
+    RefPtr<DMABufSurface> surface =
+        DMABufSurface::CreateDMABufSurface(aDescriptor);
+    EXPECT_TRUE(surface);
+    return surface &&
+           surface->GetAsDMABufSurfaceYUV()->SupportsVAAPIImage(aCapabilities);
+  };
+  auto descriptor = MakeVAAPIDescriptor(false, 0);
+  ASSERT_TRUE(descriptor);
+  EXPECT_TRUE(supports(*descriptor, capabilities));
+  for (int i = 0; i < 8; ++i) {
+    SCOPED_TRACE(i);
+    auto changed = capabilities;
+    switch (i) {
+      case 0:
+        changed.drmMinor()++;
+        break;
+      case 1:
+        changed.deviceUUID().Clear();
+        break;
+      case 2:
+        changed.driverUUID().Clear();
+        break;
+      case 3:
+        changed.formats().Clear();
+        break;
+      case 4:
+        changed.formats()[0].modifier() = 1;
+        break;
+      case 5:
+        changed.formats()[0].maxWidth()--;
+        break;
+      case 6:
+        changed.formats()[0].maxHeight()--;
+        break;
+      case 7:
+        changed.formats()[0].maxAllocationSize()--;
+        break;
+    }
+    EXPECT_FALSE(supports(*descriptor, changed));
+  }
+  for (auto transfer : {TransferFunction::PQ, TransferFunction::HLG}) {
+    auto changed = *descriptor;
+    changed.get_SurfaceDescriptorDMABuf().transferFunction() = transfer;
+    EXPECT_FALSE(supports(changed, capabilities));
+  }
+  for (auto primaries : {ColorSpace2::DISPLAY_P3, ColorSpace2::BT2020}) {
+    auto changed = *descriptor;
+    changed.get_SurfaceDescriptorDMABuf().colorPrimaries() = primaries;
+    EXPECT_FALSE(supports(changed, capabilities));
+  }
+  auto separate = MakeVAAPIDescriptor(true, 0);
+  ASSERT_TRUE(separate);
+  EXPECT_FALSE(supports(*separate, capabilities));
 }
 
 TEST(DMABufSurface, VAAPIObjectAndPlaneRoundtrip)

@@ -29,6 +29,7 @@ namespace mozilla {
 namespace gfx {
 class DataSourceSurface;
 class FileHandleWrapper;
+class VulkanVideoCapabilities;
 }  // namespace gfx
 namespace layers {
 class MemoryOrShmem;
@@ -389,6 +390,8 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   bool PublishVAAPIImage(const VADRMPRIMESurfaceDescriptor& aDesc,
                          uint64_t aPublicationId, uint64_t aProducerEpoch,
                          uint64_t aDRMMajor, uint64_t aDRMMinor);
+  bool SupportsVAAPIImage(
+      const mozilla::gfx::VulkanVideoCapabilities& aCapabilities) const;
   bool SameVAAPIAllocation(const DMABufSurfaceYUV& aOther) const;
   bool SameVAAPIImage(const DMABufSurfaceYUV& aOther) const;
   bool TryRetireVAAPIImage();

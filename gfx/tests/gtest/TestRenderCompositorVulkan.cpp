@@ -12,6 +12,124 @@
 #include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "nsString.h"
 
+extern "C" void* wr_vulkan_register_dmabuf_device(
+    const uint8_t*, const uint8_t*, const uint64_t*, size_t, const uint64_t*,
+    size_t, const mozilla::wr::WrHalNv12Capabilities*);
+extern "C" void wr_vulkan_unregister_dmabuf_device(void*);
+
+TEST(RenderCompositorVulkan, VideoRequiresEveryLiveDeviceToMatchProbe)
+{
+  using namespace mozilla;
+  using gfx::gfxVars;
+  using wr::RenderCompositorVulkan;
+  gfxVars::Initialize();
+  const auto saved = gfxVars::WebRenderVulkanVideoCapabilities();
+  const bool video = gfxVars::UseWebRenderVulkanVideo();
+  const bool vulkan = gfxVars::UseWebRenderVulkan();
+  const bool software = gfxVars::UseSoftwareWebRender();
+  auto restore = MakeScopeExit([&] {
+    gfxVars::SetWebRenderVulkanVideoCapabilities(saved);
+    gfxVars::SetUseWebRenderVulkanVideo(video);
+    gfxVars::SetUseWebRenderVulkan(vulkan);
+    gfxVars::SetUseSoftwareWebRender(software);
+  });
+  gfxVars::SetUseWebRenderVulkan(true);
+  gfxVars::SetUseSoftwareWebRender(false);
+  gfxVars::SetUseWebRenderVulkanVideo(true);
+  gfx::VulkanVideoCapabilities expected;
+  expected.drmMajor() = 226;
+  expected.drmMinor() = 128;
+  for (size_t i = 0; i < 16; ++i) {
+    expected.deviceUUID().AppendElement(0);
+    expected.driverUUID().AppendElement(0);
+  }
+  expected.deviceUUID()[0] = 1;
+  expected.driverUUID()[0] = 2;
+  expected.formats().AppendElement(
+      gfx::VulkanVideoFormat(0, 4096, 2160, 1ULL << 32));
+  gfxVars::SetWebRenderVulkanVideoCapabilities(expected);
+  EXPECT_FALSE(RenderCompositorVulkan::SupportsVideo());
+  wr::WrHalNv12Capabilities actual{};
+  actual.drm_node[0] = 226;
+  actual.drm_node[1] = 128;
+  actual.device_uuid[0] = 1;
+  actual.driver_uuid[0] = 2;
+  actual.format_count = 1;
+  actual.formats[0] = {0, 4096, 2160, 1ULL << 32};
+  const uint64_t modifier = 0;
+  const auto add = [&](const wr::WrHalNv12Capabilities& aCaps) {
+    return wr_vulkan_register_dmabuf_device(aCaps.device_uuid,
+                                            aCaps.driver_uuid, &modifier, 1,
+                                            &modifier, 1, &aCaps);
+  };
+  void* first = add(actual);
+  ASSERT_TRUE(first);
+  auto unregister =
+      MakeScopeExit([&] { wr_vulkan_unregister_dmabuf_device(first); });
+  EXPECT_TRUE(RenderCompositorVulkan::SupportsVideo());
+  for (int i = 0; i < 8; ++i) {
+    SCOPED_TRACE(i);
+    auto changed = actual;
+    switch (i) {
+      case 0:
+        changed.drm_node[1]++;
+        break;
+      case 1:
+        changed.device_uuid[0]++;
+        break;
+      case 2:
+        changed.driver_uuid[0]++;
+        break;
+      case 3:
+        changed.format_count = 0;
+        break;
+      case 4:
+        changed.formats[0].modifier++;
+        break;
+      case 5:
+        changed.formats[0].max_width--;
+        break;
+      case 6:
+        changed.formats[0].max_height--;
+        break;
+      case 7:
+        changed.formats[0].max_allocation_size--;
+        break;
+    }
+    void* second = add(changed);
+    EXPECT_FALSE(RenderCompositorVulkan::SupportsVideo());
+    wr_vulkan_unregister_dmabuf_device(second);
+    EXPECT_TRUE(RenderCompositorVulkan::SupportsVideo());
+  }
+  gfxVars::SetUseWebRenderVulkanVideo(false);
+  EXPECT_FALSE(RenderCompositorVulkan::SupportsVideo());
+}
+
+TEST(RenderCompositorVulkan, VideoFailureRevokesCapabilityForSession)
+{
+  using namespace mozilla;
+  using gfx::gfxVars;
+  gfxVars::Initialize();
+  const bool vulkan = gfxVars::UseWebRenderVulkan();
+  const bool software = gfxVars::UseSoftwareWebRender();
+  auto restore = MakeScopeExit([&] {
+    gfxVars::SetUseWebRenderVulkan(vulkan);
+    gfxVars::SetUseSoftwareWebRender(software);
+  });
+  gfxVars::SetUseWebRenderVulkan(true);
+  gfxVars::SetUseSoftwareWebRender(false);
+  gfxVars::SetUseWebRenderVulkanVideo(true);
+  gfx::VulkanVideoCapabilities capabilities;
+  capabilities.formats().AppendElement(
+      gfx::VulkanVideoFormat(0, 128, 128, 24576));
+  gfxVars::SetWebRenderVulkanVideoCapabilities(capabilities);
+  wr::RenderCompositorVulkan::DisableVideo();
+  EXPECT_FALSE(gfxVars::UseWebRenderVulkanVideo());
+  EXPECT_TRUE(gfxVars::WebRenderVulkanVideoCapabilities().formats().IsEmpty());
+  EXPECT_TRUE(
+      wr::RenderCompositorVulkan::ProbeVideoCapabilities().formats().IsEmpty());
+}
+
 TEST(RenderCompositorVulkan, SelectionIsExplicitAndSoftwareTakesPrecedence)
 {
   mozilla::gfx::gfxVars::Initialize();

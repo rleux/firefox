@@ -2276,6 +2276,41 @@ bool DMABufSurfaceYUV::PublishVAAPIImage(
   return true;
 }
 
+bool DMABufSurfaceYUV::SupportsVAAPIImage(
+    const mozilla::gfx::VulkanVideoCapabilities& aCapabilities) const {
+  using namespace mozilla::gfx;
+  if (!mVAAPIDescriptor || !AccessLockUsable() ||
+      aCapabilities.deviceUUID().Length() != 16 ||
+      aCapabilities.driverUUID().Length() != 16) {
+    return false;
+  }
+  const auto& image = *mVAAPIDescriptor;
+  const auto& state = image.vaapiImageState().ref();
+  if (state.objects().Length() != 1 ||
+      state.drmRenderMajor() != aCapabilities.drmMajor() ||
+      state.drmRenderMinor() != aCapabilities.drmMinor() ||
+      (image.yUVColorSpace() != YUVColorSpace::BT601 &&
+       image.yUVColorSpace() != YUVColorSpace::BT709) ||
+      (image.colorPrimaries() != ColorSpace2::UNKNOWN &&
+       image.colorPrimaries() != ColorSpace2::SRGB &&
+       image.colorPrimaries() != ColorSpace2::BT601_525 &&
+       image.colorPrimaries() != ColorSpace2::BT709) ||
+      image.transferFunction() != TransferFunction::BT709 ||
+      !(image.hdrMetadata() == HDRMetadata())) {
+    return false;
+  }
+  const auto& object = state.objects()[0];
+  for (const auto& format : aCapabilities.formats()) {
+    if (format.modifier() == object.modifier() &&
+        image.widthAligned()[0] <= format.maxWidth() &&
+        image.heightAligned()[0] <= format.maxHeight() &&
+        object.size() <= format.maxAllocationSize()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool DMABufSurfaceYUV::SameVAAPIAllocation(
     const DMABufSurfaceYUV& aOther) const {
   if (mBufferPlaneCount != 2 || aOther.mBufferPlaneCount != 2) return false;

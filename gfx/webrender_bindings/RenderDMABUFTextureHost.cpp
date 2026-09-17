@@ -10,6 +10,10 @@
 #include "ScopedGLHelpers.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
 #include "mozilla/gfx/Logging.h"
+#ifdef XP_LINUX
+#  include "RenderCompositorVulkan.h"
+#  include "mozilla/gfx/gfxVars.h"
+#endif
 
 namespace mozilla::wr {
 
@@ -125,6 +129,13 @@ bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
     return false;
   }
   if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
+#ifdef XP_LINUX
+    if (!RenderCompositorVulkan::SupportsVideo() ||
+        !yuv->SupportsVAAPIImage(
+            gfx::gfxVars::WebRenderVulkanVideoCapabilities())) {
+      return false;
+    }
+#endif
     return GetVAAPIImage(*yuv, aChannelIndex, aImage);
   }
   if (aChannelIndex) {

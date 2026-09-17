@@ -150,6 +150,22 @@ tests cover modifier, dimension and allocation-size boundaries; the C++
 `VideoCapabilitiesSurviveGfxVarIPC` test checks serialization of device identity
 and both modifier records, including sizes above 4 GiB.
 
-A successful probe does not enable publication. Renderer registration,
-per-frame admission and late-failure recovery remain required. Image creation,
-memory compatibility and actual plane layout are still validated at import.
+A successful probe does not enable publication. Live renderer registrations
+must match its DRM node, device/driver UUIDs and format limits before native
+video sampling. Each publication must fit the reported modifier and allocation
+limits. Initial color admission permits BT.601/BT.709 matrices, ordinary SDR
+primaries, BT.709 transfer and no HDR metadata. Image creation, memory
+compatibility and actual plane layout are still validated at import.
+
+Renderer errors and compositor device resets revoke native-video capability
+for the browser session. The decoder checks revocation before feeding another
+packet once it has native publications. Vulkan rendering selects only VA-API
+through this path and preserves hardware-decoder preferences. C++ tests cover
+frame rejection, incompatible simultaneous renderer registrations, removal of
+those registrations and persistent capability revocation. A native Rust test
+checks the actual device-registration payload and its removal.
+
+Publication remains disabled pending recovery and consumer validation. In
+particular, Linux's existing hardware-decoder fallback can fail after playback
+starts when there is no later keyframe; revoking capability alone does not
+establish successful software-decoder recovery for that case.
