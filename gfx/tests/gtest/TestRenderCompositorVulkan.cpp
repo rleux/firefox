@@ -10,10 +10,11 @@
 #include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "nsString.h"
 
-TEST(RenderCompositorVulkan, SoftwareOverridesEnvironment)
+TEST(RenderCompositorVulkan, SelectionIsExplicitAndSoftwareTakesPrecedence)
 {
   mozilla::gfx::gfxVars::Initialize();
   const bool software = mozilla::gfx::gfxVars::UseSoftwareWebRender();
+  const bool vulkan = mozilla::gfx::gfxVars::UseWebRenderVulkan();
   const char* backend = getenv("MOZ_WR_BACKEND");
   const bool hadBackend = backend != nullptr;
   const nsCString savedBackend(backend);
@@ -24,13 +25,19 @@ TEST(RenderCompositorVulkan, SoftwareOverridesEnvironment)
       unsetenv("MOZ_WR_BACKEND");
     }
     mozilla::gfx::gfxVars::SetUseSoftwareWebRender(software);
+    mozilla::gfx::gfxVars::SetUseWebRenderVulkan(vulkan);
   });
 
   ASSERT_EQ(setenv("MOZ_WR_BACKEND", "vulkan", 1), 0);
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(false);
+  mozilla::gfx::gfxVars::SetUseWebRenderVulkan(false);
+  EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
+  mozilla::gfx::gfxVars::SetUseWebRenderVulkan(true);
   EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::IsRequested());
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(true);
   EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(false);
   EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::IsRequested());
+  mozilla::gfx::gfxVars::SetUseWebRenderVulkan(false);
+  EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
 }
