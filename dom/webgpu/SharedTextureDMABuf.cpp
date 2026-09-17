@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/webgpu/WebGPUParent.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
@@ -51,6 +52,9 @@ UniquePtr<SharedTextureDMABuf> SharedTextureDMABuf::Create(
       std::move(fd), dmaBufInfo, aWidth, aHeight);
   if (!surface) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    return nullptr;
+  }
+  if (forWebRender && !surface->CreateAccessLock()) {
     return nullptr;
   }
 
@@ -108,15 +112,16 @@ Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
   auto& sdDMABuf = sd.get_SurfaceDescriptorDMABuf();
   sdDMABuf.semaphoreFd() = mSemaphoreFd;
   if (mDMABufInfo.for_webrender) {
-    if (!mVulkanGeneration) {
+    if (!mVulkanGeneration || !mSurface->AccessLockUsable()) {
       return Nothing();
     }
     nsTArray<uint8_t> device;
     nsTArray<uint8_t> driver;
     device.AppendElements(mDMABufInfo.device_uuid, 16);
     driver.AppendElements(mDMABufInfo.driver_uuid, 16);
-    sdDMABuf.vulkanImageState() =
-        Some(layers::VulkanImageState(device, driver, mVulkanGeneration));
+    sdDMABuf.vulkanImageState() = Some(
+        layers::VulkanImageState(device, driver, mVulkanGeneration,
+                                 WrapNotNull(mSurface->GetAccessLockFd())));
     sdDMABuf.semaphoreFdIsSyncFd() = true;
   }
 
@@ -126,6 +131,12 @@ Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
 void SharedTextureDMABuf::GetSnapshot(const ipc::Shmem& aDestShmem,
                                       size_t aDestStride) {
   if (mDMABufInfo.for_webrender) {
+    if (!mVulkanGeneration || !mSurface->LockAccess()) {
+      memset(aDestShmem.get<uint8_t>(), 0, aDestShmem.Size<uint8_t>());
+      return;
+    }
+    bool complete = false;
+    auto unlock = MakeScopeExit([&] { mSurface->UnlockAccess(!complete); });
     wr::WrHalDmaBuf image{};
     image.fd = mSurfaceDescriptor.fds()[0]->GetHandle();
     image.ready_fd = mSemaphoreFd ? mSemaphoreFd->GetHandle() : -1;
@@ -138,9 +149,10 @@ void SharedTextureDMABuf::GetSnapshot(const ipc::Shmem& aDestShmem,
     image.offset = mDMABufInfo.offsets[0];
     std::copy_n(mDMABufInfo.device_uuid, 16, image.device_uuid);
     std::copy_n(mDMABufInfo.driver_uuid, 16, image.driver_uuid);
-    if (!mVulkanGeneration || !wr::wr_snapshot_vulkan_dmabuf(
-                                  &image, aDestShmem.get<uint8_t>(),
-                                  aDestShmem.Size<uint8_t>(), aDestStride)) {
+    complete =
+        wr::wr_snapshot_vulkan_dmabuf(&image, aDestShmem.get<uint8_t>(),
+                                      aDestShmem.Size<uint8_t>(), aDestStride);
+    if (!complete) {
       memset(aDestShmem.get<uint8_t>(), 0, aDestShmem.Size<uint8_t>());
       gfxCriticalNoteOnce << "Vulkan DMA-BUF snapshot failed";
     }
@@ -190,7 +202,7 @@ bool SharedTextureDMABuf::PrepareForVulkanPresent(
   if (!mDMABufInfo.for_webrender) {
     return true;
   }
-  if (!aGeneration || mVulkanGeneration) {
+  if (!aGeneration || mVulkanGeneration || !mSurface->AccessLockUsable()) {
     return false;
   }
   int32_t fd = -2;
@@ -207,7 +219,18 @@ bool SharedTextureDMABuf::PrepareForVulkanPresent(
   return true;
 }
 
+ffi::WGPUDMABufInfo SharedTextureDMABuf::GetDMABufInfo() const {
+  auto info = mDMABufInfo;
+  if (info.for_webrender && !mSurface->AccessLockUsable()) {
+    info.is_valid = false;
+  }
+  return info;
+}
+
 UniqueFileHandle SharedTextureDMABuf::CloneDmaBufFd() {
+  if (mDMABufInfo.for_webrender && !mSurface->AccessLockUsable()) {
+    return UniqueFileHandle();
+  }
   return mSurfaceDescriptor.fds()[0]->ClonePlatformHandle();
 }
 

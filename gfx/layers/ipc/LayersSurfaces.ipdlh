@@ -82,6 +82,7 @@ namespace layers {
   uint8_t[] deviceUUID;
   uint8_t[] driverUUID;
   uint64_t generation;
+  FileHandleWrapper accessLock;
 };
 
 [Comparable] struct ForeignRGBImageState {

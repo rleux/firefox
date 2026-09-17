@@ -9,7 +9,11 @@
 #  include <sys/eventfd.h>
 #  include <sys/syscall.h>
 
+#  include <chrono>
+#  include <future>
+
 #  include "base/linux_memfd_defs.h"
+#  include "mozilla/webgpu/SharedTextureDMABuf.h"
 #endif
 
 #include "gtest/gtest.h"
@@ -169,6 +173,106 @@ TEST(DMABufSurface, YUVRoundtrip)
 }
 
 #ifdef XP_LINUX
+static void AddVulkanState(SurfaceDescriptor& aDescriptor,
+                           RefPtr<FileHandleWrapper> aAccessLock) {
+  AutoTArray<uint8_t, 16> identity = {0, 0, 0, 0, 0, 0, 0, 0,
+                                      0, 0, 0, 0, 0, 0, 0, 0};
+  auto& image = aDescriptor.get_SurfaceDescriptorDMABuf();
+  image.semaphoreFdIsSyncFd() = true;
+  image.vulkanImageState() =
+      Some(VulkanImageState(identity, identity, 1, WrapNotNull(aAccessLock)));
+}
+
+TEST(DMABufSurface, VulkanRejectsInvalidAccessLock)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  auto descriptor = MakeRGBADescriptor(fd);
+  AddVulkanState(descriptor, fd);
+  RefPtr<DMABufSurface> rejected =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  EXPECT_FALSE(rejected);
+}
+
+TEST(DMABufSurface, VulkanSnapshotSerializesCompositorAccess)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  auto descriptor = MakeRGBADescriptor(fd);
+  RefPtr<DMABufSurface> snapshot =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(snapshot);
+  ASSERT_TRUE(snapshot->CreateAccessLock());
+  AddVulkanState(descriptor, snapshot->GetAccessLockFd());
+  RefPtr<DMABufSurface> imported =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(imported);
+  SurfaceDescriptor forwarded;
+  ASSERT_TRUE(imported->Serialize(forwarded));
+  RefPtr<DMABufSurface> compositor =
+      DMABufSurface::CreateDMABufSurface(forwarded);
+  ASSERT_TRUE(compositor);
+
+  ASSERT_TRUE(snapshot->LockAccess());
+  std::promise<void> started;
+  auto acquired = std::async(std::launch::async, [&] {
+    started.set_value();
+    const bool locked = compositor->LockAccess();
+    if (locked) {
+      compositor->UnlockAccess();
+    }
+    return locked;
+  });
+  started.get_future().wait();
+  EXPECT_EQ(acquired.wait_for(std::chrono::milliseconds(100)),
+            std::future_status::timeout);
+  snapshot->UnlockAccess();
+  EXPECT_TRUE(acquired.get());
+  ASSERT_TRUE(snapshot->LockAccess());
+  snapshot->UnlockAccess();
+}
+
+TEST(DMABufSurface, VulkanAbandonmentPreventsProducerRecycling)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  auto descriptor = MakeRGBADescriptor(fd);
+  RefPtr<DMABufSurface> producer =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(producer);
+  ASSERT_TRUE(producer->CreateAccessLock());
+  AddVulkanState(descriptor, producer->GetAccessLockFd());
+  RefPtr<DMABufSurface> compositor =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(compositor);
+
+  webgpu::ffi::WGPUTextureFormat format{};
+  format.tag = webgpu::ffi::WGPUTextureFormat_Bgra8Unorm;
+  webgpu::ffi::WGPUDMABufInfo info{};
+  info.is_valid = true;
+  info.for_webrender = true;
+  webgpu::SharedTextureDMABuf texture(
+      128, 128, format, {}, RefPtr<DMABufSurface>(producer),
+      descriptor.get_SurfaceDescriptorDMABuf(), info);
+  EXPECT_TRUE(texture.GetDMABufInfo().is_valid);
+
+  ASSERT_TRUE(compositor->LockAccess());
+  compositor->UnlockAccess();
+  EXPECT_TRUE(producer->AccessLockUsable());
+  ASSERT_TRUE(compositor->LockAccess());
+  compositor->UnlockAccess(true);
+  EXPECT_FALSE(producer->AccessLockUsable());
+  EXPECT_FALSE(producer->LockAccess());
+  EXPECT_FALSE(compositor->LockAccess());
+  EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
+  EXPECT_FALSE(texture.CloneDmaBufFd());
+  texture.CleanForRecycling();
+  EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
+  EXPECT_FALSE(producer->CreateAccessLock());
+  producer->UnlockAccess();
+  EXPECT_FALSE(producer->AccessLockUsable());
+}
+
 TEST(DMABufSurface, ForeignRGBRejectsMissingAccessLock)
 {
   auto fd = MakeFd();

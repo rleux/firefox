@@ -117,6 +117,11 @@ bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
     default:
       return false;
   }
+  if (mVulkanLocked || !mSurface->LockAccess()) {
+    return false;
+  }
+  // The HAL lease returns external ownership before unlocking this surface.
+  mVulkanLocked = true;
   WrHalDmaBuf image{};
   image.fd = desc->fds()[0]->GetHandle();
   image.ready_fd = desc->semaphoreFd() ? desc->semaphoreFd()->GetHandle() : -1;
@@ -134,6 +139,10 @@ bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
 }
 
 void RenderDMABUFTextureHost::UnlockHalImage(WrHalImageRelease aStatus) {
+  if (mVulkanLocked) {
+    mSurface->UnlockAccess(aStatus == WrHalImageRelease::Abandoned);
+    mVulkanLocked = false;
+  }
   if (aStatus == WrHalImageRelease::Abandoned) {
     if (!mVulkanFailed && mSurface->IsForeignRGB()) {
       mSurface->GlobalRefAdd();
