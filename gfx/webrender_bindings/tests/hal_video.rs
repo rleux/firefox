@@ -8,6 +8,55 @@ extern "C" {
     fn wr_vulkan_query_nv12(major: u64, minor: u64, output: &mut WrHalNv12Capabilities) -> bool;
 }
 
+thread_local! {
+    static REGISTERED_VIDEO: RefCell<Option<WrHalNv12Capabilities>> = RefCell::new(None);
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_vulkan_register_dmabuf_device(
+    device: *const u8,
+    driver: *const u8,
+    _: *const u64,
+    _: usize,
+    _: *const u64,
+    _: usize,
+    video: &WrHalNv12Capabilities,
+) -> *mut c_void {
+    assert_eq!(std::slice::from_raw_parts(device, 16), video.device_uuid);
+    assert_eq!(std::slice::from_raw_parts(driver, 16), video.driver_uuid);
+    REGISTERED_VIDEO.with(|slot| {
+        assert!(slot.borrow_mut().replace(*video).is_none());
+    });
+    Box::into_raw(Box::new(())) as *mut c_void
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_vulkan_unregister_dmabuf_device(registration: *mut c_void) {
+    drop(Box::from_raw(registration as *mut ()));
+    REGISTERED_VIDEO.with(|slot| assert!(slot.borrow_mut().take().is_some()));
+}
+
+#[test]
+#[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_nv12_live_device_registration_carries_capabilities() {
+    let (_, data) = fixture();
+    let live_device = device();
+    let registration = DeviceRegistration::new(&live_device).unwrap();
+    REGISTERED_VIDEO.with(|slot| {
+        let caps = slot.borrow();
+        let caps = caps.as_ref().unwrap();
+        assert_eq!(caps.drm_node, data.drm_node);
+        assert!(caps.formats[..caps.format_count].iter().any(|format| {
+            format.modifier == data.modifier
+                && format.max_width >= data.allocation_width
+                && format.max_height >= data.allocation_height
+                && format.max_allocation_size >= data.allocation_size
+        }));
+    });
+    drop(registration);
+    REGISTERED_VIDEO.with(|slot| assert!(slot.borrow().is_none()));
+}
+
 #[test]
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
@@ -15,6 +64,7 @@ fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
     let mut capabilities = WrHalNv12Capabilities::default();
     assert!(unsafe { wr_vulkan_query_nv12(data.drm_node[0], data.drm_node[1], &mut capabilities) });
     assert!((1..=2).contains(&capabilities.format_count));
+    assert_eq!(capabilities.drm_node, data.drm_node);
     let formats = &capabilities.formats[..capabilities.format_count];
     assert!(formats.iter().any(|format| {
         format.modifier == data.modifier
@@ -27,6 +77,7 @@ fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
     assert_eq!(capabilities.driver_uuid, identity.driver_uuid());
     assert!(!unsafe { wr_vulkan_query_nv12(u64::MAX, u64::MAX, &mut capabilities) });
     assert_eq!(capabilities.format_count, 0);
+    assert_eq!(capabilities.drm_node, [0; 2]);
     assert_eq!(capabilities.device_uuid, [0; 16]);
     assert_eq!(capabilities.driver_uuid, [0; 16]);
     for format in capabilities.formats {

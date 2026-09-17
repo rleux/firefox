@@ -28,19 +28,23 @@ struct DmaBufDevice {
   std::array<uint8_t, 16> mDriver;
   nsTArray<uint64_t> mRGBA;
   nsTArray<uint64_t> mBGRA;
+  WrHalNv12Capabilities mVideo;
 };
 StaticMutex sDmaBufDevicesMutex;
 StaticAutoPtr<nsTArray<DmaBufDevice*>> sDmaBufDevices;
+bool sVideoFailed = false;
 }  // namespace
 
 extern "C" void* wr_vulkan_register_dmabuf_device(
     const uint8_t* aDevice, const uint8_t* aDriver, const uint64_t* aRGBA,
-    size_t aRGBALength, const uint64_t* aBGRA, size_t aBGRALength) {
+    size_t aRGBALength, const uint64_t* aBGRA, size_t aBGRALength,
+    const WrHalNv12Capabilities* aVideo) {
   auto device = MakeUnique<DmaBufDevice>();
   std::copy_n(aDevice, 16, device->mDevice.begin());
   std::copy_n(aDriver, 16, device->mDriver.begin());
   device->mRGBA.AppendElements(aRGBA, aRGBALength);
   device->mBGRA.AppendElements(aBGRA, aBGRALength);
+  device->mVideo = *aVideo;
   StaticMutexAutoLock lock(sDmaBufDevicesMutex);
   if (!sDmaBufDevices) {
     sDmaBufDevices = new nsTArray<DmaBufDevice*>();
@@ -97,8 +101,9 @@ bool RenderCompositorVulkan::IsRequested() {
 }
 
 gfx::VulkanVideoCapabilities RenderCompositorVulkan::ProbeVideoCapabilities() {
+  MOZ_ASSERT(NS_IsMainThread());
   gfx::VulkanVideoCapabilities result;
-  if (!IsRequested()) return result;
+  if (!IsRequested() || sVideoFailed) return result;
   nsCString node(PR_GetEnv("MOZ_DRM_DEVICE"));
   if (node.IsEmpty()) node = gfx::gfxVars::DrmRenderDevice();
   struct stat device;
@@ -123,6 +128,49 @@ gfx::VulkanVideoCapabilities RenderCompositorVulkan::ProbeVideoCapabilities() {
                                format.max_height, format.max_allocation_size));
   }
   return result;
+}
+
+bool RenderCompositorVulkan::SupportsVideo() {
+  if (!IsRequested() || !gfx::gfxVars::UseWebRenderVulkanVideo()) return false;
+  const auto& expected = gfx::gfxVars::WebRenderVulkanVideoCapabilities();
+  if (expected.formats().IsEmpty() || expected.deviceUUID().Length() != 16 ||
+      expected.driverUUID().Length() != 16) {
+    return false;
+  }
+  StaticMutexAutoLock lock(sDmaBufDevicesMutex);
+  if (!sDmaBufDevices || sDmaBufDevices->IsEmpty()) return false;
+  for (const auto* device : *sDmaBufDevices) {
+    const auto& video = device->mVideo;
+    if (video.format_count > std::size(video.formats) ||
+        video.drm_node[0] != expected.drmMajor() ||
+        video.drm_node[1] != expected.drmMinor() ||
+        memcmp(video.device_uuid, expected.deviceUUID().Elements(), 16) ||
+        memcmp(video.driver_uuid, expected.driverUUID().Elements(), 16)) {
+      return false;
+    }
+    for (const auto& format : expected.formats()) {
+      bool supported = false;
+      for (size_t i = 0; i < video.format_count; ++i) {
+        const auto& actual = video.formats[i];
+        supported |= actual.modifier == format.modifier() &&
+                     actual.max_width >= format.maxWidth() &&
+                     actual.max_height >= format.maxHeight() &&
+                     actual.max_allocation_size >= format.maxAllocationSize();
+      }
+      if (!supported) return false;
+    }
+  }
+  return true;
+}
+
+void RenderCompositorVulkan::DisableVideo() {
+  MOZ_ASSERT(NS_IsMainThread() && XRE_IsParentProcess());
+  if (!gfx::gfxVars::UseWebRenderVulkan()) return;
+  sVideoFailed = true;
+  gfx::gfxVarsCollectUpdates collect;
+  gfx::gfxVars::SetUseWebRenderVulkanVideo(false);
+  gfx::gfxVars::SetWebRenderVulkanVideoCapabilities(
+      gfx::VulkanVideoCapabilities());
 }
 
 UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(

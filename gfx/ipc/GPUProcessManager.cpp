@@ -56,6 +56,9 @@
 #include "nsExceptionHandler.h"
 #include "nsIWidget.h"
 #include "nsPrintfCString.h"
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
+#endif
 
 #ifdef MOZ_WMF_MEDIA_ENGINE
 #  include "mozilla/ipc/UtilityMediaServiceChild.h"
@@ -787,6 +790,9 @@ void GPUProcessManager::DisableWebRender(wr::WebRenderError aError,
 
 void GPUProcessManager::NotifyWebRenderError(wr::WebRenderError aError) {
   gfxCriticalNote << "Handling webrender error " << (unsigned int)aError;
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  wr::RenderCompositorVulkan::DisableVideo();
+#endif
 #ifdef XP_WIN
   if (aError == wr::WebRenderError::VIDEO_OVERLAY) {
     gfxVarsCollectUpdates collect;
@@ -957,6 +963,9 @@ void GPUProcessManager::OnRemoteProcessDeviceReset(
 }
 
 void GPUProcessManager::NotifyListenersOnCompositeDeviceReset() {
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  wr::RenderCompositorVulkan::DisableVideo();
+#endif
   nsTArray<RefPtr<GPUProcessListener>> listeners;
   listeners.AppendElements(mListeners);
   for (const auto& listener : listeners) {
