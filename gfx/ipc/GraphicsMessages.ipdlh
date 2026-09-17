@@ -58,6 +58,23 @@ struct GPUDeviceData
   D3D11DeviceStatus? gpuDevice;
 };
 
+[Comparable] struct VulkanVideoFormat
+{
+  uint64_t modifier;
+  uint32_t maxWidth;
+  uint32_t maxHeight;
+  uint64_t maxAllocationSize;
+};
+
+[Comparable] struct VulkanVideoCapabilities
+{
+  uint64_t drmMajor;
+  uint64_t drmMinor;
+  uint8_t[] deviceUUID;
+  uint8_t[] driverUUID;
+  VulkanVideoFormat[] formats;
+};
+
 union GfxVarValue
 {
   BackendType;
@@ -70,6 +87,7 @@ union GfxVarValue
   uint64_t;
   float;
   uint64_t[];
+  VulkanVideoCapabilities;
 };
 
 struct GfxVarUpdate

@@ -4,6 +4,8 @@
 
 #include <cstdlib>
 
+#include "chrome/common/ipc_message.h"
+#include "chrome/common/ipc_message_utils.h"
 #include "gtest/gtest.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/gfxVars.h"
@@ -32,12 +34,44 @@ TEST(RenderCompositorVulkan, SelectionIsExplicitAndSoftwareTakesPrecedence)
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(false);
   mozilla::gfx::gfxVars::SetUseWebRenderVulkan(false);
   EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
+  EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::ProbeVideoCapabilities()
+                  .formats()
+                  .IsEmpty());
   mozilla::gfx::gfxVars::SetUseWebRenderVulkan(true);
   EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::IsRequested());
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(true);
   EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
+  EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::ProbeVideoCapabilities()
+                  .formats()
+                  .IsEmpty());
   mozilla::gfx::gfxVars::SetUseSoftwareWebRender(false);
   EXPECT_TRUE(mozilla::wr::RenderCompositorVulkan::IsRequested());
   mozilla::gfx::gfxVars::SetUseWebRenderVulkan(false);
   EXPECT_FALSE(mozilla::wr::RenderCompositorVulkan::IsRequested());
+}
+
+TEST(RenderCompositorVulkan, VideoCapabilitiesSurviveGfxVarIPC)
+{
+  mozilla::gfx::VulkanVideoCapabilities capabilities;
+  capabilities.drmMajor() = 226;
+  capabilities.drmMinor() = 128;
+  for (uint8_t i = 0; i < 16; ++i) {
+    capabilities.deviceUUID().AppendElement(i);
+    capabilities.driverUUID().AppendElement(31 - i);
+  }
+  capabilities.formats().AppendElement(
+      mozilla::gfx::VulkanVideoFormat(0, 4096, 2160, 1ULL << 32));
+  capabilities.formats().AppendElement(mozilla::gfx::VulkanVideoFormat(
+      0x0100000000000002, 8192, 4320, 1ULL << 34));
+  mozilla::gfx::GfxVarValue input(capabilities);
+  IPC::Message message(MSG_ROUTING_NONE, 0);
+  {
+    IPC::MessageWriter writer(message);
+    IPC::WriteParam(&writer, input);
+  }
+  IPC::MessageReader reader(message);
+  mozilla::gfx::GfxVarValue output;
+  ASSERT_TRUE(IPC::ReadParam(&reader, &output));
+  ASSERT_EQ(output.type(), mozilla::gfx::GfxVarValue::TVulkanVideoCapabilities);
+  EXPECT_EQ(output.get_VulkanVideoCapabilities(), capabilities);
 }

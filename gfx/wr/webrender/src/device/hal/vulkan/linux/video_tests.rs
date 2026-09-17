@@ -78,6 +78,38 @@ fn nv12_abandonment_survives_later_plane_completion() {
     assert_eq!(observed.get(), Some(ExternalImageRelease::Abandoned));
 }
 
+#[test]
+fn nv12_capabilities_check_modifier_extent_and_bytes() {
+    let layout =
+        Nv12DmaBufLayout::new([256, 128], [248, 120], 0, [256; 2], [0, 32768], 49152).unwrap();
+    let capabilities = Nv12DmaBufCapabilities {
+        modifier: 0,
+        max_size: [256, 128],
+        max_allocation_size: 49152,
+    };
+    assert!(capabilities.supports(&layout));
+    for changed in [
+        Nv12DmaBufCapabilities {
+            modifier: INTEL_Y_TILED,
+            ..capabilities
+        },
+        Nv12DmaBufCapabilities {
+            max_size: [254, 128],
+            ..capabilities
+        },
+        Nv12DmaBufCapabilities {
+            max_size: [256, 126],
+            ..capabilities
+        },
+        Nv12DmaBufCapabilities {
+            max_allocation_size: 49151,
+            ..capabilities
+        },
+    ] {
+        assert!(!changed.supports(&layout));
+    }
+}
+
 fn fixture() -> (OwnedFd, Nv12DmaBufLayout, [u64; 2], Vec<u8>) {
     let number = |name| {
         std::env::var(name)
@@ -213,6 +245,11 @@ fn check_sampling(crop: u32) {
     )
     .unwrap();
     let device = renderer.external_image_device();
+    assert!(device
+        .vaapi_nv12_capabilities()
+        .unwrap()
+        .iter()
+        .any(|caps| caps.supports(&layout)));
     let released = Rc::new(RefCell::new(Vec::new()));
     let log = released.clone();
     let image = unsafe {

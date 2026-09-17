@@ -63,6 +63,27 @@ pub struct WrHalNv12 {
     pub drm_node: [u64; 2],
 }
 
+/// cbindgen:derive-ostream=false
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct WrHalNv12Format {
+    pub modifier: u64,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_allocation_size: u64,
+}
+
+/// cbindgen:derive-eq=false
+/// cbindgen:derive-ostream=false
+#[repr(C)]
+#[derive(Default)]
+pub struct WrHalNv12Capabilities {
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+    pub formats: [WrHalNv12Format; 2],
+    pub format_count: usize,
+}
+
 /// cbindgen:derive-eq=false
 /// cbindgen:derive-ostream=false
 #[repr(C)]
@@ -171,6 +192,54 @@ mod linux {
             Ok(supported) => supported,
             Err(error) => {
                 log::info!("Native WebGL capability unavailable: {error}");
+                false
+            },
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn wr_vulkan_query_nv12(
+        major: u64,
+        minor: u64,
+        output: &mut WrHalNv12Capabilities,
+    ) -> bool {
+        *output = WrHalNv12Capabilities::default();
+        let result = (|| -> Result<WrHalNv12Capabilities, String> {
+            let device = hal::create_vulkan_image_device(&hal::Options {
+                validation: std::env::var_os("MOZ_WR_VULKAN_VALIDATION").is_some(),
+                adapter_name: std::env::var("MOZ_WR_VULKAN_ADAPTER").ok(),
+            })?;
+            if device.foreign_rgb_drm_node()? != Some([major, minor]) {
+                return Err("NV12 decoder and renderer DRM devices differ".into());
+            }
+            let formats = device.vaapi_nv12_capabilities()?;
+            if formats.is_empty() || formats.len() > output.formats.len() {
+                return Err("No supported NV12 sampling formats".into());
+            }
+            let identity = device.dmabuf_capabilities()?;
+            let mut capabilities = WrHalNv12Capabilities {
+                device_uuid: identity.device_uuid(),
+                driver_uuid: identity.driver_uuid(),
+                format_count: formats.len(),
+                ..Default::default()
+            };
+            for (destination, source) in capabilities.formats.iter_mut().zip(formats) {
+                *destination = WrHalNv12Format {
+                    modifier: source.modifier,
+                    max_width: source.max_size[0],
+                    max_height: source.max_size[1],
+                    max_allocation_size: source.max_allocation_size,
+                };
+            }
+            Ok(capabilities)
+        })();
+        match result {
+            Ok(capabilities) => {
+                *output = capabilities;
+                true
+            },
+            Err(error) => {
+                log::info!("Native NV12 capability unavailable: {error}");
                 false
             },
         }

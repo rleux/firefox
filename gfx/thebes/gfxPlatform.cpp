@@ -3172,6 +3172,8 @@ void gfxPlatform::InitHardwareVideoConfig() {
   InitPlatformHardwareDRMConfig();
 
 #if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  gfxVars::SetWebRenderVulkanVideoCapabilities(
+      wr::RenderCompositorVulkan::ProbeVideoCapabilities());
   if (wr::RenderCompositorVulkan::IsRequested()) {
     featureDec.ForceDisable(
         FeatureStatus::Unavailable,
