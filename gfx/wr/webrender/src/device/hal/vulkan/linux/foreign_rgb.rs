@@ -13,7 +13,7 @@ mod layout;
 #[path = "foreign_rgb_lifetime.rs"]
 mod lifetime;
 pub use layout::{ForeignRgbFormat, ForeignRgbLayout};
-use lifetime::ForeignRgbLifetime;
+pub(super) use lifetime::ForeignRgbLifetime;
 
 impl ForeignRgbFormat {
     fn texture_format(self) -> wgt::TextureFormat {

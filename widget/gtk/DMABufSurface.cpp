@@ -2165,8 +2165,8 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
   for (size_t i = 0; i < state.objects().Length(); ++i) {
     const auto& object = state.objects()[i];
     if (fstat(object.fd()->GetHandle(), &objects[i]) ||
-        objects[i].st_size <= 0 ||
-        object.size() != uint64_t(objects[i].st_size) ||
+        objects[i].st_size <= 0 || !object.size() ||
+        object.size() > uint64_t(objects[i].st_size) ||
         (object.modifier() != DRM_FORMAT_MOD_LINEAR &&
          object.modifier() != I915_FORMAT_MOD_Y_TILED)) {
       return false;

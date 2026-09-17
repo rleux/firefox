@@ -373,6 +373,27 @@ TEST(DMABufSurface, VAAPIRejectsMismatchedObjectHandle)
   EXPECT_FALSE(surface);
 }
 
+TEST(DMABufSurface, VAAPIAcceptsLargerBackingAllocation)
+{
+  auto descriptor = MakeVAAPIDescriptor(false);
+  auto larger = MakeVideoMemory(32768);
+  ASSERT_TRUE(descriptor);
+  ASSERT_TRUE(larger);
+  auto& image = descriptor->get_SurfaceDescriptorDMABuf();
+  image.fds()[0] = image.fds()[1] = WrapNotNull(larger);
+  image.vaapiImageState()->objects()[0].fd() = WrapNotNull(larger);
+  RefPtr<DMABufSurface> surface =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(surface);
+  SurfaceDescriptor forwarded;
+  ASSERT_TRUE(surface->Serialize(forwarded));
+  EXPECT_EQ(forwarded.get_SurfaceDescriptorDMABuf()
+                .vaapiImageState()
+                ->objects()[0]
+                .size(),
+            24576u);
+}
+
 TEST(DMABufSurface, VAAPIAbandonmentPreventsForwarding)
 {
   auto descriptor = MakeVAAPIDescriptor(false);
