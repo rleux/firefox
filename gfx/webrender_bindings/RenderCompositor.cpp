@@ -204,17 +204,6 @@ void wr_partial_present_compositor_set_buffer_damage_region(
 /* static */
 UniquePtr<RenderCompositor> RenderCompositor::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
-#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
-  const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
-  if (backend && strcmp(backend, "gl") && strcmp(backend, "vulkan")) {
-    aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
-    return nullptr;
-  }
-  if (RenderCompositorVulkan::IsRequested() &&
-      (backend || !aWidget->GetCompositorOptions().UseSoftwareWebRender())) {
-    return RenderCompositorVulkan::Create(aWidget, aError);
-  }
-#endif
   if (aWidget->GetCompositorOptions().UseSoftwareWebRender()) {
 #ifdef XP_DARWIN
     // Mac uses NativeLayerCA
@@ -243,6 +232,17 @@ UniquePtr<RenderCompositor> RenderCompositor::Create(
 #endif
     return RenderCompositorSWGL::Create(aWidget, aError);
   }
+
+#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
+  const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
+  if (backend && strcmp(backend, "gl") && strcmp(backend, "vulkan")) {
+    aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
+    return nullptr;
+  }
+  if (RenderCompositorVulkan::IsRequested()) {
+    return RenderCompositorVulkan::Create(aWidget, aError);
+  }
+#endif
 
 #ifdef XP_WIN
   if (gfx::gfxVars::UseWebRenderANGLE()) {
