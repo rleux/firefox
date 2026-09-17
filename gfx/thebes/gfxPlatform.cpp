@@ -80,6 +80,7 @@
 #elif defined(MOZ_WIDGET_GTK)
 #  include "DMABufFormats.h"
 #  include "gfxPlatformGtk.h"
+#  include "mozilla/WidgetUtilsGtk.h"
 #  ifdef XP_LINUX
 #    include "mozilla/webrender/RenderCompositorVulkan.h"
 #  endif
@@ -2651,6 +2652,12 @@ void gfxPlatform::InitWebRenderConfig() {
       gfxConfig::IsEnabled(Feature::WEBRENDER_OPTIMIZED_SHADERS));
 
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
+
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX) && defined(MOZ_X11)
+  gfxVars::SetUseWebRenderVulkan(
+      hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
+      widget::GdkIsX11Display());
+#endif
 
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");

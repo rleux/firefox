@@ -8200,6 +8200,12 @@
   value: false
   mirror: once
 
+# Enable experimental Vulkan WebRender on Linux/X11. Requires a restart.
+- name: gfx.webrender.vulkan
+  type: bool
+  value: false
+  mirror: once
+
 # Experimental paused-window memory trimming. 0 disables trimming, 1 releases
 # inactive WebRender render targets, and 2 also releases transient upload
 # buffers when a renderer is paused.

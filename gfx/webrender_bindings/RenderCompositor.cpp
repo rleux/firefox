@@ -5,7 +5,6 @@
 #include "RenderCompositor.h"
 #if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
 #  include "RenderCompositorVulkan.h"
-#  include "prenv.h"
 #endif
 
 #include "GLContext.h"
@@ -234,11 +233,6 @@ UniquePtr<RenderCompositor> RenderCompositor::Create(
   }
 
 #if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
-  const char* backend = PR_GetEnv("MOZ_WR_BACKEND");
-  if (backend && strcmp(backend, "gl") && strcmp(backend, "vulkan")) {
-    aError.AssignLiteral("MOZ_WR_BACKEND must be gl or vulkan");
-    return nullptr;
-  }
   if (RenderCompositorVulkan::IsRequested()) {
     return RenderCompositorVulkan::Create(aWidget, aError);
   }
