@@ -384,6 +384,15 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   const mozilla::layers::SurfaceDescriptorDMABuf* GetVAAPIDescriptor() const {
     return mVAAPIDescriptor.get();
   }
+  // The caller retains the completed decoder frame until retirement or
+  // shutdown.
+  bool PublishVAAPIImage(const VADRMPRIMESurfaceDescriptor& aDesc,
+                         uint64_t aPublicationId, uint64_t aProducerEpoch,
+                         uint64_t aDRMMajor, uint64_t aDRMMinor);
+  bool SameVAAPIAllocation(const DMABufSurfaceYUV& aOther) const;
+  bool SameVAAPIImage(const DMABufSurfaceYUV& aOther) const;
+  bool TryRetireVAAPIImage();
+  bool VAAPIImageAbandoned() const;
 
   nsresult BuildSurfaceDescriptorBuffer(
       mozilla::layers::SurfaceDescriptorBuffer& aSdBuffer,
@@ -478,6 +487,7 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   // format.
   uint32_t mWPChromaLocation = 0;
   mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf> mVAAPIDescriptor;
+  bool mVAAPIProducer = false;
 };
 
 #endif

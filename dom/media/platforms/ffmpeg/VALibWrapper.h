@@ -63,6 +63,7 @@ class VADisplayHolder final
   static RefPtr<VADisplayHolder> GetSingleton();
 
   VADisplay Display() const { return mDisplay.get(); }
+  int DRMFileDescriptor() const { return mDRMFd.get(); }
   ~VADisplayHolder();
 
  private:

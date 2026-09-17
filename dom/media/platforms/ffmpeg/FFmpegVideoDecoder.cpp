@@ -30,6 +30,10 @@
 #ifdef XP_UNIX
 #  include <unistd.h>
 #endif
+#ifdef XP_LINUX
+#  include <sys/stat.h>
+#  include <sys/sysmacros.h>
+#endif
 
 #include <algorithm>
 
@@ -339,6 +343,15 @@ bool FFmpegVideoDecoder<LIBAV_VER>::CreateVAAPIDeviceContext() {
   }
 
   mDisplay = displayHolder->Display();
+  mVAAPIDRMMajor = mVAAPIDRMMinor = 0;
+#  ifdef XP_LINUX
+  struct stat drmNode{};
+  if (!fstat(displayHolder->DRMFileDescriptor(), &drmNode) &&
+      S_ISCHR(drmNode.st_mode)) {
+    mVAAPIDRMMajor = major(drmNode.st_rdev);
+    mVAAPIDRMMinor = minor(drmNode.st_rdev);
+  }
+#  endif
   hwctx->user_opaque = displayHolder.forget().take();
   hwctx->free = VAAPIDisplayReleaseCallback;
 
@@ -1703,6 +1716,9 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::DoDecode(
     if (mVideoFramePool) {
       mVideoFramePool->ReleaseUnusedVAAPIFrames();
     }
+    if (mNativeVAAPIFramePool) {
+      mNativeVAAPIFramePool->ReleaseUnusedVAAPIFrames();
+    }
 #  endif
 
     int res = mLib->avcodec_receive_frame(mCodecContext, mFrame);
@@ -2199,6 +2215,8 @@ bool FFmpegVideoDecoder<LIBAV_VER>::GetVAAPISurfaceDescriptor(
   vas = VALibWrapper::sFuncs.vaSyncSurface(mDisplay, surface_id);
   if (vas != VA_STATUS_SUCCESS) {
     FFMPEG_LOG("GetVAAPISurfaceDescriptor(): vaSyncSurface failed");
+    DMABufSurfaceYUV::ReleaseVADRMPRIMESurfaceDescriptor(*aVaDesc);
+    return false;
   }
   return true;
 }
@@ -2210,38 +2228,74 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::CreateImageVAAPI(
   if (!GetVAAPISurfaceDescriptor(&vaDesc)) {
     return MediaResult(
         NS_ERROR_DOM_MEDIA_DECODE_ERR,
-        RESULT_DETAIL("Unable to get frame by vaExportSurfaceHandle()"));
+        RESULT_DETAIL("Unable to export and synchronize VAAPI frame"));
   }
   auto releaseSurfaceDescriptor = MakeScopeExit(
       [&] { DMABufSurfaceYUV::ReleaseVADRMPRIMESurfaceDescriptor(vaDesc); });
 
   MOZ_ASSERT(mTaskQueue->IsOnCurrentThread());
-  if (!mVideoFramePool) {
-    AVHWFramesContext* context =
-        (AVHWFramesContext*)mCodecContext->hw_frames_ctx->data;
-    mVideoFramePool =
-        MakeUnique<VideoFramePool<LIBAV_VER>>(context->initial_pool_size);
+  const bool native = gfx::gfxVars::UseWebRenderVulkan() &&
+                      !gfx::gfxVars::UseSoftwareWebRender();
+  if (native && !gfx::gfxVars::UseWebRenderVulkanVideo()) {
+    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                       RESULT_DETAIL("Vulkan video transport is not enabled"));
   }
-  auto surface = mVideoFramePool->GetVideoFrameSurface(
-      vaDesc, mFrame->width, mFrame->height, mCodecContext, mFrame, mLib);
+  if (mNativeVAAPIFramePool && !native) {
+    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                       RESULT_DETAIL("VAAPI native renderer changed"));
+  }
+  const auto setColorMetadata = [&](const RefPtr<DMABufSurfaceYUV>& aSurface) {
+    aSurface->SetYUVColorSpace(GetFrameColorSpace());
+    aSurface->SetColorRange(GetFrameColorRange());
+    if (mInfo.mColorPrimaries) {
+      aSurface->SetColorPrimaries(mInfo.mColorPrimaries.value());
+    }
+    if (mInfo.mTransferFunction) {
+      aSurface->SetTransferFunction(mInfo.mTransferFunction.value());
+    }
+    aSurface->SetWPChromaLocation(
+        AVChromaLocationToWPChromaLocation(mFrame->chroma_location));
+    if (mInfo.mHDRMetadata) {
+      aSurface->SetHDRMetadata(mInfo.mHDRMetadata.value());
+    }
+  };
+  RefPtr<VideoFrameSurface<LIBAV_VER>> surface;
+  if (native) {
+    if (!mFrame->hw_frames_ctx || vaDesc.fourcc != VA_FOURCC_NV12 ||
+        vaDesc.num_objects != 1 || vaDesc.num_layers != 2 ||
+        vaDesc.layers[0].num_planes != 1 || vaDesc.layers[1].num_planes != 1) {
+      return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                         RESULT_DETAIL("Unsupported native VAAPI frame"));
+    }
+    RefPtr<DMABufSurfaceYUV> candidate = DMABufSurfaceYUV::CreateYUVSurface(
+        vaDesc, mFrame->width, mFrame->height);
+    if (candidate) {
+      setColorMetadata(candidate);
+      if (!mNativeVAAPIFramePool) {
+        auto* context =
+            reinterpret_cast<AVHWFramesContext*>(mFrame->hw_frames_ctx->data);
+        mNativeVAAPIFramePool = MakeUnique<VideoFramePool<LIBAV_VER>>(
+            context->initial_pool_size, true);
+      }
+      surface = mNativeVAAPIFramePool->GetNativeVAAPIFrame(
+          std::move(candidate), vaDesc, mFrame, mLib, mVAAPIDRMMajor,
+          mVAAPIDRMMinor);
+    }
+  } else {
+    if (!mVideoFramePool) {
+      AVHWFramesContext* context =
+          (AVHWFramesContext*)mCodecContext->hw_frames_ctx->data;
+      mVideoFramePool =
+          MakeUnique<VideoFramePool<LIBAV_VER>>(context->initial_pool_size);
+    }
+    surface = mVideoFramePool->GetVideoFrameSurface(
+        vaDesc, mFrame->width, mFrame->height, mCodecContext, mFrame, mLib);
+    if (surface) setColorMetadata(surface->GetDMABufSurface());
+  }
   if (!surface) {
     FFMPEG_LOG("CreateImageVAAPI(): failed to get VideoFrameSurface");
     return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
                        RESULT_DETAIL("VAAPI dmabuf allocation error"));
-  }
-
-  surface->SetYUVColorSpace(GetFrameColorSpace());
-  surface->SetColorRange(GetFrameColorRange());
-  if (mInfo.mColorPrimaries) {
-    surface->SetColorPrimaries(mInfo.mColorPrimaries.value());
-  }
-  if (mInfo.mTransferFunction) {
-    surface->SetTransferFunction(mInfo.mTransferFunction.value());
-  }
-  surface->SetWPChromaLocation(
-      AVChromaLocationToWPChromaLocation(mFrame->chroma_location));
-  if (mInfo.mHDRMetadata) {
-    surface->SetHDRMetadata(mInfo.mHDRMetadata.value());
   }
 
   FFMPEG_LOG(
@@ -2552,6 +2606,9 @@ FFmpegVideoDecoder<LIBAV_VER>::ProcessFlush() {
   if (mVideoFramePool) {
     mVideoFramePool->FlushFFmpegFrames();
   }
+  if (mNativeVAAPIFramePool) {
+    mNativeVAAPIFramePool->FlushFFmpegFrames();
+  }
 #endif
 #ifdef MOZ_WIDGET_ANDROID
   ReleaseFramesMediaCodec();
@@ -2652,6 +2709,9 @@ void FFmpegVideoDecoder<LIBAV_VER>::ProcessShutdown() {
   //    vkDestroyDevice, so it must come after Cleanup().
   FFmpegDataDecoder<LIBAV_VER>::ProcessShutdown();
 #if defined(MOZ_USE_HWDECODE) && defined(MOZ_WIDGET_GTK)
+  // Native frames may still be sampled; stop the codec before releasing its
+  // pool.
+  mNativeVAAPIFramePool = nullptr;
   if (IsHardwareAccelerated()) {
 #  ifdef MOZ_USE_HWDECODE_VULKAN
     if (mVulkanDecoder.mDevice) {
