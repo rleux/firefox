@@ -164,6 +164,9 @@ class DrawBlitProg final {
   struct YUVArgs final {
     Mat3 texMatrix1;
     Maybe<gfx::YUVColorSpace> colorSpaceForMatrix;
+    gfx::ColorRange colorRange = gfx::ColorRange::LIMITED;
+
+    std::array<float, 16> ColorMatrix() const;
   };
 
   void Draw(const BaseArgs& args, const YUVArgs* argsYUV = nullptr) const;
