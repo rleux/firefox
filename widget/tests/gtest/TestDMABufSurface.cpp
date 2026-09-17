@@ -12,7 +12,12 @@
 #  include <chrono>
 #  include <future>
 
+#  include "GLBlitHelper.h"
+#  include "GLContext.h"
+#  include "GLContextProvider.h"
 #  include "base/linux_memfd_defs.h"
+#  include "mozilla/ScopeExit.h"
+#  include "mozilla/gfx/gfxVars.h"
 #  include "mozilla/webgpu/SharedTextureDMABuf.h"
 #  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #endif
@@ -229,6 +234,99 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   image.vaapiImageState() = Some(VAAPIImageState(
       objects, planes, 42, 7, 3, true, 226, 128, WrapNotNull(accessLock)));
   return Some(std::move(descriptor));
+}
+
+TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
+{
+  ASSERT_NE(getenv("WR_NV12_FD"), nullptr) << "Requires ExportVAAPIFrame";
+  const auto number = [](const char* name) -> uint64_t {
+    const char* value = getenv(name);
+    EXPECT_NE(value, nullptr) << name;
+    return value ? strtoull(value, nullptr, 10) : 0;
+  };
+  gfxVars::Initialize();
+  const bool software = gfxVars::UseSoftwareWebRender();
+  const bool egl = gfxVars::UseEGL();
+  gfxVars::SetUseSoftwareWebRender(false);
+  gfxVars::SetUseEGL(true);
+  auto restore = MakeScopeExit([&] {
+    DMABufSurface::ReleaseSnapshotGLContext();
+    gfxVars::SetUseSoftwareWebRender(software);
+    gfxVars::SetUseEGL(egl);
+  });
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  auto fd = MakeRefPtr<FileHandleWrapper>(
+      UniqueFileHandle(dup(number("WR_NV12_FD"))));
+  ASSERT_GE(fd->GetHandle(), 0);
+  auto& image = descriptor->get_SurfaceDescriptorDMABuf();
+  auto& state = image.vaapiImageState().ref();
+  state.drmRenderMajor() = number("WR_NV12_DRM_MAJOR");
+  state.drmRenderMinor() = number("WR_NV12_DRM_MINOR");
+  state.objects()[0].fd() = WrapNotNull(fd);
+  state.objects()[0].size() = number("WR_NV12_BYTES");
+  state.objects()[0].modifier() = number("WR_NV12_MODIFIER");
+  image.colorRange() = ColorRange::LIMITED;
+  for (size_t i = 0; i < 2; ++i) {
+    image.fds()[i] = WrapNotNull(fd);
+    image.width()[i] = number("WR_NV12_WIDTH") >> i;
+    image.height()[i] = number("WR_NV12_HEIGHT") >> i;
+    image.widthAligned()[i] = number("WR_NV12_ALLOC_WIDTH") >> i;
+    image.heightAligned()[i] = number("WR_NV12_ALLOC_HEIGHT") >> i;
+    image.modifier()[i] = state.objects()[0].modifier();
+    image.strides()[i] = number(i ? "WR_NV12_UV_PITCH" : "WR_NV12_Y_PITCH");
+    image.offsets()[i] = number(i ? "WR_NV12_UV_OFFSET" : "WR_NV12_Y_OFFSET");
+    state.planes()[i].stride() = image.strides()[i];
+    state.planes()[i].offset() = image.offsets()[i];
+  }
+  RefPtr<DMABufSurface> native =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(native);
+  auto legacyDescriptor = *descriptor;
+  legacyDescriptor.get_SurfaceDescriptorDMABuf().vaapiImageState().reset();
+  RefPtr<DMABufSurface> legacy =
+      DMABufSurface::CreateDMABufSurface(legacyDescriptor);
+  ASSERT_TRUE(legacy);
+  RefPtr<gfx::DataSourceSurface> expected = legacy->GetAsSourceSurface();
+  RefPtr<gfx::DataSourceSurface> actual = native->GetAsSourceSurface();
+  ASSERT_TRUE(expected);
+  ASSERT_TRUE(actual);
+  gfx::DataSourceSurface::ScopedMap expectedMap(expected,
+                                                gfx::DataSourceSurface::READ);
+  gfx::DataSourceSurface::ScopedMap actualMap(actual,
+                                              gfx::DataSourceSurface::READ);
+  ASSERT_TRUE(expectedMap.IsMapped());
+  ASSERT_TRUE(actualMap.IsMapped());
+  for (int y = 0; y < native->GetHeight(); ++y) {
+    EXPECT_EQ(memcmp(expectedMap.GetData() + y * expectedMap.GetStride(),
+                     actualMap.GetData() + y * actualMap.GetStride(),
+                     native->GetWidth() * 4),
+              0)
+        << y;
+  }
+  ASSERT_TRUE(native->TryLockAccess());
+  auto releaseAccess = MakeScopeExit([&] { native->UnlockAccess(); });
+  RefPtr<gfx::DataSourceSurface> snapshot = native->GetAsSourceSurface();
+  EXPECT_FALSE(snapshot);
+  EXPECT_TRUE(native->AccessLockUsable());
+  EXPECT_FALSE(native->TryLockAccess());
+  nsCString failure;
+  RefPtr<gl::GLContext> context =
+      gl::GLContextProviderEGL::CreateHeadless({}, &failure);
+  ASSERT_TRUE(context)
+  << failure.get();
+  ASSERT_TRUE(context->MakeCurrent());
+  EXPECT_FALSE(context->BlitHelper()->BlitSdToFramebuffer(
+      *descriptor, gfx::IntRect(0, 0, native->GetWidth(), native->GetHeight()),
+      gl::OriginPos::BottomLeft));
+  EXPECT_TRUE(native->AccessLockUsable());
+  native->UnlockAccess();
+  releaseAccess.release();
+  snapshot = native->GetAsSourceSurface();
+  EXPECT_TRUE(snapshot);
+  native->UnlockAccess(true);
+  snapshot = native->GetAsSourceSurface();
+  EXPECT_FALSE(snapshot);
 }
 
 TEST(DMABufSurface, VAAPICapabilitiesRejectUnsupportedFrames)

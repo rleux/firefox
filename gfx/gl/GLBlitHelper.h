@@ -316,6 +316,11 @@ class GLBlitHelper final {
                            Maybe<gfxAlphaType> convertAlpha = {});
 
  private:
+#ifdef MOZ_WIDGET_GTK
+  bool BlitDMABuf(DMABufSurface* surface, const gfx::IntRect& destRect,
+                  OriginPos destOrigin, const gfx::IntSize& fbSize,
+                  Maybe<gfxAlphaType> convertAlpha) const;
+#endif
 #ifdef XP_MACOSX
   bool BlitImage(MacIOSurface* const iosurf, const gfx::IntRect& destRect,
                  OriginPos destOrigin,

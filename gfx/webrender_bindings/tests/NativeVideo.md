@@ -172,3 +172,27 @@ earlier keyframe and discard already delivered frames. The tests check frame
 timestamps, software-only decoder selection, remote decoder crashes, failed
 seeks, software decode failure and unseekable input. Browser playback and
 separate video-image consumers still require integration coverage.
+
+## GL readers
+
+Native VA-API GL blits acquire the publication lock before creating plane
+textures or drawing. They wait for a GL fence before releasing access. A busy
+publication is rejected without poisoning it; an uncertain GPU completion
+abandons it. CPU snapshots delegate source access to the same blit operation,
+then read the owned destination buffer. Ordinary Vulkan playback does not use
+this snapshot path.
+
+`DMABufSurface.DISABLED_NativeVAAPIGLReaders` requires a live frame from
+`ExportVAAPIFrame` and is disabled in ordinary test runs. It compares native
+and legacy GL snapshot pixels for the same limited-range frame and checks
+busy/abandoned snapshots and the surface-descriptor blit used by WebGL uploads.
+Run the exporter with a wrapper executable that ignores the Rust test arguments
+and launches the compiled Firefox gtest binary with
+`GTEST_FILTER=DMABufSurface.DISABLED_NativeVAAPIGLReaders`,
+`GTEST_ALSO_RUN_DISABLED_TESTS=1` and `MOZ_RUN_GTEST=True`.
+Use the existing Firefox gtest runtime environment and an available EGL driver.
+
+This establishes a test for GL-reader coordination, not the complete browser
+acceptance matrix. Busy-read recovery in web-facing APIs, full-range color
+conversion, and software-renderer recovery still need validation before native
+publication is enabled.
