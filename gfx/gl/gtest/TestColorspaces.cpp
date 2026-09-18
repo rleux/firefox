@@ -8,6 +8,9 @@
 #include "Colorspaces.h"
 #include "GLBlitHelper.h"
 #include "gtest/gtest.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/layers/ImageDataSerializer.h"
+#include "mozilla/layers/LayersSurfaces.h"
 
 namespace mozilla::color {
 mat4 YuvFromYcbcr(const YcbcrDesc&);
@@ -17,6 +20,45 @@ mat3 XyzFromLinearRgb(const Chromaticities&);
 }  // namespace mozilla::color
 
 using namespace mozilla::color;
+
+TEST(Colorspaces, YCbCrDescriptorReadbackHonorsRange)
+{
+  using namespace mozilla;
+  layers::YCbCrDescriptor descriptor;
+  descriptor.display() = gfx::IntRect(0, 0, 2, 2);
+  descriptor.ySize() = gfx::IntSize(2, 2);
+  descriptor.cbCrSize() = gfx::IntSize(1, 1);
+  descriptor.yStride() = 2;
+  descriptor.cbCrStride() = 1;
+  descriptor.yOffset() = 0;
+  descriptor.cbOffset() = 4;
+  descriptor.crOffset() = 5;
+  descriptor.yUVColorSpace() = gfx::YUVColorSpace::BT709;
+  descriptor.colorDepth() = gfx::ColorDepth::COLOR_8;
+  descriptor.chromaSubsampling() =
+      gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
+  std::array<uint8_t, 6> data = {16, 16, 235, 235, 128, 128};
+  for (const auto range : {gfx::ColorRange::LIMITED, gfx::ColorRange::FULL}) {
+    descriptor.colorRange() = range;
+    RefPtr<gfx::DataSourceSurface> surface =
+        layers::ImageDataSerializer::DataSourceSurfaceFromYCbCrDescriptor(
+            data.data(), descriptor);
+    ASSERT_TRUE(surface);
+    gfx::DataSourceSurface::ScopedMap map(surface,
+                                          gfx::DataSourceSurface::READ);
+    ASSERT_TRUE(map.IsMapped());
+    for (int y = 0; y < 2; ++y) {
+      const int expected =
+          range == gfx::ColorRange::FULL ? (y ? 235 : 16) : (y ? 255 : 0);
+      for (int x = 0; x < 2; ++x) {
+        for (int channel = 0; channel < 3; ++channel) {
+          EXPECT_NEAR(map.GetData()[y * map.GetStride() + x * 4 + channel],
+                      expected, 1);
+        }
+      }
+    }
+  }
+}
 
 TEST(Colorspaces, GLBlitYUVMatrixHonorsRange)
 {

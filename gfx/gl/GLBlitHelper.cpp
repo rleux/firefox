@@ -1403,7 +1403,8 @@ bool GLBlitHelper::BlitPlanarYCbCr(const PlanarYCbCrData& yuvData,
                                            yFlip, fbSize, destRect,
                                            clipRect.Size()};
   const DrawBlitProg::YUVArgs yuvArgs = {
-      SubRectMat3(clipRect, uvTexSize, divisors), Some(yuvData.mYUVColorSpace)};
+      SubRectMat3(clipRect, uvTexSize, divisors), Some(yuvData.mYUVColorSpace),
+      yuvData.mColorRange};
   prog.Draw(baseArgs, &yuvArgs);
   return true;
 }
