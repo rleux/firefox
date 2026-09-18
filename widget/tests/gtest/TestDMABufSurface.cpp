@@ -21,6 +21,7 @@
 #  include "mozilla/ScopeExit.h"
 #  include "mozilla/gfx/gfxVars.h"
 #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
 #  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #endif
 
@@ -236,6 +237,62 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   image.vaapiImageState() = Some(VAAPIImageState(
       objects, planes, 42, 7, 3, true, 226, 128, WrapNotNull(accessLock)));
   return Some(std::move(descriptor));
+}
+
+extern "C" void* wr_vulkan_register_dmabuf_device(
+    const uint8_t*, const uint8_t*, const uint64_t*, size_t, const uint64_t*,
+    size_t, const mozilla::wr::WrHalNv12Capabilities*);
+extern "C" void wr_vulkan_unregister_dmabuf_device(void*);
+
+TEST(DMABufSurface, RetainedVAAPIFrameSurvivesPublicationRevocation)
+{
+  gfxVars::Initialize();
+  const bool vulkan = gfxVars::UseWebRenderVulkan();
+  const bool software = gfxVars::UseSoftwareWebRender();
+  const bool video = gfxVars::UseWebRenderVulkanVideo();
+  const auto capabilities = gfxVars::WebRenderVulkanVideoCapabilities();
+  auto restore = MakeScopeExit([&] {
+    gfxVars::SetUseWebRenderVulkan(vulkan);
+    gfxVars::SetUseSoftwareWebRender(software);
+    gfxVars::SetUseWebRenderVulkanVideo(video);
+    gfxVars::SetWebRenderVulkanVideoCapabilities(capabilities);
+  });
+  gfxVars::SetUseWebRenderVulkan(true);
+  gfxVars::SetUseSoftwareWebRender(false);
+  gfxVars::SetUseWebRenderVulkanVideo(false);
+  gfxVars::SetWebRenderVulkanVideoCapabilities(VulkanVideoCapabilities());
+  auto descriptor = MakeVAAPIDescriptor(false);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> surface =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(surface);
+  auto* yuv = surface->GetAsDMABufSurfaceYUV();
+  EXPECT_FALSE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
+  wr::WrHalNv12Capabilities actual{};
+  actual.drm_node[0] = 226;
+  actual.drm_node[1] = 128;
+  actual.format_count = 1;
+  actual.formats[0] = {0, 128, 128, 24576};
+  const uint64_t modifier = 0;
+  const auto add = [&](const wr::WrHalNv12Capabilities& aCaps) {
+    return wr_vulkan_register_dmabuf_device(aCaps.device_uuid,
+                                            aCaps.driver_uuid, &modifier, 1,
+                                            &modifier, 1, &aCaps);
+  };
+  void* first = add(actual);
+  auto unregister =
+      MakeScopeExit([&] { wr_vulkan_unregister_dmabuf_device(first); });
+  EXPECT_TRUE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
+  EXPECT_FALSE(wr::RenderCompositorVulkan::SupportsVideo());
+  actual.drm_node[1]++;
+  void* second = add(actual);
+  EXPECT_FALSE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
+  wr_vulkan_unregister_dmabuf_device(second);
+  EXPECT_TRUE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
+  surface->UnlockAccess(true);
+  EXPECT_FALSE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
+  EXPECT_FALSE(gfxVars::UseWebRenderVulkanVideo());
+  EXPECT_TRUE(gfxVars::WebRenderVulkanVideoCapabilities().formats().IsEmpty());
 }
 
 TEST(DMABufSurface, VAAPIWaitTimeoutPreservesOwner)

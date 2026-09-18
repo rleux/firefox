@@ -12,23 +12,16 @@ from pathlib import Path
 
 
 def main():
-    if os.environ.get("WR_NATIVE_VIDEO_XVFB") != "1":
-        env = os.environ.copy()
-        env["WR_NATIVE_VIDEO_XVFB"] = "1"
-        return subprocess.call(
-            [
-                "xvfb-run", "-a", "-s",
-                "-screen 0 1280x1024x24 -nolisten tcp",
-                sys.executable, str(Path(__file__).resolve()), *sys.argv[1:],
-            ],
-            env=env,
-        )
     root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(
         description="Test native video in an already-built Firefox"
     )
     parser.add_argument("--clip", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--native-display", action="store_true",
+        help="Use the current display and its window manager instead of private Xvfb",
+    )
     parser.add_argument(
         "--binary", type=Path, default=root / "obj-x86_64-pc-linux-gnu/dist/bin/firefox"
     )
@@ -55,6 +48,17 @@ def main():
         default="basic",
     )
     args = parser.parse_args()
+    if not args.native_display and os.environ.get("WR_NATIVE_VIDEO_XVFB") != "1":
+        env = os.environ.copy()
+        env["WR_NATIVE_VIDEO_XVFB"] = "1"
+        return subprocess.call(
+            [
+                "xvfb-run", "-a", "-s",
+                "-screen 0 1280x1024x24 -nolisten tcp",
+                sys.executable, str(Path(__file__).resolve()), *sys.argv[1:],
+            ],
+            env=env,
+        )
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -131,13 +135,13 @@ def main():
     log = output / "test.log"
     print(f"Log: {log}", flush=True)
     with log.open("w") as stream, (output / "window-manager.log").open("w") as wm_log:
-        window_manager = subprocess.Popen(
+        window_manager = None if args.native_display else subprocess.Popen(
             ["openbox", "--sm-disable"], env=env,
             stdout=wm_log, stderr=subprocess.STDOUT,
         )
         try:
             deadline = time.monotonic() + 10
-            while True:
+            while window_manager:
                 ready = subprocess.run(
                     ["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"],
                     env=env, capture_output=True, text=True, timeout=5,
@@ -159,12 +163,13 @@ def main():
                 process.wait()
                 status = 124
         finally:
-            window_manager.terminate()
-            try:
-                window_manager.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                window_manager.kill()
-                window_manager.wait()
+            if window_manager:
+                window_manager.terminate()
+                try:
+                    window_manager.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    window_manager.kill()
+                    window_manager.wait()
     print(f"Exit: {status}", flush=True)
     return status
 

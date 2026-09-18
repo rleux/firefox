@@ -3174,12 +3174,18 @@ void gfxPlatform::InitHardwareVideoConfig() {
 #if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
   gfxVars::SetWebRenderVulkanVideoCapabilities(
       wr::RenderCompositorVulkan::ProbeVideoCapabilities());
-  if (wr::RenderCompositorVulkan::IsRequested()) {
+  const bool nativeVideoSupported =
+      !gfxVars::WebRenderVulkanVideoCapabilities().formats().IsEmpty() &&
+      gfxConfig::IsEnabled(Feature::HW_DECODED_VIDEO_ZERO_COPY);
+  if (wr::RenderCompositorVulkan::IsRequested() && !nativeVideoSupported) {
     featureDec.ForceDisable(
         FeatureStatus::Unavailable,
-        "Vulkan WebRender does not support decoder DMA-BUFs",
+        "Vulkan WebRender has no supported zero-copy VA-API transport",
         "FEATURE_FAILURE_WEBRENDER_VIDEO_SHARING"_ns);
   }
+  gfxVars::SetUseWebRenderVulkanVideo(
+      wr::RenderCompositorVulkan::IsRequested() && nativeVideoSupported &&
+      featureDec.IsEnabled());
 #endif
 
   nsCString message;
