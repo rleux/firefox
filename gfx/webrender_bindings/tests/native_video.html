@@ -1,0 +1,151 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8">
+<title>Native video reader test</title>
+<style>
+  body { margin: 8px; background: white; }
+  main { display: grid; gap: 8px; }
+  video, canvas { display: block; inline-size: 256px; block-size: 128px; }
+</style>
+<main>
+  <video id="video" muted loop preload="auto" src="/clip.webm"></video>
+  <canvas id="copy" width="256" height="128"></canvas>
+  <canvas id="webgl" width="256" height="128"></canvas>
+</main>
+<script>
+  const video = document.querySelector("video");
+  const copy = document.querySelector("#copy");
+  const output = copy.getContext("2d", { willReadFrequently: true });
+  let webgl = document.querySelector("#webgl");
+  let gl, texture, framebuffer;
+  function initializeWebGL() {
+    gl = webgl.getContext("webgl2", { alpha: false, antialias: false, preserveDrawingBuffer: true });
+    texture = gl?.createTexture();
+    framebuffer = gl?.createFramebuffer();
+  }
+  initializeWebGL();
+  const points = [[128, 32], [128, 96]];
+  const painted = () => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Paint timed out (${document.visibilityState})`)), 5000);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      clearTimeout(timeout);
+      resolve();
+    }));
+  });
+  const event = (target, name) => new Promise((resolve, reject) => {
+    const failed = () => reject(new Error(target.error?.message || `${name} failed`));
+    target.addEventListener("error", failed, { once: true });
+    target.addEventListener(name, () => {
+      target.removeEventListener("error", failed);
+      resolve();
+    }, { once: true });
+  });
+
+  function readers() {
+    if (!gl) throw new Error("WebGL2 unavailable");
+    output.clearRect(0, 0, copy.width, copy.height);
+    output.drawImage(video, 0, 0, copy.width, copy.height);
+    const canvasPixels = points.map(([x, y]) => [...output.getImageData(x, y, 1, 1).data]);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    checkGL("upload");
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      throw new Error("Video upload framebuffer incomplete");
+    }
+    const webglPixels = points.map(([x, y]) => {
+      const pixel = new Uint8Array(4);
+      gl.readPixels(Math.floor(x * video.videoWidth / copy.width),
+                    Math.floor(y * video.videoHeight / copy.height),
+                    1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      return [...pixel];
+    });
+    checkGL("readback");
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, video.videoHeight, video.videoWidth, 0,
+                       0, 0, webgl.width, webgl.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    checkGL("display");
+    return { canvasPixels, webglPixels, time: video.currentTime,
+             width: video.videoWidth, height: video.videoHeight };
+  }
+
+  function checkGL(stage) {
+    const error = gl.getError();
+    if (error || gl.isContextLost()) throw new Error(`WebGL ${stage} failed: ${error}`);
+  }
+
+  window.nativeVideo = {
+    resetWebGL() {
+      const canvas = document.createElement("canvas");
+      canvas.id = "webgl";
+      canvas.width = 256;
+      canvas.height = 128;
+      webgl.replaceWith(canvas);
+      webgl = canvas;
+      initializeWebGL();
+      return { reset: true };
+    },
+    async ready() {
+      if (video.readyState < video.HAVE_CURRENT_DATA) await event(video, "loadeddata");
+      await painted();
+      return { width: video.videoWidth, height: video.videoHeight, duration: video.duration };
+    },
+    async seek(time) {
+      video.pause();
+      if (Math.abs(video.currentTime - time) > 0.001) {
+        const done = event(video, "seeked");
+        video.currentTime = time;
+        await done;
+      }
+      const result = readers();
+      await painted();
+      return result;
+    },
+    playFrames(count, readDuringPlayback) {
+      return new Promise((resolve, reject) => {
+        const samples = [];
+        let callback;
+        let finished = false;
+        const finish = error => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          video.cancelVideoFrameCallback(callback);
+          video.pause();
+          if (error) reject(error);
+          else resolve({ samples, quality: {
+            totalVideoFrames: video.getVideoPlaybackQuality().totalVideoFrames,
+            droppedVideoFrames: video.getVideoPlaybackQuality().droppedVideoFrames,
+          } });
+        };
+        const timeout = setTimeout(() => finish(new Error("Playback timed out")), 15000);
+        const frame = (now, metadata) => {
+          try {
+            samples.push({ now, mediaTime: metadata.mediaTime, presented: metadata.presentedFrames,
+                           readers: readDuringPlayback ? readers() : null });
+            if (samples.length === count) finish();
+            else callback = video.requestVideoFrameCallback(frame);
+          } catch (error) { finish(error); }
+        };
+        callback = video.requestVideoFrameCallback(frame);
+        video.play().catch(finish);
+      });
+    },
+    rectangles() {
+      return [video, copy, webgl].map(element => {
+        const r = element.getBoundingClientRect();
+        return points.map(([x, y]) => [(r.x + x * r.width / copy.width) * devicePixelRatio,
+                                       (r.y + y * r.height / copy.height) * devicePixelRatio]);
+      });
+    },
+  };
+</script>

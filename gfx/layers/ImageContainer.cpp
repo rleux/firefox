@@ -33,6 +33,7 @@
 #include "mozilla/layers/TextureClientRecycleAllocator.h"
 #include "nsISupportsUtils.h"  // for NS_IF_ADDREF
 #include "nsProxyRelease.h"
+#include "nsThreadUtils.h"
 
 #ifdef XP_DARWIN
 #  include "MacIOSurfaceImage.h"
@@ -170,6 +171,13 @@ void ImageContainer::EnsureImageClient() {
   mImageClient = imageBridge->CreateImageClient(CompositableType::IMAGE, this);
   if (mImageClient) {
     mAsyncContainerHandle = mImageClient->GetAsyncHandle();
+    if (!mCurrentImages.IsEmpty()) {
+      imageBridge->GetThread()->Dispatch(NS_NewRunnableFunction(
+          "ImageContainer::RepublishRetainedImages",
+          [bridge = imageBridge, container = RefPtr<ImageContainer>(this)] {
+            bridge->UpdateImageClient(container);
+          }));
+    }
   } else {
     // It's okay to drop the async container handle since the ImageBridgeChild
     // is going to die anyway.
