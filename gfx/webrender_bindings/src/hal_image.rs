@@ -408,7 +408,10 @@ mod linux {
             let copied = unsafe { self.device.copy_dmabuf_planes(&[plane], &ready) }?;
             let (mut images, release) = copied.into_parts();
             self.device.wait_dmabuf_release(&release)?;
-            log::info!("WebRender Vulkan DMA-BUF materialized: generation={generation}");
+            log::info!(
+                "WebRender Vulkan DMA-BUF materialized: generation={generation}, format={:?}, modifier={:#x}, stride={}, offset={}",
+                data.format, data.modifier, data.stride, data.offset,
+            );
             lease.status = WrHalImageRelease::Complete;
             drop(lease);
             let image = images.pop().ok_or("DMA-BUF copy returned no image")?;
