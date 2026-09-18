@@ -48,6 +48,7 @@ fn native_snapshots_preserve_format_and_validate_destination() {
         let data = WrHalDmaBuf {
             fd: export.plane().as_fd().as_raw_fd(),
             ready_fd: export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd()),
+            access_lock_fd: -1,
             width: 4,
             height: 4,
             format,
@@ -114,6 +115,11 @@ unsafe extern "C" fn wr_renderer_acquire_hal_image(
 #[no_mangle]
 unsafe extern "C" fn wr_renderer_lock_foreign_rgb(_: *mut WrHalImageLease) -> bool {
     true
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_lock_vulkan_dmabuf(raw: *mut WrHalImageLease) -> bool {
+    wr_renderer_lock_vaapi_image(raw)
 }
 
 #[no_mangle]
@@ -237,6 +243,7 @@ fn buffer_acquisitions_release_once_on_success_and_error() {
                 source: WrHalImageSource::VulkanDmaBuf(WrHalDmaBuf {
                     fd,
                     ready_fd: -1,
+                    access_lock_fd: -1,
                     width: 4,
                     height: 4,
                     format: ImageFormat::RGBA8,
@@ -272,7 +279,59 @@ impl hal::ExternalImageProvider for SingleLease {
 
 #[test]
 #[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
-fn native_descriptor_copy_survives_producer_descriptor_release() {
+fn native_cache_shares_publications_and_rejects_stale_metadata() {
+    init_log();
+    let options = hal::Options { validation: true, ..Default::default() };
+    let producer = hal::create_vulkan_image_device(&options).unwrap();
+    let consumer = hal::create_vulkan_image_device(&options).unwrap();
+    let other = hal::create_vulkan_image_device(&options).unwrap();
+    let original = producer.create_image(
+        ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::empty()),
+        &[31, 67, 89, 255].repeat(16),
+    ).unwrap();
+    let export = producer.export_dmabuf_image(&original, 0).unwrap();
+    let layout = export.plane().layout();
+    let data = WrHalDmaBuf {
+        fd: export.plane().as_fd().as_raw_fd(),
+        ready_fd: export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd()),
+        access_lock_fd: export.plane().as_fd().as_raw_fd(),
+        width: 4, height: 4, format: layout.format(), modifier: layout.modifier(),
+        stride: layout.stride(), offset: layout.offset(),
+        device_uuid: layout.device_uuid(), driver_uuid: layout.driver_uuid(),
+    };
+    let fixture = Rc::new(Fixture { image: RefCell::new(None), export: RefCell::new(None),
+        releases: Default::default(), pixels: Vec::new(), video_access: Default::default() });
+    let offer = |generation, data| {
+        *fixture.image.borrow_mut() = Some(WrHalImage { generation, source: WrHalImageSource::VulkanDmaBuf(data) });
+    };
+    offer(81, data);
+    let first = provider(&fixture, consumer.clone()).acquire(ExternalImageId(1), 0, false).unwrap();
+    offer(81, data);
+    let second = provider(&fixture, consumer.clone()).acquire(ExternalImageId(2), 0, false).unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    for generation in [80, 82] {
+        offer(generation, data);
+        assert!(provider(&fixture, consumer.clone()).acquire(ExternalImageId(3), 0, false).is_err());
+    }
+    let foreign_lock = std::fs::File::open("/dev/null").unwrap();
+    offer(81, WrHalDmaBuf { access_lock_fd: foreign_lock.as_raw_fd(), ..data });
+    assert!(provider(&fixture, consumer.clone()).acquire(ExternalImageId(3), 0, false).is_err());
+    offer(81, data);
+    assert!(provider(&fixture, other).acquire(ExternalImageId(3), 0, false).is_err());
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    assert!(fixture.video_access.borrow().locked);
+    assert!(finish_vulkan_images(&consumer, || Ok(true)).is_err());
+    drop(first);
+    assert!(fixture.video_access.borrow().locked);
+    drop(second);
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    finish_vulkan_images(&consumer, || Ok(true)).unwrap();
+}
+
+#[test]
+#[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
+fn native_descriptor_sampling_retains_producer_until_completion() {
     let (mut renderer, sender) = renderer();
     let device = renderer.external_image_device();
     assert!(device.dmabuf_capabilities().unwrap().supported());
@@ -294,6 +353,7 @@ fn native_descriptor_copy_survives_producer_descriptor_release() {
             source: WrHalImageSource::VulkanDmaBuf(WrHalDmaBuf {
                 fd,
                 ready_fd,
+                access_lock_fd: fd,
                 width: 4,
                 height: 4,
                 format: layout.format(),
@@ -309,16 +369,16 @@ fn native_descriptor_copy_survives_producer_descriptor_release() {
         pixels: Vec::new(),
         video_access: Default::default(),
     });
-    let lease = provider(&fixture, device)
+    let lease = provider(&fixture, device.clone())
         .acquire(ExternalImageId(1), 0, false)
         .unwrap();
     assert_eq!(lease.generation(), 71);
-    assert!(matches!(
-        fixture.releases.borrow().as_slice(),
-        [WrHalImageRelease::Complete]
-    ));
+    assert!(fixture.releases.borrow().is_empty());
+    assert!(fixture.video_access.borrow().locked);
     assert!(fixture.export.borrow().is_none());
-    assert!(!std::path::Path::new(&format!("/proc/self/fd/{fd}")).exists());
+    assert!(std::path::Path::new(&format!("/proc/self/fd/{fd}")).exists());
+    let releases = fixture.releases.clone();
+    let weak = Rc::downgrade(&fixture);
     drop(fixture);
     drop(original);
     drop(producer);
@@ -377,6 +437,10 @@ fn native_descriptor_copy_survives_producer_descriptor_release() {
     api.send_transaction(document, transaction);
     renderer.prepare_frame(document).unwrap();
     renderer.render().unwrap();
+    let completion = renderer.submit_work().unwrap();
+    finish_vulkan_images(&device, || renderer.poll_completion(completion)).unwrap();
+    assert!(matches!(releases.borrow().as_slice(), [WrHalImageRelease::Complete]));
+    assert!(weak.upgrade().is_none());
     assert_eq!(
         renderer
             .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(4, 4)))

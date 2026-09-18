@@ -510,6 +510,12 @@ impl Renderer {
             r.error = Some(error.clone());
             error
         })?;
+        crate::hal_image::finish_vulkan_images(&r.renderer.external_image_device(), || {
+            r.renderer.poll_completion(completion)
+        }).map_err(|error| {
+            r.error = Some(error.clone());
+            error
+        })?;
         Ok(true)
     }
 

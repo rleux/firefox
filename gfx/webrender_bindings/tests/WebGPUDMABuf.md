@@ -102,5 +102,35 @@ supported linear/tiled modifiers, retained duplicate reads, one terminal
 release, rejected identities and injected import/submission/return failures.
 The existing offscreen `gfx/wr/wrench/script/test_foreign_webgl.py` fixture
 checks that GL producers still use FOREIGN ownership with the shared lifetime
-implementation. The browser still uses the copy importer until its recycling
-and reader coordination are integrated.
+implementation. The browser bridge uses direct leases for supported tuples
+and retains an explicitly logged copy fallback for unsupported sampling tuples.
+
+## Browser publication and recycling
+
+The weak import cache identifies a publication by allocation, generation,
+layout, shared access-handle identity and logical renderer device. Duplicate
+reads share one publication and one lock. A lease token unlocks the surface
+only if that token acquired it. Mismatched live publications are rejected.
+
+Frame end drains native DMA-BUF sampling completion with a bounded wait,
+allowing idle frames and snapshots to release source ownership. CPU snapshots
+remain explicit copies under the same shared lock. A busy snapshot wait does
+not poison another reader's publication.
+
+Recycling atomically retires the old access handle before the allocation can
+be reused. A busy or poisoned allocation is not returned to the producer's
+reuse queue. Successful retirement creates a fresh access handle; stale
+descriptors keep the retired handle and cannot read the next generation.
+Remote-texture snapshots also pin compositor references while reading.
+
+The producer fully initializes each new export before publication. It does
+not preserve contents across reuse; the synchronization specification permits
+discarding ownership transfers when previous contents are reinitialized after
+an UNDEFINED layout transition. Completion before overwriting is still
+required. See [queue family ownership transfer](https://docs.vulkan.org/spec/latest/chapters/synchronization.html#synchronization-queue-transfers).
+
+Build the `browser_hal_image_leases` test target with the same standalone
+flags and run its `native_ --ignored --nocapture` tests. They cover duplicate
+readers, stale generations/access handles/devices, release before another
+frame, and snapshot controls. `DMABufSurface.VulkanRecyclingRetiresOldReaders`
+checks busy recycle rejection and permanently retired old mappings.
