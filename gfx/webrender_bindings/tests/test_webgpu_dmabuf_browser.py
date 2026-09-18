@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 import re
+import struct
 import sys
 import threading
 from pathlib import Path
@@ -27,6 +28,10 @@ class TestWebGPUDMABuf(MarionetteTestCase):
             "pixelMismatches": [],
             "snapshotMismatches": [],
             "display": os.environ.get("DISPLAY"),
+            "presentation": {
+                "mode": os.environ.get("WR_WEBGPU_DISPLAY_MODE", "xvfb"),
+                "wsiDebug": os.environ.get("MESA_VK_WSI_DEBUG"),
+            },
         }
         page = Path(__file__).with_name("webgpu_dmabuf.html").read_bytes()
 
@@ -48,6 +53,42 @@ class TestWebGPUDMABuf(MarionetteTestCase):
         self.marionette.set_window_rect(x=80, y=80, width=900, height=800)
         self.url = f"http://localhost:{self.server.server_port}/"
         self.marionette.navigate(self.url)
+        viewport = os.environ.get("WR_WEBGPU_VIEWPORT")
+        if viewport:
+            width, height = map(int, viewport.split("x"))
+            for _ in range(3):
+                current = self.marionette.execute_script(
+                    "return [innerWidth, innerHeight];"
+                )
+                if current == [width, height]:
+                    break
+                outer = self.marionette.window_rect
+                self.marionette.set_window_rect(
+                    width=outer["width"] + width - current[0],
+                    height=outer["height"] + height - current[1],
+                )
+            self.assertEqual(
+                self.marionette.execute_script("return [innerWidth, innerHeight];"),
+                [width, height],
+            )
+        if self.report["presentation"]["mode"] == "native":
+            with self.marionette.using_context("chrome"):
+                self.marionette.execute_script("window.focus();")
+            self.marionette.find_element("css selector", "canvas").click()
+        self.report["screen"] = self.marionette.execute_script("""
+            return {
+              width: screen.width, height: screen.height,
+              availableWidth: screen.availWidth, availableHeight: screen.availHeight,
+              innerWidth, innerHeight, outerWidth, outerHeight,
+              devicePixelRatio, visibility: document.visibilityState,
+              focused: document.hasFocus()
+            };
+        """)
+        if self.report["presentation"]["mode"] == "native":
+            self.assertIsNone(self.report["presentation"]["wsiDebug"])
+            self.assertEqual(self.report["screen"]["devicePixelRatio"], 1)
+            self.assertEqual(self.report["screen"]["visibility"], "visible")
+            self.assertTrue(self.report["screen"]["focused"])
 
     def tearDown(self):
         try:
@@ -84,7 +125,12 @@ class TestWebGPUDMABuf(MarionetteTestCase):
 
     def pixels(self, label, points=None):
         screenshot = self.marionette.screenshot(full=False)
-        (self.output / f"{label}.png").write_bytes(base64.b64decode(screenshot))
+        png = base64.b64decode(screenshot)
+        (self.output / f"{label}.png").write_bytes(png)
+        size = list(struct.unpack(">II", png[16:24]))
+        self.report.setdefault("screenshotSizes", {})[label] = size
+        if viewport := os.environ.get("WR_WEBGPU_VIEWPORT"):
+            self.assertEqual(size, list(map(int, viewport.split("x"))))
         return self.marionette.execute_async_script(
             """
             const done = arguments[arguments.length - 1];
@@ -120,18 +166,39 @@ class TestWebGPUDMABuf(MarionetteTestCase):
         )
 
     def measure(self, frames):
+        native = self.report["presentation"]["mode"] == "native"
+        if native:
+            self.marionette.execute_script(
+                """
+                window.presentationEvents = [];
+                window.addEventListener('blur', () =>
+                  window.presentationEvents.push({type: 'blur', time: performance.now()}));
+                document.addEventListener('visibilitychange', () =>
+                  window.presentationEvents.push({type: document.visibilityState, time: performance.now()}));
+            """,
+                sandbox=None,
+            )
         mode = os.environ.get("WR_WEBGPU_PROCESS_METRICS", "full")
         if mode == "off":
             self.report["benchmark"] = self.call("benchmark", frames)
             self.report["processMetrics"] = []
-            self.assertEqual(len(self.report["benchmark"]["samples"]), frames)
-            return
-        with self.marionette.using_context("chrome"):
-            pid = self.marionette.execute_script("return Services.appinfo.processID;")
-        with ProcessMetrics(pid, include_memory=mode == "full") as metrics:
-            self.report["benchmark"] = self.call("benchmark", frames)
-        self.report["processMetrics"] = metrics.samples
+        else:
+            with self.marionette.using_context("chrome"):
+                pid = self.marionette.execute_script(
+                    "return Services.appinfo.processID;"
+                )
+            with ProcessMetrics(pid, include_memory=mode == "full") as metrics:
+                self.report["benchmark"] = self.call("benchmark", frames)
+            self.report["processMetrics"] = metrics.samples
         self.assertEqual(len(self.report["benchmark"]["samples"]), frames)
+        if native:
+            self.report["presentationEvents"] = self.marionette.execute_script(
+                "return window.presentationEvents;", sandbox=None
+            )
+            self.assertEqual(self.report["presentationEvents"], [])
+            self.assertTrue(
+                self.marionette.execute_script("return document.hasFocus();")
+            )
 
     def check_errors(self, allow_reset=False):
         log = self.log()
@@ -285,6 +352,11 @@ class TestWebGPUDMABuf(MarionetteTestCase):
         self.assertEqual(
             self.report["backend"]["process"], os.environ["WR_WEBGPU_PROCESS"]
         )
+        if self.report["presentation"]["mode"] == "native":
+            self.assertNotRegex(
+                self.report["backend"]["renderer"].lower(),
+                "llvmpipe|lavapipe|swiftshader|software",
+            )
         if os.environ.get("WR_WEBGPU_LOADER_DIRECTORY"):
             with self.marionette.using_context("chrome"):
                 pid = self.marionette.execute_script(

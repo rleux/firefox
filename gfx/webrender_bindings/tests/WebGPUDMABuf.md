@@ -56,6 +56,13 @@ presentation option permits Xvfb without DRI3; it still uses the selected
 Vulkan adapter for rendering and import. These runs do not measure native
 desktop presentation performance.
 
+Use `--display native --viewport 890 705` to measure the existing X11 display
+with hardware presentation. Omit `--software-presentation`. This uses the
+existing window manager and a private Firefox profile; Xvfb remains the default.
+Native benchmarks require a visible, focused test window and reject focus or
+visibility changes during measurement. Reports include the display, screen,
+viewport, device-pixel ratio and screenshot dimensions.
+
 Validation-enabled multi-window tests should use a Vulkan loader containing
 the [upstream device-list synchronization fix](https://github.com/KhronosGroup/Vulkan-Loader/pull/1866).
 Older loaders can race device teardown against debug-object naming. A local
@@ -129,6 +136,14 @@ paired direct-minus-copy elapsed difference was -0.076 s over about 102 s.
 Direct used 11.8–18.0% fewer tracked render-engine cycles, while process CPU
 differences varied in sign. Two separate balanced 1,200-frame memory pairs had
 peak PSS differences of +0.51 and -0.79 MiB for direct versus copy.
+The [measurement record](WebGPUDMABufMeasurements.md) preserves the per-run
+timing, memory, synchronization and host-condition data.
+
+The matched native X11 rerun also maintained equal 60 Hz cadence. Direct
+sampling used 9.0–14.9% more Firefox process CPU and 4.2–13.2% fewer tracked
+render cycles. Its frame-completion wait averaged 7.07 ms; memory checks did
+not reproduce the earlier PSS penalty. See the measurement record for native
+display verification, window geometry and the limits of cross-display comparisons.
 
 Earlier observations of 51.36 ms direct p95 and about 54 MiB extra PSS used
 different binaries and heavier instrumentation, with unrecorded host load.
