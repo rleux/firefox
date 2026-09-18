@@ -97,4 +97,15 @@ window.benchmark = async count => {
   queries?.destroy(); resolved?.destroy(); mapped?.destroy();
   return {width: canvas.width, height: canvas.height, samples};
 };
+window.snapshotPixels = () => {
+  const source = document.querySelector("canvas");
+  const copy = document.createElement("canvas");
+  copy.width = source.width; copy.height = source.height;
+  const context = copy.getContext("2d", {willReadFrequently: true});
+  context.fillStyle = "white";
+  context.fillRect(0, 0, copy.width, copy.height);
+  context.drawImage(source, 0, 0);
+  return [0.25, 0.75].map(y => [...context.getImageData(
+    Math.floor(copy.width / 2), Math.floor(copy.height * y), 1, 1).data]);
+};
 </script>

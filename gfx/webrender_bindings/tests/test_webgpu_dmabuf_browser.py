@@ -21,7 +21,7 @@ class TestWebGPUDMABuf(MarionetteTestCase):
     def setUp(self):
         super().setUp()
         self.output = Path(os.environ["WR_WEBGPU_OUTPUT"])
-        self.report = {"cases": [], "knownFailures": [], "display": os.environ.get("DISPLAY")}
+        self.report = {"cases": [], "knownFailures": [], "pixelMismatches": [], "display": os.environ.get("DISPLAY")}
         page = Path(__file__).with_name("webgpu_dmabuf.html").read_bytes()
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -115,13 +115,15 @@ class TestWebGPUDMABuf(MarionetteTestCase):
                     expected = [[255, 0, 0, 255], [0, 0, 255, 255]]
                 if phase % 2:
                     expected.reverse()
-                self.report["cases"].append({"case": label, "pixels": pixels})
+                snapshot = self.call("snapshotPixels")
+                self.report["cases"].append({"case": label, "pixels": pixels, "snapshot": snapshot})
+                self.assertEqual(snapshot, expected, label)
                 if (os.environ.get("WR_WEBGPU_BASELINE_DEFECTS") == "1"
                         and not direct and alpha == "opaque" and phase == 8
                         and pixels == [[255, 127, 127, 255], [127, 127, 255, 255]]):
                     self.report["knownFailures"].append({"case": label, "expected": expected, "actual": pixels})
-                else:
-                    self.assertEqual(pixels, expected, label)
+                elif pixels != expected:
+                    self.report["pixelMismatches"].append({"case": label, "expected": expected, "actual": pixels})
                 log = self.log()
                 self.assertGreater(log.count(marker), before, label)
                 published = re.findall(r"WebGPU canvas transport: Vulkan DMA-BUF, generation=(\d+)", log)
@@ -142,3 +144,4 @@ class TestWebGPUDMABuf(MarionetteTestCase):
         for error in ["Validation Error", "VUID-", "DeviceReset", "panicked", "Failed to render", "Vulkan canvas publication failed"]:
             self.assertNotIn(error, log)
         self.assertEqual(self.marionette.execute_script("return [...window.gpuErrors];", sandbox=None), [])
+        self.assertEqual(self.report["pixelMismatches"], [])

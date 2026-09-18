@@ -122,6 +122,7 @@ struct WrHalImageLease {
   RefPtr<RenderTextureHost> mTexture;
   bool mForeignLocked = false;
   bool mVAAPILocked = false;
+  bool mVulkanLocked = false;
 };
 
 extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
@@ -151,6 +152,21 @@ extern "C" bool wr_renderer_lock_vaapi_image(WrHalImageLease* aLease) {
   return false;
 }
 
+extern "C" bool wr_renderer_lock_vulkan_dmabuf(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (!texture || aLease->mVulkanLocked) {
+    return false;
+  }
+  auto surface = texture->GetSurface();
+  if (surface->GetVulkanDescriptor() && surface->WaitForAccess(5000)) {
+    aLease->mVulkanLocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
+
 extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
     void* aObj, wr::ExternalImageId aId, uint8_t aChannelIndex,
     WrHalImage* aImage) {
@@ -167,7 +183,7 @@ extern "C" void wr_renderer_release_hal_image(WrHalImageLease* aLease,
                                               WrHalImageRelease aStatus) {
   UniquePtr<WrHalImageLease> lease(aLease);
 #ifdef MOZ_WIDGET_GTK
-  if (lease->mVAAPILocked) {
+  if (lease->mVAAPILocked || lease->mVulkanLocked) {
     lease->mTexture->AsRenderDMABUFTextureHost()->GetSurface()->UnlockAccess(
         aStatus == WrHalImageRelease::Abandoned);
   }

@@ -47,6 +47,7 @@ class SharedTextureDMABuf final : public SharedTexture {
   bool IsForVulkanWebRender() const { return mDMABufInfo.for_webrender; }
 
   void CleanForRecycling() override;
+  bool RetireVulkanPublication();
 
   UniqueFileHandle CloneDmaBufFd();
 

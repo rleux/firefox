@@ -55,7 +55,6 @@ class RenderDMABUFTextureHost final : public RenderTextureHostSWGL {
   void DeleteTextureHandle();
 
   bool mVulkanFailed = false;
-  bool mVulkanLocked = false;
   RefPtr<DMABufSurface> mSurface;
   RefPtr<gl::GLContext> mGL;
   RefPtr<gfx::DataSourceSurface> mReadback;

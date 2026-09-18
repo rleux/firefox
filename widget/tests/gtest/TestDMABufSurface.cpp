@@ -960,11 +960,48 @@ TEST(DMABufSurface, VulkanAbandonmentPreventsProducerRecycling)
   EXPECT_FALSE(compositor->LockAccess());
   EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
   EXPECT_FALSE(texture.CloneDmaBufFd());
+  EXPECT_FALSE(texture.RetireVulkanPublication());
   texture.CleanForRecycling();
   EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
   EXPECT_FALSE(producer->CreateAccessLock());
   producer->UnlockAccess();
   EXPECT_FALSE(producer->AccessLockUsable());
+}
+
+TEST(DMABufSurface, VulkanRecyclingRetiresOldReaders)
+{
+  auto fd = MakeFd();
+  ASSERT_TRUE(fd);
+  auto descriptor = MakeRGBADescriptor(fd);
+  RefPtr<DMABufSurface> producer =
+      DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(producer);
+  ASSERT_TRUE(producer->CreateAccessLock());
+  AddVulkanState(descriptor, producer->GetAccessLockFd());
+  RefPtr<DMABufSurface> reader = DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(reader);
+  webgpu::ffi::WGPUTextureFormat format{};
+  format.tag = webgpu::ffi::WGPUTextureFormat_Bgra8Unorm;
+  webgpu::ffi::WGPUDMABufInfo info{};
+  info.is_valid = true;
+  info.for_webrender = true;
+  webgpu::SharedTextureDMABuf texture(
+      128, 128, format, {}, RefPtr<DMABufSurface>(producer),
+      descriptor.get_SurfaceDescriptorDMABuf(), info);
+
+  ASSERT_TRUE(reader->TryLockAccess());
+  EXPECT_FALSE(texture.RetireVulkanPublication());
+  EXPECT_TRUE(producer->AccessLockUsable());
+  reader->UnlockAccess();
+  ASSERT_TRUE(texture.RetireVulkanPublication());
+  EXPECT_FALSE(producer->AccessLockUsable());
+  EXPECT_FALSE(reader->TryLockAccess());
+  EXPECT_FALSE(reader->WaitForAccess(1));
+  EXPECT_TRUE(texture.GetDMABufInfo().is_valid);
+  EXPECT_TRUE(texture.CloneDmaBufFd());
+  texture.CleanForRecycling();
+  EXPECT_TRUE(texture.RetireVulkanPublication());
+  EXPECT_FALSE(reader->AccessLockUsable());
 }
 
 TEST(DMABufSurface, ForeignRGBRejectsMissingAccessLock)

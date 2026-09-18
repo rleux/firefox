@@ -88,6 +88,27 @@ SharedTextureDMABuf::SharedTextureDMABuf(
 
 SharedTextureDMABuf::~SharedTextureDMABuf() = default;
 
+bool SharedTextureDMABuf::RetireVulkanPublication() {
+  if (!mDMABufInfo.for_webrender) {
+    return true;
+  }
+  if (!mSurface->TryRetireAccess()) {
+    return false;
+  }
+  auto descriptor = mSurfaceDescriptor;
+  descriptor.vulkanImageState() = Nothing();
+  descriptor.semaphoreFd() = nullptr;
+  descriptor.semaphoreFdIsSyncFd() = false;
+  RefPtr<DMABufSurface> surface = DMABufSurface::CreateDMABufSurface(
+      layers::SurfaceDescriptor(std::move(descriptor)));
+  if (!surface || !surface->CreateAccessLock()) {
+    return false;
+  }
+  ClearTextureHost();
+  mSurface = std::move(surface);
+  return true;
+}
+
 void SharedTextureDMABuf::CleanForRecycling() {
   SharedTexture::CleanForRecycling();
   if (mDMABufInfo.for_webrender) {
@@ -131,7 +152,7 @@ Maybe<layers::SurfaceDescriptor> SharedTextureDMABuf::ToSurfaceDescriptor() {
 void SharedTextureDMABuf::GetSnapshot(const ipc::Shmem& aDestShmem,
                                       size_t aDestStride) {
   if (mDMABufInfo.for_webrender) {
-    if (!mVulkanGeneration || !mSurface->LockAccess()) {
+    if (!mVulkanGeneration || !mSurface->WaitForAccess(5000)) {
       memset(aDestShmem.get<uint8_t>(), 0, aDestShmem.Size<uint8_t>());
       return;
     }

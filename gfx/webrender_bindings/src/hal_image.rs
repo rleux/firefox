@@ -19,9 +19,11 @@ pub struct WrHalBuffer {
 
 /// cbindgen:derive-ostream=false
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct WrHalDmaBuf {
     pub fd: i32,
     pub ready_fd: i32,
+    pub access_lock_fd: i32,
     pub width: u32,
     pub height: u32,
     pub format: ImageFormat,
@@ -133,6 +135,8 @@ extern "C" {
     pub fn wr_renderer_lock_foreign_rgb(lease: *mut WrHalImageLease) -> bool;
     /// cbindgen:ignore
     pub fn wr_renderer_lock_vaapi_image(lease: *mut WrHalImageLease) -> bool;
+    /// cbindgen:ignore
+    pub fn wr_renderer_lock_vulkan_dmabuf(lease: *mut WrHalImageLease) -> bool;
     pub fn wr_renderer_release_hal_image(lease: *mut WrHalImageLease, status: WrHalImageRelease);
 }
 
@@ -173,9 +177,17 @@ mod linux {
         image: hal::WeakForeignNv12Image,
     }
 
+    struct VulkanEntry {
+        generation: u64,
+        access_lock: (u64, u64),
+        layout: hal::DmaBufLayout,
+        image: hal::WeakVulkanDmaBufImage,
+    }
+
     thread_local! {
         static FOREIGN_IMAGES: RefCell<HashMap<(u64, u64), ForeignEntry>> = RefCell::new(HashMap::new());
         static VIDEO_IMAGES: RefCell<HashMap<(u64, u64), VideoEntry>> = RefCell::new(HashMap::new());
+        static VULKAN_IMAGES: RefCell<HashMap<(u64, u64), VulkanEntry>> = RefCell::new(HashMap::new());
     }
 
     pub fn finish_video_images(
@@ -199,6 +211,26 @@ mod linux {
         if live() {
             return Err("Native video publication outlived its frame".into());
         }
+        Ok(())
+    }
+
+    pub fn finish_vulkan_images(
+        device: &ExternalImageDevice,
+        mut poll: impl FnMut() -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let live = || VULKAN_IMAGES.with(|images| images.borrow().values().any(|entry| {
+            entry.image.upgrade().map_or(false, |image| image.belongs_to(device))
+        }));
+        if !live() { return device.poll(); }
+        let start = std::time::Instant::now();
+        while !poll()? {
+            if start.elapsed() >= std::time::Duration::from_secs(5) {
+                return Err("Timed out completing Vulkan DMA-BUF reads".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        device.poll()?;
+        if live() { return Err("Vulkan DMA-BUF publication outlived its frame".into()); }
         Ok(())
     }
 
@@ -397,11 +429,52 @@ mod linux {
         }
 
         fn dmabuf(&self, data: WrHalDmaBuf, generation: u64, mut lease: Lease) -> Result<ExternalImageLease, String> {
-            if data.fd < 0 || data.ready_fd < -1 || generation == 0 {
+            if data.fd < 0 || data.ready_fd < -1 || data.access_lock_fd < 0 || generation == 0 {
                 return Err("Invalid Vulkan DMA-BUF handles or generation".into());
             }
             // The C++ lease owns the borrowed descriptors until release.
             let (plane, ready) = dmabuf_plane(&data)?;
+            let layout = plane.layout();
+            if self.device.supports_dmabuf_sampling(layout) {
+                let metadata = |fd: i32| -> Result<_, String> {
+                    let file = File::from(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().map_err(|error| error.to_string())?);
+                    let stat = file.metadata().map_err(|error| error.to_string())?;
+                    Ok((stat.dev(), stat.ino()))
+                };
+                let key = metadata(data.fd)?;
+                let access_lock = metadata(data.access_lock_fd)?;
+                let uv = TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32);
+                return VULKAN_IMAGES.with(|images| {
+                    let mut images = images.borrow_mut();
+                    images.retain(|_, entry| entry.image.upgrade().is_some());
+                    if let Some(entry) = images.get(&key) {
+                        if let Some(image) = entry.image.upgrade() {
+                            if entry.generation != generation || entry.access_lock != access_lock
+                                || entry.layout != layout || !image.belongs_to(&self.device) {
+                                return Err("Vulkan DMA-BUF has a different live publication or device".into());
+                            }
+                            return image.lease(uv);
+                        }
+                    }
+                    if !unsafe { wr_renderer_lock_vulkan_dmabuf(lease.raw.as_ptr()) } {
+                        return Err("Vulkan DMA-BUF publication is unavailable for sampling".into());
+                    }
+                    let image = unsafe { self.device.import_vulkan_dmabuf(&plane, &ready, generation, move |status| {
+                        lease.status = match status {
+                            hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
+                            hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
+                            hal::ExternalImageRelease::Abandoned => WrHalImageRelease::Abandoned,
+                        };
+                        drop(lease);
+                    }) }?;
+                    images.insert(key, VulkanEntry { generation, access_lock, layout, image: image.downgrade() });
+                    log::info!("WebRender Vulkan DMA-BUF directly sampled: generation={generation}, format={:?}, modifier={:#x}", data.format, data.modifier);
+                    image.lease(uv)
+                });
+            }
+            if !unsafe { wr_renderer_lock_vulkan_dmabuf(lease.raw.as_ptr()) } {
+                return Err("Vulkan DMA-BUF publication is unavailable for copying".into());
+            }
             lease.status = WrHalImageRelease::Abandoned;
             // VulkanDmaBuf denotes an immutable single-plane image released in GENERAL
             // layout to QUEUE_FAMILY_EXTERNAL, on the identified device and driver.
@@ -577,7 +650,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use self::linux::{ExternalImages, finish_video_images};
+pub use self::linux::{ExternalImages, finish_video_images, finish_vulkan_images};
 
 #[cfg(target_os = "linux")]
 pub struct DeviceRegistration(Option<std::ptr::NonNull<c_void>>);

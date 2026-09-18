@@ -1161,6 +1161,13 @@ void WebGPUParent::PostSharedTexture(
   auto recycledTexture = mRemoteTextureOwner->GetRecycledSharedTexture(
       size, surfaceFormat, desc->type(), aOwnerId);
   if (recycledTexture) {
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (auto* dmabuf = recycledTexture->AsSharedTextureDMABuf()) {
+      if (!dmabuf->RetireVulkanPublication()) {
+        return;
+      }
+    }
+#endif
     recycledTexture->CleanForRecycling();
     data->mRecycledSharedTextures.push_back(recycledTexture);
   }

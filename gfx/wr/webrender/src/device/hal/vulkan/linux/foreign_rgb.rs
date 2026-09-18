@@ -122,10 +122,19 @@ struct ForeignAccess {
 impl ForeignAccess {
     fn wait(&self) -> Result<()> {
         let producer = self.device.dmabuf_producer()?;
-        producer
-            .submissions
-            .submit_serial()
-            .and_then(|serial| producer.submissions.wait_for(serial))
+        let serial = producer.submissions.submit_serial()?;
+        if self.external_family != vk::QUEUE_FAMILY_EXTERNAL {
+            return producer.submissions.wait_for(serial);
+        }
+        let start = std::time::Instant::now();
+        while producer.submissions.poll()? < serial {
+            if start.elapsed() >= std::time::Duration::from_secs(5) {
+                self.owner.lost.set(true);
+                return Err("Timed out transferring Vulkan DMA-BUF ownership".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
     }
 
     unsafe fn acquire(&mut self, ready: &SyncFile) -> Result<()> {

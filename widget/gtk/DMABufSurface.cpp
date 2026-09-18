@@ -569,6 +569,19 @@ bool DMABufSurface::TryLockAccess() {
                                      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
 }
 
+bool DMABufSurface::TryRetireAccess() {
+  uint32_t expected = 0;
+  if (!mAccessLock ||
+      !__atomic_compare_exchange_n(mAccessLock, &expected, 3, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+    return false;
+  }
+#ifdef XP_LINUX
+  syscall(SYS_futex, mAccessLock, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+#endif
+  return true;
+}
+
 bool DMABufSurface::WaitForAccess(uint32_t aTimeoutMs) {
 #ifdef XP_LINUX
   if (!mAccessLock) return false;
