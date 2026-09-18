@@ -486,7 +486,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             wgt::TextureUses::UNINITIALIZED => wgt::TextureUses::RESOURCE,
             usage => usage,
         };
-        let texture = texture.with_lease(target.image.state.clone(), TextureFilter::Linear)?;
+        let texture = texture.with_lease(target.image.state.clone(), TextureFilter::Linear, false)?;
         Ok(BoundTarget { texture, origin: target.origin, size, return_usage })
     }
 
@@ -647,7 +647,8 @@ impl<A: BackendApi> FrameRenderer<A> {
             if !texture.sample_initialized() { return Err("External image contents are not initialized".into()); }
             let filter = if resolve.rendering == api::ImageRendering::Pixelated { TextureFilter::Nearest } else { TextureFilter::Linear };
             let return_usage = texture.current_usage();
-            let texture = texture.with_lease(lease.state.clone(), filter)?;
+            let texture = texture.with_lease(lease.state.clone(), filter,
+                props.descriptor.flags.contains(api::ImageDescriptorFlags::IS_OPAQUE))?;
             let mut uv = lease.uv.to_array();
             if external.normalized_uvs {
                 if props.descriptor.size.is_empty() { return Err("Invalid normalized external image size".into()); }

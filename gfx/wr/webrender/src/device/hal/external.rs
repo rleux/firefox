@@ -386,7 +386,7 @@ mod tests {
             ExternalImageSource::Native(image.clone()), move |status| log.borrow_mut().push(status)).unwrap();
         let releases = Rc::new(RefCell::new(Vec::new()));
         lease.attach_releases(&releases);
-        let view = image.texture(&owner).unwrap().with_lease(lease.state.clone(), crate::device::TextureFilter::Linear).unwrap();
+        let view = image.texture(&owner).unwrap().with_lease(lease.state.clone(), crate::device::TextureFilter::Linear, false).unwrap();
         let queue = SubmissionQueue::new(&owner, 2, false);
         {
             let mut commands = queue.recording().unwrap();
