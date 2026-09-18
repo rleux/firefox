@@ -163,12 +163,12 @@ impl<A: hal::Api> Submission<A> {
         Ok(self.complete)
     }
 
-    fn wait(&mut self) -> Result<()> {
+    fn wait(&mut self, timeout: Option<std::time::Duration>) -> Result<()> {
         self.complete = unsafe {
             self.owner
                 .open
                 .device
-                .wait(&self.fence, self.serial, None)
+                .wait(&self.fence, self.serial, timeout)
                 .map_err(|e| format!("Waiting for WR submission: {e:?}"))?
         };
         if self.complete {
@@ -179,6 +179,7 @@ impl<A: hal::Api> Submission<A> {
         if self.complete {
             Ok(())
         } else {
+            self.owner.lost.set(true);
             Err("WR submission did not complete".into())
         }
     }
@@ -217,6 +218,7 @@ pub(super) struct SubmissionQueue<A: hal::Api> {
     state: RefCell<QueueState<A>>,
     limit: usize,
     synchronous: bool,
+    wait_timeout: Option<std::time::Duration>,
     uploads: super::pool::BufferPool<A>,
     fence: RefCell<Option<Rc<Owned<A, A::Fence>>>>,
     #[cfg(test)]
@@ -230,6 +232,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
             owner: owner.clone(),
             limit,
             synchronous,
+            wait_timeout: None,
             uploads: super::pool::BufferPool::new(owner),
             fence: RefCell::new(None),
             #[cfg(test)]
@@ -257,10 +260,17 @@ impl<A: hal::Api> SubmissionQueue<A> {
         Ok(fence.as_ref().unwrap().clone())
     }
 
-    fn retire(state: &mut QueueState<A>, wait: bool) -> Result<()> {
+    pub fn with_wait_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.wait_timeout = Some(timeout);
+        self
+    }
+
+    pub fn submitted(&self) -> u64 { self.state.borrow().submitted }
+
+    fn retire(state: &mut QueueState<A>, wait: bool, timeout: Option<std::time::Duration>) -> Result<()> {
         while let Some(front) = state.pending.front_mut() {
             if wait {
-                front.wait()?;
+                front.wait(timeout)?;
                 state.waits += 1;
             } else if !front.poll()? {
                 break;
@@ -281,7 +291,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
         bytes: &[u8],
         usage: wgt::BufferUses,
     ) -> Result<Rc<super::resources::Buffer<A>>> {
-        Self::retire(&mut self.state.borrow_mut(), false)?;
+        Self::retire(&mut self.state.borrow_mut(), false, self.wait_timeout)?;
         self.uploads.upload(bytes, usage)
     }
 
@@ -318,10 +328,10 @@ impl<A: hal::Api> SubmissionQueue<A> {
             #[cfg(not(test))]
             let poll = true;
             if poll {
-                Self::retire(&mut state, false)?;
+                Self::retire(&mut state, false, self.wait_timeout)?;
             }
             if state.pending.len() == self.limit {
-                Self::retire(&mut state, true)?;
+                Self::retire(&mut state, true, self.wait_timeout)?;
             }
             let serial = state.next_serial;
             state.next_serial = serial
@@ -352,7 +362,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
         }
         if self.synchronous {
             while !state.pending.is_empty() {
-                Self::retire(&mut state, true)?;
+                Self::retire(&mut state, true, self.wait_timeout)?;
             }
         }
         Ok(())
@@ -365,7 +375,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
 
     pub fn poll(&self) -> Result<u64> {
         let mut state = self.state.borrow_mut();
-        Self::retire(&mut state, false)?;
+        Self::retire(&mut state, false, self.wait_timeout)?;
         Ok(state.completed)
     }
 
@@ -375,7 +385,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
             return Err("Cannot wait for an unsubmitted HAL serial".into());
         }
         while state.completed < serial {
-            Self::retire(&mut state, true)?;
+            Self::retire(&mut state, true, self.wait_timeout)?;
         }
         Ok(())
     }
@@ -396,7 +406,7 @@ impl<A: hal::Api> SubmissionQueue<A> {
         self.submit()?;
         let mut state = self.state.borrow_mut();
         while !state.pending.is_empty() {
-            Self::retire(&mut state, true)?;
+            Self::retire(&mut state, true, self.wait_timeout)?;
         }
         Ok(())
     }
@@ -407,7 +417,7 @@ impl<A: hal::Api> Drop for SubmissionQueue<A> {
         let state = self.state.get_mut();
         state.active.take();
         while !state.pending.is_empty() {
-            if Self::retire(state, true).is_err() {
+            if Self::retire(state, true, self.wait_timeout).is_err() {
                 break;
             }
         }

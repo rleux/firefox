@@ -6,6 +6,7 @@
 #define MOZILLA_GFX_RENDERCOMPOSITOR_VULKAN_H
 
 #include "RenderCompositor.h"
+#include "base/timer.h"
 
 class DMABufSurfaceYUV;
 
@@ -28,7 +29,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
   RenderCompositorVulkan(const RefPtr<widget::CompositorWidget>& aWidget,
                          const WrHalSurface& aSurface);
   bool GetHalSurface(WrHalSurface* aSurface) const override;
-  void SetRenderer(Renderer* aRenderer) override { mRenderer = aRenderer; }
+  void SetRenderer(Renderer* aRenderer) override;
   bool BeginFrame() override;
   void CancelFrame() override;
   RenderedFrameId EndFrame(const nsTArray<DeviceIntRect>& aDirtyRects) override;
@@ -45,10 +46,14 @@ class RenderCompositorVulkan final : public RenderCompositor {
   bool SurfaceOriginIsTopLeft() override { return true; }
 
  private:
+  bool PollCompletions(bool aNotify);
+  void PollPendingFrames();
   WrHalSurface mSurface;
   // RendererOGL owns this renderer and deletes it before this compositor.
   Renderer* mRenderer = nullptr;
   uint64_t mCompletedFrame = 1;
+  uint64_t mSubmittedFrame = 1;
+  base::RepeatingTimer<RenderCompositorVulkan> mCompletionTimer;
   bool mPaused = false;
   bool mFailed = false;
 };

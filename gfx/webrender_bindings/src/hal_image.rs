@@ -182,6 +182,8 @@ mod linux {
         access_lock: (u64, u64),
         layout: hal::DmaBufLayout,
         image: hal::WeakVulkanDmaBufImage,
+        consumer: u64,
+        pending: std::rc::Rc<std::cell::Cell<bool>>,
     }
 
     thread_local! {
@@ -211,30 +213,6 @@ mod linux {
         if live() {
             return Err("Native video publication outlived its frame".into());
         }
-        Ok(())
-    }
-
-    pub fn finish_vulkan_images(
-        device: &ExternalImageDevice,
-        mut poll: impl FnMut() -> Result<bool, String>,
-    ) -> Result<(), String> {
-        let live = || VULKAN_IMAGES.with(|images| images.borrow().values().any(|entry| {
-            entry.image.upgrade().map_or(false, |image| image.belongs_to(device))
-        }));
-        if !live() { return device.poll(); }
-        let start = std::time::Instant::now();
-        {
-            let _span = hal::diagnostics::Span::new("frameCompletion");
-            while !poll()? {
-                if start.elapsed() >= std::time::Duration::from_secs(5) {
-                    return Err("Timed out completing Vulkan DMA-BUF reads".into());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        }
-        let _span = hal::diagnostics::Span::new("devicePoll");
-        device.poll()?;
-        if live() { return Err("Vulkan DMA-BUF publication outlived its frame".into()); }
         Ok(())
     }
 
@@ -453,10 +431,44 @@ mod linux {
                 };
                 let key = metadata(data.fd)?;
                 let access_lock = metadata(data.access_lock_fd)?;
+                let pending = VULKAN_IMAGES.with(|images| {
+                    let images = images.borrow();
+                    let entry = match images.get(&key) {
+                        Some(entry) => entry,
+                        None => return Ok(None),
+                    };
+                    if entry.pending.get()
+                        && (entry.generation != generation
+                            || entry.access_lock != access_lock
+                            || entry.layout != layout
+                            || entry.consumer != self.device.device_id())
+                    {
+                        return Err("Vulkan DMA-BUF has a different live publication or device".to_owned());
+                    }
+                    Ok(if entry.pending.get() && entry.image.upgrade().is_none() {
+                        Some(entry.pending.clone())
+                    } else {
+                        None
+                    })
+                })?;
+                if let Some(pending) = pending {
+                    let _span = hal::diagnostics::Span::new("publicationReuseWait");
+                    let start = std::time::Instant::now();
+                    while pending.get() {
+                        self.device.poll()?;
+                        if !pending.get() {
+                            break;
+                        }
+                        if start.elapsed() >= std::time::Duration::from_secs(5) {
+                            return Err("Timed out returning Vulkan DMA-BUF publication".into());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
                 let uv = TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32);
                 return VULKAN_IMAGES.with(|images| {
                     let mut images = images.borrow_mut();
-                    images.retain(|_, entry| entry.image.upgrade().is_some());
+                    images.retain(|_, entry| entry.pending.get());
                     if let Some(entry) = images.get(&key) {
                         if let Some(image) = entry.image.upgrade() {
                             if entry.generation != generation || entry.access_lock != access_lock
@@ -470,7 +482,10 @@ mod linux {
                     if !unsafe { wr_renderer_lock_vulkan_dmabuf(lease.raw.as_ptr()) } {
                         return Err("Vulkan DMA-BUF publication is unavailable for sampling".into());
                     }
+                    let pending = std::rc::Rc::new(std::cell::Cell::new(true));
+                    let completed = pending.clone();
                     let image = unsafe { self.device.import_vulkan_dmabuf(&plane, &ready, generation, move |status| {
+                        completed.set(false);
                         lease.status = match status {
                             hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
                             hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
@@ -478,7 +493,8 @@ mod linux {
                         };
                         drop(lease);
                     }) }?;
-                    images.insert(key, VulkanEntry { generation, access_lock, layout, image: image.downgrade() });
+                    images.insert(key, VulkanEntry { generation, access_lock, layout, image: image.downgrade(),
+                        consumer: self.device.device_id(), pending });
                     hal::diagnostics::transport(true);
                     log::info!("WebRender Vulkan DMA-BUF directly sampled: generation={generation}, format={:?}, modifier={:#x}", data.format, data.modifier);
                     image.lease(uv)
@@ -669,7 +685,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use self::linux::{ExternalImages, finish_video_images, finish_vulkan_images};
+pub use self::linux::{finish_video_images, ExternalImages};
 
 #[cfg(target_os = "linux")]
 pub struct DeviceRegistration(Option<std::ptr::NonNull<c_void>>);

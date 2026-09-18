@@ -4,8 +4,11 @@
 
 #include "WebGPUParent.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <unordered_set>
 
 #include "ExternalTexture.h"
@@ -409,6 +412,10 @@ class PresentationData {
   uint64_t mSubmissionIndex = 0;
 
   std::deque<std::shared_ptr<SharedTexture>> mRecycledSharedTextures;
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  std::deque<std::shared_ptr<SharedTexture>> mPendingVulkanTextures;
+  std::vector<std::weak_ptr<SharedTexture>> mVulkanTextures;
+#endif
   const bool mMeasurePool = [] {
     const char* flag = std::getenv("WR_WEBGPU_SYNC_INSTRUMENTATION");
     return flag && flag[0] == '1' && flag[1] == '\0';
@@ -1189,6 +1196,9 @@ void WebGPUParent::PostSharedTexture(
 #if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
     if (auto* dmabuf = recycledTexture->AsSharedTextureDMABuf()) {
       if (!dmabuf->RetireVulkanPublication()) {
+        if (dmabuf->CanRetryVulkanRetirement()) {
+          data->mPendingVulkanTextures.push_back(std::move(recycledTexture));
+        }
         if (data->mMeasurePool) {
           ++data->mPoolRetireRejected;
         }
@@ -1204,6 +1214,40 @@ void WebGPUParent::PostSharedTexture(
   }
   data->ReportPoolMetrics();
 }
+
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+void WebGPUParent::CollectVulkanTextures(
+    PresentationData* aData, const layers::RemoteTextureOwnerId& aOwnerId) {
+  if (!mRemoteTextureOwner || !mRemoteTextureOwner->IsRegistered(aOwnerId)) {
+    return;
+  }
+  while (auto texture = mRemoteTextureOwner->GetRecycledSharedTexture(
+             aData->mDesc.size(), aData->mDesc.format(),
+             layers::SurfaceDescriptor::TSurfaceDescriptorDMABuf, aOwnerId)) {
+    aData->mPendingVulkanTextures.push_back(std::move(texture));
+  }
+  for (auto it = aData->mPendingVulkanTextures.begin();
+       it != aData->mPendingVulkanTextures.end();) {
+    auto* dmabuf = (*it)->AsSharedTextureDMABuf();
+    if (!dmabuf) {
+      it = aData->mPendingVulkanTextures.erase(it);
+    } else if (dmabuf->RetireVulkanPublication()) {
+      (*it)->CleanForRecycling();
+      aData->mRecycledSharedTextures.push_back(std::move(*it));
+      it = aData->mPendingVulkanTextures.erase(it);
+    } else if (!dmabuf->CanRetryVulkanRetirement()) {
+      it = aData->mPendingVulkanTextures.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  auto& textures = aData->mVulkanTextures;
+  textures.erase(
+      std::remove_if(textures.begin(), textures.end(),
+                     [](const auto& texture) { return texture.expired(); }),
+      textures.end());
+}
+#endif
 
 RefPtr<gfx::FileHandleWrapper> WebGPUParent::GetDeviceFenceHandle(
     const RawId aDeviceId) {
@@ -1519,26 +1563,57 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
                      static_cast<uint32_t>(data->mDesc.size().height));
   MOZ_RELEASE_ASSERT(SwapChainFormatMatches(data->mDesc.format(), aFormat));
 
-  // Recycled SharedTexture if it exists.
-  if (!data->mRecycledSharedTextures.empty()) {
-    std::shared_ptr<SharedTexture> texture =
-        data->mRecycledSharedTextures.front();
-    // Check if the texture is recyclable.
-    if (texture->mWidth == aWidth && texture->mHeight == aHeight &&
-        texture->mFormat.tag == aFormat.tag && texture->mUsage == aUsage) {
-      texture->SetOwnerId(ownerId);
-      data->mRecycledSharedTextures.pop_front();
-      mSharedTextures.emplace(aTextureId, texture);
-      if (data->mMeasurePool) {
-        ++data->mPoolReuses;
-      }
-      return true;
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  const auto started = std::chrono::steady_clock::now();
+#endif
+  for (;;) {
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (!data->mVulkanTextures.empty()) {
+      CollectVulkanTextures(data, ownerId);
     }
-    data->mRecycledSharedTextures.clear();
+#endif
+    // Recycled SharedTexture if it exists.
+    if (!data->mRecycledSharedTextures.empty()) {
+      std::shared_ptr<SharedTexture> texture =
+          data->mRecycledSharedTextures.front();
+      // Check if the texture is recyclable.
+      if (texture->mWidth == aWidth && texture->mHeight == aHeight &&
+          texture->mFormat.tag == aFormat.tag && texture->mUsage == aUsage) {
+        texture->SetOwnerId(ownerId);
+        data->mRecycledSharedTextures.pop_front();
+        mSharedTextures.emplace(aTextureId, texture);
+        if (data->mMeasurePool) {
+          ++data->mPoolReuses;
+        }
+        return true;
+      }
+      data->mRecycledSharedTextures.clear();
+    }
+
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (data->mVulkanTextures.size() >= 8) {
+      if (std::chrono::steady_clock::now() - started >=
+          std::chrono::seconds(5)) {
+        gfxWarningOnce() << "Timed out recycling Vulkan WebGPU textures";
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+#endif
+    break;
   }
 
   auto sharedTexture = CreateSharedTexture(ownerId, aDeviceId, aTextureId,
                                            aWidth, aHeight, aFormat, aUsage);
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (sharedTexture) {
+    auto* dmabuf = sharedTexture->AsSharedTextureDMABuf();
+    if (dmabuf && dmabuf->IsForVulkanWebRender()) {
+      data->mVulkanTextures.push_back(sharedTexture);
+    }
+  }
+#endif
   if (sharedTexture && data->mMeasurePool) {
     ++data->mPoolAllocations;
   }

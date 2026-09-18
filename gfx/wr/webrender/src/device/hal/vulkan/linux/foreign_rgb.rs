@@ -117,6 +117,7 @@ struct ForeignAccess {
     texture: Rc<Texture<V>>,
     lifetime: ForeignRgbLifetime,
     external_family: u32,
+    releases: crate::device::hal::external::ReleaseQueue,
 }
 
 impl ForeignAccess {
@@ -170,13 +171,17 @@ impl ForeignAccess {
                 vk::AccessFlags::SHADER_READ,
             );
         }
-        self.wait()?;
-        self.lifetime.acquired()?;
+        if self.external_family == vk::QUEUE_FAMILY_EXTERNAL {
+            producer.submissions.submit_serial()?;
+            self.lifetime.acquire_submitted()?;
+        } else {
+            self.wait()?;
+            self.lifetime.acquired()?;
+        }
         Ok(())
     }
 
-    fn release(&mut self) -> Result<()> {
-        let _span = crate::device::hal::diagnostics::Span::new("ownershipRelease");
+    fn record_release(&mut self) -> Result<()> {
         let producer = self.device.dmabuf_producer()?;
         if self.texture.current_usage() != wgt::TextureUses::RESOURCE {
             return Err("Foreign RGB image was not restored after its last use".into());
@@ -211,9 +216,59 @@ impl ForeignAccess {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn release(&mut self) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("ownershipRelease");
+        self.record_release()?;
         self.wait()?;
         self.lifetime.released()?;
         Ok(())
+    }
+
+    fn release_async(&mut self, callback: Box<dyn FnOnce(ExternalImageRelease)>, status: ExternalImageRelease) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("ownershipRelease");
+        let mut completion = OwnershipReturn {
+            callback: Some(callback), status,
+            completed: Rc::new(Cell::new(false)),
+            lost: self.owner.lost.clone(),
+            releases: self.releases.clone(),
+            lifetime: None,
+        };
+        self.record_release()?;
+        completion.lifetime = Some(std::mem::replace(&mut self.lifetime, ForeignRgbLifetime::new()));
+        let producer = self.device.dmabuf_producer()?;
+        {
+            let mut commands = producer.submissions.recording()?;
+            let completed = completion.completed.clone();
+            commands.on_complete(move || completed.set(true));
+            commands.keep(completion);
+        }
+        producer.submissions.submit_serial()?;
+        Ok(())
+    }
+}
+
+struct OwnershipReturn {
+    callback: Option<Box<dyn FnOnce(ExternalImageRelease)>>,
+    status: ExternalImageRelease,
+    completed: Rc<Cell<bool>>,
+    lost: crate::device::hal::DeviceLost,
+    releases: crate::device::hal::external::ReleaseQueue,
+    lifetime: Option<ForeignRgbLifetime>,
+}
+
+impl Drop for OwnershipReturn {
+    fn drop(&mut self) {
+        if !self.completed.get() || self.lost.get()
+            || self.lifetime.as_mut().map_or(true, |lifetime| lifetime.released().is_err()) {
+            self.status = ExternalImageRelease::Abandoned;
+            self.lost.set(true);
+        }
+        if let Some(callback) = self.callback.take() {
+            self.releases.borrow_mut().push((callback, self.status));
+        }
     }
 }
 
@@ -238,6 +293,20 @@ impl ReleaseGuard {
 impl Drop for ReleaseGuard {
     fn drop(&mut self) {
         if let Some(access) = &mut self.access {
+            if access.external_family == vk::QUEUE_FAMILY_EXTERNAL
+                && self.status.get() != ExternalImageRelease::Abandoned
+                && access.lifetime.needs_release() {
+                if let Some(callback) = self.callback.take() {
+                    if let Err(error) = access.release_async(callback, self.status.get()) {
+                        log::error!("Queueing Vulkan RGB ownership return: {error}");
+                        access.owner.lost.set(true);
+                        if let Ok(producer) = access.device.dmabuf_producer() {
+                            producer.submissions.discard_recording();
+                        }
+                    }
+                }
+                return;
+            }
             if self.status.get() != ExternalImageRelease::Abandoned
                 && access.lifetime.needs_release()
             {
@@ -415,6 +484,7 @@ impl ExternalImageDevice {
             texture: texture.clone(),
             lifetime: ForeignRgbLifetime::new(),
             external_family: vk::QUEUE_FAMILY_FOREIGN_EXT,
+            releases: producer.releases.clone(),
         });
         guard.access.as_mut().unwrap().acquire(ready)?;
         let descriptor = api::ImageDescriptor::new(

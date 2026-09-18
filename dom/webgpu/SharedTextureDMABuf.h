@@ -48,6 +48,7 @@ class SharedTextureDMABuf final : public SharedTexture {
 
   void CleanForRecycling() override;
   bool RetireVulkanPublication();
+  bool CanRetryVulkanRetirement() const;
 
   UniqueFileHandle CloneDmaBufFd();
 

@@ -701,8 +701,17 @@ pub extern "C" fn wr_renderer_vulkan_end(renderer: &mut Renderer, frame: u64) ->
 
 #[cfg(target_os = "linux")]
 #[no_mangle]
-pub extern "C" fn wr_renderer_vulkan_poll(renderer: &mut Renderer, completed: &mut u64) -> bool {
-    match renderer.poll_vulkan() { Ok(frame) => { *completed = frame; true }, Err(e) => { error!("Vulkan poll: {}", e); false } }
+pub extern "C" fn wr_renderer_vulkan_poll(renderer: &mut Renderer, completed: &mut u64, notify: bool) -> bool {
+    match renderer.poll_vulkan(notify) {
+        Ok(frame) => {
+            *completed = frame;
+            true
+        },
+        Err(e) => {
+            error!("Vulkan poll: {}", e);
+            false
+        },
+    }
 }
 
 #[cfg(target_os = "linux")]
