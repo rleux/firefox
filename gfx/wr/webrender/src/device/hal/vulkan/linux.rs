@@ -16,6 +16,8 @@ mod foreign_rgb;
 pub use foreign_rgb::{ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
 mod video;
 pub use video::{Nv12DmaBufCapabilities, Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
+#[cfg(test)]
+mod sampling_probe;
 
 type V = hal::api::Vulkan;
 
