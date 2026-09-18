@@ -135,6 +135,7 @@ impl<A: hal::Api> ImageDevice for Producer<A> {
     }
 
     fn poll(&self) -> Result<()> {
+        self.ensure_healthy()?;
         let result = self.submissions.poll().map(|_| ());
         if result.is_err() { self.failed.set(true); }
         result

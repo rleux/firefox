@@ -14,6 +14,9 @@ mod layout;
 mod lifetime;
 pub use layout::{ForeignRgbFormat, ForeignRgbLayout};
 pub(super) use lifetime::ForeignRgbLifetime;
+#[path = "vulkan_rgb.rs"]
+mod vulkan_rgb;
+pub use vulkan_rgb::{VulkanDmaBufImage, WeakVulkanDmaBufImage};
 
 impl ForeignRgbFormat {
     fn texture_format(self) -> wgt::TextureFormat {
@@ -113,6 +116,7 @@ struct ForeignAccess {
     owner: Rc<Device<V>>,
     texture: Rc<Texture<V>>,
     lifetime: ForeignRgbLifetime,
+    external_family: u32,
 }
 
 impl ForeignAccess {
@@ -139,7 +143,7 @@ impl ForeignAccess {
                 image,
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::GENERAL,
-                vk::QUEUE_FAMILY_FOREIGN_EXT,
+                self.external_family,
                 self.owner.open.device.queue_family_index(),
                 vk::AccessFlags::empty(),
                 vk::AccessFlags::SHADER_READ,
@@ -190,7 +194,7 @@ impl ForeignAccess {
                     vk::ImageLayout::GENERAL,
                     vk::ImageLayout::GENERAL,
                     self.owner.open.device.queue_family_index(),
-                    vk::QUEUE_FAMILY_FOREIGN_EXT,
+                    self.external_family,
                     vk::AccessFlags::SHADER_READ,
                     vk::AccessFlags::empty(),
                 );
@@ -399,6 +403,7 @@ impl ExternalImageDevice {
             owner: owner.clone(),
             texture: texture.clone(),
             lifetime: ForeignRgbLifetime::new(),
+            external_family: vk::QUEUE_FAMILY_FOREIGN_EXT,
         });
         guard.access.as_mut().unwrap().acquire(ready)?;
         let descriptor = api::ImageDescriptor::new(

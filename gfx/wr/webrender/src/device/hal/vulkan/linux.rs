@@ -14,6 +14,7 @@ use std::os::unix::fs::MetadataExt;
 
 mod foreign_rgb;
 pub use foreign_rgb::{ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
+pub use foreign_rgb::{VulkanDmaBufImage, WeakVulkanDmaBufImage};
 mod video;
 pub use video::{Nv12DmaBufCapabilities, Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
 #[cfg(test)]
@@ -21,7 +22,7 @@ mod sampling_probe;
 
 type V = hal::api::Vulkan;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DmaBufLayout {
     size: [u32; 2],
     format: api::ImageFormat,
