@@ -980,6 +980,9 @@ void GPUProcessManager::OnProcessUnexpectedShutdown(GPUProcessHost* aHost) {
     MOZ_CRASH("GPU process crashed and pref is set to crash the browser.");
   }
 
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  wr::RenderCompositorVulkan::DisableVideo();
+#endif
   CompositorManagerChild::OnGPUProcessLost(aHost->GetProcessToken());
   DestroyProcess(/* aUnexpectedShutdown */ true);
 
