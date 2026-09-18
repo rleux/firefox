@@ -317,16 +317,62 @@ fn native_cache_shares_publications_and_rejects_stale_metadata() {
     offer(81, WrHalDmaBuf { access_lock_fd: foreign_lock.as_raw_fd(), ..data });
     assert!(provider(&fixture, consumer.clone()).acquire(ExternalImageId(3), 0, false).is_err());
     offer(81, data);
-    assert!(provider(&fixture, other).acquire(ExternalImageId(3), 0, false).is_err());
+    assert!(provider(&fixture, other.clone()).acquire(ExternalImageId(3), 0, false).is_err());
     assert_eq!(fixture.video_access.borrow().locks, 1);
     assert!(fixture.video_access.borrow().locked);
-    assert!(finish_vulkan_images(&consumer, || Ok(true)).is_err());
+    consumer.poll().unwrap();
+    assert!(fixture.video_access.borrow().locked);
     drop(first);
     assert!(fixture.video_access.borrow().locked);
     drop(second);
-    assert!(!fixture.video_access.borrow().locked);
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+    let releases_before_pending_retry = fixture.releases.borrow().len();
+    for generation in [80, 82] {
+        offer(generation, data);
+        assert!(provider(&fixture, consumer.clone())
+            .acquire(ExternalImageId(4), 0, false)
+            .is_err());
+    }
+    offer(81, WrHalDmaBuf { access_lock_fd: foreign_lock.as_raw_fd(), ..data });
+    assert!(provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .is_err());
+    offer(81, data);
+    assert!(provider(&fixture, other)
+        .acquire(ExternalImageId(4), 0, false)
+        .is_err());
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 4
+    );
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+
+    offer(81, data);
+    let resumed = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .unwrap();
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().locks, 2);
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
-    finish_vulkan_images(&consumer, || Ok(true)).unwrap();
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 5
+    );
+    drop(resumed);
+    assert!(fixture.video_access.borrow().locked);
+    consumer.finish().unwrap();
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 2);
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 6
+    );
+    assert!(matches!(
+        fixture.releases.borrow().last(),
+        Some(WrHalImageRelease::Unused)
+    ));
 }
 
 #[test]
@@ -341,8 +387,8 @@ fn native_descriptor_sampling_retains_producer_until_completion() {
     })
     .unwrap();
     let desc = ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE);
-    let pixels = [23, 47, 89, 255].repeat(16);
-    let original = producer.create_image(desc, &pixels).unwrap();
+    let expected_pixels = [23, 47, 89, 255].repeat(16);
+    let original = producer.create_image(desc, &expected_pixels).unwrap();
     let export = producer.export_dmabuf_image(&original, 0).unwrap();
     let layout = export.plane().layout();
     let fd = export.plane().as_fd().as_raw_fd();
@@ -438,14 +484,24 @@ fn native_descriptor_sampling_retains_producer_until_completion() {
     renderer.prepare_frame(document).unwrap();
     renderer.render().unwrap();
     let completion = renderer.submit_work().unwrap();
-    finish_vulkan_images(&device, || renderer.poll_completion(completion)).unwrap();
+    assert!(releases.borrow().is_empty());
+    let mut completed = false;
+    for _ in 0..100_000 {
+        renderer.poll().unwrap();
+        let draw_complete = renderer.poll_completion(completion).unwrap();
+        device.poll().unwrap();
+        if draw_complete && !releases.borrow().is_empty() {
+            completed = true;
+            break;
+        }
+        std::hint::spin_loop();
+    }
+    assert!(completed);
     assert!(matches!(releases.borrow().as_slice(), [WrHalImageRelease::Complete]));
     assert!(weak.upgrade().is_none());
-    assert_eq!(
-        renderer
-            .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(4, 4)))
-            .unwrap(),
-        pixels
-    );
+    let rendered = renderer
+        .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(4, 4)))
+        .unwrap();
+    assert_eq!(rendered, expected_pixels);
     api.shut_down(true);
 }

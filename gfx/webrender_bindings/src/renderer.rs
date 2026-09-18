@@ -56,10 +56,45 @@ pub struct VulkanRenderer {
     screenshots: std::collections::HashMap<usize, webrender::hal::ScreenshotHandle>,
     recordings: std::collections::HashMap<usize, webrender::hal::RecordedFrameHandle>,
     next_capture: usize,
-    frames: std::collections::VecDeque<(u64, webrender::hal::FrameCompletion)>,
+    frames: std::collections::VecDeque<PendingVulkanFrame>,
     completed_frame: u64,
     max_texture_size: i32,
     notifier: Box<dyn RenderNotifier>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingVulkanFrame {
+    id: u64,
+    draw: webrender::hal::FrameCompletion,
+    returned: Option<u64>,
+    started: std::time::Instant,
+}
+
+#[cfg(target_os = "linux")]
+impl VulkanRenderer {
+    fn poll_frames(&mut self) -> Result<(), String> {
+        self.renderer.poll()?;
+        let device = self.renderer.external_image_device();
+        while let Some(frame) = self.frames.front_mut() {
+            if frame.returned.is_none() && self.renderer.poll_completion(frame.draw)? {
+                frame.returned = Some(device.submitted());
+            }
+            if !frame
+                .returned
+                .map(|serial| device.poll_complete(serial))
+                .transpose()?
+                .unwrap_or(false)
+            {
+                if frame.started.elapsed() >= std::time::Duration::from_secs(5) {
+                    return Err("Timed out completing a Vulkan frame".into());
+                }
+                break;
+            }
+            self.completed_frame = frame.id;
+            self.frames.pop_front();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -488,50 +523,67 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
-        if r.renderer.has_acquired_surface() {
-            if r.renderer.has_presentable_output() {
-                let status = r.renderer.present()?;
-                if !matches!(
-                    status,
-                    webrender::hal::PresentationStatus::Presented { suboptimal: false }
-                ) {
-                    r.renderer.force_redraw();
-                    r.notifier.wake_up(true);
+        let result = (|| {
+            r.poll_frames()?;
+            if r.frames.len() >= 3 {
+                let _span = webrender::hal::diagnostics::Span::new("frameBackpressure");
+                while r.frames.len() >= 3 {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    r.poll_frames()?;
                 }
-            } else {
-                r.renderer.discard_surface()?;
             }
-        }
-        let completion = r.renderer.submit_work()?;
-        r.frames.push_back((frame, completion));
-        crate::hal_image::finish_video_images(&r.renderer.external_image_device(), || {
-            r.renderer.poll_completion(completion)
-        }).map_err(|error| {
+            if r.renderer.has_acquired_surface() {
+                if r.renderer.has_presentable_output() {
+                    let status = r.renderer.present()?;
+                    if !matches!(
+                        status,
+                        webrender::hal::PresentationStatus::Presented { suboptimal: false }
+                    ) {
+                        r.renderer.force_redraw();
+                        r.notifier.wake_up(true);
+                    }
+                } else {
+                    r.renderer.discard_surface()?;
+                }
+            }
+            let completion = r.renderer.submit_work()?;
+            if let Some(pending) = r.frames.back_mut().filter(|pending| pending.draw == completion) {
+                pending.id = frame;
+                pending.returned = None;
+            } else {
+                r.frames.push_back(PendingVulkanFrame {
+                    id: frame,
+                    draw: completion,
+                    returned: None,
+                    started: std::time::Instant::now(),
+                });
+            }
+            crate::hal_image::finish_video_images(&r.renderer.external_image_device(), || {
+                r.renderer.poll_completion(completion)
+            })?;
+            r.poll_frames()?;
+            Ok(true)
+        })();
+        result.map_err(|error: String| {
             r.error = Some(error.clone());
             error
-        })?;
-        crate::hal_image::finish_vulkan_images(&r.renderer.external_image_device(), || {
-            r.renderer.poll_completion(completion)
-        }).map_err(|error| {
-            r.error = Some(error.clone());
-            error
-        })?;
-        Ok(true)
+        })
     }
 
     #[cfg(target_os = "linux")]
-    pub fn poll_vulkan(&mut self) -> Result<u64, String> {
+    pub fn poll_vulkan(&mut self, notify: bool) -> Result<u64, String> {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
-        r.renderer.poll()?;
-        while let Some(&(frame, completion)) = r.frames.front() {
-            if !r.renderer.poll_completion(completion)? {
-                break;
-            }
-            r.completed_frame = frame;
-            r.frames.pop_front();
+        let previous = r.completed_frame;
+        let result = r.poll_frames();
+        if result.is_err() || (notify && r.completed_frame != previous) {
+            r.notifier.wake_up(false);
         }
+        result.map_err(|error| {
+            r.error = Some(error.clone());
+            error
+        })?;
         Ok(r.completed_frame)
     }
 

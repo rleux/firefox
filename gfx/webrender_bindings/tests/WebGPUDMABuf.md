@@ -124,13 +124,14 @@ runs. Keep correctness/validation runs separate from timing runs.
 
 Use `--sync-instrumentation --process-metrics off` for separate diagnostics.
 `WR_WEBGPU_SYNC_INSTRUMENTATION` enables cumulative CPU wall-time histograms
-for import, acquire, frame-completion and ownership-return operations, plus
+for import, acquire, ownership-return and conditional backpressure operations, plus
 per-publication allocation/reuse counters. Use the last histogram per
 process/thread/event; periodic snapshots are cumulative and process termination
 can omit the final partial batch. Spans can nest, so their totals must not be
 added as independent costs. Quiet timing uses `WR_WEBGPU_BENCHMARK_QUIET`.
 
-On Intel Iris Xe/Mesa 26.2.2 under Xvfb, four balanced same-binary pairs of
+Before W4's asynchronous completion changes, on Intel Iris Xe/Mesa 26.2.2
+under Xvfb, four balanced same-binary pairs of
 6,000 frames had p95 intervals of 17.22–17.28 ms across both paths. The median
 paired direct-minus-copy elapsed difference was -0.076 s over about 102 s.
 Direct used 11.8–18.0% fewer tracked render-engine cycles, while process CPU
@@ -156,8 +157,9 @@ memory plateau.
 Diagnostics observed four allocations and 611 reuses per 615 publications for
 both paths, without retirement rejection. Direct acquisition averaged about
 2.48 ms and its separate frame-completion point about 1.75 ms, including about
-1.65 ms returning ownership. Recycling works, but these synchronous waits
-still prevent a fully asynchronous frame pipeline.
+1.65 ms returning ownership. Those measurements describe W3's synchronous
+implementation. W4 removes those unconditional waits; its performance must
+be measured separately.
 
 Direct sampling retains the publication through all GPU reads, serializes
 snapshots and producer reuse, rejects stale generations and quarantines
@@ -191,14 +193,38 @@ layout, shared access-handle identity and logical renderer device. Duplicate
 reads share one publication and one lock. A lease token unlocks the surface
 only if that token acquired it. Mismatched live publications are rejected.
 
-Frame end drains native DMA-BUF sampling completion with a bounded wait,
-allowing idle frames and snapshots to release source ownership. CPU snapshots
-remain explicit copies under the same shared lock. A busy snapshot wait does
-not poison another reader's publication.
+For WebGPU's EXTERNAL ownership contract, acquisition submits the producer's
+sync-file wait and ownership/layout barriers to the same Vulkan queue used
+for subsequent WebRender reads. Import returns without a CPU completion wait.
+The final sampling lease queues the ownership return after all GPU uses finish.
+The callback retains the C++ publication and its access lock until that return
+submission completes. Failure or uncertain completion reports abandonment.
+
+Frame completion tracks both drawing and the resulting ownership-return
+submission. A render-thread timer polls pending work every 2 ms and wakes the
+normal compositor update path when completion advances, so an idle canvas does
+not require another render to release resources. Renderer teardown stops the
+timer before deleting its target and drains pending work. The draw queue,
+external-image queue and pending frame list each have a limit of three.
+Pressure waits have a five-second timeout. Vulkan driver teardown can still
+block inside the driver's device/queue-idle operations.
+
+The cache retains pending publication identity after its last weak image lease
+expires. Reacquiring that identical publication polls its ownership return
+outside the cache borrow before relocking; stale generations, access handles,
+layouts and logical devices remain rejected. This conditional reuse wait is
+separate from the removed per-frame wait. CPU snapshots remain explicit copies
+under the same shared lock. A busy snapshot wait does not poison another reader's
+publication. VA-API/FOREIGN ownership and video frame completion remain synchronous.
 
 Recycling atomically retires the old access handle before the allocation can
 be reused. A busy or poisoned allocation is not returned to the producer's
-reuse queue. Successful retirement creates a fresh access handle; stale
+reuse queue. Busy allocations remain in a pending list and are retried; poisoned
+allocations cannot be retried. Each canvas has at most eight live Vulkan export
+textures, tracked by weak references so the accounting does not retain textures.
+At that limit the producer polls retirement instead of allocating more, with a
+five-second timeout that rejects shared-texture creation and invokes the existing
+readback fallback. Successful retirement creates a fresh access handle; stale
 descriptors keep the retired handle and cannot read the next generation.
 Remote-texture snapshots also pin compositor references while reading.
 
@@ -212,7 +238,41 @@ Build the `browser_hal_image_leases` test target with the same standalone
 flags and run its `native_ --ignored --nocapture` tests. They cover duplicate
 readers, stale generations/access handles/devices, release before another
 frame, and snapshot controls. `DMABufSurface.VulkanRecyclingRetiresOldReaders`
-checks busy recycle rejection and permanently retired old mappings.
+checks busy recycle rejection, retry eligibility and permanently retired old
+mappings. The importer tests gate completion deterministically, verify the first
+read before a CPU acquire wait, delayed exactly-once callbacks, bounded queue
+pressure, shutdown draining and abandonment after a failed return submission.
+
+### W4 local validation
+
+The asynchronous path was checked on Intel Iris Xe (RPL-P), Mesa 26.2.2:
+
+| Check | Result |
+| --- | --- |
+| Direct importer, native and Naga shaders | 6 tests per mode passed |
+| Browser image bridge, native and Naga shaders | 3 tests per mode passed, including used-publication completion through nonblocking idle polls alone |
+| Ordinary WebRender tests | 161 passed |
+| External-image, submission and resource regressions | 2, 3 and 2 tests passed respectively |
+| Renderer external-image regressions | 4 tests per shader mode passed |
+| Real GL-to-Vulkan DMA-BUF fixture | 4 tests per shader mode passed |
+| Real VA-API NV12 fixture | 4 HAL and 7 bridge tests per shader mode passed |
+| Focused C++ regressions | 62 passed, including all 22 DMA-BUF surface tests |
+| Xvfb browser matrix | 12 runs passed, each with 24 base pixel/snapshot cases and no waived failures |
+
+The browser matrix covered GPU and parent rendering, multiple windows,
+OffscreenCanvas, resize, device replacement, compositor reset and GPU-process
+crash recovery. Copy controls also passed. It used the fixed Vulkan loader
+1.4.363 and validation layers, with no validation errors. Both instrumented
+600-frame lifecycle runs used at most five allocations in their main pool.
+The direct run recorded 611 reuses and no retirement rejections. These are
+correctness diagnostics under Xvfb, not native performance measurements.
+The standalone tests force submission backpressure and the C++ tests reject
+busy retirement. The browser runs did not force the eight-texture producer
+limit or its timeout.
+
+Firefox export, binary and gtest builds passed. Logs and reports are retained
+under `artifacts/webgpu-zero-copy/w4/`. Native performance must be rerun after
+the host is ready; the preceding measurement record describes W3.
 
 ## Opaque canvas views
 

@@ -8,7 +8,7 @@ use api::*;
 use crate::device::hal::{ExternalImageProvider, Options};
 use crate::render_api::Transaction;
 use crate::WebRenderOptions;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 struct Notice;
 impl RenderNotifier for Notice {
@@ -36,6 +36,33 @@ fn device() -> ExternalImageDevice {
         ..Default::default()
     })
     .unwrap()
+}
+
+thread_local! {
+    static COMPLETION_GATE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn gated_device() -> ExternalImageDevice {
+    let mut device = crate::hal::create_vulkan_device(&Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    device.completion_probe = Some(|_, _| {
+        Ok(Box::new(|wait| {
+            Ok(wait || COMPLETION_GATE.with(|gate| gate.get()))
+        }))
+    });
+    ExternalImageDevice::new(&Rc::new(device))
+}
+
+fn set_completion_gate(open: bool) {
+    COMPLETION_GATE.with(|gate| gate.set(open));
+}
+
+fn wait_for_hardware(device: &ExternalImageDevice) {
+    let producer = device.dmabuf_producer().unwrap();
+    unsafe { producer.owner.open.queue.wait_for_idle() }.unwrap();
 }
 
 fn exported(producer: &ExternalImageDevice, format: ImageFormat, modifier: u64) -> DmaBufExport {
@@ -94,6 +121,8 @@ fn vulkan_dmabuf_direct_sampling_and_lifetime() {
                 })
             }
             .unwrap();
+            let acquire = consumer.submitted();
+            assert!(acquire > 0);
             assert!(image.belongs_to(&consumer));
             assert!(!image.belongs_to(&producer));
             let access = image.0 .0.release.access.as_ref().unwrap();
@@ -190,6 +219,10 @@ fn vulkan_dmabuf_direct_sampling_and_lifetime() {
             assert!(releases.borrow().is_empty());
             assert!(weak.upgrade().is_some());
             drop(retained);
+            assert!(releases.borrow().is_empty());
+            let release = consumer.submitted();
+            assert!(release > acquire);
+            consumer.finish().unwrap();
             assert_eq!(*releases.borrow(), [ExternalImageRelease::Complete]);
             assert!(weak.upgrade().is_none());
             let copied = unsafe {
@@ -263,7 +296,120 @@ fn vulkan_dmabuf_rejection_and_failure_release() {
     }
     .unwrap();
     drop(image);
+    assert!(releases.borrow().is_empty());
+    consumer.finish().unwrap();
     assert_eq!(*releases.borrow(), [ExternalImageRelease::Unused]);
+}
+
+#[test]
+#[ignore = "Requires Vulkan DMA-BUF and sync-file sharing"]
+fn vulkan_dmabuf_acquire_and_release_complete_asynchronously() {
+    set_completion_gate(false);
+    let producer = device();
+    let consumer = gated_device();
+    let export = exported(&producer, ImageFormat::RGBA8, 0);
+    let releases = Rc::new(RefCell::new(Vec::new()));
+    let observed = releases.clone();
+    let image = unsafe {
+        consumer.import_vulkan_dmabuf(export.plane(), export.ready(), 3, move |status| {
+            observed.borrow_mut().push(status)
+        })
+    }
+    .unwrap();
+    let acquire = consumer.submitted();
+    assert!(acquire > 0);
+    wait_for_hardware(&consumer);
+    assert!(!consumer.poll_complete(acquire).unwrap());
+    assert!(releases.borrow().is_empty());
+
+    let weak = image.downgrade();
+    drop(image);
+    let release = consumer.submitted();
+    assert!(release > acquire);
+    wait_for_hardware(&consumer);
+    assert!(!consumer.poll_complete(release).unwrap());
+    assert!(releases.borrow().is_empty());
+    assert!(weak.upgrade().is_none());
+
+    set_completion_gate(true);
+    assert!(consumer.poll_complete(release).unwrap());
+    assert_eq!(*releases.borrow(), [ExternalImageRelease::Unused]);
+    assert!(consumer.poll_complete(release).unwrap());
+    assert_eq!(releases.borrow().len(), 1);
+    set_completion_gate(false);
+}
+
+#[test]
+#[ignore = "Requires Vulkan DMA-BUF and sync-file sharing"]
+fn vulkan_dmabuf_shutdown_drains_ownership_return() {
+    set_completion_gate(false);
+    let producer = device();
+    let consumer = gated_device();
+    let export = exported(&producer, ImageFormat::RGBA8, 0);
+    let releases = Rc::new(RefCell::new(Vec::new()));
+    let observed = releases.clone();
+    let image = unsafe {
+        consumer.import_vulkan_dmabuf(export.plane(), export.ready(), 4, move |status| {
+            observed.borrow_mut().push(status)
+        })
+    }
+    .unwrap();
+    drop(image);
+    assert!(releases.borrow().is_empty());
+    drop(consumer);
+    assert_eq!(*releases.borrow(), [ExternalImageRelease::Unused]);
+}
+
+#[test]
+#[ignore = "Requires Vulkan DMA-BUF and sync-file sharing"]
+fn vulkan_dmabuf_in_flight_ownership_is_bounded() {
+    set_completion_gate(false);
+    let producer = device();
+    let consumer = gated_device();
+    let releases = Rc::new(RefCell::new(Vec::new()));
+    let mut exports = Vec::new();
+    for index in 0..6 {
+        let export = exported(&producer, ImageFormat::RGBA8, 0);
+        let observed = releases.clone();
+        let image = unsafe {
+            consumer.import_vulkan_dmabuf(
+                export.plane(),
+                export.ready(),
+                index + 1,
+                move |status| observed.borrow_mut().push((index, status)),
+            )
+        }
+        .unwrap();
+        drop(image);
+        exports.push(export);
+        let mut stats = MemoryStats::default();
+        consumer
+            .dmabuf_producer()
+            .unwrap()
+            .submissions
+            .memory(&mut stats);
+        assert!(stats.in_flight <= 3);
+        consumer.poll().unwrap();
+        assert!(releases
+            .borrow()
+            .iter()
+            .all(|(_, status)| *status == ExternalImageRelease::Unused));
+    }
+    consumer.finish().unwrap();
+    assert_eq!(
+        *releases.borrow(),
+        (0..6)
+            .map(|index| (index, ExternalImageRelease::Unused))
+            .collect::<Vec<_>>()
+    );
+    let mut stats = MemoryStats::default();
+    consumer
+        .dmabuf_producer()
+        .unwrap()
+        .submissions
+        .memory(&mut stats);
+    assert_eq!(stats.in_flight, 0);
+    set_completion_gate(false);
 }
 
 #[test]
@@ -287,6 +433,9 @@ fn vulkan_dmabuf_ownership_return_failure_abandons() {
         .fault
         .set(Some(FailurePoint::Submit));
     drop(image);
+    assert!(releases.borrow().is_empty());
+    assert!(consumer.poll().is_err());
     assert_eq!(*releases.borrow(), [ExternalImageRelease::Abandoned]);
     assert!(consumer.poll().is_err());
+    assert_eq!(releases.borrow().len(), 1);
 }

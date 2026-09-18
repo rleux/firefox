@@ -266,6 +266,7 @@ pub(crate) struct FrameRenderer<A: BackendApi> {
     samplers: [Owned<A, A::Sampler>; 3],
     quad: Rc<Buffer<A>>,
     submissions: SubmissionQueue<A>,
+    external_device: ExternalImageDevice,
     dummy: Rc<Texture<A>>,
     dither: Option<Rc<Texture<A>>>,
     depths: HashMap<(u64, u32), Rc<Texture<A>>>,
@@ -305,7 +306,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     pub fn external_image_device(&self) -> ExternalImageDevice {
-        ExternalImageDevice::new(&self.owner)
+        self.external_device.clone()
     }
 
     pub fn new(device: Device<A>) -> Result<Self> {
@@ -355,8 +356,11 @@ impl<A: BackendApi> FrameRenderer<A> {
             TextureFilter::Nearest,
             false,
         )?;
-        let submissions =
+        let mut submissions =
             SubmissionQueue::new(&owner, 3, std::env::var_os("WR_HAL_SYNC").is_some());
+        if owner.info.backend == wgt::Backend::Vulkan {
+            submissions = submissions.with_wait_timeout(std::time::Duration::from_secs(5));
+        }
         dummy.upload_recorded(
             &owner,
             &submissions,
@@ -369,6 +373,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         let texture_pool = super::pool::TexturePool::new(&owner);
         let capture_pool = super::pool::TexturePool::new(&owner);
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
+        let external_device = ExternalImageDevice::new(&owner);
         Ok(Self {
             shader_input,
             shader_cache: RefCell::new(ShaderCache::default()),
@@ -382,6 +387,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             samplers,
             quad,
             submissions,
+            external_device,
             dummy,
             dither: None,
             depths: HashMap::new(),
@@ -600,6 +606,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         let result = self.submissions.poll().and_then(|completed| self.queries.borrow_mut().poll(completed));
         dispatch_releases(&self.releases);
+        let result = result.and_then(|_| self.external_device.poll());
         if result.is_err() { self.failed.set(true); }
         result
     }
@@ -2713,6 +2720,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         if self.is_failed() { return Err("HAL renderer requires recreation".into()); }
         let result = self.submissions.poll();
         dispatch_releases(&self.releases);
+        let result = result.and_then(|completed| self.external_device.poll().map(|_| completed));
         match result {
             Ok(completed) => Ok(completed >= serial),
             Err(error) => { self.failed.set(true); Err(error) }
@@ -2794,6 +2802,7 @@ impl<A: BackendApi> Drop for FrameRenderer<A> {
         self.native_targets.clear();
         self.layer_targets.clear();
         dispatch_releases(&self.releases);
+        let _ = self.external_device.finish();
     }
 }
 

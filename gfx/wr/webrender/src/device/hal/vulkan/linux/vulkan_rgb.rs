@@ -294,6 +294,7 @@ impl ExternalImageDevice {
             texture: texture.clone(),
             lifetime: ForeignRgbLifetime::new(),
             external_family: vk::QUEUE_FAMILY_EXTERNAL,
+            releases: self.dmabuf_producer()?.releases.clone(),
         });
         guard.access.as_mut().unwrap().acquire(ready)?;
         Ok(VulkanDmaBufImage(ForeignRgbImage(Rc::new(

@@ -48,6 +48,10 @@ pub(super) trait ImageDevice: Any {
     fn create(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage>;
     fn update(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()>;
     fn poll(&self) -> Result<()>;
+    fn submitted(&self) -> u64;
+    fn device_id(&self) -> u64;
+    fn poll_complete(&self, serial: u64) -> Result<bool>;
+    fn finish(&self) -> Result<()>;
     fn target(&self, descriptor: ImageDescriptor) -> Result<NativeImage>;
     fn read(&self, image: &NativeImage) -> Result<Vec<u8>>;
     fn as_any(&self) -> &dyn Any;
@@ -56,10 +60,17 @@ pub(super) trait ImageDevice: Any {
 pub(super) struct Producer<A: hal::Api> {
     pub owner: Rc<Device<A>>,
     pub(super) submissions: SubmissionQueue<A>,
+    pub(super) releases: ReleaseQueue,
     failed: Cell<bool>,
 }
 
 impl<A: hal::Api> Producer<A> {
+    fn progress(&self) -> Result<u64> {
+        let result = self.ensure_healthy().and_then(|_| self.submissions.poll());
+        if result.is_err() { self.failed.set(true); self.owner.lost.set(true); }
+        dispatch_releases(&self.releases);
+        result
+    }
     pub(super) fn ensure_healthy(&self) -> Result<()> {
         if self.failed.get() || self.owner.lost.get() { return Err("Native image producer requires recreation".into()); }
         Ok(())
@@ -135,9 +146,21 @@ impl<A: hal::Api> ImageDevice for Producer<A> {
     }
 
     fn poll(&self) -> Result<()> {
-        self.ensure_healthy()?;
-        let result = self.submissions.poll().map(|_| ());
-        if result.is_err() { self.failed.set(true); }
+        self.progress().map(|_| ())
+    }
+    fn submitted(&self) -> u64 { self.submissions.submitted() }
+    fn device_id(&self) -> u64 { self.owner.cache_id }
+    fn poll_complete(&self, serial: u64) -> Result<bool> {
+        self.progress().map(|completed| completed >= serial)
+    }
+    fn finish(&self) -> Result<()> {
+        let result = self.ensure_healthy().and_then(|_| self.submissions.wait());
+        if result.is_err() {
+            self.failed.set(true);
+            self.owner.lost.set(true);
+            self.submissions.shutdown();
+        }
+        dispatch_releases(&self.releases);
         result
     }
     fn as_any(&self) -> &dyn Any { self }
@@ -148,7 +171,12 @@ pub struct ExternalImageDevice(pub(super) Rc<dyn ImageDevice>);
 
 impl ExternalImageDevice {
     pub(super) fn new<A: hal::Api>(owner: &Rc<Device<A>>) -> Self {
-        Self(Rc::new(Producer { owner: owner.clone(), submissions: SubmissionQueue::new(owner, 3, false), failed: Cell::new(false) }))
+        let mut submissions = SubmissionQueue::new(owner, 3, false);
+        if owner.info.backend == wgt::Backend::Vulkan {
+            submissions = submissions.with_wait_timeout(std::time::Duration::from_secs(5));
+        }
+        Self(Rc::new(Producer { owner: owner.clone(), submissions, failed: Cell::new(false),
+            releases: Rc::new(RefCell::new(Vec::new())) }))
     }
     pub fn create_image(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage> {
         self.0.create(descriptor, bytes)
@@ -157,8 +185,19 @@ impl ExternalImageDevice {
         self.0.update(image, descriptor, bytes)
     }
     pub fn poll(&self) -> Result<()> { self.0.poll() }
+    pub fn submitted(&self) -> u64 { self.0.submitted() }
+    pub fn device_id(&self) -> u64 { self.0.device_id() }
+    pub fn poll_complete(&self, serial: u64) -> Result<bool> { self.0.poll_complete(serial) }
+    pub fn finish(&self) -> Result<()> { self.0.finish() }
     pub fn create_target(&self, descriptor: ImageDescriptor) -> Result<NativeImage> { self.0.target(descriptor) }
     pub fn read_image(&self, image: &NativeImage) -> Result<Vec<u8>> { self.0.read(image) }
+}
+
+impl<A: hal::Api> Drop for Producer<A> {
+    fn drop(&mut self) {
+        self.submissions.shutdown();
+        dispatch_releases(&self.releases);
+    }
 }
 
 #[derive(Clone)]

@@ -961,6 +961,7 @@ TEST(DMABufSurface, VulkanAbandonmentPreventsProducerRecycling)
   EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
   EXPECT_FALSE(texture.CloneDmaBufFd());
   EXPECT_FALSE(texture.RetireVulkanPublication());
+  EXPECT_FALSE(texture.CanRetryVulkanRetirement());
   texture.CleanForRecycling();
   EXPECT_FALSE(texture.GetDMABufInfo().is_valid);
   EXPECT_FALSE(producer->CreateAccessLock());
@@ -991,6 +992,7 @@ TEST(DMABufSurface, VulkanRecyclingRetiresOldReaders)
 
   ASSERT_TRUE(reader->TryLockAccess());
   EXPECT_FALSE(texture.RetireVulkanPublication());
+  EXPECT_TRUE(texture.CanRetryVulkanRetirement());
   EXPECT_TRUE(producer->AccessLockUsable());
   reader->UnlockAccess();
   ASSERT_TRUE(texture.RetireVulkanPublication());
@@ -998,6 +1000,7 @@ TEST(DMABufSurface, VulkanRecyclingRetiresOldReaders)
   EXPECT_FALSE(reader->TryLockAccess());
   EXPECT_FALSE(reader->WaitForAccess(1));
   EXPECT_TRUE(texture.GetDMABufInfo().is_valid);
+  EXPECT_TRUE(texture.CanRetryVulkanRetirement());
   EXPECT_TRUE(texture.CloneDmaBufFd());
   texture.CleanForRecycling();
   EXPECT_TRUE(texture.RetireVulkanPublication());

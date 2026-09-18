@@ -6,6 +6,7 @@
 enum Phase {
     Unacquired,
     Acquiring,
+    AcquireSubmitted,
     Acquired,
     Releasing,
     Released,
@@ -34,10 +35,16 @@ impl ForeignRgbLifetime {
     pub(crate) fn acquired(&mut self) -> Result<(), &'static str> {
         self.advance(Phase::Acquiring, Phase::Acquired)
     }
+    pub(crate) fn acquire_submitted(&mut self) -> Result<(), &'static str> {
+        self.advance(Phase::Acquiring, Phase::AcquireSubmitted)
+    }
     pub(crate) fn needs_release(&self) -> bool {
-        self.phase == Phase::Acquired
+        matches!(self.phase, Phase::Acquired | Phase::AcquireSubmitted)
     }
     pub(crate) fn begin_release(&mut self) -> Result<(), &'static str> {
+        if self.phase == Phase::AcquireSubmitted {
+            return self.advance(Phase::AcquireSubmitted, Phase::Releasing);
+        }
         self.advance(Phase::Acquired, Phase::Releasing)
     }
     pub(crate) fn released(&mut self) -> Result<(), &'static str> {
@@ -51,6 +58,19 @@ impl ForeignRgbLifetime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queued_acquire_requires_completed_return_before_reuse() {
+        let mut state = ForeignRgbLifetime::new();
+        state.begin_acquire().unwrap();
+        state.acquire_submitted().unwrap();
+        assert!(state.needs_release());
+        assert!(!state.producer_reusable());
+        assert!(state.acquired().is_err());
+        state.begin_release().unwrap();
+        assert!(!state.producer_reusable());
+        state.released().unwrap();
+        assert!(state.producer_reusable());
+    }
     #[test]
     fn rejection_before_acquire_does_not_lock_producer() {
         let state = ForeignRgbLifetime::new();

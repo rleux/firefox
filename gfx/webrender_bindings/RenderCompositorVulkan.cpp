@@ -229,6 +229,11 @@ bool RenderCompositorVulkan::GetHalSurface(WrHalSurface* aSurface) const {
   return true;
 }
 
+void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer) {
+  mCompletionTimer.Stop();
+  mRenderer = aRenderer;
+}
+
 bool RenderCompositorVulkan::BeginFrame() {
   if (!mRenderer || mPaused || mFailed) {
     return false;
@@ -256,15 +261,29 @@ RenderedFrameId RenderCompositorVulkan::UpdateFrameId() {
   if (mRenderer && !mFailed && !wr_renderer_vulkan_end(mRenderer, id.mId)) {
     mFailed = true;
   }
+  mSubmittedFrame = id.mId;
+  PollCompletions(false);
+  if (mRenderer && !mFailed && mCompletedFrame < mSubmittedFrame &&
+      !mCompletionTimer.IsRunning()) {
+    mCompletionTimer.Start(base::TimeDelta::FromMilliseconds(2), this,
+                           &RenderCompositorVulkan::PollPendingFrames);
+  }
   return id;
 }
 
-bool RenderCompositorVulkan::WaitForGPU() {
+bool RenderCompositorVulkan::PollCompletions(bool aNotify) {
   if (mRenderer && !mFailed) {
-    mFailed = !wr_renderer_vulkan_poll(mRenderer, &mCompletedFrame);
+    mFailed = !wr_renderer_vulkan_poll(mRenderer, &mCompletedFrame, aNotify);
+  }
+  if (mFailed || mCompletedFrame >= mSubmittedFrame) {
+    mCompletionTimer.Stop();
   }
   return !mFailed;
 }
+
+void RenderCompositorVulkan::PollPendingFrames() { PollCompletions(true); }
+
+bool RenderCompositorVulkan::WaitForGPU() { return PollCompletions(false); }
 
 RenderedFrameId RenderCompositorVulkan::GetLastCompletedFrameId() {
   WaitForGPU();

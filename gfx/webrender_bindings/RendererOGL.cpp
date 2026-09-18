@@ -215,6 +215,7 @@ RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
 
 RendererOGL::~RendererOGL() {
   MOZ_COUNT_DTOR(RendererOGL);
+  mCompositor->SetRenderer(nullptr);
 #ifdef MOZ_WIDGET_ANDROID
   if (mPendingScreenPixelsRequest) {
     mPendingScreenPixelsRequest->mPromise->Reject(NS_ERROR_ABORT, __func__);

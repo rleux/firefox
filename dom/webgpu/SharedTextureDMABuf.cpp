@@ -88,6 +88,10 @@ SharedTextureDMABuf::SharedTextureDMABuf(
 
 SharedTextureDMABuf::~SharedTextureDMABuf() = default;
 
+bool SharedTextureDMABuf::CanRetryVulkanRetirement() const {
+  return mDMABufInfo.for_webrender && mSurface->AccessLockUsable();
+}
+
 bool SharedTextureDMABuf::RetireVulkanPublication() {
   if (!mDMABufInfo.for_webrender) {
     return true;
