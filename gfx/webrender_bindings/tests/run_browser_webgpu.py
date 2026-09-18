@@ -19,6 +19,8 @@ def main():
     )
     parser.add_argument("--transport", choices=["copy", "direct"], default="copy")
     parser.add_argument("--backend", choices=["vulkan", "gl"], default="vulkan")
+    parser.add_argument("--display", choices=["xvfb", "native"], default="xvfb")
+    parser.add_argument("--viewport", nargs=2, type=int, metavar=("WIDTH", "HEIGHT"))
     parser.add_argument("--gpu-process", choices=["true", "false"], default="true")
     parser.add_argument("--icd", type=Path)
     parser.add_argument("--validation-layers", type=Path)
@@ -40,6 +42,13 @@ def main():
     )
     parser.add_argument("--record-baseline-defects", action="store_true")
     args = parser.parse_args()
+    if args.viewport and min(args.viewport) <= 0:
+        parser.error("Viewport dimensions must be positive")
+    if args.display == "native":
+        if not os.environ.get("DISPLAY"):
+            parser.error("Native presentation requires an existing X11 DISPLAY")
+        if args.software_presentation:
+            parser.error("Native presentation cannot use software presentation")
     if args.benchmark_frames < 0 or (args.benchmark_only and not args.benchmark_frames):
         parser.error("Benchmark-only requires a positive frame count")
     if args.backend == "gl" and (
@@ -49,7 +58,7 @@ def main():
     ):
         parser.error("The GL control supports strict basic correctness checks only")
     benchmark_timeout = args.benchmark_frames // 20 + 30
-    if os.environ.get("WR_WEBGPU_XVFB") != "1":
+    if args.display == "xvfb" and os.environ.get("WR_WEBGPU_XVFB") != "1":
         env = os.environ.copy()
         env["WR_WEBGPU_XVFB"] = "1"
         return subprocess.call(
@@ -76,12 +85,15 @@ def main():
         "VK_LAYER_PATH",
         "VK_INSTANCE_LAYERS",
         "VK_LAYER_VALIDATE_SYNC",
+        "MESA_VK_WSI_DEBUG",
     ]:
         env.pop(name, None)
     env.update(
         WR_WEBGPU_OUTPUT=str(output),
         WR_WEBGPU_TRANSPORT=args.transport,
         WR_WEBGPU_BACKEND=args.backend,
+        WR_WEBGPU_DISPLAY_MODE=args.display,
+        WR_WEBGPU_VIEWPORT=("x".join(map(str, args.viewport)) if args.viewport else ""),
         WR_WEBGPU_PROCESS="GPU" if args.gpu_process == "true" else "Parent",
         WR_WEBGPU_BENCHMARK_FRAMES=str(args.benchmark_frames),
         WR_WEBGPU_BENCHMARK_TIMEOUT=str(benchmark_timeout),
@@ -98,6 +110,7 @@ def main():
         ),
         WR_WEBGPU_BASELINE_DEFECTS="1" if args.record_baseline_defects else "0",
         GDK_BACKEND="x11",
+        MOZ_NO_REMOTE="1",
         WGPU_VALIDATION="1" if args.validation_layers else "0",
         WGPU_DEBUG="1" if args.validation_layers else "0",
         MOZ_LOG=(
@@ -129,6 +142,7 @@ def main():
         "gfx.webrender.software": "false",
         "gfx.color_management.mode": "0",
         "layout.css.devPixelsPerPx": "1.0",
+        "browser.display.os-zoom-behavior": "0",
         "layers.gpu-process.enabled": args.gpu_process,
         "dom.webgpu.enabled": "true",
         "dom.webgpu.force-enabled": "true",
@@ -158,11 +172,15 @@ def main():
     with (output / "test.log").open("w") as log, (output / "window-manager.log").open(
         "w"
     ) as wm_log:
-        wm = subprocess.Popen(
-            ["openbox", "--sm-disable"],
-            env=env,
-            stdout=wm_log,
-            stderr=subprocess.STDOUT,
+        wm = (
+            subprocess.Popen(
+                ["openbox", "--sm-disable"],
+                env=env,
+                stdout=wm_log,
+                stderr=subprocess.STDOUT,
+            )
+            if args.display == "xvfb"
+            else None
         )
         try:
             process = subprocess.Popen(
@@ -180,12 +198,13 @@ def main():
                 process.wait()
                 status = 124
         finally:
-            wm.terminate()
-            try:
-                wm.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                wm.kill()
-                wm.wait()
+            if wm:
+                wm.terminate()
+                try:
+                    wm.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    wm.kill()
+                    wm.wait()
     print(f"Exit: {status}", flush=True)
     return status
 
