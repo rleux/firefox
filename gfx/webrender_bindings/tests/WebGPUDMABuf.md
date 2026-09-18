@@ -83,3 +83,24 @@ generation after the remote texture map returns a resource. Direct sampling
 must retain the publication through all GPU reads, serialize snapshots and
 producer reuse, reject stale generations and quarantine uncertain completion.
 Capability checks and bounded retention are required before browser enablement.
+
+## Standalone direct importer
+
+`ExternalImageDevice::import_vulkan_dmabuf` imports the initialized allocation
+as a sampled image, acquires EXTERNAL ownership, and returns shared leases.
+It validates device/driver identity, the exact sampled/filterable modifier,
+format limits, DMA-BUF bounds and Vulkan memory requirements before binding.
+It returns ownership only after all leases and GPU uses finish. Import
+rejection reports unused; uncertain submission or ownership return reports
+abandoned and prevents further device use. Idle polling also reports a device
+that failed while returning ownership.
+
+Run the library binary with `vulkan_dmabuf_ --ignored --nocapture` in both
+`WR_HAL_SHADER_INPUT=native` and `naga` modes. Tests verify distinct producer
+and consumer devices, direct texture identity, RGBA/BGRA pixels for the
+supported linear/tiled modifiers, retained duplicate reads, one terminal
+release, rejected identities and injected import/submission/return failures.
+The existing offscreen `gfx/wr/wrench/script/test_foreign_webgl.py` fixture
+checks that GL producers still use FOREIGN ownership with the shared lifetime
+implementation. The browser still uses the copy importer until its recycling
+and reader coordination are integrated.

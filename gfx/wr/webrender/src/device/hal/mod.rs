@@ -43,6 +43,8 @@ pub use self::vulkan::{create_vulkan_device, VulkanDeviceContext, VulkanImageDes
 pub use self::vulkan::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities, ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 pub use self::vulkan::{Nv12DmaBufCapabilities, Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
+#[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
+pub use self::vulkan::{VulkanDmaBufImage, WeakVulkanDmaBufImage};
 #[cfg(any(all(target_os = "linux", feature = "hal-linux-dmabuf"), all(target_os = "android", feature = "hal-android-ahb")))]
 pub use self::vulkan::SyncFile;
 #[cfg(wr_hal_vulkan)]
