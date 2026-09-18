@@ -120,9 +120,15 @@ class TestWebGPUDMABuf(MarionetteTestCase):
         )
 
     def measure(self, frames):
+        mode = os.environ.get("WR_WEBGPU_PROCESS_METRICS", "full")
+        if mode == "off":
+            self.report["benchmark"] = self.call("benchmark", frames)
+            self.report["processMetrics"] = []
+            self.assertEqual(len(self.report["benchmark"]["samples"]), frames)
+            return
         with self.marionette.using_context("chrome"):
             pid = self.marionette.execute_script("return Services.appinfo.processID;")
-        with ProcessMetrics(pid) as metrics:
+        with ProcessMetrics(pid, include_memory=mode == "full") as metrics:
             self.report["benchmark"] = self.call("benchmark", frames)
         self.report["processMetrics"] = metrics.samples
         self.assertEqual(len(self.report["benchmark"]["samples"]), frames)
@@ -308,13 +314,22 @@ class TestWebGPUDMABuf(MarionetteTestCase):
                 self.pixels("benchmark-final"),
                 [[red * 255, 0, (1 - red) * 255, 255]] * 2,
             )
-            published, consumed = self.transport_generations()
-            self.assertTrue(published and consumed)
-            self.assertEqual(published[-1], consumed[-1])
-            self.report["presentationCounts"] = {
-                "published": len(set(published)),
-                "consumed": len(set(consumed)),
-            }
+            if os.environ.get("WR_WEBGPU_BENCHMARK_QUIET") == "1":
+                selected = re.findall(
+                    r"WebRender Vulkan DMA-BUF selected transport: (direct|copy)",
+                    self.log(),
+                )
+                self.assertEqual(set(selected), {os.environ["WR_WEBGPU_TRANSPORT"]})
+                self.report["selectedTransports"] = selected
+                self.assertNotIn("HAL rendered WR frame:", self.log())
+            else:
+                published, consumed = self.transport_generations()
+                self.assertTrue(published and consumed)
+                self.assertEqual(published[-1], consumed[-1])
+                self.report["presentationCounts"] = {
+                    "published": len(set(published)),
+                    "consumed": len(set(consumed)),
+                }
             self.check_errors()
             return
         direct = os.environ["WR_WEBGPU_TRANSPORT"] == "direct"

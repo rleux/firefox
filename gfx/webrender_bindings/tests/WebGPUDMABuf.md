@@ -84,9 +84,17 @@ process loss. Use GPU-process rendering for `crash`. Recovery checks flush
 the replacement compositor before testing resumed native presentation; they
 do not establish unassisted repaint timing.
 
-For timing comparisons omit validation layers and add
-`--benchmark-only --benchmark-frames 120` to both builds. This uses identical
-warmup without alpha-validation scenarios. The fixture continuously presents
+For timing comparisons use the same binary for both paths. `--transport copy`
+sets `WR_WEBGPU_FORCE_DMABUF_COPY=1` to select the existing copy fallback even
+when sampling is supported; `--transport direct` clears that override. Both
+retain the same producer publication and recycling protocol.
+
+Omit validation layers and use
+`--benchmark-only --benchmark-frames 6000 --process-metrics light` for each
+path, repeating pairs in both orders. This uses identical warmup without
+alpha-validation scenarios. Timing mode suppresses per-frame transport,
+renderer and allocation-note logging, and verifies a one-time transport marker.
+The fixture continuously presents
 a 1920x1080 premultiplied canvas containing opaque pixels. Frame samples
 exclude 15 warmup frames; process counters include that warmup interval.
 It records animation-frame intervals, CPU submission duration and a GPU
@@ -95,8 +103,10 @@ timestamp buffer, avoiding a per-frame readback bottleneck. Producer GPU time
 does not include WebRender's import or composition work. The isolated profile
 disables reduced timer precision for this measurement.
 
-Process samples record CPU counters, summed RSS, PSS, private resident memory
-and per-client DRM counters. PSS/private samples include only processes whose
+`--process-metrics light` records CPU counters, summed RSS and per-client DRM
+counters. `full` (the default) also records PSS and private resident memory;
+`off` disables process sampling. Run full memory sampling separately from
+primary timing. PSS/private samples include only processes whose
 `smaps_rollup` is readable; `memorySampledProcesses` records that coverage.
 DRM clients are deduplicated by device/client identity as required by the
 [kernel DRM usage statistics documentation](https://docs.kernel.org/gpu/drm-usage-stats.html).
@@ -105,13 +115,34 @@ allocations in both clients. Neither is a physical-memory total. Counter
 availability depends on the driver; preserve the reported units when comparing
 runs. Keep correctness/validation runs separate from timing runs.
 
-Local Intel Iris Xe/Mesa 26.2.2 measurements under Xvfb showed similar median
-cadence in three short trials. One longer 6,000-frame pair had worse direct-import
-tail cadence (51.36 ms p95 versus 17.32 ms) and about 54 MiB higher peak process
-PSS. Peak summed client GPU residency was the same and declined late in both
-runs. Process PSS/private memory still grew at similar late rates, so these
-runs do not establish a total-memory plateau. Removing the materialization
-copy does not by itself establish a performance or memory improvement.
+Use `--sync-instrumentation --process-metrics off` for separate diagnostics.
+`WR_WEBGPU_SYNC_INSTRUMENTATION` enables cumulative CPU wall-time histograms
+for import, acquire, frame-completion and ownership-return operations, plus
+per-publication allocation/reuse counters. Use the last histogram per
+process/thread/event; periodic snapshots are cumulative and process termination
+can omit the final partial batch. Spans can nest, so their totals must not be
+added as independent costs. Quiet timing uses `WR_WEBGPU_BENCHMARK_QUIET`.
+
+On Intel Iris Xe/Mesa 26.2.2 under Xvfb, four balanced same-binary pairs of
+6,000 frames had p95 intervals of 17.22–17.28 ms across both paths. The median
+paired direct-minus-copy elapsed difference was -0.076 s over about 102 s.
+Direct used 11.8–18.0% fewer tracked render-engine cycles, while process CPU
+differences varied in sign. Two separate balanced 1,200-frame memory pairs had
+peak PSS differences of +0.51 and -0.79 MiB for direct versus copy.
+
+Earlier observations of 51.36 ms direct p95 and about 54 MiB extra PSS used
+different binaries and heavier instrumentation, with unrecorded host load.
+Those penalties did not reproduce in the controlled comparison; their cause
+is unresolved. Host CPU, frequencies and temperatures were monitored, but a
+whole-GPU busy sensor was unavailable. These refresh-capped Xvfb results do
+not establish uncapped throughput, native presentation latency or a long-term
+memory plateau.
+
+Diagnostics observed four allocations and 611 reuses per 615 publications for
+both paths, without retirement rejection. Direct acquisition averaged about
+2.48 ms and its separate frame-completion point about 1.75 ms, including about
+1.65 ms returning ownership. Recycling works, but these synchronous waits
+still prevent a fully asynchronous frame pipeline.
 
 Direct sampling retains the publication through all GPU reads, serializes
 snapshots and producer reuse, rejects stale generations and quarantines

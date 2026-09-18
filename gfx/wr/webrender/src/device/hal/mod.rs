@@ -14,6 +14,7 @@ mod fault;
 #[cfg(any(test, feature = "hal-testing"))]
 pub use self::fault::FailurePoint;
 mod external;
+pub mod diagnostics;
 mod compositor;
 pub use self::compositor::{CompositorConfig, CompositorTarget, LayerCompositor, NativeCompositor};
 pub use crate::composite::{CompositeDescriptor, CompositorInputLayer, NativeSurfaceOperation, NativeSurfaceOperationDetails};

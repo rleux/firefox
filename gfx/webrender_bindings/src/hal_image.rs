@@ -223,12 +223,16 @@ mod linux {
         }));
         if !live() { return device.poll(); }
         let start = std::time::Instant::now();
-        while !poll()? {
-            if start.elapsed() >= std::time::Duration::from_secs(5) {
-                return Err("Timed out completing Vulkan DMA-BUF reads".into());
+        {
+            let _span = hal::diagnostics::Span::new("frameCompletion");
+            while !poll()? {
+                if start.elapsed() >= std::time::Duration::from_secs(5) {
+                    return Err("Timed out completing Vulkan DMA-BUF reads".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        let _span = hal::diagnostics::Span::new("devicePoll");
         device.poll()?;
         if live() { return Err("Vulkan DMA-BUF publication outlived its frame".into()); }
         Ok(())
@@ -429,13 +433,19 @@ mod linux {
         }
 
         fn dmabuf(&self, data: WrHalDmaBuf, generation: u64, mut lease: Lease) -> Result<ExternalImageLease, String> {
+            let _span = hal::diagnostics::Span::new("dmabufTotal");
             if data.fd < 0 || data.ready_fd < -1 || data.access_lock_fd < 0 || generation == 0 {
                 return Err("Invalid Vulkan DMA-BUF handles or generation".into());
             }
             // The C++ lease owns the borrowed descriptors until release.
             let (plane, ready) = dmabuf_plane(&data)?;
             let layout = plane.layout();
-            if self.device.supports_dmabuf_sampling(layout) {
+            let sampled = !hal::diagnostics::force_dmabuf_copy() && {
+                let _span = hal::diagnostics::Span::new("samplingQuery");
+                self.device.supports_dmabuf_sampling(layout)
+            };
+            if sampled {
+                let _span = hal::diagnostics::Span::new("directImport");
                 let metadata = |fd: i32| -> Result<_, String> {
                     let file = File::from(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().map_err(|error| error.to_string())?);
                     let stat = file.metadata().map_err(|error| error.to_string())?;
@@ -453,6 +463,7 @@ mod linux {
                                 || entry.layout != layout || !image.belongs_to(&self.device) {
                                 return Err("Vulkan DMA-BUF has a different live publication or device".into());
                             }
+                            hal::diagnostics::transport(true);
                             return image.lease(uv);
                         }
                     }
@@ -468,6 +479,7 @@ mod linux {
                         drop(lease);
                     }) }?;
                     images.insert(key, VulkanEntry { generation, access_lock, layout, image: image.downgrade() });
+                    hal::diagnostics::transport(true);
                     log::info!("WebRender Vulkan DMA-BUF directly sampled: generation={generation}, format={:?}, modifier={:#x}", data.format, data.modifier);
                     image.lease(uv)
                 });
@@ -478,9 +490,16 @@ mod linux {
             lease.status = WrHalImageRelease::Abandoned;
             // VulkanDmaBuf denotes an immutable single-plane image released in GENERAL
             // layout to QUEUE_FAMILY_EXTERNAL, on the identified device and driver.
-            let copied = unsafe { self.device.copy_dmabuf_planes(&[plane], &ready) }?;
+            let copied = {
+                let _span = hal::diagnostics::Span::new("copySubmit");
+                unsafe { self.device.copy_dmabuf_planes(&[plane], &ready) }?
+            };
             let (mut images, release) = copied.into_parts();
-            self.device.wait_dmabuf_release(&release)?;
+            {
+                let _span = hal::diagnostics::Span::new("copyReleaseWait");
+                self.device.wait_dmabuf_release(&release)?;
+            }
+            hal::diagnostics::transport(false);
             log::info!(
                 "WebRender Vulkan DMA-BUF materialized: generation={generation}, format={:?}, modifier={:#x}, stride={}, offset={}",
                 data.format, data.modifier, data.stride, data.offset,

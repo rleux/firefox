@@ -727,7 +727,9 @@ impl<A: BackendApi> RendererCore<A> {
 
     pub fn render(&mut self) -> Result<super::RenderResults, String> {
         let output = self.execute_frame()?;
-        println!("HAL rendered WR frame: {:?}", output.stats);
+        if !crate::device::hal::diagnostics::quiet() {
+            println!("HAL rendered WR frame: {:?}", output.stats);
+        }
         let document = self.document.as_mut().unwrap();
         let mut results = super::RenderResults::default();
         results.stats.total_draw_calls = output.stats.wr_draw_calls;
