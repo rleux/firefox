@@ -130,9 +130,13 @@ bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
   }
   if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
 #ifdef XP_LINUX
-    if (!RenderCompositorVulkan::SupportsVideo() ||
-        !yuv->SupportsVAAPIImage(
-            gfx::gfxVars::WebRenderVulkanVideoCapabilities())) {
+    if (gfx::gfxVars::UseWebRenderVulkanVideo()) {
+      if (!RenderCompositorVulkan::SupportsVideo() ||
+          !yuv->SupportsVAAPIImage(
+              gfx::gfxVars::WebRenderVulkanVideoCapabilities())) {
+        return false;
+      }
+    } else if (!RenderCompositorVulkan::SupportsRetainedVideo(*yuv)) {
       return false;
     }
 #endif

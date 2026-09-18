@@ -7,6 +7,8 @@
 
 #include "RenderCompositor.h"
 
+class DMABufSurfaceYUV;
+
 namespace mozilla::gfx {
 class VulkanVideoCapabilities;
 }
@@ -19,6 +21,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
   static bool SupportsWebGL();
   static gfx::VulkanVideoCapabilities ProbeVideoCapabilities();
   static bool SupportsVideo();
+  static bool SupportsRetainedVideo(const DMABufSurfaceYUV& aSurface);
   static void DisableVideo();
   static UniquePtr<RenderCompositor> Create(
       const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError);

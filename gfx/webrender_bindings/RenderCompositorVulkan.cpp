@@ -14,6 +14,7 @@
 #include "mozilla/StaticMutex.h"
 #include "mozilla/StaticPtr.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/widget/DMABufSurface.h"
 #include "mozilla/widget/GtkCompositorWidget.h"
 #include "prenv.h"
 #ifdef MOZ_X11
@@ -159,6 +160,31 @@ bool RenderCompositorVulkan::SupportsVideo() {
       }
       if (!supported) return false;
     }
+  }
+  return true;
+}
+
+bool RenderCompositorVulkan::SupportsRetainedVideo(
+    const DMABufSurfaceYUV& aSurface) {
+  if (!IsRequested()) return false;
+  StaticMutexAutoLock lock(sDmaBufDevicesMutex);
+  if (!sDmaBufDevices || sDmaBufDevices->IsEmpty()) return false;
+  for (const auto* device : *sDmaBufDevices) {
+    const auto& video = device->mVideo;
+    if (!video.format_count || video.format_count > std::size(video.formats))
+      return false;
+    gfx::VulkanVideoCapabilities capabilities;
+    capabilities.drmMajor() = video.drm_node[0];
+    capabilities.drmMinor() = video.drm_node[1];
+    capabilities.deviceUUID().AppendElements(video.device_uuid, 16);
+    capabilities.driverUUID().AppendElements(video.driver_uuid, 16);
+    for (size_t i = 0; i < video.format_count; ++i) {
+      const auto& format = video.formats[i];
+      capabilities.formats().AppendElement(gfx::VulkanVideoFormat(
+          format.modifier, format.max_width, format.max_height,
+          format.max_allocation_size));
+    }
+    if (!aSurface.SupportsVAAPIImage(capabilities)) return false;
   }
   return true;
 }
