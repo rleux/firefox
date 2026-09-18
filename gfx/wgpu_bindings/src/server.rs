@@ -1220,6 +1220,7 @@ unsafe fn dedicated_image_memory_requirements(
     device: &ash::Device,
     image: vk::Image,
 ) -> vk::MemoryRequirements {
+    static QUIET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let loader = khr::get_memory_requirements2::Device::new(instance, device);
 
     let mut dedicated_requirements = vk::MemoryDedicatedRequirements::default();
@@ -1233,6 +1234,9 @@ unsafe fn dedicated_image_memory_requirements(
 
     if dedicated_requirements.requires_dedicated_allocation == vk::FALSE
         && dedicated_requirements.prefers_dedicated_allocation == vk::FALSE
+        && !*QUIET.get_or_init(|| {
+            std::env::var("WR_WEBGPU_BENCHMARK_QUIET").as_deref() == Ok("1")
+        })
     {
         let msg = c"dmabuf image neither requires nor prefers a dedicated allocation";
         gfx_critical_note(msg.as_ptr());

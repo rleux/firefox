@@ -1493,7 +1493,9 @@ impl<A: BackendApi> FrameRenderer<A> {
             })
         }
         .map_err(|e| format!("Creating pipeline {key:?}: {e:?}"))?;
-        println!("HAL pipeline {:?} shader={:016x}", key, artifact.digest);
+        if !super::diagnostics::quiet() {
+            println!("HAL pipeline {:?} shader={:016x}", key, artifact.digest);
+        }
         self.pipelines.insert(
             key,
             Rc::new(Pipeline {

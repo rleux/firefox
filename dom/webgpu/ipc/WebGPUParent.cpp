@@ -4,6 +4,8 @@
 
 #include "WebGPUParent.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <unordered_set>
 
 #include "ExternalTexture.h"
@@ -407,6 +409,14 @@ class PresentationData {
   uint64_t mSubmissionIndex = 0;
 
   std::deque<std::shared_ptr<SharedTexture>> mRecycledSharedTextures;
+  const bool mMeasurePool = [] {
+    const char* flag = std::getenv("WR_WEBGPU_SYNC_INSTRUMENTATION");
+    return flag && flag[0] == '1' && flag[1] == '\0';
+  }();
+  uint64_t mPoolAllocations = 0;
+  uint64_t mPoolReuses = 0;
+  uint64_t mPoolRetireRejected = 0;
+  uint64_t mPoolNoRecycled = 0;
 
   std::unordered_set<layers::RemoteTextureId, layers::RemoteTextureId::HashFn>
       mWaitingReadbackTexturesForPresent;
@@ -438,8 +448,23 @@ class PresentationData {
     }
   }
 
+  void ReportPoolMetrics() {
+    if (mMeasurePool) {
+      std::fprintf(stderr,
+                   "WebGPU DMA-BUF pool metrics: {\"id\":\"%p\","
+                   "\"allocations\":%" PRIu64 ",\"reuses\":%" PRIu64
+                   ",\"retireRejected\":%" PRIu64 ",\"noRecycled\":%" PRIu64
+                   "}\n",
+                   static_cast<void*>(this), mPoolAllocations, mPoolReuses,
+                   mPoolRetireRejected, mPoolNoRecycled);
+    }
+  }
+
  private:
-  ~PresentationData() { MOZ_COUNT_DTOR(PresentationData); }
+  ~PresentationData() {
+    ReportPoolMetrics();
+    MOZ_COUNT_DTOR(PresentationData);
+  }
 };
 
 WebGPUParent::WebGPUParent(const dom::ContentParentId& aContentId)
@@ -1164,13 +1189,20 @@ void WebGPUParent::PostSharedTexture(
 #if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
     if (auto* dmabuf = recycledTexture->AsSharedTextureDMABuf()) {
       if (!dmabuf->RetireVulkanPublication()) {
+        if (data->mMeasurePool) {
+          ++data->mPoolRetireRejected;
+        }
+        data->ReportPoolMetrics();
         return;
       }
     }
 #endif
     recycledTexture->CleanForRecycling();
     data->mRecycledSharedTextures.push_back(recycledTexture);
+  } else if (data->mMeasurePool) {
+    ++data->mPoolNoRecycled;
   }
+  data->ReportPoolMetrics();
 }
 
 RefPtr<gfx::FileHandleWrapper> WebGPUParent::GetDeviceFenceHandle(
@@ -1497,6 +1529,9 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
       texture->SetOwnerId(ownerId);
       data->mRecycledSharedTextures.pop_front();
       mSharedTextures.emplace(aTextureId, texture);
+      if (data->mMeasurePool) {
+        ++data->mPoolReuses;
+      }
       return true;
     }
     data->mRecycledSharedTextures.clear();
@@ -1504,6 +1539,9 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
 
   auto sharedTexture = CreateSharedTexture(ownerId, aDeviceId, aTextureId,
                                            aWidth, aHeight, aFormat, aUsage);
+  if (sharedTexture && data->mMeasurePool) {
+    ++data->mPoolAllocations;
+  }
   return static_cast<bool>(sharedTexture);
 }
 

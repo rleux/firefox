@@ -28,6 +28,12 @@ def main():
     parser.add_argument("--benchmark-frames", type=int, default=0)
     parser.add_argument("--benchmark-only", action="store_true")
     parser.add_argument(
+        "--process-metrics",
+        choices=["full", "light", "off"],
+        default="full",
+    )
+    parser.add_argument("--sync-instrumentation", action="store_true")
+    parser.add_argument(
         "--scenario",
         choices=["basic", "lifecycle", "windows", "reset", "crash", "offscreen"],
         default="basic",
@@ -80,6 +86,12 @@ def main():
         WR_WEBGPU_BENCHMARK_FRAMES=str(args.benchmark_frames),
         WR_WEBGPU_BENCHMARK_TIMEOUT=str(benchmark_timeout),
         WR_WEBGPU_BENCHMARK_ONLY="1" if args.benchmark_only else "0",
+        WR_WEBGPU_PROCESS_METRICS=args.process_metrics,
+        WR_WEBGPU_FORCE_DMABUF_COPY="1" if args.transport == "copy" else "0",
+        WR_WEBGPU_SYNC_INSTRUMENTATION="1" if args.sync_instrumentation else "0",
+        WR_WEBGPU_BENCHMARK_QUIET=(
+            "1" if args.benchmark_only and not args.sync_instrumentation else "0"
+        ),
         WR_WEBGPU_SCENARIO=args.scenario,
         WR_WEBGPU_LOADER_DIRECTORY=(
             str(args.loader_directory.resolve()) if args.loader_directory else ""
@@ -88,7 +100,11 @@ def main():
         GDK_BACKEND="x11",
         WGPU_VALIDATION="1" if args.validation_layers else "0",
         WGPU_DEBUG="1" if args.validation_layers else "0",
-        MOZ_LOG="wgpu_bindings::server:3,webrender_bindings::hal_image::linux:3,WebGPU:3",
+        MOZ_LOG=(
+            "wgpu_bindings::server:2,webrender_bindings::hal_image::linux:2,WebGPU:2,WebGPUDMABufMetrics:3"
+            if args.benchmark_only and not args.sync_instrumentation
+            else "wgpu_bindings::server:3,webrender_bindings::hal_image::linux:3,WebGPU:3"
+        ),
     )
     if args.icd:
         env["VK_DRIVER_FILES"] = str(args.icd.resolve())

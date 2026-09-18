@@ -138,6 +138,7 @@ impl ForeignAccess {
     }
 
     unsafe fn acquire(&mut self, ready: &SyncFile) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("acquire");
         let producer = self.device.dmabuf_producer()?;
         let sync = TransferSync::new(&self.owner, Some(ready))?;
         {
@@ -175,6 +176,7 @@ impl ForeignAccess {
     }
 
     fn release(&mut self) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("ownershipRelease");
         let producer = self.device.dmabuf_producer()?;
         if self.texture.current_usage() != wgt::TextureUses::RESOURCE {
             return Err("Foreign RGB image was not restored after its last use".into());
