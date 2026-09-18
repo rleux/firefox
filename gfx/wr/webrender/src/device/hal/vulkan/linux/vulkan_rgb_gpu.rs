@@ -43,7 +43,7 @@ fn exported(producer: &ExternalImageDevice, format: ImageFormat, modifier: u64) 
     let mut bytes = Vec::new();
     for y in 0..9 {
         for x in 0..17 {
-            let mut pixel = [x * 11, y * 23, 71, 255];
+            let mut pixel = [x * 11, y * 23, 71, 128];
             if format == ImageFormat::BGRA8 {
                 pixel.swap(0, 2);
             }
@@ -77,6 +77,8 @@ fn vulkan_dmabuf_direct_sampling_and_lifetime() {
             let consumer = renderer.external_image_device();
             let export = exported(&producer, *format, modifier);
             let layout = export.plane().layout();
+            let inspection =
+                DmaBufPlane::new(export.plane().as_fd().try_clone_to_owned().unwrap(), layout);
             if !consumer.supports_dmabuf_sampling(layout) {
                 continue;
             }
@@ -190,6 +192,13 @@ fn vulkan_dmabuf_direct_sampling_and_lifetime() {
             drop(retained);
             assert_eq!(*releases.borrow(), [ExternalImageRelease::Complete]);
             assert!(weak.upgrade().is_none());
+            let copied = unsafe {
+                producer.copy_dmabuf_planes(&[inspection], &SyncFile::already_signaled())
+            }
+            .unwrap();
+            producer.wait_dmabuf_release(copied.release()).unwrap();
+            let unchanged = producer.read_image(&copied.images()[0]).unwrap();
+            assert!(unchanged.chunks_exact(4).all(|pixel| pixel[3] == 128));
             api.shut_down(true);
             tested += 1;
         }

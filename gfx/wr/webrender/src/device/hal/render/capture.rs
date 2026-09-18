@@ -210,7 +210,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                     ExternalImageSource::Buffer(data) => { lease.complete_cpu_copy(); data.as_ref().clone() }
                     ExternalImageSource::Native(image) => {
                         external.descriptor = image.descriptor();
-                        let texture = image.texture(&self.owner)?.with_lease(lease.state.clone(), TextureFilter::Linear)?;
+                        let texture = image.texture(&self.owner)?.with_lease(lease.state.clone(), TextureFilter::Linear, false)?;
                         self.capture_texture(&texture)?
                     }
                 };

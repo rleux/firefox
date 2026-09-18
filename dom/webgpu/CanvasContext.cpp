@@ -336,7 +336,8 @@ bool CanvasContext::InitializeCanvasRenderer(
   layers::CanvasRendererData data;
   data.mContext = this;
   data.mSize = mCanvasSize;
-  data.mIsOpaque = false;
+  data.mIsOpaque = gfx::gfxVars::UseWebRenderVulkan() &&
+                   !gfx::gfxVars::UseSoftwareWebRender() && GetIsOpaque();
   data.mRemoteTextureOwnerId = mRemoteTextureOwnerId;
 
   aRenderer->Initialize(data);
@@ -513,7 +514,8 @@ void CanvasContext::ForceNewFrame() {
   } else if (mOffscreenCanvas) {
     dom::OffscreenCanvasDisplayData data;
     data.mSize = mCanvasSize;
-    data.mIsOpaque = false;
+    data.mIsOpaque = gfx::gfxVars::UseWebRenderVulkan() &&
+                     !gfx::gfxVars::UseSoftwareWebRender() && GetIsOpaque();
     mOffscreenCanvas->UpdateDisplayData(data);
   }
 }

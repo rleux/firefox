@@ -501,11 +501,17 @@ impl<A: hal::Api> Texture<A> {
         self.states[self.base_mip as usize].usage.get()
     }
 
-    pub fn with_lease(&self, lease: Rc<super::external::LeaseState>, filter: crate::device::TextureFilter) -> Result<Rc<Self>> {
+    pub fn with_lease(&self, lease: Rc<super::external::LeaseState>, filter: crate::device::TextureFilter, opaque: bool) -> Result<Rc<Self>> {
         let owner = &self.raw.owner;
         let view = |usage, levels| {
+            let mut swizzle = wgt::TextureComponentSwizzle::default();
+            if opaque && usage == wgt::TextureUses::RESOURCE
+                && owner.info.backend == wgt::Backend::Vulkan
+                && matches!(self.format, wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm) {
+                swizzle.a = wgt::ComponentSwizzle::One;
+            }
             let raw = unsafe { owner.open.device.create_texture_view(&self.raw, &hal::TextureViewDescriptor {
-                swizzle: Default::default(),
+                swizzle,
                 label: Some("WR acquired image view"), format: self.format, dimension: wgt::TextureViewDimension::D2, usage,
                 range: wgt::ImageSubresourceRange { aspect: self.aspect, base_mip_level: self.base_mip, mip_level_count: Some(levels), array_layer_count: Some(1), ..Default::default() },
             }) }.map_err(|error| format!("Creating acquired image view: {error:?}"))?;

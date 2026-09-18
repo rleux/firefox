@@ -4,8 +4,8 @@ WebGPU and WebRender use separate Vulkan logical devices. WebGPU's
 `wgpu_vkimage_prepare_webrender_present` copies the API texture into a dedicated
 export image through wgpu-core, establishing initialized contents. It releases
 that image in GENERAL layout to EXTERNAL ownership and exports a sync-file.
-The baseline WebRender importer copies the export into an owned texture before
-sampling. Removing this second copy does not remove the producer copy.
+WebRender samples supported exports directly. The original importer copied
+the export into an owned texture before sampling. The producer copy remains.
 
 The producer's internal export usage already includes sampled and transfer
 usage even when the canvas configuration does not request texture binding.
@@ -23,7 +23,7 @@ Preserve EXTERNAL ownership for this Vulkan producer; VA-API's FOREIGN
 ownership contract is different. Dedicated import requirements are described
 by [VkMemoryDedicatedAllocateInfo](https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryDedicatedAllocateInfo.html).
 
-## Probe and copy baseline
+## Probe and browser tests
 
 Build the standalone WebRender library tests from `gfx/wr`:
 
@@ -46,8 +46,8 @@ transport diagnostics and composited pixels. Install `xvfb-run`, `xauth` and
 
 ```sh
 python3 gfx/webrender_bindings/tests/run_browser_webgpu.py \
-  --output artifacts/webgpu-baseline --transport copy \
-  --software-presentation --record-baseline-defects
+  --output artifacts/webgpu-direct --transport direct \
+  --software-presentation
 ```
 
 Use `--icd` and `--validation-layers` to select the test driver and layers.
@@ -56,21 +56,48 @@ presentation option permits Xvfb without DRI3; it still uses the selected
 Vulkan adapter for rendering and import. These runs do not measure native
 desktop presentation performance.
 
-The original copy baseline has a known opaque-alpha defect: fractional alpha
-in an opaque canvas blends with the page background. The explicit
-`--record-baseline-defects` option records only those two known failures in
-`report.json`; it cannot excuse them in direct-transport runs. Without that
-option all pixel checks are strict.
+Validation-enabled multi-window tests should use a Vulkan loader containing
+the [upstream device-list synchronization fix](https://github.com/KhronosGroup/Vulkan-Loader/pull/1866).
+Older loaders can race device teardown against debug-object naming. A local
+loader can be selected with `--loader-directory`; record it with the test results.
 
-For timing comparisons omit validation layers and add `--benchmark-frames 120`.
-The fixture continuously presents a 1920x1080 canvas after 15 warmup frames.
+The original copy baseline has an opaque-alpha defect: fractional alpha and
+discarded opaque contents blend with the page background. To compare that
+build, pass `--binary /path/to/copy/firefox --transport copy`.
+`--record-baseline-defects` records those known failures in `report.json` and
+skips the transformed-alpha checks; it cannot excuse failures in direct runs.
+Without that option all pixel checks are strict.
+
+Use `--backend gl --gpu-process false` for the default-renderer compatibility
+control. It runs the same strict basic pixel, snapshot and CSS-opacity checks,
+asserts the OpenGL backend and omits Vulkan transport assertions.
+The llvmpipe control currently exposes opaque-alpha and discard failures in
+both the saved copy baseline and this implementation. They remain strict
+failures; compare complete reports to distinguish existing defects from changes.
+
+The default matrix covers RGBA/BGRA, opaque/premultiplied alpha, initialized
+discard, repeated presentation, canvas snapshots and transformed CSS opacity.
+Additional `--scenario` choices are `lifecycle`, `windows`, `offscreen`, `reset`
+and `crash`. They cover odd-size resize, simultaneous canvases, device
+destruction/recreation, tab/window closure, OffscreenCanvas opacity and GPU
+process loss. Use GPU-process rendering for `crash`. Recovery checks flush
+the replacement compositor before testing resumed native presentation; they
+do not establish unassisted repaint timing.
+
+For timing comparisons omit validation layers and add
+`--benchmark-only --benchmark-frames 120` to both builds. This uses identical
+warmup without alpha-validation scenarios. The fixture continuously presents
+a 1920x1080 premultiplied canvas containing opaque pixels. Frame samples
+exclude 15 warmup frames; process counters include that warmup interval.
 It records animation-frame intervals, CPU submission duration and a GPU
 timestamp for the final producer render pass. Only the final frame maps a
 timestamp buffer, avoiding a per-frame readback bottleneck. Producer GPU time
 does not include WebRender's import or composition work. The isolated profile
 disables reduced timer precision for this measurement.
 
-Process samples record CPU counters, summed RSS and per-client DRM counters.
+Process samples record CPU counters, summed RSS, PSS, private resident memory
+and per-client DRM counters. PSS/private samples include only processes whose
+`smaps_rollup` is readable; `memorySampledProcesses` records that coverage.
 DRM clients are deduplicated by device/client identity as required by the
 [kernel DRM usage statistics documentation](https://docs.kernel.org/gpu/drm-usage-stats.html).
 RSS can double-count shared pages; per-client memory can count shared GPU
@@ -78,11 +105,17 @@ allocations in both clients. Neither is a physical-memory total. Counter
 availability depends on the driver; preserve the reported units when comparing
 runs. Keep correctness/validation runs separate from timing runs.
 
-WebGPU recycling currently resets its texture host, readiness semaphore and
-generation after the remote texture map returns a resource. Direct sampling
-must retain the publication through all GPU reads, serialize snapshots and
-producer reuse, reject stale generations and quarantine uncertain completion.
-Capability checks and bounded retention are required before browser enablement.
+Local Intel Iris Xe/Mesa 26.2.2 measurements under Xvfb showed similar median
+cadence in three short trials. One longer 6,000-frame pair had worse direct-import
+tail cadence (51.36 ms p95 versus 17.32 ms) and about 54 MiB higher peak process
+PSS. Peak summed client GPU residency was the same and declined late in both
+runs. Process PSS/private memory still grew at similar late rates, so these
+runs do not establish a total-memory plateau. Removing the materialization
+copy does not by itself establish a performance or memory improvement.
+
+Direct sampling retains the publication through all GPU reads, serializes
+snapshots and producer reuse, rejects stale generations and quarantines
+uncertain completion through the publication/recycling protocol below.
 
 ## Standalone direct importer
 
@@ -134,3 +167,16 @@ flags and run its `native_ --ignored --nocapture` tests. They cover duplicate
 readers, stale generations/access handles/devices, release before another
 frame, and snapshot controls. `DMABufSurface.VulkanRecyclingRetiresOldReaders`
 checks busy recycle rejection and permanently retired old mappings.
+
+## Opaque canvas views
+
+For Vulkan composition, canvas configuration supplies the opaque flag through
+the canvas renderer, texture-host wrappers and DMA-BUF image descriptor.
+Other renderers retain their existing canvas opacity metadata. Vulkan acquires RGBA/BGRA
+sampling views with alpha fixed to one for opaque images. Attachment views
+keep identity mapping, and the shared allocation's alpha bytes are unchanged.
+This implements the [WebGPU canvas alpha-mode contract](https://gpuweb.github.io/gpuweb/#gpucanvasalphamode)
+without an extra copy or write to the source. Tests cover fractional alpha,
+opaque discard, transformed CSS opacity and OffscreenCanvas readback. The
+native importer test checks both the rendered opaque pixels and the unchanged
+alpha bytes in the exported allocation.
