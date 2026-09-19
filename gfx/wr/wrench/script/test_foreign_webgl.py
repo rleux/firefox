@@ -3,10 +3,10 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import ctypes as C
+import argparse
 import json
 import os
 import subprocess
-import sys
 
 P, I, U = C.c_void_p, C.c_int, C.c_uint
 
@@ -25,7 +25,18 @@ def proc(egl, name, result, args):
 
 
 def main():
-    binary = sys.argv[1]
+    parser = argparse.ArgumentParser()
+    parser.add_argument("binary")
+    parser.add_argument(
+        "--test",
+        default="device::hal::vulkan::linux::foreign_rgb::gpu_tests::gl_dmabuf_direct_sampling_and_release",
+    )
+    parser.add_argument("--generations", type=int, default=2)
+    parser.add_argument("--destructive", action="store_true")
+    args = parser.parse_args()
+    if args.destructive and args.generations != 1:
+        parser.error("Destructive tests require exactly one generation")
+    binary = args.binary
     egl, gbm, gl = (
         C.CDLL(name) for name in ["libEGL.so.1", "libgbm.so.1", "libGLESv2.so.2"]
     )
@@ -53,7 +64,7 @@ def main():
     bo_modifier = bind(gbm, "gbm_bo_get_modifier", C.c_uint64, [P])
     bo_planes = bind(gbm, "gbm_bo_get_plane_count", I, [P])
     bo_destroy = bind(gbm, "gbm_bo_destroy", None, [P])
-    for name, result, args in [
+    for name, result, signature in [
         ("glGenTextures", None, [I, C.POINTER(U)]),
         ("glBindTexture", None, [U, U]),
         ("glGenFramebuffers", None, [I, C.POINTER(U)]),
@@ -72,7 +83,7 @@ def main():
         ("glDeleteTextures", None, [I, C.POINTER(U)]),
         ("glDeleteFramebuffers", None, [I, C.POINTER(U)]),
     ]:
-        bind(gl, name, result, args)
+        bind(gl, name, result, signature)
     render_fd = os.open(
         os.environ.get("WR_GBM_NODE", "/dev/dri/renderD128"), os.O_RDWR | os.O_CLOEXEC
     )
@@ -122,7 +133,7 @@ def main():
         gl.glBindFramebuffer(0x8D40, fbo)
         gl.glFramebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, tex, 0)
         assert gl.glCheckFramebufferStatus(0x8D40) == 0x8CD5
-        for generation in [1, 2]:
+        for generation in range(1, args.generations + 1):
             gl.glDisable(0x0BD0)
             gl.glDisable(0x0BE2)
             gl.glDisable(0x0C11)
@@ -160,7 +171,7 @@ def main():
                     binary,
                     "--ignored",
                     "--exact",
-                    "device::hal::vulkan::linux::foreign_rgb::gpu_tests::gl_dmabuf_direct_sampling_and_release",
+                    args.test,
                     "--nocapture",
                     "--test-threads=1",
                 ],
@@ -173,6 +184,8 @@ def main():
             print(child.stdout, end="", flush=True)
             assert child.returncode == 0 and "1 passed; 0 failed" in child.stdout
             os.close(fence)
+            if args.destructive:
+                continue
             actual = (C.c_ubyte * (width * height * 4))()
             gl.glReadPixels(0, 0, width, height, 0x1908, 0x1401, actual)
             expected = []
@@ -192,10 +205,7 @@ def main():
         destroy_image(display, image)
         os.close(fd)
         bo_destroy(bo)
-    print(
-        "Four native GL -> Vulkan direct-sampling cases passed; GL could reuse every released allocation.",
-        flush=True,
-    )
+    print(f"Foreign WebGL fixture passed: {args.test}", flush=True)
 
 
 if __name__ == "__main__":
