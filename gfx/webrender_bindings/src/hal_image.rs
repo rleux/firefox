@@ -175,8 +175,8 @@ mod linux {
 
     struct VideoEntry {
         identity: VideoIdentity,
-        layout: hal::Nv12DmaBufLayout,
-        image: hal::WeakForeignNv12Image,
+        layout: hal::VideoDmaBufLayout,
+        image: hal::WeakForeignYuvImage,
         device: u64,
         pending: std::rc::Rc<std::cell::Cell<bool>>,
         progress: std::rc::Rc<dyn Fn() -> Result<bool, String>>,
@@ -281,7 +281,7 @@ mod linux {
 
     pub(super) fn video_capabilities(device: &ExternalImageDevice) -> Result<WrHalNv12Capabilities, String> {
         let node = device.foreign_rgb_drm_node()?.ok_or("NV12 DRM identity unavailable")?;
-        let formats = device.vaapi_nv12_capabilities()?;
+        let formats = device.vaapi_video_capabilities(hal::VideoDmaBufFormat::Nv12)?;
         let mut capabilities = WrHalNv12Capabilities::default();
         if formats.is_empty() || formats.len() > capabilities.formats.len() {
             return Err("No supported NV12 sampling formats".into());
@@ -611,7 +611,8 @@ mod linux {
             {
                 return Err("Invalid NV12 publication metadata".into());
             }
-            let layout = hal::Nv12DmaBufLayout::new(
+            let layout = hal::VideoDmaBufLayout::new(
+                hal::VideoDmaBufFormat::Nv12,
                 [data.allocation_width, data.allocation_height],
                 [data.width, data.height],
                 data.modifier,
@@ -702,7 +703,7 @@ mod linux {
                 let pending = std::rc::Rc::new(std::cell::Cell::new(true));
                 let returned = pending.clone();
                 let image = unsafe {
-                    self.device.import_vaapi_nv12(
+                    self.device.import_vaapi_video(
                         BorrowedFd::borrow_raw(data.fd),
                         layout,
                         data.drm_node,

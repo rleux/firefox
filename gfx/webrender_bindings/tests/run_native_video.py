@@ -11,7 +11,9 @@ from pathlib import Path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run native VA-API/Vulkan tests without building")
+    parser = argparse.ArgumentParser(
+        description="Run native VA-API/Vulkan tests without building"
+    )
     parser.add_argument("--exporter", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--clip", type=Path, required=True)
@@ -20,22 +22,40 @@ def main():
     parser.add_argument("--icd", type=Path)
     parser.add_argument("--validation-layers", type=Path)
     parser.add_argument("--shader-input", choices=["native", "naga"])
+    parser.add_argument("--test-filter")
+    parser.add_argument("--loader-directory", type=Path)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     log = args.output / "native-tests.log"
-    command = [str(args.exporter.resolve()), args.render_node, str(args.clip.resolve()),
-               str(args.binary.resolve()), str(args.output.resolve())]
+    command = [
+        str(args.exporter.resolve()),
+        args.render_node,
+        str(args.clip.resolve()),
+        str(args.binary.resolve()),
+        str(args.output.resolve()),
+    ]
+    if args.test_filter:
+        command.append(args.test_filter)
     env = os.environ.copy()
     if args.icd:
         env["VK_DRIVER_FILES"] = str(args.icd.resolve())
     if args.validation_layers:
         env["VK_LAYER_PATH"] = str(args.validation_layers.resolve())
         env["VK_LAYER_VALIDATE_SYNC"] = "1"
+    if args.loader_directory:
+        current = env.get("LD_LIBRARY_PATH")
+        loader = str(args.loader_directory.resolve())
+        env["LD_LIBRARY_PATH"] = f"{loader}:{current}" if current else loader
     if args.shader_input:
         env["WR_HAL_SHADER_INPUT"] = args.shader_input
     with log.open("w") as output:
-        process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
-                                   start_new_session=True, env=env)
+        process = subprocess.Popen(
+            command,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env=env,
+        )
         try:
             result = process.wait(timeout=120)
         except subprocess.TimeoutExpired:
@@ -44,8 +64,13 @@ def main():
             result = 124
     text = log.read_text(errors="replace")
     summary = re.search(r"test result: ok\. (\d+) passed; 0 failed", text)
-    valid = summary and int(summary[1]) >= 4 and not any(
-        marker in text for marker in ("VUID-", "VALIDATION [", "Validation Error")
+    minimum = 1 if args.test_filter else 4
+    valid = (
+        summary
+        and int(summary[1]) >= minimum
+        and not any(
+            marker in text for marker in ("VUID-", "VALIDATION [", "Validation Error")
+        )
     )
     print(f"Log: {log}")
     if result or not valid:

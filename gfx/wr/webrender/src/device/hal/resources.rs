@@ -400,8 +400,9 @@ impl<A: hal::Api> Texture<A> {
     }
 
     #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
-    pub fn from_nv12(
+    pub fn from_yuv(
         owner: &Rc<Device<A>>, raw: A::Texture, size: [u32; 2], bytes: u64,
+        formats: [wgt::TextureFormat; 2],
     ) -> Result<[Rc<Self>; 2]> {
         let raw = Rc::new(Owned::new(owner, raw, A::Device::destroy_texture).accounted(true, bytes));
         let states = Rc::new(vec![TextureState {
@@ -414,12 +415,12 @@ impl<A: hal::Api> Texture<A> {
         owner.next_texture_id.set(allocation_id.checked_add(1).ok_or("HAL texture identity overflow")?);
         let plane = |index: u32, aspect, format| -> Result<Rc<Self>> {
             let view = unsafe { owner.open.device.create_texture_view(&raw, &hal::TextureViewDescriptor {
-                label: Some("WR NV12 plane"), swizzle: Default::default(),
+                label: Some("WR YUV plane"), swizzle: Default::default(),
                 format, dimension: wgt::TextureViewDimension::D2, usage: wgt::TextureUses::RESOURCE,
                 range: wgt::ImageSubresourceRange {
                     aspect, mip_level_count: Some(1), array_layer_count: Some(1), ..Default::default()
                 },
-            }) }.map_err(|error| format!("Creating NV12 plane view: {error:?}"))?;
+            }) }.map_err(|error| format!("Creating YUV plane view: {error:?}"))?;
             Ok(Rc::new(Self {
                 view: Owned::new(owner, view, A::Device::destroy_texture_view), target: None,
                 raw: raw.clone(), size: wgt::Extent3d {
@@ -430,10 +431,10 @@ impl<A: hal::Api> Texture<A> {
                 states: states.clone(), lease: None,
             }))
         };
-        let y = plane(0, wgt::TextureAspect::Plane0, wgt::TextureFormat::R8Unorm)?;
+        let y = plane(0, wgt::TextureAspect::Plane0, formats[0])?;
         #[cfg(any(test, feature = "hal-testing"))]
         owner.check_fault(FailurePoint::VideoPlaneView)?;
-        let uv = plane(1, wgt::TextureAspect::Plane1, wgt::TextureFormat::Rg8Unorm)?;
+        let uv = plane(1, wgt::TextureAspect::Plane1, formats[1])?;
         Ok([y, uv])
     }
 

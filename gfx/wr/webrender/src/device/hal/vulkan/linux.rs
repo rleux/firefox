@@ -16,7 +16,7 @@ mod foreign_rgb;
 pub use foreign_rgb::{ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
 pub use foreign_rgb::{VulkanDmaBufImage, WeakVulkanDmaBufImage};
 mod video;
-pub use video::{Nv12DmaBufCapabilities, Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
+pub use video::{VideoDmaBufCapabilities, VideoDmaBufFormat, VideoDmaBufLayout, ForeignYuvImage, WeakForeignYuvImage};
 #[cfg(test)]
 mod sampling_probe;
 
