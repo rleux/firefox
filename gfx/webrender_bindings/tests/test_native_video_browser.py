@@ -20,7 +20,11 @@ class TestNativeVideoBrowser(MarionetteTestCase):
     def setUp(self):
         super().setUp()
         self.output = Path(os.environ["WR_NATIVE_VIDEO_OUTPUT"])
-        self.report = {"display": os.environ.get("DISPLAY")}
+        self.report = {
+            "passed": False,
+            "display": os.environ.get("DISPLAY"),
+            "synchronization": os.environ["WR_NATIVE_VIDEO_SYNCHRONIZATION"],
+        }
         self.pixel_tolerance = (
             2 if os.environ["WR_NATIVE_VIDEO_DECODER"] == "hardware" else 4
         )
@@ -102,11 +106,32 @@ class TestNativeVideoBrowser(MarionetteTestCase):
                     "return Services.prefs.getBoolPref('remote.screenshot.use_readback');"
                 )
             )
-            return self.marionette.execute_async_script("""
+            return self.marionette.execute_async_script(
+                """
                 const done = arguments[arguments.length - 1];
                 window.windowUtils.getWebRenderBackendInfo().then(
                   info => done(JSON.parse(info)), error => done({error: String(error)}));
-            """)
+            """
+            )
+
+    def record_loader(self, process):
+        with self.marionette.using_context("chrome"):
+            pid = self.marionette.execute_script(
+                "return window.windowUtils.gpuProcessPid;"
+                if process == "GPU"
+                else "return Services.appinfo.processID;"
+            )
+        mappings = [
+            line.split(maxsplit=5)[-1]
+            for line in Path(f"/proc/{pid}/maps").read_text().splitlines()
+            if "libvulkan.so" in line
+        ]
+        self.report["vulkanLoaderMappings"] = sorted(set(mappings))
+        self.assertTrue(mappings)
+        if directory := os.environ.get("WR_NATIVE_VIDEO_LOADER_DIRECTORY"):
+            self.assertTrue(
+                all(path.startswith(directory + os.sep) for path in mappings)
+            )
 
     def compositor_pixels(self, label):
         rectangles = self.marionette.execute_script(
@@ -317,9 +342,11 @@ class TestNativeVideoBrowser(MarionetteTestCase):
             self.wait_for_condition(matches, timeout=15)
         finally:
             with self.marionette.using_context("chrome"):
-                self.marionette.execute_script("""
+                self.marionette.execute_script(
+                    """
                     Services.wm.getMostRecentWindow("Toolkit:PictureInPicture")?.close();
-                """)
+                """
+                )
         self.call("playFrames", 12, True)
         self.assertEqual(
             self.debug_info()["decoder"]["reader"]["videoHardwareAccelerated"],
@@ -344,6 +371,8 @@ class TestNativeVideoBrowser(MarionetteTestCase):
             )
         if expected_backend != "software":
             self.assertEqual(backend["process"], os.environ["WR_NATIVE_VIDEO_PROCESS"])
+        if expected_backend == "vulkan":
+            self.record_loader(backend["process"])
         self.report["playback"] = self.call("playFrames", 72, True)
         samples = self.report["playback"]["samples"]
         self.assertEqual(len(samples), 72)
@@ -383,6 +412,17 @@ class TestNativeVideoBrowser(MarionetteTestCase):
         self.assertEqual(
             native in log, expected_backend == "vulkan" and expected_hardware
         )
+        modes = re.findall(
+            r"WebRender Vulkan video selected transport: direct NV12; synchronization: (sync|async)",
+            log,
+        )
+        if expected_backend == "vulkan" and expected_hardware:
+            self.assertEqual(
+                set(modes), {os.environ["WR_NATIVE_VIDEO_SYNCHRONIZATION"]}
+            )
+        else:
+            self.assertEqual(modes, [])
+        self.report["synchronizationMarkers"] = modes
         for error in [
             "Validation Error",
             "VUID-",
@@ -403,3 +443,4 @@ class TestNativeVideoBrowser(MarionetteTestCase):
                 "Timed out completing native video reads",
             ]:
                 self.assertNotIn(error, self.log())
+        self.report["passed"] = True

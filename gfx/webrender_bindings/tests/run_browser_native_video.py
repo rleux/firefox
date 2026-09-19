@@ -19,7 +19,8 @@ def main():
     parser.add_argument("--clip", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--native-display", action="store_true",
+        "--native-display",
+        action="store_true",
         help="Use the current display and its window manager instead of private Xvfb",
     )
     parser.add_argument(
@@ -31,6 +32,10 @@ def main():
     parser.add_argument(
         "--decoder", choices=["hardware", "software"], default="hardware"
     )
+    parser.add_argument("--synchronization", choices=["sync", "async"], default="async")
+    parser.add_argument(
+        "--webgl-synchronization", choices=["sync", "async"], default="async"
+    )
     parser.add_argument("--software-video", action="store_true")
     parser.add_argument("--force-hardware-decoder", action="store_true")
     parser.add_argument("--webgl-readback", action="store_true")
@@ -39,9 +44,11 @@ def main():
     parser.add_argument("--gpu-process", choices=["true", "false"], default="true")
     parser.add_argument("--icd", type=Path)
     parser.add_argument("--validation-layers", type=Path)
+    parser.add_argument("--loader-directory", type=Path)
     parser.add_argument("--adapter")
     parser.add_argument("--render-node", type=Path)
     parser.add_argument("--software-presentation", action="store_true")
+    parser.add_argument("--sync-instrumentation", action="store_true")
     parser.add_argument(
         "--scenario",
         choices=["basic", "reset", "crash", "windows", "pip", "lifecycle"],
@@ -53,9 +60,13 @@ def main():
         env["WR_NATIVE_VIDEO_XVFB"] = "1"
         return subprocess.call(
             [
-                "xvfb-run", "-a", "-s",
+                "xvfb-run",
+                "-a",
+                "-s",
                 "-screen 0 1280x1024x24 -nolisten tcp",
-                sys.executable, str(Path(__file__).resolve()), *sys.argv[1:],
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *sys.argv[1:],
             ],
             env=env,
         )
@@ -67,6 +78,16 @@ def main():
         "MOZ_WR_DEFAULT_BACKEND",
         "MOZ_RUN_GTEST",
         "MOZ_HEADLESS",
+        "MOZ_WR_VULKAN_VALIDATION",
+        "VK_LAYER_PATH",
+        "VK_INSTANCE_LAYERS",
+        "VK_LAYER_VALIDATE_SYNC",
+        "WR_VIDEO_FORCE_SYNC",
+        "WR_WEBGL_FORCE_SYNC",
+        "WR_WEBGPU_BENCHMARK_QUIET",
+        "WR_WEBGL_BENCHMARK_QUIET",
+        "WR_WEBGPU_SYNC_INSTRUMENTATION",
+        "WR_WEBGL_SYNC_INSTRUMENTATION",
     ]:
         env.pop(name, None)
     gecko_log = output / "gecko.log"
@@ -75,13 +96,24 @@ def main():
         WR_NATIVE_VIDEO_CLIP=str(args.clip.resolve()),
         WR_NATIVE_VIDEO_BACKEND=args.backend,
         WR_NATIVE_VIDEO_DECODER=args.decoder,
+        WR_NATIVE_VIDEO_SYNCHRONIZATION=args.synchronization,
+        WR_VIDEO_FORCE_SYNC="1" if args.synchronization == "sync" else "0",
+        WR_WEBGL_FORCE_SYNC="1" if args.webgl_synchronization == "sync" else "0",
         WR_NATIVE_VIDEO_SCENARIO=args.scenario,
         WR_NATIVE_VIDEO_RESOLUTION_CHANGE="1" if args.resolution_change else "0",
         WR_NATIVE_VIDEO_PROCESS="GPU" if args.gpu_process == "true" else "Parent",
         WR_NATIVE_VIDEO_GECKO_LOG=str(gecko_log),
+        WR_VIDEO_SYNC_INSTRUMENTATION="1" if args.sync_instrumentation else "0",
+        WR_NATIVE_VIDEO_LOADER_DIRECTORY=(
+            str(args.loader_directory.resolve()) if args.loader_directory else ""
+        ),
         GDK_BACKEND="x11",
         MOZ_LOG="webrender_bindings::hal_image::linux:3,PlatformDecoderModule:5",
     )
+    if args.synchronization == "async":
+        env.pop("WR_VIDEO_FORCE_SYNC", None)
+    if args.webgl_synchronization == "async":
+        env.pop("WR_WEBGL_FORCE_SYNC", None)
     if args.icd:
         env["VK_DRIVER_FILES"] = str(args.icd.resolve())
     if args.validation_layers:
@@ -89,6 +121,10 @@ def main():
             MOZ_WR_VULKAN_VALIDATION="1",
             VK_LAYER_PATH=str(args.validation_layers.resolve()),
             VK_LAYER_VALIDATE_SYNC="1",
+        )
+    if args.loader_directory:
+        env["LD_LIBRARY_PATH"] = str(args.loader_directory.resolve()) + (
+            os.pathsep + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else ""
         )
     if args.adapter:
         env["MOZ_WR_VULKAN_ADAPTER"] = args.adapter
@@ -135,16 +171,25 @@ def main():
     log = output / "test.log"
     print(f"Log: {log}", flush=True)
     with log.open("w") as stream, (output / "window-manager.log").open("w") as wm_log:
-        window_manager = None if args.native_display else subprocess.Popen(
-            ["openbox", "--sm-disable"], env=env,
-            stdout=wm_log, stderr=subprocess.STDOUT,
+        window_manager = (
+            None
+            if args.native_display
+            else subprocess.Popen(
+                ["openbox", "--sm-disable"],
+                env=env,
+                stdout=wm_log,
+                stderr=subprocess.STDOUT,
+            )
         )
         try:
             deadline = time.monotonic() + 10
             while window_manager:
                 ready = subprocess.run(
                     ["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"],
-                    env=env, capture_output=True, text=True, timeout=5,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                     check=False,
                 )
                 if "window id #" in ready.stdout:
@@ -153,8 +198,12 @@ def main():
                     raise RuntimeError("Private Xvfb window manager did not start")
                 time.sleep(0.1)
             process = subprocess.Popen(
-                command, cwd=root, env=env, stdout=stream,
-                stderr=subprocess.STDOUT, start_new_session=True,
+                command,
+                cwd=root,
+                env=env,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
             try:
                 status = process.wait(timeout=180)

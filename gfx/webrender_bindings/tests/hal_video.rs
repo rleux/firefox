@@ -153,8 +153,10 @@ fn acquire(
 #[test]
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_bridge_channels_share_lock_and_retire_cache() {
+    let synchronous = std::env::var("WR_VIDEO_FORCE_SYNC").as_deref() == Ok("1");
     let (fixture, data) = fixture();
-    let mut provider = provider(&fixture, device());
+    let device = device();
+    let mut provider = provider(&fixture, device.clone());
     let uv = acquire(&fixture, &mut provider, data, 7, 1).unwrap();
     let y = acquire(&fixture, &mut provider, data, 7, 0).unwrap();
     let duplicate = acquire(&fixture, &mut provider, data, 7, 1).unwrap();
@@ -173,10 +175,13 @@ fn vaapi_nv12_bridge_channels_share_lock_and_retire_cache() {
     assert!(fixture.video_access.borrow().locked);
     assert_eq!(fixture.video_access.borrow().unlocks, 0);
     drop(uv);
+    assert_eq!(fixture.video_access.borrow().locked, !synchronous);
+    device.finish().unwrap();
     assert!(!fixture.video_access.borrow().locked);
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
     assert_eq!(Rc::strong_count(&fixture), 1);
     drop(acquire(&fixture, &mut provider, data, 8, 0).unwrap());
+    device.finish().unwrap();
     assert_eq!(fixture.video_access.borrow().locks, 2);
     assert_eq!(fixture.video_access.borrow().unlocks, 2);
     assert!(!fixture.video_access.borrow().poisoned);
@@ -185,9 +190,10 @@ fn vaapi_nv12_bridge_channels_share_lock_and_retire_cache() {
 #[test]
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_bridge_rejects_live_identity_and_device_changes() {
+    let synchronous = std::env::var("WR_VIDEO_FORCE_SYNC").as_deref() == Ok("1");
     let (fixture, data) = fixture();
     let first = device();
-    let mut provider = provider(&fixture, first);
+    let mut provider = provider(&fixture, first.clone());
     let keep = acquire(&fixture, &mut provider, data, 7, 1).unwrap();
     assert!(acquire(&fixture, &mut provider, data, 8, 0).is_err());
     let different_lock = std::fs::File::open("/dev/null").unwrap();
@@ -202,13 +208,18 @@ fn vaapi_nv12_bridge_rejects_live_identity_and_device_changes() {
         }
         assert!(acquire(&fixture, &mut provider, changed, 7, 0).is_err());
     }
-    let mut recreated = super::provider(&fixture, device());
+    let recreated_device = device();
+    let mut recreated = super::provider(&fixture, recreated_device.clone());
     assert!(acquire(&fixture, &mut recreated, data, 7, 0).is_err());
     assert_eq!(fixture.video_access.borrow().locks, 1);
     assert!(fixture.video_access.borrow().locked);
     drop(keep);
+    assert_eq!(fixture.video_access.borrow().locked, !synchronous);
+    let resumed = acquire(&fixture, &mut recreated, data, 7, 0).unwrap();
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
-    drop(acquire(&fixture, &mut recreated, data, 7, 0).unwrap());
+    assert_eq!(fixture.video_access.borrow().locks, 2);
+    drop(resumed);
+    recreated_device.finish().unwrap();
     assert_eq!(fixture.video_access.borrow().locks, 2);
     assert_eq!(fixture.video_access.borrow().unlocks, 2);
 }
@@ -217,7 +228,8 @@ fn vaapi_nv12_bridge_rejects_live_identity_and_device_changes() {
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_bridge_busy_lock_is_rejected_without_poisoning() {
     let (fixture, data) = fixture();
-    let mut provider = provider(&fixture, device());
+    let device = device();
+    let mut provider = provider(&fixture, device.clone());
     fixture.video_access.borrow_mut().locked = true;
     assert!(acquire(&fixture, &mut provider, data, 7, 0).is_err());
     assert_eq!(fixture.video_access.borrow().locks, 0);
@@ -226,6 +238,7 @@ fn vaapi_nv12_bridge_busy_lock_is_rejected_without_poisoning() {
     fixture.video_access.borrow_mut().locked = false;
     assert!(acquire(&fixture, &mut provider, data, 7, 2).is_err());
     drop(acquire(&fixture, &mut provider, data, 7, 1).unwrap());
+    device.finish().unwrap();
     assert_eq!(fixture.video_access.borrow().locks, 1);
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
 }
@@ -235,13 +248,150 @@ struct VideoProvider {
     data: WrHalNv12,
     images: ExternalImages,
 }
+
+fn submit_video_frame(
+    renderer: &mut hal::Renderer,
+    api: &mut webrender::render_api::RenderApi,
+    fixture: &Rc<Fixture>,
+    data: WrHalNv12,
+    epoch: u32,
+) -> hal::FrameCompletion {
+    let stable = Box::new(fixture.clone());
+    let images = provider(&stable, renderer.external_image_device());
+    renderer
+        .set_external_image_provider(Box::new(VideoProvider {
+            fixture: stable,
+            data,
+            images,
+        }))
+        .unwrap();
+    let document = api.add_document(DeviceIntSize::new(data.width as i32, data.height as i32));
+    let pipeline = PipelineId(0, 0);
+    let keys = [api.generate_image_key(), api.generate_image_key()];
+    let mut transaction = webrender::render_api::Transaction::new();
+    for channel in 0..2 {
+        transaction.add_image(
+            keys[channel],
+            ImageDescriptor::new(
+                (data.width >> channel) as i32,
+                (data.height >> channel) as i32,
+                if channel == 0 {
+                    ImageFormat::R8
+                } else {
+                    ImageFormat::RG8
+                },
+                ImageDescriptorFlags::empty(),
+            ),
+            ImageData::External(ExternalImageData {
+                id: ExternalImageId(77),
+                channel_index: channel as u8,
+                image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+                normalized_uvs: false,
+            }),
+            None,
+        );
+    }
+    let mut builder = DisplayListBuilder::new(pipeline);
+    builder.begin(60.0);
+    let bounds = LayoutRect::from_size(LayoutSize::new(data.width as f32, data.height as f32));
+    let info = CommonItemProperties {
+        clip_rect: bounds,
+        clip_chain_id: ClipChainId::INVALID,
+        spatial_id: SpatialId::root_scroll_node(pipeline),
+        flags: PrimitiveFlags::default(),
+    };
+    builder.push_stacking_context(
+        info.spatial_id,
+        info.flags,
+        None,
+        TransformStyle::Flat,
+        MixBlendMode::Normal,
+        &[],
+        &[],
+        RasterSpace::Screen,
+        StackingContextFlags::empty(),
+        None,
+    );
+    builder.push_yuv_image(
+        &info,
+        bounds,
+        YuvData::NV12(keys[0], keys[1]),
+        ColorDepth::Color8,
+        YuvColorSpace::Rec601,
+        ColorRange::Limited,
+        ImageRendering::Auto,
+    );
+    builder.pop_stacking_context();
+    transaction.set_root_pipeline(pipeline);
+    transaction.set_display_list(Epoch(epoch), api.get_namespace_id(), builder.end());
+    transaction.generate_frame(epoch as u64, true, false, RenderReasons::TESTING);
+    api.send_transaction(document, transaction);
+    renderer.prepare_frame(document).unwrap();
+    renderer.render().unwrap();
+    renderer.submit_work().unwrap()
+}
+
+#[test]
+#[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
+fn async_nv12_cross_consumer_progresses_previous_renderer() {
+    assert_ne!(std::env::var("WR_VIDEO_FORCE_SYNC").as_deref(), Ok("1"));
+    let (fixture, data) = fixture();
+    let (mut first_renderer, first_sender) = renderer();
+    let first_device = first_renderer.external_image_device();
+    let first_poller = first_device.consumer_poller();
+    let mut first_api = first_sender.create_api();
+    let first_completion = submit_video_frame(&mut first_renderer, &mut first_api, &fixture, data, 1);
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+
+    let (mut second_renderer, second_sender) = renderer();
+    let second_device = second_renderer.external_image_device();
+    let mut second_provider = provider(&fixture, second_device.clone());
+    let keep = acquire(&fixture, &mut second_provider, data, 7, 1).unwrap();
+    assert!(first_renderer.poll_completion(first_completion).unwrap());
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    assert_eq!(fixture.video_access.borrow().locks, 2);
+    assert!(fixture.video_access.borrow().locked);
+
+    let mut second_api = second_sender.create_api();
+    let second_completion = submit_video_frame(&mut second_renderer, &mut second_api, &fixture, data, 2);
+    let second_pixels = second_renderer
+        .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(
+            data.width as i32,
+            data.height as i32,
+        )))
+        .unwrap();
+    assert!(second_renderer.poll_completion(second_completion).unwrap());
+    let first_pixels = first_renderer
+        .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(
+            data.width as i32,
+            data.height as i32,
+        )))
+        .unwrap();
+    assert_eq!(second_pixels, first_pixels);
+    assert!(second_pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+    drop(keep);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        second_renderer.poll().unwrap();
+        second_device.poll().unwrap();
+        if !fixture.video_access.borrow().locked {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 2);
+    first_api.shut_down(true);
+    second_api.shut_down(true);
+    drop(first_device);
+    drop(first_renderer);
+    assert!(first_poller().is_err());
+}
 impl hal::ExternalImageProvider for VideoProvider {
-    fn acquire(
-        &mut self,
-        _: ExternalImageId,
-        channel: u8,
-        _: bool,
-    ) -> Result<hal::ExternalImageLease, String> {
+    fn acquire(&mut self, _: ExternalImageId, channel: u8, _: bool) -> Result<hal::ExternalImageLease, String> {
         acquire(&self.fixture, &mut self.images, self.data, 7, channel)
     }
 }
@@ -337,9 +487,24 @@ fn check_rendering_completion(retain_extra_lease: bool) {
     api.send_transaction(document, transaction);
     renderer.prepare_frame(document).unwrap();
     renderer.render().unwrap();
-    if !retain_extra_lease {
-        let completion = renderer.submit_work().unwrap();
+    let completion = renderer.submit_work().unwrap();
+    let synchronous = std::env::var("WR_VIDEO_FORCE_SYNC").as_deref() == Ok("1");
+    if synchronous && !retain_extra_lease {
         finish_video_images(&device, || renderer.poll_completion(completion)).unwrap();
+    } else if !synchronous {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            renderer.poll().unwrap();
+            let draw_complete = renderer.poll_completion(completion).unwrap();
+            device.poll().unwrap();
+            if draw_complete && (retain_extra_lease || !fixture.video_access.borrow().locked) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    if !retain_extra_lease {
         assert!(!fixture.video_access.borrow().locked);
         assert_eq!(fixture.video_access.borrow().unlocks, 1);
     }
@@ -355,10 +520,25 @@ fn check_rendering_completion(retain_extra_lease: bool) {
     assert_eq!(fixture.video_access.borrow().locks, 1);
     if retain_extra_lease {
         assert!(fixture.video_access.borrow().locked);
-        assert!(finish_video_images(&device, || Ok(true)).is_err());
+        if synchronous {
+            assert!(finish_video_images(&device, || Ok(true)).is_err());
+        }
     }
     drop(keep);
-    finish_video_images(&device, || panic!("No video publication needs polling")).unwrap();
+    if synchronous {
+        finish_video_images(&device, || panic!("No video publication needs polling")).unwrap();
+    } else {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            renderer.poll().unwrap();
+            device.poll().unwrap();
+            if !fixture.video_access.borrow().locked {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
     assert_eq!(fixture.video_access.borrow().unlocks, 1);
     assert_eq!(
         fixture

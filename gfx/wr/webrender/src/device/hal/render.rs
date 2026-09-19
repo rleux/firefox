@@ -265,7 +265,7 @@ pub(crate) struct FrameRenderer<A: BackendApi> {
     descriptors: RefCell<HashMap<DescriptorKey, Rc<Descriptor<A>>>>,
     samplers: [Owned<A, A::Sampler>; 3],
     quad: Rc<Buffer<A>>,
-    submissions: SubmissionQueue<A>,
+    submissions: Rc<SubmissionQueue<A>>,
     external_device: ExternalImageDevice,
     dummy: Rc<Texture<A>>,
     dither: Option<Rc<Texture<A>>>,
@@ -373,7 +373,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         let texture_pool = super::pool::TexturePool::new(&owner);
         let capture_pool = super::pool::TexturePool::new(&owner);
         let queries = RefCell::new(super::query::QueryPool::new(&owner));
-        let external_device = ExternalImageDevice::new(&owner);
+        let submissions = Rc::new(submissions);
+        let releases = Rc::new(RefCell::new(Vec::new()));
+        let external_device = ExternalImageDevice::for_renderer(&owner, &submissions, &releases);
         Ok(Self {
             shader_input,
             shader_cache: RefCell::new(ShaderCache::default()),
@@ -397,7 +399,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             failed: Cell::new(false),
             external_provider: None,
             external_images: HashMap::new(),
-            releases: Rc::new(RefCell::new(Vec::new())),
+            releases,
             compositor: CompositorConfig::Draw,
             native_targets: HashMap::new(),
             native_operations: Vec::new(),

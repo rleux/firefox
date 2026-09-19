@@ -215,7 +215,8 @@ outside the cache borrow before relocking; stale generations, access handles,
 layouts and logical devices remain rejected. This conditional reuse wait is
 separate from the removed per-frame wait. CPU snapshots remain explicit copies
 under the same shared lock. A busy snapshot wait does not poison another reader's
-publication. VA-API ownership and video frame completion remain synchronous.
+publication. [Native VA-API video](NativeVideo.md) also queues ownership
+transfers and uses idle completion polling; its producer-readiness wait remains.
 The [WebGL RGB path](WebGLDMABuf.md) now also queues its FOREIGN ownership
 transfers asynchronously.
 

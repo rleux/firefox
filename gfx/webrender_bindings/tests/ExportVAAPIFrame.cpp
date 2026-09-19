@@ -73,11 +73,11 @@ static uint32_t Read32(const uint8_t* aBytes) {
 }
 
 int main(int argc, char** argv) {
-  if (argc != 5) {
-    std::fprintf(
-        stderr,
-        "Usage: %s DRM_RENDER_NODE VP9_IVF RUST_TEST_BINARY OUTPUT_DIR\n",
-        argv[0]);
+  if (argc != 5 && argc != 6) {
+    std::fprintf(stderr,
+                 "Usage: %s DRM_RENDER_NODE VP9_IVF RUST_TEST_BINARY "
+                 "OUTPUT_DIR [TEST_FILTER]\n",
+                 argv[0]);
     return 1;
   }
   if ((avcodec_version() >> 16) != 60 || (avutil_version() >> 16) != 58) {
@@ -226,7 +226,8 @@ int main(int argc, char** argv) {
   const pid_t child = fork();
   if (child < 0) return 1;
   if (!child) {
-    execl(argv[3], argv[3], "vaapi_nv12", "--ignored", "--nocapture",
+    const char* filter = argc == 6 ? argv[5] : "vaapi_nv12";
+    execl(argv[3], argv[3], filter, "--ignored", "--nocapture",
           "--test-threads=1", nullptr);
     std::perror("exec Rust tests");
     _exit(1);

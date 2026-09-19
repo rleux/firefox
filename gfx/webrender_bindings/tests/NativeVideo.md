@@ -212,11 +212,41 @@ values against independent BT.601/BT.709/BT.2020 equations;
 fixture uses nearest-neighbor chroma sampling to match the GL blit's sampler,
 with a two-value tolerance for 8-bit channel rounding.
 
-Native Vulkan video frames drain their sampling completion before returning
-from frame end, so ownership can return even if no later frame or readback is
-requested. An unexpected surviving publication or completion timeout fails
-the renderer. This initial policy waits synchronously for native video;
-frames without live native video publications keep the existing polling path.
+Native Vulkan video queues acquisition and ownership return asynchronously.
+Both plane views and their shared allocation remain retained through the return
+submission. The C++ publication lease and access lock are released only after
+its fence completes; uncertain completion abandons the publication. The cache
+retains pending identity after the weak image expires and rejects mismatched
+publication metadata. Reusing an identical publication polls its pending return
+outside the cache borrow before relocking it. When another renderer needs the
+same frame, such as a picture-in-picture window, it also progresses the previous
+renderer’s submitted reads before taking ownership on its Vulkan device. The
+progress handle retains neither that renderer nor its device. This cross-device
+handoff can wait; ordinary playback on one device remains asynchronous.
+
+The renderer tracks draw and ownership-return completion and polls pending
+frames while idle, so release does not require another frame or readback.
+Draw/external submission queues and pending frame records each have a limit of
+three. Queue pressure and publication-reuse waits have five-second timeouts;
+driver-level teardown can still block inside the driver. The decoder pool keeps
+its existing cap and fail-closed exhaustion policy. Delayed returns must not
+cause silent copying or premature decoder reuse; sustained pressure can still
+disable native publication and trigger the existing fallback.
+
+Producer completion is still established by `vaSyncSurface` before publication.
+This change removes consumer ownership-transfer and frame-end waits; it does not
+replace the decoder's readiness wait with an exported fence.
+
+`WR_VIDEO_FORCE_SYNC=1` restores synchronous acquire, ownership return and the
+native-video frame-end drain for same-binary comparisons. The default is
+asynchronous; WebGL/WebGPU controls do not affect it. Restart Firefox when
+changing these environment flags. Successful imports emit the one-time marker
+`WebRender Vulkan video selected transport: direct NV12; synchronization: async`
+(or `sync` for the control). `WR_VIDEO_SYNC_INSTRUMENTATION=1` records cumulative
+`Video DMA-BUF sync metrics:` histograms; `WR_VIDEO_BENCHMARK_QUIET=1` suppresses
+per-frame logging while keeping the selection marker. Import, acquire,
+ownership-return and conditional reuse/backpressure spans are CPU-side wall
+times, not GPU execution or presentation latency; nested spans must not be added.
 
 Both GL readers and the HAL acquire callback use the bounded shared-lock wait.
 The native GL fixture includes a reader waiting on another thread's access.
@@ -255,7 +285,10 @@ python3 gfx/webrender_bindings/tests/run_browser_native_video.py \
 ```
 
 Use `--binary` for another object directory. Optional `--icd`,
-`--validation-layers` and `--adapter` select the Vulkan test environment.
+`--validation-layers`, `--loader-directory` and `--adapter` select the Vulkan
+test environment. `--synchronization sync` selects the synchronous control;
+the default is `async`. Reports check the selected mode and loaded Vulkan
+library as well as the actual compositor and decoder.
 `--software-presentation` enables Mesa's CPU presentation path for Xvfb,
 which has no DRI3. This changes presentation, not the selected Vulkan adapter;
 the test still checks the actual backend and decoder. `--render-node` selects
@@ -290,3 +323,62 @@ layouts. Other vendors, unsupported formats and playback performance require
 separate evidence. Ordinary native playback samples the decoder allocation;
 canvas readback, screenshots, WebGL uploads and recovery readback explicitly
 copy pixels when their consumer needs a separate image.
+
+## Asynchronous transfer validation
+
+The native tests cover deferred acquisition and return, both-plane retention,
+exactly-once release, bounded submissions, shutdown and failed return submission.
+`async_nv12_cross_consumer_progresses_previous_renderer` submits a frame on one
+renderer and acquires the same publication on another without first polling the
+original renderer. It checks ownership release, matching rendered pixels and
+that the progress handle does not retain a destroyed consumer. Live CPU leases
+and changed publication metadata remain rejected.
+
+Intel VA-API/Vulkan validation passed both native and Naga shader paths, including
+the synchronous control. Native browser coverage passed playback with canvas
+and WebGL readers, seeks, looping, multiple windows, PiP, minimize/restore,
+resolution changes and device reset in GPU and parent compositor processes,
+plus GPU-process crash recovery. PiP retains the full reader coverage while the
+separate window is active. These runs used Vulkan loader 1.4.363 and synchronization
+validation; the system loader 1.3.275 has a previously observed multi-device
+validation teardown race. Logs are under `artifacts/native-video/async/`.
+
+## Transfer benchmark
+
+`run_video_transfer_benchmark.py` compares the two transfer modes using the same
+binary and clip. It plays only a video during the timed interval, after a
+two-second warmup. Timing stops after a fixed wall-time duration; it is not
+extended until a requested number of callbacks arrives. Canvas and compositor
+readbacks happen after timing. The report records decoder hardware status,
+the direct-NV12 selection marker, playback-quality counters, frame callbacks,
+focus/visibility changes and optional process CPU/memory/DRM counters.
+
+```sh
+ffmpeg -f lavfi -i testsrc2=size=1920x1080:rate=60 -t 120 -an \
+  -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -threads 4 \
+  -row-mt 1 -tile-columns 2 -b:v 4M -g 120 -pix_fmt yuv420p \
+  -color_range tv -color_primaries bt709 -color_trc bt709 -colorspace bt709 \
+  artifacts/video-async/benchmark-1080p60.webm
+
+python3 gfx/webrender_bindings/tests/run_video_transfer_benchmark.py \
+  --clip artifacts/video-async/benchmark-1080p60.webm \
+  --output artifacts/video-async/benchmark-async \
+  --display native --synchronization async --duration 100 \
+  --process-metrics light --quiet
+```
+
+Use a clip longer than the warmup and measured interval; the runner rejects
+early ending, stalls, decoder fallback and invalid readback. Repeat with
+`--synchronization sync`, alternating order across pairs. Collect memory and
+`--sync-instrumentation` separately from quiet CPU timing. Native measurements
+require an idle host and a visible, focused browser. Callback cadence and
+`presentedFrames` describe compositor submission, not scanout latency. No
+performance improvement is established by the correctness runs.
+
+The initial three-second native smoke passed in both modes with hardware
+decoding, zero dropped frames and no Vulkan validation errors. The largest
+post-timing readback differences were 3.04/255 (sync) and 2.20/255 (async), using
+5×5 pixel means after scaling to the displayed size. Reports are in
+`artifacts/video-async/benchmark-smoke-sync/` and
+`artifacts/video-async/benchmark-smoke-async/`. These short checks validate the
+harness and make no performance claim.
