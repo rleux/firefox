@@ -40,7 +40,15 @@ fn wait_for_hardware(device: &ExternalImageDevice) {
 #[test]
 fn nv12_layout_rejects_invalid_storage() {
     let make = |allocation, visible, modifier, strides, offsets, bytes| {
-        Nv12DmaBufLayout::new(allocation, visible, modifier, strides, offsets, bytes)
+        VideoDmaBufLayout::new(
+            VideoDmaBufFormat::Nv12,
+            allocation,
+            visible,
+            modifier,
+            strides,
+            offsets,
+            bytes,
+        )
     };
     assert!(make(
         [256, 128],
@@ -90,6 +98,79 @@ fn nv12_layout_rejects_invalid_storage() {
 }
 
 #[test]
+fn p010_layout_checks_sample_storage_and_alignment() {
+    let make = |allocation, visible, modifier, strides, offsets, bytes| {
+        VideoDmaBufLayout::new(
+            VideoDmaBufFormat::P010,
+            allocation,
+            visible,
+            modifier,
+            strides,
+            offsets,
+            bytes,
+        )
+    };
+    assert!(make(
+        [256, 128],
+        [248, 120],
+        INTEL_Y_TILED,
+        [512; 2],
+        [0, 65536],
+        98304,
+    )
+    .is_ok());
+    let linear = make(
+        [256, 128],
+        [256, 128],
+        0,
+        [512; 2],
+        [0, 65536],
+        98304,
+    )
+    .unwrap();
+    assert_eq!(linear.descriptor(0).format, ImageFormat::R16);
+    assert_eq!(linear.descriptor(1).format, ImageFormat::RG16);
+    for (allocation, visible, modifier, strides, offsets, bytes) in [
+        ([0, 128], [256, 128], 0, [512; 2], [0, 65536], 98304),
+        ([256, 128], [258, 120], 0, [512; 2], [0, 65536], 98304),
+        ([256, 128], [247, 120], 0, [512; 2], [0, 65536], 98304),
+        ([255, 128], [248, 120], 0, [512; 2], [0, 65536], 98304),
+        ([256, 128], [256, 128], 1, [512; 2], [0, 65536], 98304),
+        ([256, 128], [256, 128], 0, [510, 512], [0, 65536], 98304),
+        ([256, 128], [256, 128], 0, [513, 512], [0, 65536], 98304),
+        ([256, 128], [256, 128], 0, [512; 2], [1, 65536], 98304),
+        ([256, 128], [256, 128], 0, [512; 2], [0, 32768], 98304),
+        ([256, 128], [256, 128], 0, [512; 2], [0, 65536], 98303),
+        (
+            [256, 128],
+            [256, 128],
+            0,
+            [u64::MAX; 2],
+            [0, 65536],
+            u64::MAX,
+        ),
+        (
+            [256, 128],
+            [256, 128],
+            INTEL_Y_TILED,
+            [514, 512],
+            [0, 65536],
+            98304,
+        ),
+        (
+            [256, 128],
+            [256, 128],
+            INTEL_Y_TILED,
+            [512; 2],
+            [0, 65538],
+            98304,
+        ),
+    ] {
+        assert!(make(allocation, visible, modifier, strides, offsets, bytes).is_err());
+    }
+}
+
+#[test]
 fn nv12_abandonment_survives_later_plane_completion() {
     let observed = Rc::new(Cell::new(None));
     let result = observed.clone();
@@ -107,28 +188,37 @@ fn nv12_abandonment_survives_later_plane_completion() {
 
 #[test]
 fn nv12_capabilities_check_modifier_extent_and_bytes() {
-    let layout =
-        Nv12DmaBufLayout::new([256, 128], [248, 120], 0, [256; 2], [0, 32768], 49152).unwrap();
-    let capabilities = Nv12DmaBufCapabilities {
+    let layout = VideoDmaBufLayout::new(
+        VideoDmaBufFormat::Nv12,
+        [256, 128],
+        [248, 120],
+        0,
+        [256; 2],
+        [0, 32768],
+        49152,
+    )
+    .unwrap();
+    let capabilities = VideoDmaBufCapabilities {
+        format: VideoDmaBufFormat::Nv12,
         modifier: 0,
         max_size: [256, 128],
         max_allocation_size: 49152,
     };
     assert!(capabilities.supports(&layout));
     for changed in [
-        Nv12DmaBufCapabilities {
+        VideoDmaBufCapabilities {
             modifier: INTEL_Y_TILED,
             ..capabilities
         },
-        Nv12DmaBufCapabilities {
+        VideoDmaBufCapabilities {
             max_size: [254, 128],
             ..capabilities
         },
-        Nv12DmaBufCapabilities {
+        VideoDmaBufCapabilities {
             max_size: [256, 126],
             ..capabilities
         },
-        Nv12DmaBufCapabilities {
+        VideoDmaBufCapabilities {
             max_allocation_size: 49151,
             ..capabilities
         },
@@ -137,7 +227,52 @@ fn nv12_capabilities_check_modifier_extent_and_bytes() {
     }
 }
 
-fn fixture() -> (OwnedFd, Nv12DmaBufLayout, [u64; 2], Vec<u8>) {
+#[test]
+fn p010_capabilities_require_exact_format_modifier_extent_and_bytes() {
+    let layout = VideoDmaBufLayout::new(
+        VideoDmaBufFormat::P010,
+        [256, 128],
+        [248, 120],
+        0,
+        [512; 2],
+        [0, 65536],
+        98304,
+    )
+    .unwrap();
+    let capabilities = VideoDmaBufCapabilities {
+        format: VideoDmaBufFormat::P010,
+        modifier: 0,
+        max_size: [256, 128],
+        max_allocation_size: 98304,
+    };
+    assert!(capabilities.supports(&layout));
+    for changed in [
+        VideoDmaBufCapabilities {
+            format: VideoDmaBufFormat::Nv12,
+            ..capabilities
+        },
+        VideoDmaBufCapabilities {
+            modifier: INTEL_Y_TILED,
+            ..capabilities
+        },
+        VideoDmaBufCapabilities {
+            max_size: [254, 128],
+            ..capabilities
+        },
+        VideoDmaBufCapabilities {
+            max_size: [256, 126],
+            ..capabilities
+        },
+        VideoDmaBufCapabilities {
+            max_allocation_size: 98303,
+            ..capabilities
+        },
+    ] {
+        assert!(!changed.supports(&layout));
+    }
+}
+
+fn fixture() -> (OwnedFd, VideoDmaBufLayout, [u64; 2], Vec<u8>) {
     let number = |name| {
         std::env::var(name)
             .expect("Run through ExportVAAPIFrame")
@@ -145,7 +280,8 @@ fn fixture() -> (OwnedFd, Nv12DmaBufLayout, [u64; 2], Vec<u8>) {
             .unwrap()
     };
     let fd = unsafe { BorrowedFd::borrow_raw(number("WR_NV12_FD") as i32) };
-    let layout = Nv12DmaBufLayout::new(
+    let layout = VideoDmaBufLayout::new(
+        VideoDmaBufFormat::Nv12,
         [
             number("WR_NV12_ALLOC_WIDTH") as u32,
             number("WR_NV12_ALLOC_HEIGHT") as u32,
@@ -167,6 +303,108 @@ fn fixture() -> (OwnedFd, Nv12DmaBufLayout, [u64; 2], Vec<u8>) {
         [number("WR_NV12_DRM_MAJOR"), number("WR_NV12_DRM_MINOR")],
         bytes,
     )
+}
+
+fn p010_fixture() -> (OwnedFd, VideoDmaBufLayout, [u64; 2], Vec<u8>) {
+    let number = |name| {
+        std::env::var(name)
+            .expect("Run through the P010 ExportVAAPIFrame fixture")
+            .parse::<u64>()
+            .unwrap()
+    };
+    assert_eq!(std::env::var("WR_VIDEO_FORMAT").as_deref(), Ok("P010"));
+    let fd = unsafe { BorrowedFd::borrow_raw(number("WR_P010_FD") as i32) };
+    let layout = VideoDmaBufLayout::new(
+        VideoDmaBufFormat::P010,
+        [
+            number("WR_P010_ALLOC_WIDTH") as u32,
+            number("WR_P010_ALLOC_HEIGHT") as u32,
+        ],
+        [
+            number("WR_P010_WIDTH") as u32,
+            number("WR_P010_HEIGHT") as u32,
+        ],
+        number("WR_P010_MODIFIER"),
+        [number("WR_P010_Y_PITCH"), number("WR_P010_UV_PITCH")],
+        [number("WR_P010_Y_OFFSET"), number("WR_P010_UV_OFFSET")],
+        number("WR_P010_BYTES"),
+    )
+    .unwrap();
+    let bytes = std::fs::read(std::env::var("WR_P010_REFERENCE").unwrap()).unwrap();
+    (
+        fd.try_clone_to_owned().unwrap(),
+        layout,
+        [number("WR_P010_DRM_MAJOR"), number("WR_P010_DRM_MINOR")],
+        bytes,
+    )
+}
+
+fn crop_p010_reference(
+    reference: &[u8],
+    original: [u32; 2],
+    visible: [u32; 2],
+) -> Vec<u8> {
+    let mut cropped = Vec::new();
+    let y_bytes = (original[0] * original[1] * 2) as usize;
+    for channel in 0..2 {
+        let plane = if channel == 0 { 0 } else { y_bytes };
+        let rows = (visible[1] >> channel) as usize;
+        let source_stride = (original[0] * 2) as usize;
+        let row_bytes = (visible[0] * 2) as usize;
+        for row in 0..rows {
+            let start = plane + row * source_stride;
+            cropped.extend_from_slice(&reference[start..start + row_bytes]);
+        }
+    }
+    cropped
+}
+
+fn p010_word(reference: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([reference[offset], reference[offset + 1]])
+}
+
+fn expected_p010_pixel(
+    reference: &[u8],
+    size: [u32; 2],
+    point: [u32; 2],
+    color_space: YuvColorSpace,
+    range: ColorRange,
+) -> [u8; 4] {
+    let [width, height] = size;
+    let y_offset = ((point[1] * width + point[0]) * 2) as usize;
+    let uv_offset = (width * height * 2
+        + ((point[1] / 2) * (width / 2) + point[0] / 2) * 4)
+        as usize;
+    let code = |offset| {
+        let word = p010_word(reference, offset);
+        assert_eq!(word & 0x3f, 0);
+        (word >> 6) as f32
+    };
+    let (y, cb, cr) = match range {
+        ColorRange::Limited => (
+            (code(y_offset) - 64.0) / 876.0,
+            (code(uv_offset) - 512.0) / 896.0,
+            (code(uv_offset + 2) - 512.0) / 896.0,
+        ),
+        ColorRange::Full => (
+            code(y_offset) / 1023.0,
+            (code(uv_offset) - 512.0) / 1023.0,
+            (code(uv_offset + 2) - 512.0) / 1023.0,
+        ),
+    };
+    let (kr, kb) = match color_space {
+        YuvColorSpace::Rec601 => (0.299, 0.114),
+        YuvColorSpace::Rec709 => (0.2126, 0.0722),
+        _ => unreachable!(),
+    };
+    let kg = 1.0 - kr - kb;
+    let r = y + 2.0 * (1.0 - kr) * cr;
+    let g = y
+        - 2.0 * kb * (1.0 - kb) / kg * cb
+        - 2.0 * kr * (1.0 - kr) / kg * cr;
+    let b = y + 2.0 * (1.0 - kb) * cb;
+    let convert = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [convert(r), convert(g), convert(b), 255]
 }
 
 fn read_plane(device: &ExternalImageDevice, image: &ExternalNativeImage) -> Vec<u8> {
@@ -213,7 +451,7 @@ impl RenderNotifier for Notice {
     fn shut_down(&self) {}
 }
 struct Provider {
-    image: WeakForeignNv12Image,
+    image: WeakForeignYuvImage,
     size: [u32; 2],
 }
 impl ExternalImageProvider for Provider {
@@ -221,7 +459,7 @@ impl ExternalImageProvider for Provider {
         assert_eq!(id.0, 77);
         self.image
             .upgrade()
-            .ok_or("NV12 publication released too early")?
+            .ok_or("YUV publication released too early")?
             .lease(
                 channel,
                 TexelRect::new(
@@ -274,14 +512,14 @@ fn check_sampling(crop: u32) {
     .unwrap();
     let device = renderer.external_image_device();
     assert!(device
-        .vaapi_nv12_capabilities()
+        .vaapi_video_capabilities(VideoDmaBufFormat::Nv12)
         .unwrap()
         .iter()
         .any(|caps| caps.supports(&layout)));
     let released = Rc::new(RefCell::new(Vec::new()));
     let log = released.clone();
     let image = unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 1, move |status| {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 1, move |status| {
             log.borrow_mut().push(status)
         })
     }
@@ -464,6 +702,267 @@ fn check_sampling(crop: u32) {
 }
 
 #[test]
+#[ignore = "Requires a real P010 ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_p010_plane_bytes_sampling_and_shared_release() {
+    check_p010_sampling(0);
+    check_p010_sampling(8);
+}
+
+fn check_p010_sampling(crop: u32) {
+    let asynchronous = std::env::var("WR_VIDEO_FORCE_SYNC").as_deref() != Ok("1");
+    let (fd, mut layout, node, original_reference) = p010_fixture();
+    let reference = if crop == 0 {
+        original_reference
+    } else {
+        let original = layout.visible;
+        assert!(original.iter().all(|&size| size > crop));
+        layout.visible = [original[0] - crop, original[1] - crop];
+        crop_p010_reference(&original_reference, original, layout.visible)
+    };
+    let (width, height) = (layout.visible[0], layout.visible[1]);
+    assert_eq!(reference.len(), (width * height * 3) as usize);
+    assert!(reference
+        .chunks_exact(2)
+        .all(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) & 0x3f == 0));
+    assert!(reference
+        .chunks_exact(2)
+        .any(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) >> 6 != 0));
+
+    let (mut renderer, sender) = crate::hal::create_vulkan_renderer(
+        &Options {
+            validation: true,
+            ..Default::default()
+        },
+        WebRenderOptions::default(),
+        Box::new(Notice),
+    )
+    .unwrap();
+    let device = renderer.external_image_device();
+    let p010_capabilities = device
+        .vaapi_video_capabilities(VideoDmaBufFormat::P010)
+        .unwrap();
+    assert!(!p010_capabilities.is_empty());
+    assert!(p010_capabilities
+        .iter()
+        .all(|capabilities| capabilities.format == VideoDmaBufFormat::P010));
+    assert!(p010_capabilities
+        .iter()
+        .any(|capabilities| capabilities.supports(&layout)));
+    assert!(device
+        .vaapi_video_capabilities(VideoDmaBufFormat::Nv12)
+        .unwrap()
+        .iter()
+        .all(|capabilities| {
+            capabilities.format == VideoDmaBufFormat::Nv12
+                && !capabilities.supports(&layout)
+        }));
+
+    let released = Rc::new(RefCell::new(Vec::new()));
+    let log = released.clone();
+    let image = unsafe {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 21, move |status| {
+            log.borrow_mut().push(status)
+        })
+    }
+    .unwrap();
+    let acquire = device.submitted();
+    assert!(acquire > 0);
+    let owner = &device.dmabuf_producer().unwrap().owner;
+    for channel in 0..2 {
+        let captured = read_plane(&device, &image.0.planes[channel]);
+        let expected_plane = if channel == 0 {
+            0
+        } else {
+            (width * height * 2) as usize
+        };
+        let rows = (height >> channel) as usize;
+        let actual_stride = (layout.allocation[0] * 2) as usize;
+        let row_bytes = (width * 2) as usize;
+        for row in 0..rows {
+            let actual = row * actual_stride;
+            let expected = expected_plane + row * row_bytes;
+            assert_eq!(
+                &captured[actual..actual + row_bytes],
+                &reference[expected..expected + row_bytes]
+            );
+        }
+    }
+    let y = image.0.planes[0].texture(owner).unwrap();
+    let uv = image.0.planes[1].texture(owner).unwrap();
+    assert!(Rc::ptr_eq(&y.raw, &uv.raw));
+    assert_eq!(y.allocation_id, uv.allocation_id);
+    assert_ne!(y.copy_aspect(), uv.copy_aspect());
+    drop((y, uv));
+
+    let hold_y = image
+        .lease(0, TexelRect::new(0.0, 0.0, width as f32, height as f32))
+        .unwrap();
+    let hold_uv = image
+        .lease(
+            1,
+            TexelRect::new(0.0, 0.0, (width / 2) as f32, (height / 2) as f32),
+        )
+        .unwrap();
+    let weak = image.downgrade();
+    renderer
+        .set_external_image_provider(Box::new(Provider {
+            image: image.downgrade(),
+            size: layout.visible,
+        }))
+        .unwrap();
+    drop(image);
+
+    let mut api = sender.create_api();
+    let frame_width = width * 2 + 2;
+    let document = api.add_document(DeviceIntSize::new(frame_width as i32, height as i32));
+    let pipeline = PipelineId(0, 0);
+    let native_keys = [api.generate_image_key(), api.generate_image_key()];
+    let control_keys = [api.generate_image_key(), api.generate_image_key()];
+    let mut iteration = 0;
+    for color_space in [YuvColorSpace::Rec601, YuvColorSpace::Rec709] {
+        for range in [ColorRange::Limited, ColorRange::Full] {
+            for (filter, scale) in [
+                (ImageRendering::Pixelated, 1.0),
+                (ImageRendering::Auto, 1.0),
+                (ImageRendering::Auto, 0.5),
+            ] {
+                let mut transaction = Transaction::new();
+                if iteration == 0 {
+                    for channel in 0..2 {
+                        transaction.add_image(
+                            native_keys[channel],
+                            layout.descriptor(channel),
+                            ImageData::External(ExternalImageData {
+                                id: ExternalImageId(77),
+                                channel_index: channel as u8,
+                                image_type: ExternalImageType::TextureHandle(
+                                    ImageBufferKind::Texture2D,
+                                ),
+                                normalized_uvs: false,
+                            }),
+                            None,
+                        );
+                        let range = if channel == 0 {
+                            0..(width * height * 2) as usize
+                        } else {
+                            (width * height * 2) as usize..reference.len()
+                        };
+                        transaction.add_image(
+                            control_keys[channel],
+                            layout.descriptor(channel),
+                            ImageData::new(reference[range].to_vec()),
+                            None,
+                        );
+                    }
+                }
+                let mut builder = DisplayListBuilder::new(pipeline);
+                builder.begin(60.0);
+                let info = CommonItemProperties {
+                    clip_rect: LayoutRect::from_size(LayoutSize::new(
+                        frame_width as f32,
+                        height as f32,
+                    )),
+                    clip_chain_id: ClipChainId::INVALID,
+                    spatial_id: SpatialId::root_scroll_node(pipeline),
+                    flags: PrimitiveFlags::default(),
+                };
+                builder.push_stacking_context(
+                    info.spatial_id,
+                    info.flags,
+                    None,
+                    TransformStyle::Flat,
+                    MixBlendMode::Normal,
+                    &[],
+                    &[],
+                    RasterSpace::Screen,
+                    StackingContextFlags::empty(),
+                    None,
+                );
+                for (x, keys) in [(0, native_keys), (width + 2, control_keys)] {
+                    builder.push_yuv_image(
+                        &info,
+                        LayoutRect::from_origin_and_size(
+                            LayoutPoint::new(x as f32, 0.0),
+                            LayoutSize::new(width as f32 * scale, height as f32 * scale),
+                        ),
+                        YuvData::P010(keys[0], keys[1]),
+                        ColorDepth::Color10,
+                        color_space,
+                        range,
+                        filter,
+                    );
+                }
+                builder.pop_stacking_context();
+                transaction.set_root_pipeline(pipeline);
+                transaction.set_display_list(
+                    Epoch(iteration),
+                    api.get_namespace_id(),
+                    builder.end(),
+                );
+                transaction.generate_frame(iteration as u64, true, false, RenderReasons::TESTING);
+                api.send_transaction(document, transaction);
+                renderer.prepare_frame(document).unwrap();
+                renderer.render().unwrap();
+                let pixels = renderer
+                    .read_pixels_rgba8(FramebufferIntRect::from_size(
+                        FramebufferIntSize::new(frame_width as i32, height as i32),
+                    ))
+                    .unwrap();
+                for row in pixels.chunks_exact(frame_width as usize * 4) {
+                    assert_eq!(
+                        &row[..width as usize * 4],
+                        &row[(width + 2) as usize * 4..],
+                        "Direct P010 sampling differs from uploaded control"
+                    );
+                }
+                if filter == ImageRendering::Pixelated {
+                    let point = [width / 4, height / 4];
+                    let framebuffer_y = height - 1 - point[1];
+                    let offset = ((framebuffer_y * frame_width + point[0]) * 4) as usize;
+                    let expected =
+                        expected_p010_pixel(&reference, [width, height], point, color_space, range);
+                    for (actual, expected) in pixels[offset..offset + 4].iter().zip(expected) {
+                        assert!(
+                            actual.abs_diff(expected) <= 2,
+                            "P010 {:?}/{:?} pixel {:?} differs from independent {:?}",
+                            color_space,
+                            range,
+                            &pixels[offset..offset + 4],
+                            expected_p010_pixel(
+                                &reference,
+                                [width, height],
+                                point,
+                                color_space,
+                                range,
+                            )
+                        );
+                    }
+                }
+                renderer.poll().unwrap();
+                assert!(released.borrow().is_empty());
+                iteration += 1;
+            }
+        }
+    }
+    drop(hold_y);
+    assert!(released.borrow().is_empty());
+    drop(hold_uv);
+    let release = device.submitted();
+    assert!(release > acquire);
+    assert!(weak.upgrade().is_none());
+    if asynchronous {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while released.borrow().is_empty() {
+            device.poll().unwrap();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Complete]);
+    api.shut_down(true);
+}
+
+#[test]
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_acquire_and_release_complete_asynchronously() {
     assert_ne!(std::env::var("WR_VIDEO_FORCE_SYNC").as_deref(), Ok("1"));
@@ -473,7 +972,7 @@ fn vaapi_nv12_acquire_and_release_complete_asynchronously() {
     let released = Rc::new(RefCell::new(Vec::new()));
     let result = released.clone();
     let image = unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 9, move |status| {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 9, move |status| {
             result.borrow_mut().push(status)
         })
     }
@@ -513,7 +1012,7 @@ fn vaapi_nv12_shutdown_drains_ownership_return() {
     let released = Rc::new(RefCell::new(Vec::new()));
     let result = released.clone();
     let image = unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 10, move |status| {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 10, move |status| {
             result.borrow_mut().push(status)
         })
     }
@@ -538,7 +1037,7 @@ fn vaapi_nv12_in_flight_ownership_is_bounded() {
     let released = Rc::new(RefCell::new(Vec::new()));
     let result = released.clone();
     let image = unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 11, move |status| {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 11, move |status| {
             result.borrow_mut().push(status)
         })
     }
@@ -589,7 +1088,7 @@ fn vaapi_nv12_rejects_device_mismatch_without_acquire() {
     let status = Rc::new(Cell::new(None));
     let result = status.clone();
     assert!(unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
+        device.import_vaapi_video(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
     }
     .is_err());
     assert_eq!(status.get(), Some(ExternalImageRelease::Unused));
@@ -615,7 +1114,7 @@ fn vaapi_nv12_submit_failure_abandons_publication() {
     let status = Rc::new(Cell::new(None));
     let result = status.clone();
     assert!(unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
+        device.import_vaapi_video(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
     }
     .is_err());
     assert_eq!(status.get(), Some(ExternalImageRelease::Abandoned));
@@ -639,7 +1138,7 @@ fn vaapi_nv12_partial_view_failure_cleans_up() {
     let status = Rc::new(Cell::new(None));
     let result = status.clone();
     assert!(unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
+        device.import_vaapi_video(fd.as_fd(), layout, node, 1, move |s| result.set(Some(s)))
     }
     .is_err());
     assert_eq!(status.get(), Some(ExternalImageRelease::Unused));
@@ -663,7 +1162,7 @@ fn nv12_ownership_return_failure_abandons() {
     let released = Rc::new(RefCell::new(Vec::new()));
     let result = released.clone();
     let image = unsafe {
-        device.import_vaapi_nv12(fd.as_fd(), layout, node, 12, move |status| {
+        device.import_vaapi_video(fd.as_fd(), layout, node, 12, move |status| {
             result.borrow_mut().push(status)
         })
     }

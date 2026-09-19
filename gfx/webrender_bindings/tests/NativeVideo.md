@@ -14,7 +14,7 @@ hardware-decoding and zero-copy eligibility, and a successful capability probe.
 Restart Firefox after changing the Vulkan preference. Vulkan Video remains
 disabled; this path uses VA-API on X11.
 
-`import_vaapi_nv12` requires its caller to establish producer completion,
+`import_vaapi_video` requires its caller to establish producer completion,
 retain the decoder frame, serialize other ownership transfers and forbid writes
 until the release callback permits reuse. Y/UV leases share one publication.
 The last lease returns ownership after GPU completion; abandoned publications
@@ -79,6 +79,8 @@ builds anything.
 
 The runner also accepts `--icd`, `--validation-layers` and `--shader-input` to
 set those choices explicitly instead of using the caller's environment.
+Use `--loader-directory` for a validation-compatible Vulkan loader and
+`--test-filter vaapi_p010_` with a VP9 Profile 2 IVF clip to run P010 sampling.
 
 ## Browser bridge tests
 
@@ -105,9 +107,46 @@ The kernel can round the backing allocation above the decoder-reported size.
 That padding is accepted, but plane bounds and Vulkan memory requirements must
 fit the reported size, and the report must fit the actual backing object.
 
-Separate-object NV12, P010, cross-device import and protected frames remain
+Separate-object frames, cross-device import and protected frames remain
 unsupported by this importer. These standalone tests establish HAL behavior;
 the browser tests below cover decoder publication and playback separately.
+
+V7, the separate Vulkan Video producer, is postponed. V8 adds VA-API P010 SDR
+in two stages: format-aware HAL import and sampling first, then browser
+capability negotiation, publication and reader/color acceptance. The HAL uses
+`VideoDmaBufFormat` to distinguish NV12 from P010 and validates byte pitches,
+sample alignment and capability format identity. P010 uses R16/RG16 UNORM plane
+views and WebRender's existing MSB-aligned P010 interpretation. Both formats
+share the asynchronous publication lifetime. Browser admission remains NV12
+until the second stage is validated. Odd visible dimensions remain explicitly
+rejected; HDR rendering requires separate acceptance.
+
+The plane views follow Vulkan's
+[single-plane view compatibility rules](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewCreateInfo.html).
+Capability checks still require the exact image/plane formats, modifier,
+sampling, filtering and explicit-readback usage on the selected device.
+
+The first V8 P010 fixture is a real Intel iHD VP9 Profile 2 export: a 256x128
+image in one 98,304-byte object, Intel Y-tiled modifier, R16/GR1616 layers,
+512-byte pitches and offsets 0/65,536. Both native and Naga shader paths pass
+exact P010 plane-byte comparison, shared-allocation/lifetime checks, cropped
+sampling, nearest/linear filtering, downscaling, and BT.601/BT.709 limited/full
+range conversion. The fixture contains nonzero low bits in its 10-bit codes;
+the independent RGB reference recovers those codes before applying color
+equations, with a two-code-value tolerance in 8-bit output. Low-level plane readback
+must match exactly. Logs and probes are under `artifacts/native-video/v8/`.
+
+A padded 258x130 export also passes both shader paths: one 184,320-byte object,
+640-byte pitches and offsets 0/102,400. The two P010 fixtures cover 96 rendered
+configurations in total. Existing NV12 HAL and bridge controls pass alongside
+them (32 native fixture tests total); the 163 nonignored HAL tests and Firefox
+binaries build also pass.
+
+Linear P010 is query-supported on this host but has no demonstrated native
+decoder export, so it is not planned for browser admission yet. An actual
+255x127 decoder export retains odd allocation dimensions and violates Vulkan's
+4:2:0 image extent requirements; allocation byte padding alone does not justify
+inventing an even image extent. That case remains rejected.
 
 ## Producer lifetime tests
 

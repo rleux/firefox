@@ -159,17 +159,24 @@ int main(int argc, char** argv) {
                             AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT),
              "Export DRM PRIME") ||
       !Check(av_hwframe_transfer_data(decoder.reference, decoder.frame, 0),
-             "Read reference planes") ||
-      decoder.reference->format != AV_PIX_FMT_NV12)
+             "Read reference planes"))
     return 1;
   const auto* drm =
       reinterpret_cast<const AVDRMFrameDescriptor*>(decoder.mapped->data[0]);
   const auto* allocation = &exported.descriptor;
   constexpr uint32_t kR8 = 0x20203852;
   constexpr uint32_t kGR88 = 0x38385247;
+  constexpr uint32_t kR16 = 0x20363152;
+  constexpr uint32_t kGR32 = 0x32335247;
+  const bool p010 = decoder.reference->format == AV_PIX_FMT_P010LE;
+  if (!p010 && decoder.reference->format != AV_PIX_FMT_NV12) return 1;
+  const uint32_t yFormat = p010 ? kR16 : kR8;
+  const uint32_t uvFormat = p010 ? kGR32 : kGR88;
+  const char* format = p010 ? "P010" : "NV12";
   if (!drm || drm->nb_objects != 1 || drm->nb_layers != 2 ||
-      drm->layers[0].format != kR8 || drm->layers[1].format != kGR88) {
-    std::fprintf(stderr, "Fixture requires one-object, separate-layer NV12\n");
+      drm->layers[0].format != yFormat || drm->layers[1].format != uvFormat) {
+    std::fprintf(stderr, "Fixture requires one-object, separate-layer %s\n",
+                 format);
     return 1;
   }
   for (const auto& layer : drm->layers) {
@@ -188,37 +195,47 @@ int main(int argc, char** argv) {
   std::error_code error;
   std::filesystem::create_directories(argv[4], error);
   if (error) return 1;
-  const auto referencePath = std::filesystem::absolute(
-      std::filesystem::path(argv[4]) / "reference.nv12");
+  const auto referencePath =
+      std::filesystem::absolute(std::filesystem::path(argv[4]) /
+                                (p010 ? "reference.p010" : "reference.nv12"));
   std::ofstream reference(referencePath, std::ios::binary);
   for (int plane = 0; plane < 2; ++plane) {
-    for (int y = 0; y < decoder.frame->height >> plane; ++y) {
+    const int width =
+        plane ? (decoder.frame->width + 1) & ~1 : decoder.frame->width;
+    const int height =
+        plane ? (decoder.frame->height + 1) / 2 : decoder.frame->height;
+    for (int y = 0; y < height; ++y) {
       reference.write(
           reinterpret_cast<char*>(decoder.reference->data[plane] +
                                   y * decoder.reference->linesize[plane]),
-          decoder.frame->width);
+          width * (p010 ? 2 : 1));
     }
   }
   reference.close();
-  if (!reference || setenv("WR_NV12_REFERENCE", referencePath.c_str(), 1) ||
-      !SetNumber("WR_NV12_FD", fd) ||
-      !SetNumber("WR_NV12_ACCESS_LOCK_FD", decoder.accessLock) ||
-      !SetNumber("WR_NV12_BYTES", drm->objects[0].size) ||
-      !SetNumber("WR_NV12_MODIFIER", drm->objects[0].format_modifier) ||
-      !SetNumber("WR_NV12_WIDTH", decoder.frame->width) ||
-      !SetNumber("WR_NV12_HEIGHT", decoder.frame->height) ||
-      !SetNumber("WR_NV12_ALLOC_WIDTH", allocation->width) ||
-      !SetNumber("WR_NV12_ALLOC_HEIGHT", allocation->height) ||
-      !SetNumber("WR_NV12_Y_OFFSET", drm->layers[0].planes[0].offset) ||
-      !SetNumber("WR_NV12_UV_OFFSET", drm->layers[1].planes[0].offset) ||
-      !SetNumber("WR_NV12_Y_PITCH", drm->layers[0].planes[0].pitch) ||
-      !SetNumber("WR_NV12_UV_PITCH", drm->layers[1].planes[0].pitch) ||
-      !SetNumber("WR_NV12_DRM_MAJOR", major(node.st_rdev)) ||
-      !SetNumber("WR_NV12_DRM_MINOR", minor(node.st_rdev)))
+  const std::string prefix = std::string("WR_") + format + "_";
+  const auto set = [&prefix](const char* name, uint64_t value) {
+    return SetNumber((prefix + name).c_str(), value);
+  };
+  if (!reference || setenv("WR_VIDEO_FORMAT", format, 1) ||
+      setenv((prefix + "REFERENCE").c_str(), referencePath.c_str(), 1) ||
+      !set("FD", fd) || !set("ACCESS_LOCK_FD", decoder.accessLock) ||
+      !set("BYTES", drm->objects[0].size) ||
+      !set("MODIFIER", drm->objects[0].format_modifier) ||
+      !set("WIDTH", decoder.frame->width) ||
+      !set("HEIGHT", decoder.frame->height) ||
+      !set("ALLOC_WIDTH", allocation->width) ||
+      !set("ALLOC_HEIGHT", allocation->height) ||
+      !set("Y_OFFSET", drm->layers[0].planes[0].offset) ||
+      !set("UV_OFFSET", drm->layers[1].planes[0].offset) ||
+      !set("Y_PITCH", drm->layers[0].planes[0].pitch) ||
+      !set("UV_PITCH", drm->layers[1].planes[0].pitch) ||
+      !set("DRM_MAJOR", major(node.st_rdev)) ||
+      !set("DRM_MINOR", minor(node.st_rdev)))
     return 1;
   std::printf(
-      "VA-API frame %dx%d, allocation %ux%u, modifier 0x%llx, %zu bytes\n",
-      decoder.frame->width, decoder.frame->height, allocation->width,
+      "VA-API %s frame %dx%d, allocation %ux%u, modifier 0x%llx, %zu "
+      "bytes\n",
+      format, decoder.frame->width, decoder.frame->height, allocation->width,
       allocation->height,
       static_cast<unsigned long long>(drm->objects[0].format_modifier),
       drm->objects[0].size);

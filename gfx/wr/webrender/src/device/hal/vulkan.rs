@@ -10,7 +10,7 @@ mod linux;
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 pub use linux::{DmaBufLayout, DmaBufPlane, DmaBufExport, DmaBufCopy, DmaBufCapabilities, ForeignRgbFormat, ForeignRgbLayout, ForeignRgbImage, WeakForeignRgbImage};
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
-pub use linux::{Nv12DmaBufCapabilities, Nv12DmaBufLayout, ForeignNv12Image, WeakForeignNv12Image};
+pub use linux::{VideoDmaBufCapabilities, VideoDmaBufFormat, VideoDmaBufLayout, ForeignYuvImage, WeakForeignYuvImage};
 #[cfg(all(target_os = "linux", feature = "hal-linux-dmabuf"))]
 pub use linux::{VulkanDmaBufImage, WeakVulkanDmaBufImage};
 
