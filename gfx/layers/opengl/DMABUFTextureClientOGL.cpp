@@ -15,9 +15,15 @@ DMABUFTextureData::DMABUFTextureData(DMABufSurface* aSurface,
                                      BackendType aBackend)
     : mSurface(aSurface), mBackend(aBackend) {
   MOZ_ASSERT(mSurface);
+  if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
+    if (yuv->GetVAAPIDescriptor()) {
+      mSurface->GlobalRefAdd();
+      mHasGlobalRef = true;
+    }
+  }
 }
 
-DMABUFTextureData::~DMABUFTextureData() = default;
+DMABUFTextureData::~DMABUFTextureData() { ReleaseSurface(); }
 
 bool DMABUFTextureData::Serialize(SurfaceDescriptor& aOutDescriptor) {
   return mSurface->Serialize(aOutDescriptor);
@@ -43,8 +49,16 @@ already_AddRefed<DataSourceSurface> DMABUFTextureData::GetAsSurface() {
   return nullptr;
 }
 
-void DMABUFTextureData::Deallocate(LayersIPCChannel*) { mSurface = nullptr; }
+void DMABUFTextureData::ReleaseSurface() {
+  if (mHasGlobalRef) {
+    mSurface->GlobalRefRelease();
+    mHasGlobalRef = false;
+  }
+  mSurface = nullptr;
+}
 
-void DMABUFTextureData::Forget(LayersIPCChannel*) { mSurface = nullptr; }
+void DMABUFTextureData::Deallocate(LayersIPCChannel*) { ReleaseSurface(); }
+
+void DMABUFTextureData::Forget(LayersIPCChannel*) { ReleaseSurface(); }
 
 }  // namespace mozilla::layers
