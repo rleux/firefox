@@ -10,6 +10,7 @@
 #include "base/linux_memfd_defs.h"
 #include "gtest/gtest.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
+#include "mozilla/layers/DMABUFTextureClientOGL.h"
 #include "mozilla/layers/LayersSurfaces.h"
 
 using namespace mozilla;
@@ -115,6 +116,58 @@ TEST(VAAPIFramePool, RetainsCallerAndImageUntilPublicationRetires)
   EXPECT_EQ(input.contextCount.references, 1);
   RefPtr<DMABufSurface> late = DMABufSurface::CreateDMABufSurface(descriptor);
   EXPECT_FALSE(late);
+}
+
+TEST(VAAPIFramePool, TextureDataPinsPublicationUntilEveryCleanupPath)
+{
+  enum class Cleanup { Destructor, Deallocate, Forget };
+  for (const auto cleanup :
+       {Cleanup::Destructor, Cleanup::Deallocate, Cleanup::Forget}) {
+    SCOPED_TRACE(static_cast<int>(cleanup));
+    Input input;
+    ASSERT_TRUE(input.Init());
+    auto lib = Library();
+    VideoFramePool<LIBAV_VER> pool(16, true);
+    auto frame = input.Publish(pool, lib);
+    ASSERT_TRUE(frame);
+    auto surface = frame->GetDMABufSurface();
+    auto image = frame->GetAsImage();
+    UniquePtr<DMABUFTextureData> texture(
+        DMABUFTextureData::Create(surface, gfx::BackendType::SKIA));
+    SurfaceDescriptor descriptor;
+    ASSERT_TRUE(texture->Serialize(descriptor));
+
+    frame = nullptr;
+    image = nullptr;
+    pool.ReleaseUnusedVAAPIFrames();
+    EXPECT_EQ(input.frameCount.references, 2);
+    EXPECT_EQ(input.contextCount.references, 2);
+    RefPtr<DMABufSurface> consumer =
+        DMABufSurface::CreateDMABufSurface(descriptor);
+    ASSERT_TRUE(consumer);
+    consumer = nullptr;
+
+    switch (cleanup) {
+      case Cleanup::Destructor:
+        texture = nullptr;
+        break;
+      case Cleanup::Deallocate:
+        texture->Deallocate(nullptr);
+        break;
+      case Cleanup::Forget:
+        texture->Forget(nullptr);
+        break;
+    }
+    pool.ReleaseUnusedVAAPIFrames();
+    EXPECT_EQ(input.frameCount.references, 1);
+    EXPECT_EQ(input.contextCount.references, 1);
+    texture = nullptr;
+    pool.ReleaseUnusedVAAPIFrames();
+    EXPECT_EQ(input.frameCount.references, 1);
+    EXPECT_EQ(input.contextCount.references, 1);
+    RefPtr<DMABufSurface> late = DMABufSurface::CreateDMABufSurface(descriptor);
+    EXPECT_FALSE(late);
+  }
 }
 
 TEST(VAAPIFramePool, RepeatedOutputSharesPublicationAcrossFlush)
