@@ -215,7 +215,9 @@ outside the cache borrow before relocking; stale generations, access handles,
 layouts and logical devices remain rejected. This conditional reuse wait is
 separate from the removed per-frame wait. CPU snapshots remain explicit copies
 under the same shared lock. A busy snapshot wait does not poison another reader's
-publication. VA-API/FOREIGN ownership and video frame completion remain synchronous.
+publication. VA-API ownership and video frame completion remain synchronous.
+The [WebGL RGB path](WebGLDMABuf.md) now also queues its FOREIGN ownership
+transfers asynchronously.
 
 Recycling atomically retires the old access handle before the allocation can
 be reused. A busy or poisoned allocation is not returned to the producer's

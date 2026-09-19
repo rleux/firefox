@@ -113,8 +113,8 @@ unsafe extern "C" fn wr_renderer_acquire_hal_image(
 }
 
 #[no_mangle]
-unsafe extern "C" fn wr_renderer_lock_foreign_rgb(_: *mut WrHalImageLease) -> bool {
-    true
+unsafe extern "C" fn wr_renderer_lock_foreign_rgb(raw: *mut WrHalImageLease) -> bool {
+    wr_renderer_lock_vaapi_image(raw)
 }
 
 #[no_mangle]
@@ -275,6 +275,92 @@ impl hal::ExternalImageProvider for SingleLease {
     fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<hal::ExternalImageLease, String> {
         self.0.take().ok_or("Image already acquired".into())
     }
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn foreign_cache_defers_release_and_rejects_stale_metadata() {
+    init_log();
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let fd = number("WR_FOREIGN_RGB_FD") as i32;
+    let ready_fd = number("WR_FOREIGN_RGB_FENCE") as i32;
+    let fourcc = number("WR_FOREIGN_RGB_FOURCC") as u32;
+    let stride = number("WR_FOREIGN_RGB_PITCH");
+    let consumer = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let other = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: Vec::new(),
+        video_access: Default::default(),
+    });
+    let offer = |generation| {
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation,
+            source: WrHalImageSource::ForeignRGB(WrHalForeignRGB {
+                fd,
+                ready_fd,
+                width: 17,
+                height: 9,
+                fourcc,
+                stride,
+                offset: 0,
+            }),
+        });
+    };
+    let generation = number("WR_FOREIGN_RGB_GENERATION");
+    offer(generation);
+    let first = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(1), 0, false)
+        .unwrap();
+    offer(generation);
+    let second = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(2), 0, false)
+        .unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    drop(first);
+    drop(second);
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+    let before = fixture.releases.borrow().len();
+
+    offer(generation + 1);
+    assert!(provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(3), 0, false)
+        .is_err());
+    offer(generation);
+    assert!(provider(&fixture, other)
+        .acquire(ExternalImageId(3), 0, false)
+        .is_err());
+    assert_eq!(fixture.releases.borrow().len(), before + 2);
+    assert!(fixture.video_access.borrow().locked);
+
+    offer(generation);
+    let resumed = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 2);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    assert_eq!(fixture.releases.borrow().len(), before + 3);
+    drop(resumed);
+    assert!(fixture.video_access.borrow().locked);
+    consumer.finish().unwrap();
+    assert_eq!(fixture.video_access.borrow().unlocks, 2);
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.releases.borrow().len(), before + 4);
+    assert!(matches!(
+        fixture.releases.borrow().last(),
+        Some(WrHalImageRelease::Unused)
+    ));
 }
 
 #[test]

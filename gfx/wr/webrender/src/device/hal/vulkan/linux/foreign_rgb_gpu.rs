@@ -8,7 +8,34 @@ use api::*;
 use crate::device::hal::{ExternalImageProvider, Options};
 use crate::render_api::Transaction;
 use crate::WebRenderOptions;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+
+thread_local! {
+    static COMPLETION_GATE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn gated_device() -> ExternalImageDevice {
+    let mut device = crate::hal::create_vulkan_device(&Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    device.completion_probe = Some(|_, _| {
+        Ok(Box::new(|wait| {
+            Ok(wait || COMPLETION_GATE.with(|gate| gate.get()))
+        }))
+    });
+    ExternalImageDevice::new(&Rc::new(device))
+}
+
+fn set_completion_gate(open: bool) {
+    COMPLETION_GATE.with(|gate| gate.set(open));
+}
+
+fn wait_for_hardware(device: &ExternalImageDevice) {
+    let producer = device.dmabuf_producer().unwrap();
+    unsafe { producer.owner.open.queue.wait_for_idle() }.unwrap();
+}
 
 struct Notice;
 impl RenderNotifier for Notice {
@@ -37,6 +64,7 @@ impl ExternalImageProvider for Provider {
 #[test]
 #[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
 fn gl_dmabuf_direct_sampling_and_release() {
+    let asynchronous = std::env::var("WR_WEBGL_FORCE_SYNC").as_deref() != Ok("1");
     let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
     let fd = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FD") as i32) };
     let fence = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FENCE") as i32) };
@@ -73,6 +101,8 @@ fn gl_dmabuf_direct_sampling_and_release() {
         })
     }
     .unwrap();
+    let acquire = device.submitted();
+    assert!(acquire > 0);
     let uv = Rc::new(Cell::new(TexelRect::new(
         0.0,
         0.0,
@@ -214,7 +244,218 @@ fn gl_dmabuf_direct_sampling_and_release() {
         );
     }
     drop(keep);
-    assert_eq!(*released.borrow(), [ExternalImageRelease::Complete]);
+    let release = device.submitted();
+    assert!(release > acquire);
     assert!(weak.upgrade().is_none());
+    if asynchronous {
+        assert!(released.borrow().is_empty());
+        let mut completed = false;
+        for _ in 0..100_000 {
+            device.poll().unwrap();
+            if !released.borrow().is_empty() {
+                completed = true;
+                break;
+            }
+            std::hint::spin_loop();
+        }
+        assert!(completed);
+    }
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Complete]);
     api.shut_down(true);
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn gl_dmabuf_acquire_and_release_complete_asynchronously() {
+    assert_ne!(std::env::var("WR_WEBGL_FORCE_SYNC").as_deref(), Ok("1"));
+    set_completion_gate(false);
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let fd = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FD") as i32) };
+    let fence = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FENCE") as i32) };
+    let ready = SyncFile::from_fd(fence.try_clone_to_owned().unwrap());
+    let layout = ForeignRgbLayout::new(
+        [17, 9],
+        number("WR_FOREIGN_RGB_FOURCC") as u32,
+        0,
+        number("WR_FOREIGN_RGB_PITCH"),
+        0,
+    )
+    .unwrap();
+    let device = gated_device();
+    let released = Rc::new(RefCell::new(Vec::new()));
+    let result = released.clone();
+    let image = unsafe {
+        device.import_foreign_rgb_dmabuf(
+            fd,
+            layout,
+            &ready,
+            number("WR_FOREIGN_RGB_GENERATION"),
+            move |status| result.borrow_mut().push(status),
+        )
+    }
+    .unwrap();
+    let acquire = device.submitted();
+    assert!(acquire > 0);
+    wait_for_hardware(&device);
+    assert!(!device.poll_complete(acquire).unwrap());
+    drop(image);
+    let release = device.submitted();
+    assert!(release > acquire);
+    wait_for_hardware(&device);
+    assert!(!device.poll_complete(release).unwrap());
+    assert!(released.borrow().is_empty());
+    set_completion_gate(true);
+    assert!(device.poll_complete(release).unwrap());
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Unused]);
+    assert!(device.poll_complete(release).unwrap());
+    assert_eq!(released.borrow().len(), 1);
+    set_completion_gate(false);
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn gl_dmabuf_in_flight_ownership_is_bounded() {
+    assert_ne!(std::env::var("WR_WEBGL_FORCE_SYNC").as_deref(), Ok("1"));
+    set_completion_gate(false);
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let device = gated_device();
+    let descriptor = ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+    let owned = (0..4)
+        .map(|value| device.create_image(descriptor, &[value; 64]).unwrap())
+        .collect::<Vec<_>>();
+    let fd = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FD") as i32) };
+    let fence = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FENCE") as i32) };
+    let ready = SyncFile::from_fd(fence.try_clone_to_owned().unwrap());
+    let layout = ForeignRgbLayout::new(
+        [17, 9],
+        number("WR_FOREIGN_RGB_FOURCC") as u32,
+        0,
+        number("WR_FOREIGN_RGB_PITCH"),
+        0,
+    )
+    .unwrap();
+    let released = Rc::new(RefCell::new(Vec::new()));
+    let result = released.clone();
+    let image = unsafe {
+        device.import_foreign_rgb_dmabuf(
+            fd,
+            layout,
+            &ready,
+            number("WR_FOREIGN_RGB_GENERATION"),
+            move |status| result.borrow_mut().push(status),
+        )
+    }
+    .unwrap();
+    let producer = device.dmabuf_producer().unwrap();
+    for (index, owned) in owned.iter().enumerate() {
+        let texture = owned.texture(&producer.owner).unwrap();
+        texture
+            .upload_recorded(
+                &producer.owner,
+                &producer.submissions,
+                DeviceIntRect::from_size(DeviceIntSize::new(4, 4)),
+                &[index as u8; 64],
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        producer.submissions.submit().unwrap();
+        let mut stats = MemoryStats::default();
+        producer.submissions.memory(&mut stats);
+        assert!(stats.in_flight <= 3);
+        assert!(released.borrow().is_empty());
+    }
+    drop(image);
+    assert!(released.borrow().is_empty());
+    set_completion_gate(true);
+    device.finish().unwrap();
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Unused]);
+    let mut stats = MemoryStats::default();
+    producer.submissions.memory(&mut stats);
+    assert_eq!(stats.in_flight, 0);
+    set_completion_gate(false);
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn gl_dmabuf_release_failure_abandons_once() {
+    assert_ne!(std::env::var("WR_WEBGL_FORCE_SYNC").as_deref(), Ok("1"));
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let fd = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FD") as i32) };
+    let fence = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FENCE") as i32) };
+    let ready = SyncFile::from_fd(fence.try_clone_to_owned().unwrap());
+    let layout = ForeignRgbLayout::new(
+        [17, 9],
+        number("WR_FOREIGN_RGB_FOURCC") as u32,
+        0,
+        number("WR_FOREIGN_RGB_PITCH"),
+        0,
+    )
+    .unwrap();
+    let device = crate::hal::create_vulkan_image_device(&Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let released = Rc::new(RefCell::new(Vec::new()));
+    let result = released.clone();
+    let image = unsafe {
+        device.import_foreign_rgb_dmabuf(
+            fd,
+            layout,
+            &ready,
+            number("WR_FOREIGN_RGB_GENERATION"),
+            move |status| result.borrow_mut().push(status),
+        )
+    }
+    .unwrap();
+    device
+        .dmabuf_producer()
+        .unwrap()
+        .owner
+        .fault
+        .set(Some(FailurePoint::Submit));
+    drop(image);
+    assert!(released.borrow().is_empty());
+    assert!(device.poll().is_err());
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Abandoned]);
+    assert!(device.poll().is_err());
+    assert_eq!(released.borrow().len(), 1);
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn gl_dmabuf_shutdown_drains_ownership_return() {
+    assert_ne!(std::env::var("WR_WEBGL_FORCE_SYNC").as_deref(), Ok("1"));
+    set_completion_gate(false);
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let fd = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FD") as i32) };
+    let fence = unsafe { BorrowedFd::borrow_raw(number("WR_FOREIGN_RGB_FENCE") as i32) };
+    let ready = SyncFile::from_fd(fence.try_clone_to_owned().unwrap());
+    let layout = ForeignRgbLayout::new(
+        [17, 9],
+        number("WR_FOREIGN_RGB_FOURCC") as u32,
+        0,
+        number("WR_FOREIGN_RGB_PITCH"),
+        0,
+    )
+    .unwrap();
+    let device = gated_device();
+    let released = Rc::new(RefCell::new(Vec::new()));
+    let result = released.clone();
+    let image = unsafe {
+        device.import_foreign_rgb_dmabuf(
+            fd,
+            layout,
+            &ready,
+            number("WR_FOREIGN_RGB_GENERATION"),
+            move |status| result.borrow_mut().push(status),
+        )
+    }
+    .unwrap();
+    drop(image);
+    assert!(released.borrow().is_empty());
+    drop(device);
+    assert_eq!(*released.borrow(), [ExternalImageRelease::Unused]);
 }

@@ -157,9 +157,11 @@ mod linux {
 
     struct ForeignEntry {
         consumer: usize,
+        device: u64,
         generation: u64,
         layout: hal::ForeignRgbLayout,
         image: hal::WeakForeignRgbImage,
+        pending: std::rc::Rc<std::cell::Cell<bool>>,
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -352,6 +354,7 @@ mod linux {
             generation: u64,
             mut lease: Lease,
         ) -> Result<ExternalImageLease, String> {
+            let _span = hal::diagnostics::Span::new("webglImport");
             if data.fd < 0 || data.ready_fd < 0 || generation == 0 {
                 return Err("Invalid foreign WebGL handles or generation".into());
             }
@@ -363,17 +366,56 @@ mod linux {
                 .map_err(|e| e.to_string())?;
             let key = (metadata.dev(), metadata.ino());
             let consumer = self.handler.object() as usize;
+            let device = self.device.device_id();
+            let pending = FOREIGN_IMAGES.with(|images| {
+                let images = images.borrow();
+                let Some(entry) = images.get(&key) else {
+                    return Ok(None);
+                };
+                if entry.pending.get()
+                    && (entry.consumer != consumer
+                        || entry.device != device
+                        || entry.generation != generation
+                        || entry.layout != layout)
+                {
+                    return Err("Foreign WebGL allocation has a different live consumer/publication".to_owned());
+                }
+                Ok(if entry.pending.get() && entry.image.upgrade().is_none() {
+                    Some(entry.pending.clone())
+                } else {
+                    None
+                })
+            })?;
+            if let Some(pending) = pending {
+                let _span = hal::diagnostics::Span::new("webglPublicationReuseWait");
+                let start = std::time::Instant::now();
+                while pending.get() {
+                    self.device.poll()?;
+                    if !pending.get() {
+                        break;
+                    }
+                    if start.elapsed() >= std::time::Duration::from_secs(5) {
+                        return Err("Timed out returning foreign WebGL publication".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             let uv = TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32);
             FOREIGN_IMAGES.with(|images| {
                 let mut images = images.borrow_mut();
-                images.retain(|_, entry| entry.image.upgrade().is_some());
+                images.retain(|_, entry| entry.pending.get());
                 if let Some(entry) = images.get(&key) {
                     if let Some(image) = entry.image.upgrade() {
-                        if entry.consumer != consumer || entry.generation != generation || entry.layout != layout {
+                        if entry.consumer != consumer
+                            || entry.device != device
+                            || entry.generation != generation
+                            || entry.layout != layout
+                        {
                             return Err(
                                 "Foreign WebGL allocation already has a different live consumer/publication".into(),
                             );
                         }
+                        hal::diagnostics::webgl_transport();
                         return image.lease(uv);
                     }
                 }
@@ -385,9 +427,12 @@ mod linux {
                         .try_clone_to_owned()
                         .map_err(|e| e.to_string())?,
                 );
+                let pending = std::rc::Rc::new(std::cell::Cell::new(true));
+                let completed = pending.clone();
                 let image = unsafe {
                     self.device
                         .import_foreign_rgb_dmabuf(fd, layout, &ready, generation, move |status| {
+                            completed.set(false);
                             lease.status = match status {
                                 hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
                                 hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
@@ -400,12 +445,17 @@ mod linux {
                     key,
                     ForeignEntry {
                         consumer,
+                        device,
                         generation,
                         layout,
                         image: image.downgrade(),
+                        pending,
                     },
                 );
-                log::info!("WebGL canvas transport: direct Vulkan DMA-BUF sampling, generation={generation}");
+                hal::diagnostics::webgl_transport();
+                if !hal::diagnostics::quiet() {
+                    log::info!("WebGL canvas transport: direct Vulkan DMA-BUF sampling, generation={generation}");
+                }
                 image.lease(uv)
             })
         }

@@ -121,6 +121,11 @@ struct ForeignAccess {
 }
 
 impl ForeignAccess {
+    fn is_async(&self) -> bool {
+        self.external_family == vk::QUEUE_FAMILY_EXTERNAL
+            || !crate::device::hal::diagnostics::force_webgl_sync()
+    }
+
     fn wait(&self) -> Result<()> {
         let producer = self.device.dmabuf_producer()?;
         let serial = producer.submissions.submit_serial()?;
@@ -171,7 +176,7 @@ impl ForeignAccess {
                 vk::AccessFlags::SHADER_READ,
             );
         }
-        if self.external_family == vk::QUEUE_FAMILY_EXTERNAL {
+        if self.is_async() {
             producer.submissions.submit_serial()?;
             self.lifetime.acquire_submitted()?;
         } else {
@@ -293,12 +298,12 @@ impl ReleaseGuard {
 impl Drop for ReleaseGuard {
     fn drop(&mut self) {
         if let Some(access) = &mut self.access {
-            if access.external_family == vk::QUEUE_FAMILY_EXTERNAL
+            if access.is_async()
                 && self.status.get() != ExternalImageRelease::Abandoned
                 && access.lifetime.needs_release() {
                 if let Some(callback) = self.callback.take() {
                     if let Err(error) = access.release_async(callback, self.status.get()) {
-                        log::error!("Queueing Vulkan RGB ownership return: {error}");
+                        log::error!("Queueing RGB ownership return: {error}");
                         access.owner.lost.set(true);
                         if let Ok(producer) = access.device.dmabuf_producer() {
                             producer.submissions.discard_recording();
@@ -414,7 +419,8 @@ impl ExternalImageDevice {
     /// producer publication and prohibit writes until `release` reports Unused or Complete.
     /// Abandoned publications must not be recycled. Reuse this handle for repeated leases
     /// of the same live publication; do not import its allocation twice concurrently.
-    /// The callback runs after all image handles and renderer leases are dropped.
+    /// The callback runs after all image handles and renderer leases are dropped
+    /// and ownership return completes; drive pending returns with `poll` or `finish`.
     pub unsafe fn import_foreign_rgb_dmabuf(
         &self,
         fd: BorrowedFd<'_>,

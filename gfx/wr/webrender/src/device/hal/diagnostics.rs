@@ -13,7 +13,7 @@ fn flag(name: &str) -> bool {
 
 pub fn quiet() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| flag("WR_WEBGPU_BENCHMARK_QUIET"))
+    *VALUE.get_or_init(|| flag("WR_WEBGPU_BENCHMARK_QUIET") || flag("WR_WEBGL_BENCHMARK_QUIET"))
 }
 
 pub fn force_dmabuf_copy() -> bool {
@@ -21,9 +21,14 @@ pub fn force_dmabuf_copy() -> bool {
     *VALUE.get_or_init(|| flag("WR_WEBGPU_FORCE_DMABUF_COPY"))
 }
 
+pub fn force_webgl_sync() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| flag("WR_WEBGL_FORCE_SYNC"))
+}
+
 fn enabled() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| flag("WR_WEBGPU_SYNC_INSTRUMENTATION"))
+    *VALUE.get_or_init(|| flag("WR_WEBGPU_SYNC_INSTRUMENTATION") || flag("WR_WEBGL_SYNC_INSTRUMENTATION"))
 }
 
 #[derive(Default)]
@@ -36,8 +41,9 @@ struct Sample {
 
 impl Sample {
     fn print(&self, thread: &str, event: &str) {
+        let source = if flag("WR_WEBGL_SYNC_INSTRUMENTATION") { "WebGL" } else { "WebGPU" };
         eprintln!(
-            "WebGPU DMA-BUF sync metrics: {{\"pid\":{},\"thread\":\"{}\",\"event\":\"{}\",\"count\":{},\"totalNs\":{},\"maxNs\":{},\"buckets\":{:?}}}",
+            "{source} DMA-BUF sync metrics: {{\"pid\":{},\"thread\":\"{}\",\"event\":\"{}\",\"count\":{},\"totalNs\":{},\"maxNs\":{},\"buckets\":{:?}}}",
             std::process::id(), thread, event, self.count, self.total, self.max, self.buckets,
         );
     }
@@ -72,6 +78,16 @@ pub fn transport(direct: bool) {
             eprintln!(
                 "WebRender Vulkan DMA-BUF selected transport: {}",
                 if direct { "direct" } else { "copy" });
+        }
+    });
+}
+
+pub fn webgl_transport() {
+    TRANSPORTS.with(|seen| {
+        if seen.get() & 4 == 0 {
+            seen.set(seen.get() | 4);
+            eprintln!("WebRender Vulkan WebGL selected transport: direct; synchronization: {}",
+                if force_webgl_sync() { "sync" } else { "async" });
         }
     });
 }
