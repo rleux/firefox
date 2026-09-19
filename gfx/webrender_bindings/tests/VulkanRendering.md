@@ -1,5 +1,12 @@
 # Vulkan rendering diagnostics
 
+HAL `PreparedFrameInfo` preserves WebRender's render and present decisions.
+Readiness can coalesce notifications: a later no-render notification does not
+erase an earlier unconsumed render request for that document, even when both
+use the same frame publication ID. Once consumed, that request no longer makes
+subsequent no-render notifications request rendering. This metadata alone does
+not establish that the caller has retained valid output after resize or loss.
+
 Set `WR_HAL_RENDER_METRICS=1` before launching a HAL renderer to collect
 aggregate rendering counters. It emits `WR HAL render metrics: {json}` at most
 once per second during existing renderer polling, and a final record when the
