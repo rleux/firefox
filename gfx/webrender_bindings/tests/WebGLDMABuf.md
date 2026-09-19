@@ -104,5 +104,8 @@ same-context restoration and main-thread/worker OffscreenCanvas termination and
 recovery. Each correctness run checks 16 base pixel cases and preserved-buffer
 snapshots. Both 120-frame benchmark smoke runs passed the frame-index,
 direct-transport, mode, focus, viewport and system-loader checks. Long-run
-measurements are recorded separately. Failed Xvfb probes are excluded from native
+measurements are recorded in [the native measurement report](WebGLDMABufMeasurements.md).
+The 20-run comparison observed about 5% lower process CPU with asynchronous
+transfers, unchanged refresh-capped cadence, and no consistent GPU-cycle or
+memory difference. Failed Xvfb probes are excluded from native
 acceptance. Logs are under `artifacts/webgl-async/`.
