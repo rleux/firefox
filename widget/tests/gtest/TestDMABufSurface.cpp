@@ -13,6 +13,7 @@
 #  include <chrono>
 #  include <cmath>
 #  include <future>
+#  include <string>
 
 #  include "GLBlitHelper.h"
 #  include "GLContext.h"
@@ -199,10 +200,15 @@ static RefPtr<FileHandleWrapper> MakeVideoMemory(size_t aSize) {
   return handle;
 }
 
-static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
-                                                    uint64_t aModifier = 0) {
-  auto y = MakeVideoMemory(aSeparateObjects ? 16384 : 24576);
-  auto uv = aSeparateObjects ? MakeVideoMemory(8192) : y;
+static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(
+    bool aSeparateObjects, uint64_t aModifier = 0,
+    uint32_t aFourcc = VA_FOURCC_NV12) {
+  const bool p010 = aFourcc == VA_FOURCC_P010;
+  const uint32_t ySize = p010 ? 32768 : 16384;
+  const uint32_t uvSize = p010 ? 16384 : 8192;
+  const uint32_t stride = p010 ? 256 : 128;
+  auto y = MakeVideoMemory(aSeparateObjects ? ySize : ySize + uvSize);
+  auto uv = aSeparateObjects ? MakeVideoMemory(uvSize) : y;
   auto accessLock = MakeVideoMemory(sizeof(uint32_t));
   if (!y || !uv || !accessLock) {
     return Nothing();
@@ -216,24 +222,27 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
   }
   auto descriptor = MakeYUVDescriptor(y, duplicatedUV);
   auto& image = descriptor.get_SurfaceDescriptorDMABuf();
-  image.format()[0] = GBM_FORMAT_R8;
-  image.format()[1] = GBM_FORMAT_GR88;
+  image.fourccFormat() = aFourcc;
+  image.format()[0] = p010 ? GBM_FORMAT_R16 : GBM_FORMAT_R8;
+  image.format()[1] = p010 ? GBM_FORMAT_GR1616 : GBM_FORMAT_GR88;
   image.modifier()[0] = image.modifier()[1] = aModifier;
-  image.offsets()[1] = aSeparateObjects ? 0 : 16384;
+  image.strides()[0] = image.strides()[1] = stride;
+  image.offsets()[1] = aSeparateObjects ? 0 : ySize;
   image.yUVColorSpace() = YUVColorSpace::BT709;
   image.colorRange() = ColorRange::FULL;
   image.chromaLocation() = 1;
   image.refCount().AppendElement(ipc::FileDescriptor(refs->GetHandle()));
   AutoTArray<DMABufVideoObject, 2> objects;
   objects.AppendElement(DMABufVideoObject(
-      WrapNotNull(y), aSeparateObjects ? 16384 : 24576, aModifier));
+      WrapNotNull(y), aSeparateObjects ? ySize : ySize + uvSize, aModifier));
   if (aSeparateObjects) {
-    objects.AppendElement(DMABufVideoObject(WrapNotNull(uv), 8192, aModifier));
+    objects.AppendElement(
+        DMABufVideoObject(WrapNotNull(uv), uvSize, aModifier));
   }
   AutoTArray<DMABufVideoPlane, 2> planes;
-  planes.AppendElement(DMABufVideoPlane(0, 0, 128));
+  planes.AppendElement(DMABufVideoPlane(0, 0, stride));
   planes.AppendElement(
-      DMABufVideoPlane(aSeparateObjects ? 1 : 0, image.offsets()[1], 128));
+      DMABufVideoPlane(aSeparateObjects ? 1 : 0, image.offsets()[1], stride));
   image.vaapiImageState() = Some(VAAPIImageState(
       objects, planes, 42, 7, 3, true, 226, 128, WrapNotNull(accessLock)));
   return Some(std::move(descriptor));
@@ -241,7 +250,7 @@ static Maybe<SurfaceDescriptor> MakeVAAPIDescriptor(bool aSeparateObjects,
 
 extern "C" void* wr_vulkan_register_dmabuf_device(
     const uint8_t*, const uint8_t*, const uint64_t*, size_t, const uint64_t*,
-    size_t, const mozilla::wr::WrHalNv12Capabilities*);
+    size_t, const mozilla::wr::WrHalVideoCapabilities*);
 extern "C" void wr_vulkan_unregister_dmabuf_device(void*);
 
 TEST(DMABufSurface, RetainedVAAPIFrameSurvivesPublicationRevocation)
@@ -263,18 +272,19 @@ TEST(DMABufSurface, RetainedVAAPIFrameSurvivesPublicationRevocation)
   gfxVars::SetWebRenderVulkanVideoCapabilities(VulkanVideoCapabilities());
   auto descriptor = MakeVAAPIDescriptor(false);
   ASSERT_TRUE(descriptor);
+  descriptor->get_SurfaceDescriptorDMABuf().chromaLocation() = 2;
   RefPtr<DMABufSurface> surface =
       DMABufSurface::CreateDMABufSurface(*descriptor);
   ASSERT_TRUE(surface);
   auto* yuv = surface->GetAsDMABufSurfaceYUV();
   EXPECT_FALSE(wr::RenderCompositorVulkan::SupportsRetainedVideo(*yuv));
-  wr::WrHalNv12Capabilities actual{};
+  wr::WrHalVideoCapabilities actual{};
   actual.drm_node[0] = 226;
   actual.drm_node[1] = 128;
   actual.format_count = 1;
-  actual.formats[0] = {0, 128, 128, 24576};
+  actual.formats[0] = {VA_FOURCC_NV12, 0, 128, 128, 24576};
   const uint64_t modifier = 0;
-  const auto add = [&](const wr::WrHalNv12Capabilities& aCaps) {
+  const auto add = [&](const wr::WrHalVideoCapabilities& aCaps) {
     return wr_vulkan_register_dmabuf_device(aCaps.device_uuid,
                                             aCaps.driver_uuid, &modifier, 1,
                                             &modifier, 1, &aCaps);
@@ -361,10 +371,20 @@ TEST(DMABufSurface, VAAPIWaitStopsOnAbandonment)
 
 TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
 {
-  ASSERT_NE(getenv("WR_NV12_FD"), nullptr) << "Requires ExportVAAPIFrame";
-  const auto number = [](const char* name) -> uint64_t {
-    const char* value = getenv(name);
-    EXPECT_NE(value, nullptr) << name;
+  const char* format = getenv("WR_VIDEO_FORMAT");
+  const bool p010 = format && !strcmp(format, "P010");
+  if (format) {
+    ASSERT_TRUE(p010 || !strcmp(format, "NV12"));
+  }
+  const char* prefix = p010 ? "WR_P010" : "WR_NV12";
+  const auto name = [&](const char* suffix) {
+    return std::string(prefix) + "_" + suffix;
+  };
+  ASSERT_NE(getenv(name("FD").c_str()), nullptr) << "Requires ExportVAAPIFrame";
+  const auto number = [&](const char* suffix) -> uint64_t {
+    const auto key = name(suffix);
+    const char* value = getenv(key.c_str());
+    EXPECT_NE(value, nullptr) << key;
     return value ? strtoull(value, nullptr, 10) : 0;
   };
   gfxVars::Initialize();
@@ -377,32 +397,33 @@ TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
     gfxVars::SetUseSoftwareWebRender(software);
     gfxVars::SetUseEGL(egl);
   });
-  auto descriptor = MakeVAAPIDescriptor(false);
+  auto descriptor =
+      MakeVAAPIDescriptor(false, 0, p010 ? VA_FOURCC_P010 : VA_FOURCC_NV12);
   ASSERT_TRUE(descriptor);
-  auto fd = MakeRefPtr<FileHandleWrapper>(
-      UniqueFileHandle(dup(number("WR_NV12_FD"))));
+  auto fd = MakeRefPtr<FileHandleWrapper>(UniqueFileHandle(dup(number("FD"))));
   ASSERT_GE(fd->GetHandle(), 0);
   auto& image = descriptor->get_SurfaceDescriptorDMABuf();
   auto& state = image.vaapiImageState().ref();
-  state.drmRenderMajor() = number("WR_NV12_DRM_MAJOR");
-  state.drmRenderMinor() = number("WR_NV12_DRM_MINOR");
+  state.drmRenderMajor() = number("DRM_MAJOR");
+  state.drmRenderMinor() = number("DRM_MINOR");
   state.objects()[0].fd() = WrapNotNull(fd);
-  state.objects()[0].size() = number("WR_NV12_BYTES");
-  state.objects()[0].modifier() = number("WR_NV12_MODIFIER");
+  state.objects()[0].size() = number("BYTES");
+  state.objects()[0].modifier() = number("MODIFIER");
   image.colorRange() = ColorRange::LIMITED;
   for (size_t i = 0; i < 2; ++i) {
     image.fds()[i] = WrapNotNull(fd);
-    image.width()[i] = number("WR_NV12_WIDTH") >> i;
-    image.height()[i] = number("WR_NV12_HEIGHT") >> i;
-    image.widthAligned()[i] = number("WR_NV12_ALLOC_WIDTH") >> i;
-    image.heightAligned()[i] = number("WR_NV12_ALLOC_HEIGHT") >> i;
+    image.width()[i] = number("WIDTH") >> i;
+    image.height()[i] = number("HEIGHT") >> i;
+    image.widthAligned()[i] = number("ALLOC_WIDTH") >> i;
+    image.heightAligned()[i] = number("ALLOC_HEIGHT") >> i;
     image.modifier()[i] = state.objects()[0].modifier();
-    image.strides()[i] = number(i ? "WR_NV12_UV_PITCH" : "WR_NV12_Y_PITCH");
-    image.offsets()[i] = number(i ? "WR_NV12_UV_OFFSET" : "WR_NV12_Y_OFFSET");
+    image.strides()[i] = number(i ? "UV_PITCH" : "Y_PITCH");
+    image.offsets()[i] = number(i ? "UV_OFFSET" : "Y_OFFSET");
     state.planes()[i].stride() = image.strides()[i];
     state.planes()[i].offset() = image.offsets()[i];
   }
-  const char* referencePath = getenv("WR_NV12_REFERENCE");
+  const auto referenceName = name("REFERENCE");
+  const char* referencePath = getenv(referenceName.c_str());
   ASSERT_NE(referencePath, nullptr);
   FILE* reference = fopen(referencePath, "rb");
   ASSERT_NE(reference, nullptr);
@@ -410,11 +431,28 @@ TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
   const int width = image.width()[0];
   const int height = image.height()[0];
   nsTArray<uint8_t> pixels;
-  pixels.SetLength(size_t(width) * height * 3 / 2);
+  const size_t imagePixels = size_t(width) * height;
+  pixels.SetLength(p010 ? imagePixels * 3 : imagePixels * 3 / 2);
   ASSERT_EQ(fread(pixels.Elements(), 1, pixels.Length(), reference),
             pixels.Length());
+  const auto sample = [&](size_t offset) -> double {
+    if (!p010) {
+      return pixels[offset];
+    }
+    const uint16_t word =
+        uint16_t(pixels[offset]) | (uint16_t(pixels[offset + 1]) << 8);
+    EXPECT_EQ(word & uint16_t{0x3f}, uint16_t{0});
+    return word >> 6;
+  };
+  const auto luma = [&](int x, int y) {
+    return sample((size_t(y) * width + x) * (p010 ? 2 : 1));
+  };
   const auto chroma = [&](int x, int y, int component) {
-    return pixels[width * height + (y / 2) * width + (x / 2) * 2 + component];
+    const size_t yBytes = size_t(width) * height * (p010 ? 2 : 1);
+    const size_t offset =
+        yBytes + ((size_t(y / 2) * (width / 2) + x / 2) * 2 + component) *
+                     (p010 ? 2 : 1);
+    return sample(offset);
   };
   RefPtr<DMABufSurface> native;
   for (auto space : {YUVColorSpace::BT601, YUVColorSpace::BT709}) {
@@ -452,14 +490,20 @@ TEST(DMABufSurface, DISABLED_NativeVAAPIGLReaders)
                   0)
             << y;
         for (int x = 0; x < width; ++x) {
-          const double luma = pixels[y * width + x];
-          const double yy = full ? luma : (luma - 16) * 255 / 219;
-          const double cb = (chroma(x, y, 0) - 128) * (full ? 1 : 255.0 / 224);
-          const double cr = (chroma(x, y, 1) - 128) * (full ? 1 : 255.0 / 224);
+          const double scale = p010 ? 4 : 1;
+          const double maximum = p010 ? 1023 : 255;
+          const double center = p010 ? 512 : 128;
+          const double yy = full ? luma(x, y) / maximum
+                                 : (luma(x, y) - 16 * scale) / (219 * scale);
+          const double cb =
+              (chroma(x, y, 0) - center) / (full ? maximum : 224 * scale);
+          const double cr =
+              (chroma(x, y, 1) - center) / (full ? maximum : 224 * scale);
           const double bgr[] = {
-              yy + 2 * (1 - kb) * cb,
-              yy - 2 * kb * (1 - kb) / kg * cb - 2 * kr * (1 - kr) / kg * cr,
-              yy + 2 * (1 - kr) * cr};
+              (yy + 2 * (1 - kb) * cb) * 255,
+              (yy - 2 * kb * (1 - kb) / kg * cb - 2 * kr * (1 - kr) / kg * cr) *
+                  255,
+              (yy + 2 * (1 - kr) * cr) * 255};
           for (size_t c = 0; c < 3; ++c) {
             const int value = std::lround(std::clamp(bgr[c], 0.0, 255.0));
             maxError =
@@ -515,7 +559,8 @@ TEST(DMABufSurface, VAAPICapabilitiesRejectUnsupportedFrames)
   capabilities.drmMinor() = 128;
   capabilities.deviceUUID().SetLength(16);
   capabilities.driverUUID().SetLength(16);
-  capabilities.formats().AppendElement(VulkanVideoFormat(0, 128, 128, 24576));
+  capabilities.formats().AppendElement(
+      VulkanVideoFormat(VA_FOURCC_NV12, 0, 128, 128, 24576));
   const auto supports = [&](const SurfaceDescriptor& aDescriptor,
                             const VulkanVideoCapabilities& aCapabilities) {
     RefPtr<DMABufSurface> surface =
@@ -526,6 +571,7 @@ TEST(DMABufSurface, VAAPICapabilitiesRejectUnsupportedFrames)
   };
   auto descriptor = MakeVAAPIDescriptor(false, 0);
   ASSERT_TRUE(descriptor);
+  descriptor->get_SurfaceDescriptorDMABuf().chromaLocation() = 2;
   EXPECT_TRUE(supports(*descriptor, capabilities));
   for (int i = 0; i < 8; ++i) {
     SCOPED_TRACE(i);
@@ -571,6 +617,30 @@ TEST(DMABufSurface, VAAPICapabilitiesRejectUnsupportedFrames)
   auto separate = MakeVAAPIDescriptor(true, 0);
   ASSERT_TRUE(separate);
   EXPECT_FALSE(supports(*separate, capabilities));
+
+  auto unspecified = *descriptor;
+  unspecified.get_SurfaceDescriptorDMABuf().chromaLocation() = 0;
+  EXPECT_TRUE(supports(unspecified, capabilities));
+  auto left = *descriptor;
+  left.get_SurfaceDescriptorDMABuf().chromaLocation() = 1;
+  EXPECT_FALSE(supports(left, capabilities));
+
+  auto p010 = MakeVAAPIDescriptor(false, 0, VA_FOURCC_P010);
+  ASSERT_TRUE(p010);
+  p010->get_SurfaceDescriptorDMABuf().chromaLocation() = 2;
+  auto p010Capabilities = capabilities;
+  p010Capabilities.formats()[0] =
+      VulkanVideoFormat(VA_FOURCC_P010, 0, 128, 128, 49152);
+  EXPECT_TRUE(supports(*p010, p010Capabilities));
+  EXPECT_FALSE(supports(*p010, capabilities));
+  EXPECT_FALSE(supports(*descriptor, p010Capabilities));
+  for (auto* candidate : {&*descriptor, &*p010}) {
+    auto hdr = *candidate;
+    hdr.get_SurfaceDescriptorDMABuf().hdrMetadata().mContentLightLevel =
+        Some(ContentLightLevel{1000, 400});
+    EXPECT_FALSE(supports(
+        hdr, candidate == &*descriptor ? capabilities : p010Capabilities));
+  }
 }
 
 TEST(DMABufSurface, VAAPIObjectAndPlaneRoundtrip)
@@ -606,6 +676,65 @@ TEST(DMABufSurface, VAAPIObjectAndPlaneRoundtrip)
         EXPECT_EQ(image.chromaLocation(), 1u);
       }
     }
+  }
+}
+
+TEST(DMABufSurface, P010ObjectPlaneAndMetadataRoundtrip)
+{
+  auto descriptor = MakeVAAPIDescriptor(false, 0, VA_FOURCC_P010);
+  ASSERT_TRUE(descriptor);
+  auto& original = descriptor->get_SurfaceDescriptorDMABuf();
+  original.colorPrimaries() = ColorSpace2::BT709;
+  original.transferFunction() = TransferFunction::BT709;
+  original.chromaLocation() = 1;
+  original.hdrMetadata().mContentLightLevel =
+      Some(ContentLightLevel{1000, 400});
+  for (int i = 0; i < 3; ++i) {
+    RefPtr<DMABufSurface> surface =
+        DMABufSurface::CreateDMABufSurface(*descriptor);
+    ASSERT_TRUE(surface);
+    ASSERT_TRUE(surface->Serialize(*descriptor));
+    const auto& image = descriptor->get_SurfaceDescriptorDMABuf();
+    ASSERT_TRUE(image.vaapiImageState());
+    EXPECT_EQ(image.fourccFormat(), uint32_t(VA_FOURCC_P010));
+    EXPECT_EQ(image.format()[0], GBM_FORMAT_R16);
+    EXPECT_EQ(image.format()[1], GBM_FORMAT_GR1616);
+    EXPECT_EQ(image.strides()[0], 256u);
+    EXPECT_EQ(image.strides()[1], 256u);
+    EXPECT_EQ(image.offsets()[1], 32768u);
+    EXPECT_EQ(image.vaapiImageState()->objects()[0].size(), 49152u);
+    EXPECT_EQ(image.colorPrimaries(), ColorSpace2::BT709);
+    EXPECT_EQ(image.transferFunction(), TransferFunction::BT709);
+    EXPECT_EQ(image.chromaLocation(), 1u);
+    EXPECT_EQ(image.hdrMetadata().mContentLightLevel,
+              Some(ContentLightLevel{1000, 400}));
+  }
+}
+
+TEST(DMABufSurface, P010RejectsInvalidBoundsAndWordAlignment)
+{
+  using Mutate = void (*)(SurfaceDescriptorDMABuf&);
+  const Mutate mutations[] = {
+      [](auto& d) {
+        d.strides()[0] = 255;
+        d.vaapiImageState()->planes()[0].stride() = 255;
+      },
+      [](auto& d) {
+        d.offsets()[1] = 32769;
+        d.vaapiImageState()->planes()[1].offset() = 32769;
+      },
+      [](auto& d) { d.vaapiImageState()->objects()[0].size() = 49151; },
+      [](auto& d) { d.width()[0] = 127; },
+      [](auto& d) { d.widthAligned()[0] = 126; },
+      [](auto& d) { d.format()[1] = GBM_FORMAT_GR88; },
+  };
+  for (const auto& mutate : mutations) {
+    auto descriptor = MakeVAAPIDescriptor(false, 0, VA_FOURCC_P010);
+    ASSERT_TRUE(descriptor);
+    mutate(descriptor->get_SurfaceDescriptorDMABuf());
+    RefPtr<DMABufSurface> rejected =
+        DMABufSurface::CreateDMABufSurface(*descriptor);
+    EXPECT_FALSE(rejected);
   }
 }
 
@@ -798,22 +927,23 @@ TEST(DMABufSurface, VAAPIExportsOneFrameForBothHalChannels)
     for (uint8_t channel : {1, 0, 1}) {
       ASSERT_EQ(getImage(channel), !separate);
       if (separate) continue;
-      ASSERT_TRUE(image.source.IsNv12());
-      const auto& nv12 = image.source.nv12._0;
+      ASSERT_TRUE(image.source.IsVideo());
+      const auto& video = image.source.video._0;
       EXPECT_EQ(image.generation, 7u);
-      EXPECT_EQ(nv12.width, 128u);
-      EXPECT_EQ(nv12.height, 128u);
-      EXPECT_EQ(nv12.allocation_width, 128u);
-      EXPECT_EQ(nv12.allocation_height, 128u);
-      EXPECT_EQ(nv12.allocation_size, 24576u);
-      EXPECT_EQ(nv12.offsets[1], 16384u);
-      EXPECT_EQ(nv12.strides[1], 128u);
-      EXPECT_EQ(nv12.allocation_id, 42u);
-      EXPECT_EQ(nv12.producer_epoch, 3u);
-      EXPECT_EQ(nv12.drm_node[0], 226u);
-      EXPECT_EQ(nv12.drm_node[1], 128u);
-      EXPECT_GE(nv12.fd, 0);
-      EXPECT_GE(nv12.access_lock_fd, 0);
+      EXPECT_EQ(video.fourcc, uint32_t(VA_FOURCC_NV12));
+      EXPECT_EQ(video.width, 128u);
+      EXPECT_EQ(video.height, 128u);
+      EXPECT_EQ(video.allocation_width, 128u);
+      EXPECT_EQ(video.allocation_height, 128u);
+      EXPECT_EQ(video.allocation_size, 24576u);
+      EXPECT_EQ(video.offsets[1], 16384u);
+      EXPECT_EQ(video.strides[1], 128u);
+      EXPECT_EQ(video.allocation_id, 42u);
+      EXPECT_EQ(video.producer_epoch, 3u);
+      EXPECT_EQ(video.drm_node[0], 226u);
+      EXPECT_EQ(video.drm_node[1], 128u);
+      EXPECT_GE(video.fd, 0);
+      EXPECT_GE(video.access_lock_fd, 0);
       ASSERT_TRUE(surface->TryLockAccess());
       surface->UnlockAccess();
     }
@@ -821,6 +951,27 @@ TEST(DMABufSurface, VAAPIExportsOneFrameForBothHalChannels)
     ASSERT_TRUE(surface->TryLockAccess());
     surface->UnlockAccess(true);
     EXPECT_FALSE(getImage(0));
+  }
+}
+
+TEST(DMABufSurface, P010ExportsOneFrameForBothHalChannels)
+{
+  auto descriptor = MakeVAAPIDescriptor(false, 0, VA_FOURCC_P010);
+  ASSERT_TRUE(descriptor);
+  RefPtr<DMABufSurface> surface =
+      DMABufSurface::CreateDMABufSurface(*descriptor);
+  ASSERT_TRUE(surface);
+  for (uint8_t channel : {1, 0, 1}) {
+    wr::WrHalImage image{};
+    ASSERT_TRUE(wr::RenderDMABUFTextureHost::GetVAAPIImage(
+        *surface->GetAsDMABufSurfaceYUV(), channel, &image));
+    ASSERT_TRUE(image.source.IsVideo());
+    const auto& video = image.source.video._0;
+    EXPECT_EQ(video.fourcc, uint32_t(VA_FOURCC_P010));
+    EXPECT_EQ(video.allocation_size, 49152u);
+    EXPECT_EQ(video.strides[0], 256u);
+    EXPECT_EQ(video.strides[1], 256u);
+    EXPECT_EQ(video.offsets[1], 32768u);
   }
 }
 

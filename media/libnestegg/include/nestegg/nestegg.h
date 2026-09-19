@@ -169,6 +169,8 @@ typedef struct {
   unsigned int range;                    /**< Clipping of color ranges. */
   unsigned int transfer_characteristics; /**< See Table 3 of ISO/IEC 23091-4. */
   unsigned int primaries;                /**< See Table 2 of ISO/IEC 23091-4. */
+  uint64_t chroma_siting_horz;            /**< 0 unspecified, 1 left collocated, 2 half. */
+  uint64_t chroma_siting_vert;            /**< 0 unspecified, 1 top collocated, 2 half. */
   double primary_r_chromacity_x;         /**< Red X chromaticity coordinate per CIE 1931.
                                               NaN means element not present. */
   double primary_r_chromacity_y;         /**< Red Y chromaticity coordinate per CIE 1931.

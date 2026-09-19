@@ -1,0 +1,57 @@
+diff --git a/include/nestegg/nestegg.h b/include/nestegg/nestegg.h
+index 78da401c862..d80252e40e1 100644
+--- a/include/nestegg/nestegg.h
++++ b/include/nestegg/nestegg.h
+@@ -169,6 +169,8 @@ typedef struct {
+   unsigned int range;                    /**< Clipping of color ranges. */
+   unsigned int transfer_characteristics; /**< See Table 3 of ISO/IEC 23091-4. */
+   unsigned int primaries;                /**< See Table 2 of ISO/IEC 23091-4. */
++  uint64_t chroma_siting_horz;            /**< 0 unspecified, 1 left collocated, 2 half. */
++  uint64_t chroma_siting_vert;            /**< 0 unspecified, 1 top collocated, 2 half. */
+   double primary_r_chromacity_x;         /**< Red X chromaticity coordinate per CIE 1931.
+                                               NaN means element not present. */
+   double primary_r_chromacity_y;         /**< Red Y chromaticity coordinate per CIE 1931.
+diff --git a/src/nestegg.c b/src/nestegg.c
+index fa16a58fc11..38ac90d28c2 100644
+--- a/src/nestegg.c
++++ b/src/nestegg.c
+@@ -120,6 +120,8 @@
+ 
+ /* Colour Elements */
+ #define ID_MATRIX_COEFFICIENTS      0x55b1
++#define ID_CHROMA_SITING_HORZ       0x55b7
++#define ID_CHROMA_SITING_VERT       0x55b8
+ #define ID_RANGE                    0x55b9
+ #define ID_TRANSFER_CHARACTERISTICS 0x55ba
+ #define ID_PRIMARIES                0x55bb
+@@ -316,6 +318,8 @@ struct mastering_metadata {
+ 
+ struct colour {
+   struct ebml_type matrix_coefficients;
++  struct ebml_type chroma_siting_horz;
++  struct ebml_type chroma_siting_vert;
+   struct ebml_type range;
+   struct ebml_type transfer_characteristics;
+   struct ebml_type primaries;
+@@ -598,6 +602,8 @@ static struct ebml_element_desc ne_mastering_metadata_elements[] = {
+ 
+ static struct ebml_element_desc ne_colour_elements[] = {
+   E_FIELD_DEFAULT_UINT(ID_MATRIX_COEFFICIENTS, struct colour, matrix_coefficients, 2),
++  E_FIELD_DEFAULT_UINT(ID_CHROMA_SITING_HORZ, struct colour, chroma_siting_horz, 0),
++  E_FIELD_DEFAULT_UINT(ID_CHROMA_SITING_VERT, struct colour, chroma_siting_vert, 0),
+   E_FIELD_DEFAULT_UINT(ID_RANGE, struct colour, range, 0),
+   E_FIELD_DEFAULT_UINT(ID_TRANSFER_CHARACTERISTICS, struct colour, transfer_characteristics, 2),
+   E_FIELD_DEFAULT_UINT(ID_PRIMARIES, struct colour, primaries, 2),
+@@ -3213,6 +3219,12 @@ nestegg_track_video_params(nestegg * ctx, unsigned int track,
+   if (ne_get_uint(entry->video.colour.primaries, &value) == 0)
+     params->primaries = value;
+ 
++  if (ne_get_uint(entry->video.colour.chroma_siting_horz, &value) == 0)
++    params->chroma_siting_horz = value;
++
++  if (ne_get_uint(entry->video.colour.chroma_siting_vert, &value) == 0)
++    params->chroma_siting_vert = value;
++
+   value = 0;
+   ne_get_uint(entry->video.colour.max_cll, &value);
+   params->max_cll = value;

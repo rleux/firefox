@@ -23,6 +23,7 @@ class TestNativeVideoBrowser(MarionetteTestCase):
         self.report = {
             "passed": False,
             "display": os.environ.get("DISPLAY"),
+            "format": os.environ["WR_NATIVE_VIDEO_FORMAT"],
             "synchronization": os.environ["WR_NATIVE_VIDEO_SYNCHRONIZATION"],
         }
         self.pixel_tolerance = (
@@ -408,21 +409,41 @@ class TestNativeVideoBrowser(MarionetteTestCase):
         hardware = self.report["debug"]["decoder"]["reader"]["videoHardwareAccelerated"]
         self.assertEqual(hardware, expected_hardware, self.report["debug"])
         log = Path(os.environ["WR_NATIVE_VIDEO_GECKO_LOG"]).read_text(errors="replace")
-        native = "Video transport: direct Vulkan NV12 sampling"
+        expected_format = os.environ["WR_NATIVE_VIDEO_FORMAT"].upper()
+        native = f"Video transport: direct Vulkan {expected_format} sampling"
+        expected_native = expected_backend == "vulkan" and expected_hardware
         self.assertEqual(
-            native in log, expected_backend == "vulkan" and expected_hardware
+            native in log,
+            expected_native,
         )
-        modes = re.findall(
-            r"WebRender Vulkan video selected transport: direct NV12; synchronization: (sync|async)",
+        publications = re.findall(
+            r"Video transport: direct Vulkan (NV12|P010) sampling", log
+        )
+        markers = re.findall(
+            r"WebRender Vulkan video selected transport: direct (NV12|P010); "
+            r"synchronization: (sync|async)",
             log,
         )
-        if expected_backend == "vulkan" and expected_hardware:
+        if expected_native:
+            self.assertEqual(set(publications), {expected_format})
             self.assertEqual(
-                set(modes), {os.environ["WR_NATIVE_VIDEO_SYNCHRONIZATION"]}
+                set(markers),
+                {
+                    (
+                        expected_format,
+                        os.environ["WR_NATIVE_VIDEO_SYNCHRONIZATION"],
+                    )
+                },
             )
         else:
-            self.assertEqual(modes, [])
-        self.report["synchronizationMarkers"] = modes
+            self.assertEqual(publications, [])
+            self.assertEqual(markers, [])
+        self.report["transportPublications"] = publications
+        self.report["transportMarkers"] = [
+            {"format": format_name, "synchronization": synchronization}
+            for format_name, synchronization in markers
+        ]
+        self.report["synchronizationMarkers"] = [mode for _, mode in markers]
         for error in [
             "Validation Error",
             "VUID-",

@@ -14,6 +14,67 @@
 
 using namespace mozilla;
 
+static void TestChromaLocation(const char* aFixture,
+                               VideoInfo::ChromaLocation aExpected) {
+  RefPtr<MockMediaResource> resource = new MockMediaResource(aFixture);
+  ASSERT_EQ(NS_OK, resource->Open());
+
+  RefPtr<WebMDemuxer> demuxer = new WebMDemuxer(resource);
+  RefPtr<TaskQueue> taskQueue = TaskQueue::Create(
+      GetMediaThreadPool(MediaThreadType::SUPERVISOR), "TestWebMDemuxer");
+
+  bool ran = false;
+  InvokeAsync(taskQueue, __func__, [demuxer]() { return demuxer->Init(); })
+      ->Then(
+          taskQueue, __func__,
+          [&ran, demuxer, taskQueue, aExpected]() {
+            UniquePtr<TrackInfo> info =
+                demuxer->GetTrackInfo(TrackInfo::kVideoTrack, 0);
+            EXPECT_TRUE(info != nullptr);
+            if (!info) {
+              taskQueue->BeginShutdown();
+              return;
+            }
+            VideoInfo* videoInfo = info->GetAsVideoInfo();
+            EXPECT_TRUE(videoInfo != nullptr);
+            if (!videoInfo) {
+              taskQueue->BeginShutdown();
+              return;
+            }
+            EXPECT_EQ(videoInfo->mChromaLocation, aExpected);
+            ran = true;
+            taskQueue->BeginShutdown();
+          },
+          [taskQueue](const MediaResult& aError) {
+            EXPECT_TRUE(false) << "WebMDemuxer::Init() failed";
+            taskQueue->BeginShutdown();
+          });
+
+  taskQueue->AwaitShutdownAndIdle();
+  EXPECT_TRUE(ran);
+}
+
+TEST(WebMDemuxer, ChromaLocation)
+{
+  using Location = VideoInfo::ChromaLocation;
+  const struct {
+    const char* fixture;
+    Location expected;
+  } cases[] = {
+      {"webm-chroma-unspecified.webm", Location::Unspecified},
+      {"webm-chroma-left.webm", Location::Left},
+      {"webm-chroma-center.webm", Location::Center},
+      {"webm-chroma-topleft.webm", Location::TopLeft},
+      {"webm-chroma-top.webm", Location::Top},
+      {"webm-chroma-partial.webm", Location::Unsupported},
+      {"webm-chroma-invalid.webm", Location::Unsupported},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.fixture);
+    TestChromaLocation(test.fixture, test.expected);
+  }
+}
+
 TEST(WebMDemuxer, HDRMetadata)
 {
   RefPtr<MockMediaResource> resource =

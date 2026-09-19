@@ -98,11 +98,13 @@ pub fn webgl_transport() {
     });
 }
 
-pub fn video_transport() {
+pub fn video_transport(p010: bool) {
     TRANSPORTS.with(|seen| {
-        if seen.get() & 8 == 0 {
-            seen.set(seen.get() | 8);
-            eprintln!("WebRender Vulkan video selected transport: direct NV12; synchronization: {}",
+        let bit = if p010 { 16 } else { 8 };
+        if seen.get() & bit == 0 {
+            seen.set(seen.get() | bit);
+            eprintln!("WebRender Vulkan video selected transport: direct {}; synchronization: {}",
+                if p010 { "P010" } else { "NV12" },
                 if force_video_sync() { "sync" } else { "async" });
         }
     });

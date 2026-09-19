@@ -29,7 +29,7 @@ struct DmaBufDevice {
   std::array<uint8_t, 16> mDriver;
   nsTArray<uint64_t> mRGBA;
   nsTArray<uint64_t> mBGRA;
-  WrHalNv12Capabilities mVideo;
+  WrHalVideoCapabilities mVideo;
 };
 StaticMutex sDmaBufDevicesMutex;
 StaticAutoPtr<nsTArray<DmaBufDevice*>> sDmaBufDevices;
@@ -39,7 +39,7 @@ bool sVideoFailed = false;
 extern "C" void* wr_vulkan_register_dmabuf_device(
     const uint8_t* aDevice, const uint8_t* aDriver, const uint64_t* aRGBA,
     size_t aRGBALength, const uint64_t* aBGRA, size_t aBGRALength,
-    const WrHalNv12Capabilities* aVideo) {
+    const WrHalVideoCapabilities* aVideo) {
   auto device = MakeUnique<DmaBufDevice>();
   std::copy_n(aDevice, 16, device->mDevice.begin());
   std::copy_n(aDriver, 16, device->mDriver.begin());
@@ -111,9 +111,9 @@ gfx::VulkanVideoCapabilities RenderCompositorVulkan::ProbeVideoCapabilities() {
   if (node.IsEmpty() || stat(node.get(), &device) || !S_ISCHR(device.st_mode)) {
     return result;
   }
-  WrHalNv12Capabilities capabilities{};
-  if (!wr_vulkan_query_nv12(major(device.st_rdev), minor(device.st_rdev),
-                            &capabilities) ||
+  WrHalVideoCapabilities capabilities{};
+  if (!wr_vulkan_query_video(major(device.st_rdev), minor(device.st_rdev),
+                             &capabilities) ||
       !capabilities.format_count ||
       capabilities.format_count > std::size(capabilities.formats)) {
     return result;
@@ -125,7 +125,7 @@ gfx::VulkanVideoCapabilities RenderCompositorVulkan::ProbeVideoCapabilities() {
   for (size_t i = 0; i < capabilities.format_count; ++i) {
     const auto& format = capabilities.formats[i];
     result.formats().AppendElement(
-        gfx::VulkanVideoFormat(format.modifier, format.max_width,
+        gfx::VulkanVideoFormat(format.fourcc, format.modifier, format.max_width,
                                format.max_height, format.max_allocation_size));
   }
   return result;
@@ -153,7 +153,8 @@ bool RenderCompositorVulkan::SupportsVideo() {
       bool supported = false;
       for (size_t i = 0; i < video.format_count; ++i) {
         const auto& actual = video.formats[i];
-        supported |= actual.modifier == format.modifier() &&
+        supported |= actual.fourcc == format.fourcc() &&
+                     actual.modifier == format.modifier() &&
                      actual.max_width >= format.maxWidth() &&
                      actual.max_height >= format.maxHeight() &&
                      actual.max_allocation_size >= format.maxAllocationSize();
@@ -181,7 +182,7 @@ bool RenderCompositorVulkan::SupportsRetainedVideo(
     for (size_t i = 0; i < video.format_count; ++i) {
       const auto& format = video.formats[i];
       capabilities.formats().AppendElement(gfx::VulkanVideoFormat(
-          format.modifier, format.max_width, format.max_height,
+          format.fourcc, format.modifier, format.max_width, format.max_height,
           format.max_allocation_size));
     }
     if (!aSurface.SupportsVAAPIImage(capabilities)) return false;

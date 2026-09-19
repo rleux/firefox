@@ -120,6 +120,8 @@
 
 /* Colour Elements */
 #define ID_MATRIX_COEFFICIENTS      0x55b1
+#define ID_CHROMA_SITING_HORZ       0x55b7
+#define ID_CHROMA_SITING_VERT       0x55b8
 #define ID_RANGE                    0x55b9
 #define ID_TRANSFER_CHARACTERISTICS 0x55ba
 #define ID_PRIMARIES                0x55bb
@@ -316,6 +318,8 @@ struct mastering_metadata {
 
 struct colour {
   struct ebml_type matrix_coefficients;
+  struct ebml_type chroma_siting_horz;
+  struct ebml_type chroma_siting_vert;
   struct ebml_type range;
   struct ebml_type transfer_characteristics;
   struct ebml_type primaries;
@@ -598,6 +602,8 @@ static struct ebml_element_desc ne_mastering_metadata_elements[] = {
 
 static struct ebml_element_desc ne_colour_elements[] = {
   E_FIELD_DEFAULT_UINT(ID_MATRIX_COEFFICIENTS, struct colour, matrix_coefficients, 2),
+  E_FIELD_DEFAULT_UINT(ID_CHROMA_SITING_HORZ, struct colour, chroma_siting_horz, 0),
+  E_FIELD_DEFAULT_UINT(ID_CHROMA_SITING_VERT, struct colour, chroma_siting_vert, 0),
   E_FIELD_DEFAULT_UINT(ID_RANGE, struct colour, range, 0),
   E_FIELD_DEFAULT_UINT(ID_TRANSFER_CHARACTERISTICS, struct colour, transfer_characteristics, 2),
   E_FIELD_DEFAULT_UINT(ID_PRIMARIES, struct colour, primaries, 2),
@@ -3212,6 +3218,12 @@ nestegg_track_video_params(nestegg * ctx, unsigned int track,
 
   if (ne_get_uint(entry->video.colour.primaries, &value) == 0)
     params->primaries = value;
+
+  if (ne_get_uint(entry->video.colour.chroma_siting_horz, &value) == 0)
+    params->chroma_siting_horz = value;
+
+  if (ne_get_uint(entry->video.colour.chroma_siting_vert, &value) == 0)
+    params->chroma_siting_vert = value;
 
   value = 0;
   ne_get_uint(entry->video.colour.max_cll, &value);

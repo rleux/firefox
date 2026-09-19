@@ -102,9 +102,10 @@ bool RenderDMABUFTextureHost::GetVAAPIImage(const DMABufSurfaceYUV& aSurface,
     return false;
   }
   const auto& object = state.objects()[0];
-  WrHalNv12 image{};
+  WrHalVideo image{};
   image.fd = object.fd()->GetHandle();
   image.access_lock_fd = state.accessLock()->GetHandle();
+  image.fourcc = desc->fourccFormat();
   image.width = desc->width()[0];
   image.height = desc->height()[0];
   image.allocation_width = desc->widthAligned()[0];
@@ -119,21 +120,30 @@ bool RenderDMABUFTextureHost::GetVAAPIImage(const DMABufSurfaceYUV& aSurface,
   image.producer_epoch = state.producerEpoch();
   image.drm_node[0] = state.drmRenderMajor();
   image.drm_node[1] = state.drmRenderMinor();
-  *aImage = WrHalImage{state.generation(), WrHalImageSource::Nv12(image)};
+  *aImage = WrHalImage{state.generation(), WrHalImageSource::Video(image)};
   return true;
 }
 
 bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
                                            WrHalImage* aImage) {
   if (mVulkanFailed) {
+    gfxCriticalNote << "HAL DMA-BUF previously abandoned: "
+                    << mSurface->GetUID();
     return false;
   }
   if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
 #ifdef XP_LINUX
     if (gfx::gfxVars::UseWebRenderVulkanVideo()) {
-      if (!RenderCompositorVulkan::SupportsVideo() ||
-          !yuv->SupportsVAAPIImage(
-              gfx::gfxVars::WebRenderVulkanVideoCapabilities())) {
+      const bool device = RenderCompositorVulkan::SupportsVideo();
+      const bool image = yuv->SupportsVAAPIImage(
+          gfx::gfxVars::WebRenderVulkanVideoCapabilities());
+      if (!device || !image) {
+        gfxCriticalNote << "HAL video admission rejected: "
+                        << mSurface->GetUID() << " device=" << device
+                        << " image=" << image
+                        << " publication=" << !!yuv->GetVAAPIDescriptor()
+                        << " access=" << mSurface->AccessLockUsable()
+                        << " abandoned=" << yuv->VAAPIImageAbandoned();
         return false;
       }
     } else if (!RenderCompositorVulkan::SupportsRetainedVideo(*yuv)) {

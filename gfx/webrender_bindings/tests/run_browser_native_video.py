@@ -32,6 +32,7 @@ def main():
     parser.add_argument(
         "--decoder", choices=["hardware", "software"], default="hardware"
     )
+    parser.add_argument("--format", choices=["nv12", "p010"], default="nv12")
     parser.add_argument("--synchronization", choices=["sync", "async"], default="async")
     parser.add_argument(
         "--webgl-synchronization", choices=["sync", "async"], default="async"
@@ -96,6 +97,7 @@ def main():
         WR_NATIVE_VIDEO_CLIP=str(args.clip.resolve()),
         WR_NATIVE_VIDEO_BACKEND=args.backend,
         WR_NATIVE_VIDEO_DECODER=args.decoder,
+        WR_NATIVE_VIDEO_FORMAT=args.format,
         WR_NATIVE_VIDEO_SYNCHRONIZATION=args.synchronization,
         WR_VIDEO_FORCE_SYNC="1" if args.synchronization == "sync" else "0",
         WR_WEBGL_FORCE_SYNC="1" if args.webgl_synchronization == "sync" else "0",

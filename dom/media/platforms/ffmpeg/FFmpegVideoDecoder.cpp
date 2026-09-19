@@ -1043,6 +1043,10 @@ void FFmpegVideoDecoder<LIBAV_VER>::InitHWDecoderIfAllowed() {
 #  ifdef MOZ_WIDGET_GTK
   if (gfx::gfxVars::UseWebRenderVulkan() &&
       !gfx::gfxVars::UseSoftwareWebRender()) {
+    if (mInfo.mChromaLocation != VideoInfo::ChromaLocation::Unspecified &&
+        mInfo.mChromaLocation != VideoInfo::ChromaLocation::Center) {
+      return;
+    }
 #    ifdef FFVPX_VERSION
     if (!StaticPrefs::media_ffvpx_hw_enabled()) return;
 #    endif
@@ -2273,6 +2277,27 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::CreateImageVAAPI(
     return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
                        RESULT_DETAIL("VAAPI native renderer changed"));
   }
+  using ChromaLocation = VideoInfo::ChromaLocation;
+  const auto frameChroma =
+      AVChromaLocationToWPChromaLocation(mFrame->chroma_location);
+  if (native && ((mInfo.mChromaLocation != ChromaLocation::Unspecified &&
+                  mInfo.mChromaLocation != ChromaLocation::Center) ||
+                 (frameChroma != 0 && frameChroma != 2))) {
+    return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                       RESULT_DETAIL("Unsupported native VAAPI chroma siting"));
+  }
+  if (native) {
+    const auto primaries = GetFrameColorPrimaries();
+    const auto transfer = GetFrameTransferFunction();
+    if ((primaries != gfx::ColorSpace2::UNKNOWN &&
+         primaries != gfx::ColorSpace2::SRGB &&
+         primaries != gfx::ColorSpace2::BT601_525 &&
+         primaries != gfx::ColorSpace2::BT709) ||
+        (transfer && *transfer != gfx::TransferFunction::BT709)) {
+      return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,
+                         RESULT_DETAIL("Unsupported native VAAPI frame color"));
+    }
+  }
   const auto setColorMetadata = [&](const RefPtr<DMABufSurfaceYUV>& aSurface) {
     aSurface->SetYUVColorSpace(GetFrameColorSpace());
     aSurface->SetColorRange(GetFrameColorRange());
@@ -2282,15 +2307,18 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::CreateImageVAAPI(
     if (mInfo.mTransferFunction) {
       aSurface->SetTransferFunction(mInfo.mTransferFunction.value());
     }
-    aSurface->SetWPChromaLocation(
-        AVChromaLocationToWPChromaLocation(mFrame->chroma_location));
+    aSurface->SetWPChromaLocation(native && mInfo.mChromaLocation ==
+                                                ChromaLocation::Center
+                                      ? 2
+                                      : frameChroma);
     if (mInfo.mHDRMetadata) {
       aSurface->SetHDRMetadata(mInfo.mHDRMetadata.value());
     }
   };
   RefPtr<VideoFrameSurface<LIBAV_VER>> surface;
   if (native) {
-    if (!mFrame->hw_frames_ctx || vaDesc.fourcc != VA_FOURCC_NV12 ||
+    if (!mFrame->hw_frames_ctx ||
+        (vaDesc.fourcc != VA_FOURCC_NV12 && vaDesc.fourcc != VA_FOURCC_P010) ||
         vaDesc.num_objects != 1 || vaDesc.num_layers != 2 ||
         vaDesc.layers[0].num_planes != 1 || vaDesc.layers[1].num_planes != 1) {
       return MediaResult(NS_ERROR_DOM_MEDIA_DECODE_ERR,

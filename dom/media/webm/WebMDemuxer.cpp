@@ -412,6 +412,29 @@ nsresult WebMDemuxer::GetCodecPrivateData(
   return NS_OK;
 }
 
+static VideoInfo::ChromaLocation ParseWebMChromaLocation(
+    const nestegg_video_params& aParams) {
+  using Location = VideoInfo::ChromaLocation;
+  const auto horizontal = aParams.chroma_siting_horz;
+  const auto vertical = aParams.chroma_siting_vert;
+  if (horizontal == 0 && vertical == 0) {
+    return Location::Unspecified;
+  }
+  if (horizontal == 1 && vertical == 1) {
+    return Location::TopLeft;
+  }
+  if (horizontal == 1 && vertical == 2) {
+    return Location::Left;
+  }
+  if (horizontal == 2 && vertical == 1) {
+    return Location::Top;
+  }
+  if (horizontal == 2 && vertical == 2) {
+    return Location::Center;
+  }
+  return Location::Unsupported;
+}
+
 static Maybe<gfx::HDRMetadata> ParseWebMMasteringMetadata(
     const nestegg_video_params& aParams) {
   gfx::HDRMetadata hdr;
@@ -516,6 +539,7 @@ nsresult WebMDemuxer::ReadMetadata() {
       mInfo.mVideo.mColorPrimaries = gfxUtils::CicpToColorPrimaries(
           static_cast<gfx::CICP::ColourPrimaries>(params.primaries),
           gMediaDemuxerLog);
+      mInfo.mVideo.mChromaLocation = ParseWebMChromaLocation(params);
 
       // For VPX, this is our only chance to capture the transfer
       // characteristics, which we can't get from a VPX bitstream later.

@@ -60,6 +60,7 @@ struct GPUDeviceData
 
 [Comparable] struct VulkanVideoFormat
 {
+  uint32_t fourcc;
   uint64_t modifier;
   uint32_t maxWidth;
   uint32_t maxHeight;

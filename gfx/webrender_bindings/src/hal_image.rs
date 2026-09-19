@@ -49,9 +49,10 @@ pub struct WrHalForeignRGB {
 /// cbindgen:derive-ostream=false
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct WrHalNv12 {
+pub struct WrHalVideo {
     pub fd: i32,
     pub access_lock_fd: i32,
+    pub fourcc: u32,
     pub width: u32,
     pub height: u32,
     pub allocation_width: u32,
@@ -68,7 +69,8 @@ pub struct WrHalNv12 {
 /// cbindgen:derive-ostream=false
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct WrHalNv12Format {
+pub struct WrHalVideoFormat {
+    pub fourcc: u32,
     pub modifier: u64,
     pub max_width: u32,
     pub max_height: u32,
@@ -79,11 +81,11 @@ pub struct WrHalNv12Format {
 /// cbindgen:derive-ostream=false
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct WrHalNv12Capabilities {
+pub struct WrHalVideoCapabilities {
     pub drm_node: [u64; 2],
     pub device_uuid: [u8; 16],
     pub driver_uuid: [u8; 16],
-    pub formats: [WrHalNv12Format; 2],
+    pub formats: [WrHalVideoFormat; 4],
     pub format_count: usize,
 }
 
@@ -100,7 +102,7 @@ pub enum WrHalImageSource {
     ForeignRGB(WrHalForeignRGB),
     /// cbindgen:derive-eq=false
     /// cbindgen:derive-ostream=false
-    Nv12(WrHalNv12),
+    Video(WrHalVideo),
 }
 
 /// cbindgen:derive-eq=false
@@ -251,19 +253,15 @@ mod linux {
     }
 
     #[no_mangle]
-    pub extern "C" fn wr_vulkan_query_nv12(
-        major: u64,
-        minor: u64,
-        output: &mut WrHalNv12Capabilities,
-    ) -> bool {
-        *output = WrHalNv12Capabilities::default();
-        let result = (|| -> Result<WrHalNv12Capabilities, String> {
+    pub extern "C" fn wr_vulkan_query_video(major: u64, minor: u64, output: &mut WrHalVideoCapabilities) -> bool {
+        *output = WrHalVideoCapabilities::default();
+        let result = (|| -> Result<WrHalVideoCapabilities, String> {
             let device = hal::create_vulkan_image_device(&hal::Options {
                 validation: std::env::var_os("MOZ_WR_VULKAN_VALIDATION").is_some(),
                 adapter_name: std::env::var("MOZ_WR_VULKAN_ADAPTER").ok(),
             })?;
             if device.foreign_rgb_drm_node()? != Some([major, minor]) {
-                return Err("NV12 decoder and renderer DRM devices differ".into());
+                return Err("Video decoder and renderer DRM devices differ".into());
             }
             video_capabilities(&device)
         })();
@@ -273,18 +271,24 @@ mod linux {
                 true
             },
             Err(error) => {
-                log::info!("Native NV12 capability unavailable: {error}");
+                log::info!("Native video capability unavailable: {error}");
                 false
             },
         }
     }
 
-    pub(super) fn video_capabilities(device: &ExternalImageDevice) -> Result<WrHalNv12Capabilities, String> {
-        let node = device.foreign_rgb_drm_node()?.ok_or("NV12 DRM identity unavailable")?;
-        let formats = device.vaapi_video_capabilities(hal::VideoDmaBufFormat::Nv12)?;
-        let mut capabilities = WrHalNv12Capabilities::default();
+    pub(super) fn video_capabilities(device: &ExternalImageDevice) -> Result<WrHalVideoCapabilities, String> {
+        let node = device.foreign_rgb_drm_node()?.ok_or("Video DRM identity unavailable")?;
+        let mut formats = device.vaapi_video_capabilities(hal::VideoDmaBufFormat::Nv12)?;
+        formats.extend(
+            device
+                .vaapi_video_capabilities(hal::VideoDmaBufFormat::P010)?
+                .into_iter()
+                .filter(|format| format.modifier == 0x0100000000000002),
+        );
+        let mut capabilities = WrHalVideoCapabilities::default();
         if formats.is_empty() || formats.len() > capabilities.formats.len() {
-            return Err("No supported NV12 sampling formats".into());
+            return Err("No supported native video sampling formats".into());
         }
         let identity = device.dmabuf_capabilities()?;
         capabilities.drm_node = node;
@@ -292,7 +296,8 @@ mod linux {
         capabilities.driver_uuid = identity.driver_uuid();
         capabilities.format_count = formats.len();
         for (destination, source) in capabilities.formats.iter_mut().zip(formats) {
-            *destination = WrHalNv12Format {
+            *destination = WrHalVideoFormat {
+                fourcc: source.format.fourcc(),
                 modifier: source.modifier,
                 max_width: source.max_size[0],
                 max_height: source.max_size[1],
@@ -487,7 +492,11 @@ mod linux {
             if sampled {
                 let _span = hal::diagnostics::Span::new("directImport");
                 let metadata = |fd: i32| -> Result<_, String> {
-                    let file = File::from(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned().map_err(|error| error.to_string())?);
+                    let file = File::from(
+                        unsafe { BorrowedFd::borrow_raw(fd) }
+                            .try_clone_to_owned()
+                            .map_err(|error| error.to_string())?,
+                    );
                     let stat = file.metadata().map_err(|error| error.to_string())?;
                     Ok((stat.dev(), stat.ino()))
                 };
@@ -594,9 +603,9 @@ mod linux {
             )
         }
 
-        fn nv12(
+        fn video(
             &self,
-            data: WrHalNv12,
+            data: WrHalVideo,
             generation: u64,
             channel: u8,
             mut lease: Lease,
@@ -609,10 +618,12 @@ mod linux {
                 || data.producer_epoch == 0
                 || channel > 1
             {
-                return Err("Invalid NV12 publication metadata".into());
+                return Err("Invalid video publication metadata".into());
             }
+            let format = hal::VideoDmaBufFormat::from_fourcc(data.fourcc)?;
+            let p010 = format == hal::VideoDmaBufFormat::P010;
             let layout = hal::VideoDmaBufLayout::new(
-                hal::VideoDmaBufFormat::Nv12,
+                format,
                 [data.allocation_width, data.allocation_height],
                 [data.width, data.height],
                 data.modifier,
@@ -643,7 +654,7 @@ mod linux {
                     return Ok(None);
                 };
                 if entry.pending.get() && (entry.identity != identity || entry.layout != layout) {
-                    return Err("NV12 allocation has a different live publication or Vulkan device".to_owned());
+                    return Err("Video allocation has a different live publication or Vulkan device".to_owned());
                 }
                 let live = entry.image.upgrade().is_some();
                 Ok(if entry.pending.get() && (!live || entry.device != device) {
@@ -671,10 +682,10 @@ mod linux {
                         break;
                     }
                     if live && !attached {
-                        return Err("NV12 publication is held by another consumer".into());
+                        return Err("Video publication is held by another consumer".into());
                     }
                     if start.elapsed() >= std::time::Duration::from_secs(5) {
-                        return Err("Timed out returning NV12 publication".into());
+                        return Err("Timed out returning video publication".into());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
@@ -691,14 +702,14 @@ mod linux {
                 if let Some(entry) = images.get(&key) {
                     if let Some(image) = entry.image.upgrade() {
                         if entry.identity != identity || entry.layout != layout || !image.belongs_to(&self.device) {
-                            return Err("NV12 allocation has a different live publication or Vulkan device".into());
+                            return Err("Video allocation has a different live publication or Vulkan device".into());
                         }
-                        hal::diagnostics::video_transport();
+                        hal::diagnostics::video_transport(p010);
                         return image.lease(channel, uv);
                     }
                 }
                 if !unsafe { wr_renderer_lock_vaapi_image(lease.raw.as_ptr()) } {
-                    return Err("NV12 publication is busy or abandoned".into());
+                    return Err("Video publication is busy or abandoned".into());
                 }
                 let pending = std::rc::Rc::new(std::cell::Cell::new(true));
                 let returned = pending.clone();
@@ -730,9 +741,12 @@ mod linux {
                         progress: self.device.consumer_poller(),
                     },
                 );
-                hal::diagnostics::video_transport();
+                hal::diagnostics::video_transport(p010);
                 if !hal::diagnostics::quiet() {
-                    log::info!("Video transport: direct Vulkan NV12 sampling, generation={generation}");
+                    log::info!(
+                        "Video transport: direct Vulkan {} sampling, generation={generation}",
+                        if p010 { "P010" } else { "NV12" }
+                    );
                 }
                 image.lease(channel, uv)
             })
@@ -831,7 +845,7 @@ mod linux {
                 WrHalImageSource::Buffer(data) => Self::buffer(data, image.generation, lease),
                 WrHalImageSource::VulkanDmaBuf(data) => self.dmabuf(data, image.generation, lease),
                 WrHalImageSource::ForeignRGB(data) => self.foreign_rgb(data, image.generation, lease),
-                WrHalImageSource::Nv12(data) => self.nv12(data, image.generation, channel, lease),
+                WrHalImageSource::Video(data) => self.video(data, image.generation, channel, lease),
             }
         }
     }
@@ -855,7 +869,7 @@ impl DeviceRegistration {
                 rgba_len: usize,
                 bgra: *const u64,
                 bgra_len: usize,
-                video: &WrHalNv12Capabilities,
+                video: &WrHalVideoCapabilities,
             ) -> *mut c_void;
         }
         let caps = device.dmabuf_capabilities()?;
