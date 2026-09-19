@@ -177,6 +177,9 @@ mod linux {
         identity: VideoIdentity,
         layout: hal::Nv12DmaBufLayout,
         image: hal::WeakForeignNv12Image,
+        device: u64,
+        pending: std::rc::Rc<std::cell::Cell<bool>>,
+        progress: std::rc::Rc<dyn Fn() -> Result<bool, String>>,
     }
 
     struct VulkanEntry {
@@ -198,12 +201,21 @@ mod linux {
         device: &ExternalImageDevice,
         mut poll: impl FnMut() -> Result<bool, String>,
     ) -> Result<(), String> {
-        let live = || VIDEO_IMAGES.with(|images| {
-            images.borrow().values().any(|entry| {
-                entry.image.upgrade().map_or(false, |image| image.belongs_to(device))
+        if !hal::diagnostics::force_video_sync() {
+            return Ok(());
+        }
+        let live = || {
+            VIDEO_IMAGES.with(|images| {
+                images
+                    .borrow()
+                    .values()
+                    .any(|entry| entry.image.upgrade().map_or(false, |image| image.belongs_to(device)))
             })
-        });
-        if !live() { return Ok(()); }
+        };
+        if !live() {
+            return Ok(());
+        }
+        let _span = hal::diagnostics::Span::new("videoFrameCompletion");
         let start = std::time::Instant::now();
         while !poll()? {
             if start.elapsed() >= std::time::Duration::from_secs(5) {
@@ -582,55 +594,145 @@ mod linux {
             )
         }
 
-        fn nv12(&self, data: WrHalNv12, generation: u64, channel: u8, mut lease: Lease)
-            -> Result<ExternalImageLease, String> {
-            if data.fd < 0 || data.access_lock_fd < 0 || generation == 0
-                || data.allocation_id == 0 || data.producer_epoch == 0 || channel > 1 {
+        fn nv12(
+            &self,
+            data: WrHalNv12,
+            generation: u64,
+            channel: u8,
+            mut lease: Lease,
+        ) -> Result<ExternalImageLease, String> {
+            let _span = hal::diagnostics::Span::new("videoImport");
+            if data.fd < 0
+                || data.access_lock_fd < 0
+                || generation == 0
+                || data.allocation_id == 0
+                || data.producer_epoch == 0
+                || channel > 1
+            {
                 return Err("Invalid NV12 publication metadata".into());
             }
             let layout = hal::Nv12DmaBufLayout::new(
-                [data.allocation_width, data.allocation_height], [data.width, data.height],
-                data.modifier, data.strides, data.offsets, data.allocation_size,
+                [data.allocation_width, data.allocation_height],
+                [data.width, data.height],
+                data.modifier,
+                data.strides,
+                data.offsets,
+                data.allocation_size,
             )?;
             let metadata = |fd: i32| -> Result<_, String> {
                 let fd = unsafe { BorrowedFd::borrow_raw(fd) };
                 File::from(fd.try_clone_to_owned().map_err(|error| error.to_string())?)
-                    .metadata().map_err(|error| error.to_string())
+                    .metadata()
+                    .map_err(|error| error.to_string())
             };
             let allocation = metadata(data.fd)?;
             let lock = metadata(data.access_lock_fd)?;
             let key = (allocation.dev(), allocation.ino());
             let identity = VideoIdentity {
-                allocation: data.allocation_id, generation, producer_epoch: data.producer_epoch,
-                drm_node: data.drm_node, access_lock: (lock.dev(), lock.ino()),
+                allocation: data.allocation_id,
+                generation,
+                producer_epoch: data.producer_epoch,
+                drm_node: data.drm_node,
+                access_lock: (lock.dev(), lock.ino()),
             };
-            let uv = TexelRect::new(0.0, 0.0, (data.width >> channel) as f32, (data.height >> channel) as f32);
+            let device = self.device.device_id();
+            let pending = VIDEO_IMAGES.with(|images| {
+                let images = images.borrow();
+                let Some(entry) = images.get(&key) else {
+                    return Ok(None);
+                };
+                if entry.pending.get() && (entry.identity != identity || entry.layout != layout) {
+                    return Err("NV12 allocation has a different live publication or Vulkan device".to_owned());
+                }
+                let live = entry.image.upgrade().is_some();
+                Ok(if entry.pending.get() && (!live || entry.device != device) {
+                    Some((
+                        entry.pending.clone(),
+                        entry.progress.clone(),
+                        live,
+                        entry.device != device,
+                    ))
+                } else {
+                    None
+                })
+            })?;
+            if let Some((pending, progress, live, other_device)) = pending {
+                let _span = hal::diagnostics::Span::new("videoPublicationReuseWait");
+                let start = std::time::Instant::now();
+                while pending.get() {
+                    let attached = if other_device {
+                        progress()?
+                    } else {
+                        self.device.poll()?;
+                        false
+                    };
+                    if !pending.get() {
+                        break;
+                    }
+                    if live && !attached {
+                        return Err("NV12 publication is held by another consumer".into());
+                    }
+                    if start.elapsed() >= std::time::Duration::from_secs(5) {
+                        return Err("Timed out returning NV12 publication".into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            let uv = TexelRect::new(
+                0.0,
+                0.0,
+                (data.width >> channel) as f32,
+                (data.height >> channel) as f32,
+            );
             VIDEO_IMAGES.with(|images| {
                 let mut images = images.borrow_mut();
-                images.retain(|_, entry| entry.image.upgrade().is_some());
+                images.retain(|_, entry| entry.pending.get());
                 if let Some(entry) = images.get(&key) {
                     if let Some(image) = entry.image.upgrade() {
                         if entry.identity != identity || entry.layout != layout || !image.belongs_to(&self.device) {
                             return Err("NV12 allocation has a different live publication or Vulkan device".into());
                         }
+                        hal::diagnostics::video_transport();
                         return image.lease(channel, uv);
                     }
                 }
                 if !unsafe { wr_renderer_lock_vaapi_image(lease.raw.as_ptr()) } {
                     return Err("NV12 publication is busy or abandoned".into());
                 }
-                let image = unsafe { self.device.import_vaapi_nv12(
-                    BorrowedFd::borrow_raw(data.fd), layout, data.drm_node, generation, move |status| {
-                        lease.status = match status {
-                            hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
-                            hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
-                            hal::ExternalImageRelease::Abandoned => WrHalImageRelease::Abandoned,
-                        };
-                        drop(lease);
+                let pending = std::rc::Rc::new(std::cell::Cell::new(true));
+                let returned = pending.clone();
+                let image = unsafe {
+                    self.device.import_vaapi_nv12(
+                        BorrowedFd::borrow_raw(data.fd),
+                        layout,
+                        data.drm_node,
+                        generation,
+                        move |status| {
+                            returned.set(false);
+                            lease.status = match status {
+                                hal::ExternalImageRelease::Unused => WrHalImageRelease::Unused,
+                                hal::ExternalImageRelease::Complete => WrHalImageRelease::Complete,
+                                hal::ExternalImageRelease::Abandoned => WrHalImageRelease::Abandoned,
+                            };
+                            drop(lease);
+                        },
+                    )
+                }?;
+                images.insert(
+                    key,
+                    VideoEntry {
+                        identity,
+                        layout,
+                        image: image.downgrade(),
+                        device,
+                        pending,
+                        progress: self.device.consumer_poller(),
                     },
-                ) }?;
-                images.insert(key, VideoEntry { identity, layout, image: image.downgrade() });
-                log::info!("Video transport: direct Vulkan NV12 sampling, generation={generation}");
+                );
+                hal::diagnostics::video_transport();
+                if !hal::diagnostics::quiet() {
+                    log::info!("Video transport: direct Vulkan NV12 sampling, generation={generation}");
+                }
                 image.lease(channel, uv)
             })
         }

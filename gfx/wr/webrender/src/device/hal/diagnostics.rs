@@ -13,7 +13,7 @@ fn flag(name: &str) -> bool {
 
 pub fn quiet() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| flag("WR_WEBGPU_BENCHMARK_QUIET") || flag("WR_WEBGL_BENCHMARK_QUIET"))
+    *VALUE.get_or_init(|| flag("WR_WEBGPU_BENCHMARK_QUIET") || flag("WR_WEBGL_BENCHMARK_QUIET") || flag("WR_VIDEO_BENCHMARK_QUIET"))
 }
 
 pub fn force_dmabuf_copy() -> bool {
@@ -26,9 +26,14 @@ pub fn force_webgl_sync() -> bool {
     *VALUE.get_or_init(|| flag("WR_WEBGL_FORCE_SYNC"))
 }
 
+pub fn force_video_sync() -> bool {
+    static VALUE: OnceLock<bool> = OnceLock::new();
+    *VALUE.get_or_init(|| flag("WR_VIDEO_FORCE_SYNC"))
+}
+
 fn enabled() -> bool {
     static VALUE: OnceLock<bool> = OnceLock::new();
-    *VALUE.get_or_init(|| flag("WR_WEBGPU_SYNC_INSTRUMENTATION") || flag("WR_WEBGL_SYNC_INSTRUMENTATION"))
+    *VALUE.get_or_init(|| flag("WR_WEBGPU_SYNC_INSTRUMENTATION") || flag("WR_WEBGL_SYNC_INSTRUMENTATION") || flag("WR_VIDEO_SYNC_INSTRUMENTATION"))
 }
 
 #[derive(Default)]
@@ -41,7 +46,8 @@ struct Sample {
 
 impl Sample {
     fn print(&self, thread: &str, event: &str) {
-        let source = if flag("WR_WEBGL_SYNC_INSTRUMENTATION") { "WebGL" } else { "WebGPU" };
+        let source = if flag("WR_VIDEO_SYNC_INSTRUMENTATION") { "Video" }
+            else if flag("WR_WEBGL_SYNC_INSTRUMENTATION") { "WebGL" } else { "WebGPU" };
         eprintln!(
             "{source} DMA-BUF sync metrics: {{\"pid\":{},\"thread\":\"{}\",\"event\":\"{}\",\"count\":{},\"totalNs\":{},\"maxNs\":{},\"buckets\":{:?}}}",
             std::process::id(), thread, event, self.count, self.total, self.max, self.buckets,
@@ -88,6 +94,16 @@ pub fn webgl_transport() {
             seen.set(seen.get() | 4);
             eprintln!("WebRender Vulkan WebGL selected transport: direct; synchronization: {}",
                 if force_webgl_sync() { "sync" } else { "async" });
+        }
+    });
+}
+
+pub fn video_transport() {
+    TRANSPORTS.with(|seen| {
+        if seen.get() & 8 == 0 {
+            seen.set(seen.get() | 8);
+            eprintln!("WebRender Vulkan video selected transport: direct NV12; synchronization: {}",
+                if force_video_sync() { "sync" } else { "async" });
         }
     });
 }

@@ -48,6 +48,7 @@ pub(super) trait ImageDevice: Any {
     fn create(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage>;
     fn update(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()>;
     fn poll(&self) -> Result<()>;
+    fn poll_consumer(&self) -> Result<bool>;
     fn submitted(&self) -> u64;
     fn device_id(&self) -> u64;
     fn poll_complete(&self, serial: u64) -> Result<bool>;
@@ -62,6 +63,12 @@ pub(super) struct Producer<A: hal::Api> {
     pub(super) submissions: SubmissionQueue<A>,
     pub(super) releases: ReleaseQueue,
     failed: Cell<bool>,
+    consumer: Option<Consumer<A>>,
+}
+
+struct Consumer<A: hal::Api> {
+    submissions: std::rc::Weak<SubmissionQueue<A>>,
+    releases: std::rc::Weak<RefCell<Vec<(ReleaseCallback, ExternalImageRelease)>>>,
 }
 
 impl<A: hal::Api> Producer<A> {
@@ -148,6 +155,22 @@ impl<A: hal::Api> ImageDevice for Producer<A> {
     fn poll(&self) -> Result<()> {
         self.progress().map(|_| ())
     }
+    fn poll_consumer(&self) -> Result<bool> {
+        let mut attached = false;
+        let result = self.ensure_healthy().and_then(|_| {
+            if let Some(queue) = self.consumer.as_ref().and_then(|consumer| consumer.submissions.upgrade()) {
+                attached = true;
+                queue.poll()?;
+            }
+            Ok(())
+        });
+        if result.is_err() { self.failed.set(true); self.owner.lost.set(true); }
+        if let Some(releases) = self.consumer.as_ref().and_then(|consumer| consumer.releases.upgrade()) {
+            dispatch_releases(&releases);
+        }
+        let returned = self.progress();
+        result.and(returned.map(|_| attached))
+    }
     fn submitted(&self) -> u64 { self.submissions.submitted() }
     fn device_id(&self) -> u64 { self.owner.cache_id }
     fn poll_complete(&self, serial: u64) -> Result<bool> {
@@ -171,12 +194,20 @@ pub struct ExternalImageDevice(pub(super) Rc<dyn ImageDevice>);
 
 impl ExternalImageDevice {
     pub(super) fn new<A: hal::Api>(owner: &Rc<Device<A>>) -> Self {
+        Self::new_inner(owner, None)
+    }
+    pub(super) fn for_renderer<A: hal::Api>(owner: &Rc<Device<A>>, submissions: &Rc<SubmissionQueue<A>>, releases: &ReleaseQueue) -> Self {
+        Self::new_inner(owner, Some(Consumer {
+            submissions: Rc::downgrade(submissions), releases: Rc::downgrade(releases),
+        }))
+    }
+    fn new_inner<A: hal::Api>(owner: &Rc<Device<A>>, consumer: Option<Consumer<A>>) -> Self {
         let mut submissions = SubmissionQueue::new(owner, 3, false);
         if owner.info.backend == wgt::Backend::Vulkan {
             submissions = submissions.with_wait_timeout(std::time::Duration::from_secs(5));
         }
         Self(Rc::new(Producer { owner: owner.clone(), submissions, failed: Cell::new(false),
-            releases: Rc::new(RefCell::new(Vec::new())) }))
+            releases: Rc::new(RefCell::new(Vec::new())), consumer }))
     }
     pub fn create_image(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage> {
         self.0.create(descriptor, bytes)
@@ -185,6 +216,12 @@ impl ExternalImageDevice {
         self.0.update(image, descriptor, bytes)
     }
     pub fn poll(&self) -> Result<()> { self.0.poll() }
+    /// Progress another renderer outside its command recording without retaining it.
+    /// Returns whether that renderer's submission queue still exists.
+    pub fn consumer_poller(&self) -> Rc<dyn Fn() -> Result<bool>> {
+        let device = Rc::downgrade(&self.0);
+        Rc::new(move || device.upgrade().ok_or("Native image consumer no longer exists")?.poll_consumer())
+    }
     pub fn submitted(&self) -> u64 { self.0.submitted() }
     pub fn device_id(&self) -> u64 { self.0.device_id() }
     pub fn poll_complete(&self, serial: u64) -> Result<bool> { self.0.poll_complete(serial) }

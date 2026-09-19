@@ -4,7 +4,7 @@
 
 use super::*;
 use super::foreign_rgb::ForeignRgbLifetime;
-use super::super::super::external::{ExternalImageLease, ExternalImageRelease, ExternalImageSource};
+use super::super::super::external::{ExternalImageLease, ExternalImageRelease, ExternalImageSource, ReleaseQueue};
 use api::units::TexelRect;
 use std::cell::Cell;
 use std::os::fd::{AsRawFd, IntoRawFd};
@@ -360,6 +360,7 @@ struct Access {
     owner: Rc<Device<V>>,
     planes: [Rc<Texture<V>>; 2],
     lifetime: ForeignRgbLifetime,
+    releases: ReleaseQueue,
 }
 
 fn wait(device: &ExternalImageDevice) -> Result<()> {
@@ -380,11 +381,12 @@ fn wait(device: &ExternalImageDevice) -> Result<()> {
 
 impl Access {
     unsafe fn acquire(&mut self) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("videoAcquire");
         let producer = self.device.dmabuf_producer()?;
         {
             let mut commands = producer.submissions.recording()?;
             self.lifetime.begin_acquire()?;
-            commands.keep(self.planes[0].raw.clone());
+            commands.keep(self.planes.clone());
             let image = self.planes[0].raw.raw_handle();
             image_barrier(
                 &self.owner,
@@ -409,11 +411,16 @@ impl Access {
                 vk::AccessFlags::SHADER_READ,
             );
         }
-        wait(&self.device)?;
-        self.lifetime.acquired()?;
+        if crate::device::hal::diagnostics::force_video_sync() {
+            wait(&self.device)?;
+            self.lifetime.acquired()?;
+        } else {
+            producer.submissions.submit_serial()?;
+            self.lifetime.acquire_submitted()?;
+        }
         Ok(())
     }
-    fn release(&mut self) -> Result<()> {
+    fn record_release(&mut self) -> Result<()> {
         let producer = self.device.dmabuf_producer()?;
         if self.planes[0].current_usage() != wgt::TextureUses::RESOURCE {
             return Err("NV12 was not restored after its last use".into());
@@ -421,7 +428,7 @@ impl Access {
         {
             let mut commands = producer.submissions.recording()?;
             self.lifetime.begin_release()?;
-            commands.keep(self.planes[0].raw.clone());
+            commands.keep(self.planes.clone());
             unsafe {
                 let image = self.planes[0].raw.raw_handle();
                 image_barrier(
@@ -448,9 +455,58 @@ impl Access {
                 );
             }
         }
+        Ok(())
+    }
+    fn release(&mut self) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("videoOwnershipReturn");
+        self.record_release()?;
         wait(&self.device)?;
         self.lifetime.released()?;
         Ok(())
+    }
+
+    fn release_async(&mut self, callback: Box<dyn FnOnce(ExternalImageRelease)>, status: ExternalImageRelease) -> Result<()> {
+        let _span = crate::device::hal::diagnostics::Span::new("videoOwnershipReturn");
+        let mut returned = OwnershipReturn {
+            callback: Some(callback), status,
+            completed: Rc::new(Cell::new(false)),
+            lost: self.owner.lost.clone(),
+            releases: self.releases.clone(),
+            lifetime: None,
+        };
+        self.record_release()?;
+        returned.lifetime = Some(std::mem::replace(&mut self.lifetime, ForeignRgbLifetime::new()));
+        let producer = self.device.dmabuf_producer()?;
+        {
+            let mut commands = producer.submissions.recording()?;
+            let completed = returned.completed.clone();
+            commands.on_complete(move || completed.set(true));
+            commands.keep(returned);
+        }
+        producer.submissions.submit_serial()?;
+        Ok(())
+    }
+}
+
+struct OwnershipReturn {
+    callback: Option<Box<dyn FnOnce(ExternalImageRelease)>>,
+    status: ExternalImageRelease,
+    completed: Rc<Cell<bool>>,
+    lost: crate::device::hal::DeviceLost,
+    releases: ReleaseQueue,
+    lifetime: Option<ForeignRgbLifetime>,
+}
+
+impl Drop for OwnershipReturn {
+    fn drop(&mut self) {
+        if !self.completed.get() || self.lost.get()
+            || self.lifetime.as_mut().map_or(true, |lifetime| lifetime.released().is_err()) {
+            self.status = ExternalImageRelease::Abandoned;
+            self.lost.set(true);
+        }
+        if let Some(callback) = self.callback.take() {
+            self.releases.borrow_mut().push((callback, self.status));
+        }
     }
 }
 
@@ -471,6 +527,20 @@ impl Release {
 impl Drop for Release {
     fn drop(&mut self) {
         if let Some(access) = &mut self.access {
+            if !crate::device::hal::diagnostics::force_video_sync()
+                && self.status.get() != ExternalImageRelease::Abandoned
+                && access.lifetime.needs_release() {
+                if let Some(callback) = self.callback.take() {
+                    if let Err(error) = access.release_async(callback, self.status.get()) {
+                        log::error!("Queueing NV12 ownership return: {error}");
+                        if let Some(producer) = access.device.0.as_any().downcast_ref::<Producer<V>>() {
+                            producer.submissions.discard_recording();
+                        }
+                        access.owner.lost.set(true);
+                    }
+                }
+                return;
+            }
             if self.status.get() != ExternalImageRelease::Abandoned
                 && access.lifetime.needs_release()
             {
@@ -561,6 +631,7 @@ impl ExternalImageDevice {
     /// Retain the producer frame and exclude every other ownership transfer/write until
     /// the callback reports Unused or Complete. Never recycle an Abandoned allocation.
     /// Reuse this publication for all channel leases rather than importing it twice.
+    /// Drive queued ownership returns with `poll` or `finish` before reusing storage.
     pub unsafe fn import_vaapi_nv12(
         &self,
         fd: BorrowedFd<'_>,
@@ -587,6 +658,7 @@ impl ExternalImageDevice {
             owner: owner.clone(),
             planes: planes.clone(),
             lifetime: ForeignRgbLifetime::new(),
+            releases: producer.releases.clone(),
         });
         guard.access.as_mut().unwrap().acquire()?;
         let [y, uv] = planes;
