@@ -4,12 +4,15 @@
 
 use super::*;
 
+const FOURCC_NV12: u32 = u32::from_le_bytes(*b"NV12");
+const FOURCC_P010: u32 = u32::from_le_bytes(*b"P010");
+
 extern "C" {
-    fn wr_vulkan_query_nv12(major: u64, minor: u64, output: &mut WrHalNv12Capabilities) -> bool;
+    fn wr_vulkan_query_video(major: u64, minor: u64, output: &mut WrHalVideoCapabilities) -> bool;
 }
 
 thread_local! {
-    static REGISTERED_VIDEO: RefCell<Option<WrHalNv12Capabilities>> = RefCell::new(None);
+    static REGISTERED_VIDEO: RefCell<Option<WrHalVideoCapabilities>> = RefCell::new(None);
 }
 
 #[no_mangle]
@@ -20,7 +23,7 @@ unsafe extern "C" fn wr_vulkan_register_dmabuf_device(
     _: usize,
     _: *const u64,
     _: usize,
-    video: &WrHalNv12Capabilities,
+    video: &WrHalVideoCapabilities,
 ) -> *mut c_void {
     assert_eq!(std::slice::from_raw_parts(device, 16), video.device_uuid);
     assert_eq!(std::slice::from_raw_parts(driver, 16), video.driver_uuid);
@@ -47,7 +50,8 @@ fn vaapi_nv12_live_device_registration_carries_capabilities() {
         let caps = caps.as_ref().unwrap();
         assert_eq!(caps.drm_node, data.drm_node);
         assert!(caps.formats[..caps.format_count].iter().any(|format| {
-            format.modifier == data.modifier
+            format.fourcc == data.fourcc
+                && format.modifier == data.modifier
                 && format.max_width >= data.allocation_width
                 && format.max_height >= data.allocation_height
                 && format.max_allocation_size >= data.allocation_size
@@ -61,13 +65,14 @@ fn vaapi_nv12_live_device_registration_carries_capabilities() {
 #[ignore = "Requires ExportVAAPIFrame and native Vulkan validation"]
 fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
     let (_, data) = fixture();
-    let mut capabilities = WrHalNv12Capabilities::default();
-    assert!(unsafe { wr_vulkan_query_nv12(data.drm_node[0], data.drm_node[1], &mut capabilities) });
-    assert!((1..=2).contains(&capabilities.format_count));
+    let mut capabilities = WrHalVideoCapabilities::default();
+    assert!(unsafe { wr_vulkan_query_video(data.drm_node[0], data.drm_node[1], &mut capabilities) });
+    assert!((1..=4).contains(&capabilities.format_count));
     assert_eq!(capabilities.drm_node, data.drm_node);
     let formats = &capabilities.formats[..capabilities.format_count];
     assert!(formats.iter().any(|format| {
-        format.modifier == data.modifier
+        format.fourcc == data.fourcc
+            && format.modifier == data.modifier
             && format.max_width >= data.allocation_width
             && format.max_height >= data.allocation_height
             && format.max_allocation_size >= data.allocation_size
@@ -75,7 +80,7 @@ fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
     let identity = device().dmabuf_capabilities().unwrap();
     assert_eq!(capabilities.device_uuid, identity.device_uuid());
     assert_eq!(capabilities.driver_uuid, identity.driver_uuid());
-    assert!(!unsafe { wr_vulkan_query_nv12(u64::MAX, u64::MAX, &mut capabilities) });
+    assert!(!unsafe { wr_vulkan_query_video(u64::MAX, u64::MAX, &mut capabilities) });
     assert_eq!(capabilities.format_count, 0);
     assert_eq!(capabilities.drm_node, [0; 2]);
     assert_eq!(capabilities.device_uuid, [0; 16]);
@@ -83,38 +88,104 @@ fn vaapi_nv12_capability_probe_matches_decoder_and_clears_failed_query() {
     for format in capabilities.formats {
         assert_eq!(
             (
+                format.fourcc,
                 format.modifier,
                 format.max_width,
                 format.max_height,
                 format.max_allocation_size
             ),
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         );
     }
 }
 
-fn fixture() -> (Rc<Fixture>, WrHalNv12) {
+#[test]
+#[ignore = "Requires P010 ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_p010_capability_probe_and_registration_match_exact_format() {
+    let (_, data) = p010_fixture();
+    let live_device = device();
+    let registration = DeviceRegistration::new(&live_device).unwrap();
+    REGISTERED_VIDEO.with(|slot| {
+        let caps = slot.borrow();
+        let caps = caps.as_ref().unwrap();
+        assert!(caps.formats[..caps.format_count].iter().any(|format| {
+            format.fourcc == FOURCC_P010
+                && format.modifier == data.modifier
+                && format.max_width >= data.allocation_width
+                && format.max_height >= data.allocation_height
+                && format.max_allocation_size >= data.allocation_size
+        }));
+    });
+    drop(registration);
+    let mut capabilities = WrHalVideoCapabilities::default();
+    assert!(unsafe { wr_vulkan_query_video(data.drm_node[0], data.drm_node[1], &mut capabilities) });
+    let formats = &capabilities.formats[..capabilities.format_count];
+    assert!(formats.iter().any(|format| {
+        format.fourcc == FOURCC_P010
+            && format.modifier == data.modifier
+            && format.max_width >= data.allocation_width
+            && format.max_height >= data.allocation_height
+            && format.max_allocation_size >= data.allocation_size
+    }));
+    assert!(formats.iter().any(|format| format.fourcc == FOURCC_NV12));
+}
+
+fn fixture() -> (Rc<Fixture>, WrHalVideo) {
+    video_fixture("WR_NV12", FOURCC_NV12)
+}
+
+fn p010_fixture() -> (Rc<Fixture>, WrHalVideo) {
+    assert_eq!(std::env::var("WR_VIDEO_FORMAT").as_deref(), Ok("P010"));
+    video_fixture("WR_P010", FOURCC_P010)
+}
+
+fn expected_p010_bt709_limited(reference: &[u8], width: u32, point: [u32; 2]) -> [u8; 4] {
+    let height = (reference.len() as u32 / 3) / width;
+    let word = |offset| {
+        let value = u16::from_le_bytes([reference[offset], reference[offset + 1]]);
+        assert_eq!(value & 0x3f, 0);
+        (value >> 6) as f32
+    };
+    let y_offset = ((point[1] * width + point[0]) * 2) as usize;
+    let uv_offset = (width * height * 2 + ((point[1] / 2) * (width / 2) + point[0] / 2) * 4) as usize;
+    let y = (word(y_offset) - 64.0) / 876.0;
+    let cb = (word(uv_offset) - 512.0) / 896.0;
+    let cr = (word(uv_offset + 2) - 512.0) / 896.0;
+    let kr = 0.2126;
+    let kb = 0.0722;
+    let kg = 1.0 - kr - kb;
+    let rgb = [
+        y + 2.0 * (1.0 - kr) * cr,
+        y - 2.0 * kb * (1.0 - kb) / kg * cb - 2.0 * kr * (1.0 - kr) / kg * cr,
+        y + 2.0 * (1.0 - kb) * cb,
+    ];
+    let convert = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [convert(rgb[0]), convert(rgb[1]), convert(rgb[2]), 255]
+}
+
+fn video_fixture(prefix: &str, fourcc: u32) -> (Rc<Fixture>, WrHalVideo) {
     init_log();
-    let number = |name| {
-        std::env::var(name)
+    let number = |suffix| {
+        std::env::var(format!("{prefix}_{suffix}"))
             .expect("Run through ExportVAAPIFrame")
             .parse::<u64>()
             .unwrap()
     };
-    let data = WrHalNv12 {
-        fd: number("WR_NV12_FD") as i32,
-        access_lock_fd: number("WR_NV12_ACCESS_LOCK_FD") as i32,
-        width: number("WR_NV12_WIDTH") as u32,
-        height: number("WR_NV12_HEIGHT") as u32,
-        allocation_width: number("WR_NV12_ALLOC_WIDTH") as u32,
-        allocation_height: number("WR_NV12_ALLOC_HEIGHT") as u32,
-        allocation_size: number("WR_NV12_BYTES"),
-        modifier: number("WR_NV12_MODIFIER"),
-        strides: [number("WR_NV12_Y_PITCH"), number("WR_NV12_UV_PITCH")],
-        offsets: [number("WR_NV12_Y_OFFSET"), number("WR_NV12_UV_OFFSET")],
+    let data = WrHalVideo {
+        fd: number("FD") as i32,
+        access_lock_fd: number("ACCESS_LOCK_FD") as i32,
+        fourcc,
+        width: number("WIDTH") as u32,
+        height: number("HEIGHT") as u32,
+        allocation_width: number("ALLOC_WIDTH") as u32,
+        allocation_height: number("ALLOC_HEIGHT") as u32,
+        allocation_size: number("BYTES"),
+        modifier: number("MODIFIER"),
+        strides: [number("Y_PITCH"), number("UV_PITCH")],
+        offsets: [number("Y_OFFSET"), number("UV_OFFSET")],
         allocation_id: 45,
         producer_epoch: 3,
-        drm_node: [number("WR_NV12_DRM_MAJOR"), number("WR_NV12_DRM_MINOR")],
+        drm_node: [number("DRM_MAJOR"), number("DRM_MINOR")],
     };
     (
         Rc::new(Fixture {
@@ -139,13 +210,13 @@ fn device() -> hal::ExternalImageDevice {
 fn acquire(
     fixture: &Rc<Fixture>,
     provider: &mut ExternalImages,
-    data: WrHalNv12,
+    data: WrHalVideo,
     generation: u64,
     channel: u8,
 ) -> Result<hal::ExternalImageLease, String> {
     *fixture.image.borrow_mut() = Some(WrHalImage {
         generation,
-        source: WrHalImageSource::Nv12(data),
+        source: WrHalImageSource::Video(data),
     });
     provider.acquire(ExternalImageId(77), channel, false)
 }
@@ -185,6 +256,36 @@ fn vaapi_nv12_bridge_channels_share_lock_and_retire_cache() {
     assert_eq!(fixture.video_access.borrow().locks, 2);
     assert_eq!(fixture.video_access.borrow().unlocks, 2);
     assert!(!fixture.video_access.borrow().poisoned);
+}
+
+#[test]
+#[ignore = "Requires P010 ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_p010_bridge_channels_share_lock_and_require_exact_format() {
+    let (fixture, data) = p010_fixture();
+    let device = device();
+    let mut provider = provider(&fixture, device.clone());
+    let uv = acquire(&fixture, &mut provider, data, 7, 1).unwrap();
+    let y = acquire(&fixture, &mut provider, data, 7, 0).unwrap();
+    assert_eq!(uv.descriptor().format, ImageFormat::RG16);
+    assert_eq!(
+        uv.descriptor().size,
+        DeviceIntSize::new((data.width / 2) as i32, (data.height / 2) as i32)
+    );
+    assert_eq!(y.descriptor().format, ImageFormat::R16);
+    assert_eq!(
+        y.descriptor().size,
+        DeviceIntSize::new(data.width as i32, data.height as i32)
+    );
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    let mut changed = data;
+    changed.fourcc = FOURCC_NV12;
+    assert!(acquire(&fixture, &mut provider, changed, 7, 0).is_err());
+    drop(y);
+    assert!(fixture.video_access.borrow().locked);
+    drop(uv);
+    device.finish().unwrap();
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
 }
 
 #[test]
@@ -245,7 +346,7 @@ fn vaapi_nv12_bridge_busy_lock_is_rejected_without_poisoning() {
 
 struct VideoProvider {
     fixture: Box<Rc<Fixture>>,
-    data: WrHalNv12,
+    data: WrHalVideo,
     images: ExternalImages,
 }
 
@@ -253,9 +354,10 @@ fn submit_video_frame(
     renderer: &mut hal::Renderer,
     api: &mut webrender::render_api::RenderApi,
     fixture: &Rc<Fixture>,
-    data: WrHalNv12,
+    data: WrHalVideo,
     epoch: u32,
 ) -> hal::FrameCompletion {
+    let p010 = data.fourcc == FOURCC_P010;
     let stable = Box::new(fixture.clone());
     let images = provider(&stable, renderer.external_image_device());
     renderer
@@ -275,10 +377,11 @@ fn submit_video_frame(
             ImageDescriptor::new(
                 (data.width >> channel) as i32,
                 (data.height >> channel) as i32,
-                if channel == 0 {
-                    ImageFormat::R8
-                } else {
-                    ImageFormat::RG8
+                match (p010, channel) {
+                    (false, 0) => ImageFormat::R8,
+                    (false, _) => ImageFormat::RG8,
+                    (true, 0) => ImageFormat::R16,
+                    (true, _) => ImageFormat::RG16,
                 },
                 ImageDescriptorFlags::empty(),
             ),
@@ -315,9 +418,17 @@ fn submit_video_frame(
     builder.push_yuv_image(
         &info,
         bounds,
-        YuvData::NV12(keys[0], keys[1]),
-        ColorDepth::Color8,
-        YuvColorSpace::Rec601,
+        if p010 {
+            YuvData::P010(keys[0], keys[1])
+        } else {
+            YuvData::NV12(keys[0], keys[1])
+        },
+        if p010 { ColorDepth::Color10 } else { ColorDepth::Color8 },
+        if p010 {
+            YuvColorSpace::Rec709
+        } else {
+            YuvColorSpace::Rec601
+        },
         ColorRange::Limited,
         ImageRendering::Auto,
     );
@@ -389,6 +500,47 @@ fn async_nv12_cross_consumer_progresses_previous_renderer() {
     drop(first_device);
     drop(first_renderer);
     assert!(first_poller().is_err());
+}
+
+#[test]
+#[ignore = "Requires P010 ExportVAAPIFrame and native Vulkan validation"]
+fn vaapi_p010_bridge_render_matches_independent_reference() {
+    let (fixture, data) = p010_fixture();
+    let (mut renderer, sender) = renderer();
+    let device = renderer.external_image_device();
+    let mut api = sender.create_api();
+    let completion = submit_video_frame(&mut renderer, &mut api, &fixture, data, 1);
+    let pixels = renderer
+        .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(
+            data.width as i32,
+            data.height as i32,
+        )))
+        .unwrap();
+    assert!(renderer.poll_completion(completion).unwrap());
+    let reference = std::fs::read(std::env::var("WR_P010_REFERENCE").unwrap()).unwrap();
+    assert_eq!(reference.len(), (data.width * data.height * 3) as usize);
+    let point = [data.width / 4, data.height / 4];
+    let framebuffer_y = data.height - 1 - point[1];
+    let offset = ((framebuffer_y * data.width + point[0]) * 4) as usize;
+    let expected = expected_p010_bt709_limited(&reference, data.width, point);
+    for (actual, expected) in pixels[offset..offset + 4].iter().zip(expected) {
+        assert!(
+            actual.abs_diff(expected) <= 2,
+            "{:?} != {:?}",
+            &pixels[offset..offset + 4],
+            expected
+        );
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fixture.video_access.borrow().locked {
+        renderer.poll().unwrap();
+        device.poll().unwrap();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    api.shut_down(true);
 }
 impl hal::ExternalImageProvider for VideoProvider {
     fn acquire(&mut self, _: ExternalImageId, channel: u8, _: bool) -> Result<hal::ExternalImageLease, String> {

@@ -65,6 +65,7 @@ bool VideoInfo::operator==(const VideoInfo& rhs) const {
           *mCodecSpecificConfig == *rhs.mCodecSpecificConfig &&
           *mExtraData == *rhs.mExtraData && mRotation == rhs.mRotation &&
           mColorDepth == rhs.mColorDepth && mImageRect == rhs.mImageRect &&
+          mChromaLocation == rhs.mChromaLocation &&
           mAlphaPresent == rhs.mAlphaPresent);
 }
 

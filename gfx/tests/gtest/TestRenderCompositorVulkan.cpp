@@ -14,8 +14,15 @@
 
 extern "C" void* wr_vulkan_register_dmabuf_device(
     const uint8_t*, const uint8_t*, const uint64_t*, size_t, const uint64_t*,
-    size_t, const mozilla::wr::WrHalNv12Capabilities*);
+    size_t, const mozilla::wr::WrHalVideoCapabilities*);
 extern "C" void wr_vulkan_unregister_dmabuf_device(void*);
+
+static constexpr uint32_t MakeFourcc(char a, char b, char c, char d) {
+  return uint32_t(a) | (uint32_t(b) << 8) | (uint32_t(c) << 16) |
+         (uint32_t(d) << 24);
+}
+static constexpr uint32_t kFourccNV12 = MakeFourcc('N', 'V', '1', '2');
+static constexpr uint32_t kFourccP010 = MakeFourcc('P', '0', '1', '0');
 
 TEST(RenderCompositorVulkan, VideoRequiresEveryLiveDeviceToMatchProbe)
 {
@@ -46,18 +53,18 @@ TEST(RenderCompositorVulkan, VideoRequiresEveryLiveDeviceToMatchProbe)
   expected.deviceUUID()[0] = 1;
   expected.driverUUID()[0] = 2;
   expected.formats().AppendElement(
-      gfx::VulkanVideoFormat(0, 4096, 2160, 1ULL << 32));
+      gfx::VulkanVideoFormat(kFourccNV12, 0, 4096, 2160, 1ULL << 32));
   gfxVars::SetWebRenderVulkanVideoCapabilities(expected);
   EXPECT_FALSE(RenderCompositorVulkan::SupportsVideo());
-  wr::WrHalNv12Capabilities actual{};
+  wr::WrHalVideoCapabilities actual{};
   actual.drm_node[0] = 226;
   actual.drm_node[1] = 128;
   actual.device_uuid[0] = 1;
   actual.driver_uuid[0] = 2;
   actual.format_count = 1;
-  actual.formats[0] = {0, 4096, 2160, 1ULL << 32};
+  actual.formats[0] = {kFourccNV12, 0, 4096, 2160, 1ULL << 32};
   const uint64_t modifier = 0;
-  const auto add = [&](const wr::WrHalNv12Capabilities& aCaps) {
+  const auto add = [&](const wr::WrHalVideoCapabilities& aCaps) {
     return wr_vulkan_register_dmabuf_device(aCaps.device_uuid,
                                             aCaps.driver_uuid, &modifier, 1,
                                             &modifier, 1, &aCaps);
@@ -67,7 +74,7 @@ TEST(RenderCompositorVulkan, VideoRequiresEveryLiveDeviceToMatchProbe)
   auto unregister =
       MakeScopeExit([&] { wr_vulkan_unregister_dmabuf_device(first); });
   EXPECT_TRUE(RenderCompositorVulkan::SupportsVideo());
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < 9; ++i) {
     SCOPED_TRACE(i);
     auto changed = actual;
     switch (i) {
@@ -95,6 +102,9 @@ TEST(RenderCompositorVulkan, VideoRequiresEveryLiveDeviceToMatchProbe)
       case 7:
         changed.formats[0].max_allocation_size--;
         break;
+      case 8:
+        changed.formats[0].fourcc = kFourccP010;
+        break;
     }
     void* second = add(changed);
     EXPECT_FALSE(RenderCompositorVulkan::SupportsVideo());
@@ -121,7 +131,7 @@ TEST(RenderCompositorVulkan, VideoFailureRevokesCapabilityForSession)
   gfxVars::SetUseWebRenderVulkanVideo(true);
   gfx::VulkanVideoCapabilities capabilities;
   capabilities.formats().AppendElement(
-      gfx::VulkanVideoFormat(0, 128, 128, 24576));
+      gfx::VulkanVideoFormat(kFourccNV12, 0, 128, 128, 24576));
   gfxVars::SetWebRenderVulkanVideoCapabilities(capabilities);
   wr::RenderCompositorVulkan::DisableVideo();
   EXPECT_FALSE(gfxVars::UseWebRenderVulkanVideo());
@@ -178,9 +188,9 @@ TEST(RenderCompositorVulkan, VideoCapabilitiesSurviveGfxVarIPC)
     capabilities.driverUUID().AppendElement(31 - i);
   }
   capabilities.formats().AppendElement(
-      mozilla::gfx::VulkanVideoFormat(0, 4096, 2160, 1ULL << 32));
+      mozilla::gfx::VulkanVideoFormat(kFourccNV12, 0, 4096, 2160, 1ULL << 32));
   capabilities.formats().AppendElement(mozilla::gfx::VulkanVideoFormat(
-      0x0100000000000002, 8192, 4320, 1ULL << 34));
+      kFourccP010, 0x0100000000000002, 8192, 4320, 1ULL << 34));
   mozilla::gfx::GfxVarValue input(capabilities);
   IPC::Message message(MSG_ROUTING_NONE, 0);
   {

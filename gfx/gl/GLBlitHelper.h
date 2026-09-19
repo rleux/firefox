@@ -165,6 +165,7 @@ class DrawBlitProg final {
     Mat3 texMatrix1;
     Maybe<gfx::YUVColorSpace> colorSpaceForMatrix;
     gfx::ColorRange colorRange = gfx::ColorRange::LIMITED;
+    bool p010 = false;
 
     std::array<float, 16> ColorMatrix() const;
   };

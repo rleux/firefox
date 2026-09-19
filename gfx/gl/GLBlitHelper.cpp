@@ -587,6 +587,21 @@ std::array<float, 16> DrawBlitProg::YUVArgs::ColorMatrix() const {
           -(matrix[4 + row] + matrix[8 + row]) * (128.0f / 255.0f);
     }
   }
+  if (p010) {
+    const bool identity = *colorSpaceForMatrix == gfx::YUVColorSpace::Identity;
+    const bool full = colorRange == gfx::ColorRange::FULL || identity;
+    const float scale =
+        full ? 65535.0f / (1023.0f * 64.0f) : 65535.0f / (255.0f * 256.0f);
+    for (size_t row = 0; row < 3; ++row) {
+      for (size_t column = 0; column < 3; ++column) {
+        matrix[column * 4 + row] *= scale;
+      }
+      if (full && !identity) {
+        matrix[12 + row] =
+            -(matrix[4 + row] + matrix[8 + row]) * (32768.0f / 65535.0f);
+      }
+    }
+  }
   return matrix;
 }
 
@@ -1711,7 +1726,8 @@ bool GLBlitHelper::BlitDMABuf(DMABufSurface* surface,
 
   DrawBlitProg::YUVArgs yuvArgs;
   yuvArgs.colorSpaceForMatrix = Some(surface->GetYUVColorSpace());
-  if (surface->GetFOURCCFormat() == VA_FOURCC_NV12) {
+  yuvArgs.p010 = surface->GetFOURCCFormat() == VA_FOURCC_P010;
+  if (surface->GetFOURCCFormat() == VA_FOURCC_NV12 || yuvArgs.p010) {
     yuvArgs.colorRange = surface->IsFullRange() ? gfx::ColorRange::FULL
                                                 : gfx::ColorRange::LIMITED;
   }

@@ -102,7 +102,7 @@ namespace layers {
   uint64_t stride;
 };
 
-// Initially NV12 with separate R8/GR88 layers, one memory plane per layer.
+// NV12 or P010 with separate Y/UV layers, one memory plane per layer.
 [Comparable] struct VAAPIImageState {
   DMABufVideoObject[] objects;
   DMABufVideoPlane[] planes;

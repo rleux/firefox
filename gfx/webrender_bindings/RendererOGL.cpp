@@ -172,8 +172,15 @@ extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
     WrHalImage* aImage) {
   auto* renderer = static_cast<RendererOGL*>(aObj);
   RefPtr<RenderTextureHost> texture = renderer->GetRenderTexture(aId);
-  if (!texture || texture->IsFromDRMSource() ||
-      !texture->LockHalImage(aChannelIndex, aImage)) {
+  if (!texture || texture->IsFromDRMSource()) {
+    gfxCriticalNote << "HAL external image unavailable: " << AsUint64(aId)
+                    << " missing=" << !texture;
+    return nullptr;
+  }
+  if (!texture->LockHalImage(aChannelIndex, aImage)) {
+    gfxCriticalNote << "HAL external image lock rejected: " << AsUint64(aId)
+                    << " channel=" << int(aChannelIndex)
+                    << " format=" << int(texture->GetFormat());
     return nullptr;
   }
   return new WrHalImageLease{std::move(texture)};

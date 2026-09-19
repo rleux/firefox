@@ -2191,9 +2191,11 @@ bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
 static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
 #ifdef XP_LINUX
   const auto& state = aDesc.vaapiImageState().ref();
+  const bool p010 = aDesc.fourccFormat() == VA_FOURCC_P010;
+  const uint32_t sampleBytes = p010 ? 2 : 1;
   if (aDesc.vulkanImageState() || aDesc.foreignRGBImageState() ||
-      aDesc.fourccFormat() != VA_FOURCC_NV12 || !state.allocationId() ||
-      !state.generation() || !state.producerEpoch() ||
+      (!p010 && aDesc.fourccFormat() != VA_FOURCC_NV12) ||
+      !state.allocationId() || !state.generation() || !state.producerEpoch() ||
       !state.drmRenderMajor() || state.drmRenderMajor() > UINT32_MAX ||
       state.drmRenderMinor() > UINT32_MAX || !state.producerComplete() ||
       aDesc.semaphoreFd() || aDesc.semaphoreFdIsSyncFd() ||
@@ -2204,14 +2206,16 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
       aDesc.height().Length() != 2 || aDesc.widthAligned().Length() != 2 ||
       aDesc.heightAligned().Length() != 2 || aDesc.format().Length() != 2 ||
       aDesc.strides().Length() != 2 || aDesc.offsets().Length() != 2 ||
-      aDesc.modifier().Length() != 2 || aDesc.format()[0] != DRM_FORMAT_R8 ||
-      aDesc.format()[1] != DRM_FORMAT_GR88) {
+      aDesc.modifier().Length() != 2 ||
+      aDesc.format()[0] != (p010 ? DRM_FORMAT_R16 : DRM_FORMAT_R8) ||
+      aDesc.format()[1] != (p010 ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88)) {
     return false;
   }
   const uint32_t width = aDesc.width()[0];
   const uint32_t height = aDesc.height()[0];
   const uint32_t alignedWidth = aDesc.widthAligned()[0];
   const uint32_t alignedHeight = aDesc.heightAligned()[0];
+  const uint64_t rowBytes = uint64_t(alignedWidth) * sampleBytes;
   if (!width || !height || width > alignedWidth || height > alignedHeight ||
       alignedWidth > INT_MAX || alignedHeight > INT_MAX ||
       ((width | height | alignedWidth | alignedHeight) & 1) ||
@@ -2251,7 +2255,8 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
         aDesc.modifier()[i] != object.modifier() ||
         aDesc.strides()[i] != plane.stride() ||
         aDesc.offsets()[i] != plane.offset() ||
-        plane.offset() >= object.size() || plane.stride() < alignedWidth) {
+        plane.offset() >= object.size() || plane.stride() < rowBytes ||
+        plane.offset() % sampleBytes || plane.stride() % sampleBytes) {
       return false;
     }
     used[plane.objectIndex()] = true;
@@ -2259,7 +2264,7 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
       const auto end = CheckedInt<uint64_t>(plane.offset()) +
                        CheckedInt<uint64_t>(plane.stride()) *
                            (aDesc.heightAligned()[i] - 1) +
-                       alignedWidth;
+                       rowBytes;
       if (!end.isValid() || end.value() > object.size()) {
         return false;
       }
@@ -2289,13 +2294,16 @@ static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
 bool DMABufSurfaceYUV::PublishVAAPIImage(
     const VADRMPRIMESurfaceDescriptor& aDesc, uint64_t aPublicationId,
     uint64_t aProducerEpoch, uint64_t aDRMMajor, uint64_t aDRMMinor) {
+  const bool p010 = aDesc.fourcc == VA_FOURCC_P010;
   if (mVAAPIDescriptor || !mGlobalRefCountFd || IsGlobalRefSet() ||
-      aDesc.fourcc != VA_FOURCC_NV12 || aDesc.num_objects != 1 ||
+      aDesc.fourcc != uint32_t(mFOURCCFormat) ||
+      (!p010 && aDesc.fourcc != VA_FOURCC_NV12) || aDesc.num_objects != 1 ||
       aDesc.num_layers != 2 || aDesc.layers[0].num_planes != 1 ||
       aDesc.layers[1].num_planes != 1 || aDesc.layers[0].object_index[0] != 0 ||
       aDesc.layers[1].object_index[0] != 0 ||
-      aDesc.layers[0].drm_format != DRM_FORMAT_R8 ||
-      aDesc.layers[1].drm_format != DRM_FORMAT_GR88 ||
+      aDesc.layers[0].drm_format != (p010 ? DRM_FORMAT_R16 : DRM_FORMAT_R8) ||
+      aDesc.layers[1].drm_format !=
+          (p010 ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88) ||
       aDesc.width != uint32_t(mWidthAligned[0]) ||
       aDesc.height != uint32_t(mHeightAligned[0]) || !CreateAccessLock()) {
     return false;
@@ -2345,12 +2353,14 @@ bool DMABufSurfaceYUV::SupportsVAAPIImage(
        image.colorPrimaries() != ColorSpace2::BT601_525 &&
        image.colorPrimaries() != ColorSpace2::BT709) ||
       image.transferFunction() != TransferFunction::BT709 ||
+      (image.chromaLocation() != 0 && image.chromaLocation() != 2) ||
       !(image.hdrMetadata() == HDRMetadata())) {
     return false;
   }
   const auto& object = state.objects()[0];
   for (const auto& format : aCapabilities.formats()) {
-    if (format.modifier() == object.modifier() &&
+    if (format.fourcc() == image.fourccFormat() &&
+        format.modifier() == object.modifier() &&
         image.widthAligned()[0] <= format.maxWidth() &&
         image.heightAligned()[0] <= format.maxHeight() &&
         object.size() <= format.maxAllocationSize()) {

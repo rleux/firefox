@@ -20,6 +20,19 @@ pub enum VideoDmaBufFormat {
 }
 
 impl VideoDmaBufFormat {
+    pub fn fourcc(self) -> u32 {
+        match self {
+            Self::Nv12 => u32::from_le_bytes(*b"NV12"),
+            Self::P010 => u32::from_le_bytes(*b"P010"),
+        }
+    }
+
+    pub fn from_fourcc(fourcc: u32) -> Result<Self> {
+        [Self::Nv12, Self::P010].iter().copied()
+            .find(|format| format.fourcc() == fourcc)
+            .ok_or_else(|| "Unsupported native video fourcc".into())
+    }
+
     fn bytes_per_sample(self) -> u64 {
         match self { Self::Nv12 => 1, Self::P010 => 2 }
     }

@@ -1,13 +1,14 @@
 # Native VA-API video tests
 
-The experimental importer maps one completed, same-device NV12 DMA-BUF as a
-mutable Vulkan image. R8 and RG8 views share that image, memory, layout state
-and publication lifetime. WebRender samples those views with its YUV shaders;
+The experimental importer maps one completed, same-device NV12 or P010 DMA-BUF
+as a mutable Vulkan image. R8/RG8 (NV12) or R16/RG16 (P010) views share that
+image, memory, layout state and publication lifetime. WebRender samples those views with its YUV shaders;
 the importer does not copy the frame into owned plane textures. Explicit
 snapshots and test reference readbacks still copy pixels.
 
-The initial subset is even-sized NV12 with linear or Intel Y-tiled memory,
-one object and two memory planes. The driver must support the exact modifier,
+Browser admission supports even-sized NV12 with linear or Intel Y-tiled memory
+and P010 with Intel Y-tiled memory, one object and two memory planes.
+The driver must support the exact format, modifier,
 sampled usage, filtering, view formats and foreign queue ownership. Browser
 publication requires the default-off `gfx.webrender.vulkan` preference,
 hardware-decoding and zero-copy eligibility, and a successful capability probe.
@@ -26,7 +27,8 @@ publications indefinitely.
 `ExportVAAPIFrame.cpp` uses the in-tree FFmpeg 6 headers and the system
 libavcodec 60/libavutil 58/libva libraries. It decodes the first VP9 IVF frame
 in VA-API, synchronizes and exports it, and retains the frame while a child
-process runs the Rust tests. CPU readback supplies a test reference only.
+process runs the Rust tests. CPU readback supplies a test reference only,
+preserving packed 16-bit P010 samples for Profile 2 clips.
 
 From the source root:
 
@@ -112,14 +114,15 @@ unsupported by this importer. These standalone tests establish HAL behavior;
 the browser tests below cover decoder publication and playback separately.
 
 V7, the separate Vulkan Video producer, is postponed. V8 adds VA-API P010 SDR
-in two stages: format-aware HAL import and sampling first, then browser
-capability negotiation, publication and reader/color acceptance. The HAL uses
+through format-aware HAL import, browser capability negotiation, publication
+and reader/color handling. The HAL uses
 `VideoDmaBufFormat` to distinguish NV12 from P010 and validates byte pitches,
 sample alignment and capability format identity. P010 uses R16/RG16 UNORM plane
 views and WebRender's existing MSB-aligned P010 interpretation. Both formats
-share the asynchronous publication lifetime. Browser admission remains NV12
-until the second stage is validated. Odd visible dimensions remain explicitly
-rejected; HDR rendering requires separate acceptance.
+share the asynchronous publication lifetime. Capability IPC and the native
+image FFI carry fourcc identity, so an NV12 modifier entry cannot authorize
+P010. Odd visible dimensions remain explicitly rejected; HDR rendering
+requires separate acceptance.
 
 The plane views follow Vulkan's
 [single-plane view compatibility rules](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewCreateInfo.html).
@@ -143,10 +146,37 @@ them (32 native fixture tests total); the 163 nonignored HAL tests and Firefox
 binaries build also pass.
 
 Linear P010 is query-supported on this host but has no demonstrated native
-decoder export, so it is not planned for browser admission yet. An actual
+decoder export, so it is excluded from browser admission. An actual
 255x127 decoder export retains odd allocation dimensions and violates Vulkan's
 4:2:0 image extent requirements; allocation byte padding alone does not justify
 inventing an even image extent. That case remains rejected.
+
+| Browser transport tuple | Admission |
+| --- | --- |
+| VA-API NV12, linear or Intel Y-tiled, one shared object | Capability-gated |
+| VA-API P010, Intel Y-tiled, one shared object | Capability-gated |
+| P010 linear, other modifiers, separate objects, P016 or 12-bit formats | Rejected |
+| Even visible/allocation dimensions with verified padding/crop | Accepted within the format/modifier limits |
+| Odd visible or allocation dimensions | Rejected |
+| SDR BT.601/BT.709 matrix, limited or full range, BT.709 transfer | Accepted |
+| Unspecified chroma location or explicit center | Existing centered sampling |
+| Explicit left, top, bottom or corner chroma siting | Rejected |
+| HDR metadata, PQ/HLG transfer, BT.2020 or other unadmitted color contracts | Rejected |
+| Vulkan Video producer, cross-device producer, protected frames | Rejected |
+
+Color primaries remain limited to unknown, sRGB, BT.601-525 and BT.709.
+Descriptor serialization preserves color/HDR metadata even when admission
+rejects it; unsupported native tuples use the existing decoder fallback.
+Rejecting unsupported explicit chroma siting also tightens NV12 admission:
+the sampler does not implement a location-dependent chroma offset.
+WebM's horizontal/vertical siting fields are retained through `VideoInfo` and
+decoder IPC. Explicit unsupported, invalid or partially specified siting cannot
+become an unspecified value that bypasses admission. Container siting and the
+decoded frame's siting are both checked; an explicit centered container does
+not override a conflicting frame location. The element values follow the
+[Matroska chroma-siting specification](https://www.matroska.org/technical/elements.html).
+Recognized decoded-frame transfer functions and primaries also have to fit the
+SDR subset, so bitstream PQ/HLG or wide primaries cannot bypass container checks.
 
 ## Producer lifetime tests
 
@@ -166,6 +196,12 @@ fails publication and stops that pool.
 
 The tests cover retained callers and images, repeated output across flush, busy
 access, pressure, abandonment, metadata changes and partial reference failure.
+Native `DMABUFTextureData` also retains a publication reference until its
+destructor, `Deallocate` or `Forget` releases the surface. The image can disappear
+while its texture is still in transit; retaining only the DMA-BUF object would
+allow the producer to retire the decoder frame before the receiver imports it.
+`TextureDataPinsPublicationUntilEveryCleanupPath` reproduces that gap and checks
+all three cleanup paths, including consumer import after image destruction.
 `DMABufSurface.VAAPIExportCleanupClosesUnreferencedObjects` verifies that export
 cleanup closes objects even when no layer references them.
 
@@ -176,7 +212,7 @@ playback or performance.
 
 ## Capability probe
 
-The startup probe queries the same mutable NV12 format, plane views, modifier,
+The startup probe queries the same mutable NV12/P010 formats, plane views, modifiers,
 filtering, readback and external-memory support as the importer. It reports
 per-modifier dimension and allocation-size limits, plus Vulkan device/driver
 identity, only when the selected Vulkan adapter matches the decoder DRM node.
@@ -188,7 +224,7 @@ and verify device mismatch clears previously successful results. The importer
 tests also check that the reported limits admit the frame they sample. Unit
 tests cover modifier, dimension and allocation-size boundaries; the C++
 `VideoCapabilitiesSurviveGfxVarIPC` test checks serialization of device identity
-and both modifier records, including sizes above 4 GiB.
+and format/modifier records, including sizes above 4 GiB.
 
 A successful probe alone does not enable publication. Live renderer registrations
 must match its DRM node, device/driver UUIDs and format limits before native
@@ -231,7 +267,7 @@ this snapshot path.
 `ExportVAAPIFrame` and is disabled in ordinary test runs. It compares native
 and legacy GL snapshot pixels for the same frame under BT.601/BT.709 and
 limited/full-range interpretation. It also checks those pixels against the
-exported NV12 bytes with an independent conversion, along with
+exported NV12 or P010 bytes with an independent conversion, along with
 busy/abandoned snapshots and the surface-descriptor blit used by WebGL uploads.
 Run the exporter with a wrapper executable that ignores the Rust test arguments
 and launches the compiled Firefox gtest binary with
@@ -242,8 +278,13 @@ Use the existing Firefox gtest runtime environment and an available EGL driver.
 This fixture tests GL-reader coordination independently of browser playback.
 The browser acceptance runner below exercises the web-facing readers.
 
-NV12 and planar 8-bit GL blits use a range-aware matrix. Texture-host CPU
-readback also preserves the descriptor's range. Other blit inputs keep their
+NV12, P010 and planar 8-bit GL blits use a range-aware matrix. P010 blits account
+for 10-bit codes stored in the upper bits of normalized 16-bit samples, including
+the distinct full-range chroma midpoint. Texture-host CPU
+readback also preserves the descriptor's range. Software YCbCr texture-host
+readback accepts 12-bit and 16-bit buffers through the existing CPU converter,
+even though they have no dedicated `SurfaceFormat`; this keeps the rejected
+12-bit native case usable by canvas and WebGL readers. Other blit inputs keep their
 existing limited-range default until their callers supply a supported range.
 `Colorspaces.GLBlitYUVMatrixHonorsRange` checks neutral endpoints and colored
 values against independent BT.601/BT.709/BT.2020 equations;
@@ -323,7 +364,8 @@ python3 gfx/webrender_bindings/tests/run_browser_native_video.py \
   --gpu-process true
 ```
 
-Use `--binary` for another object directory. Optional `--icd`,
+Use `--format p010` to require native P010 import for a 10-bit SDR fixture;
+the default is `nv12`. Use `--binary` for another object directory. Optional `--icd`,
 `--validation-layers`, `--loader-directory` and `--adapter` select the Vulkan
 test environment. `--synchronization sync` selects the synchronous control;
 the default is `async`. Reports check the selected mode and loaded Vulkan
@@ -354,10 +396,10 @@ window title. These programs must be installed for that scenario.
 Controls include `--backend gl`, `--backend software --decoder software`,
 `--software-video --decoder software`, and
 `--zero-copy-disabled --decoder software`. Use `--decoder software` with the
-10-bit fixture to require fallback. These options express an expected decoder;
+12-bit, HDR, odd-size or unsupported-chroma fixture to require fallback. These options express an expected decoder;
 a failed native test is never silently accepted as a software success.
 
-The initial native coverage is Intel VA-API and Vulkan with the admitted NV12
+The native coverage is Intel VA-API and Vulkan with the admitted NV12/P010
 layouts. Other vendors, unsupported formats and playback performance require
 separate evidence. Ordinary native playback samples the decoder allocation;
 canvas readback, screenshots, WebGL uploads and recovery readback explicitly
@@ -381,6 +423,32 @@ plus GPU-process crash recovery. PiP retains the full reader coverage while the
 separate window is active. These runs used Vulkan loader 1.4.363 and synchronization
 validation; the system loader 1.3.275 has a previously observed multi-device
 validation teardown race. Logs are under `artifacts/native-video/async/`.
+
+## P010 browser validation
+
+All 27 V8 browser acceptance cases have passing results, covering
+BT.601/BT.709 limited/full range in GPU and parent
+compositor processes; synchronous and asynchronous transfers; seeks, loops,
+resize, windows, PiP, minimize/restore, renderer reset and GPU-process recovery.
+Negative controls cover explicit left chroma siting, odd dimensions, 12-bit
+video and PQ, alongside default-GL P010 and native NV12 controls. Canvas, WebGL
+and compositor readers remain enabled throughout acceptance.
+The updated browser bridge also passes 20 native fixture tests: three P010 and
+seven NV12 tests on each of the native and Naga shader paths, with Vulkan
+validation clean.
+The focused C++ suite passes all 43 tests across descriptor admission, color
+conversion, metadata/IPC, decoder recovery and publication lifetime. Both native
+GL-reader fixtures pass independently. Firefox gtest startup crashes inside the
+development sandbox on this host; the same tests run normally and pass with
+authorized unsandboxed execution.
+
+An additional pre-fix P010 reader run failed with an unsupported HAL external
+image before renderer fallback. Five diagnostic repetitions did not reproduce
+it. The separately proven TextureData publication-lifetime gap was fixed, but
+the original failure's causal link remains unconfirmed. After that fix, all ten
+native browser checks passed: five identical P010 reader runs, P010 PiP in both
+compositor processes, NV12 playback/PiP and 12-bit software fallback. Original
+failures and repetitions are retained under `artifacts/native-video/v8/`.
 
 ## Transfer benchmark
 
