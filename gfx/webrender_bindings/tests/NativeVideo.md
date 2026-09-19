@@ -382,3 +382,7 @@ post-timing readback differences were 3.04/255 (sync) and 2.20/255 (async), usin
 `artifacts/video-async/benchmark-smoke-sync/` and
 `artifacts/video-async/benchmark-smoke-async/`. These short checks validate the
 harness and make no performance claim.
+
+See [NativeVideoMeasurements.md](NativeVideoMeasurements.md) for the completed
+native sync/async comparison, including timing, synchronization diagnostics,
+memory and host conditions.
