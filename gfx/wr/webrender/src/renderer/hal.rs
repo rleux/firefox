@@ -100,6 +100,8 @@ pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
 
 #[derive(Debug)]
 pub struct PreparedFrameInfo {
+    pub render: bool,
+    pub present: bool,
     pub passes: usize,
     pub picture_tiles: usize,
     pub primitive_instances: usize,
@@ -631,13 +633,13 @@ impl<A: BackendApi> RendererCore<A> {
     pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> {
         let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
         let ready = self.ready.state.lock().unwrap().documents.get(&document_id)
-            .map_or(false, |frame| frame.0 > previous);
+            .map_or(false, |frame| frame.generation > previous);
         if ready { self.prepare_frame(document_id).map(Some) } else { Ok(None) }
     }
 
     pub fn prepare_frame(&mut self, document_id: DocumentId) -> Result<PreparedFrameInfo, String> {
         let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
-        let (generation, publish, present) = self.ready.wait_document(document_id, previous)?;
+        let (generation, publish, present, render) = self.ready.wait_document(document_id, previous)?;
         self.ready_generation = generation;
         self.prepared_generations.insert(document_id, generation);
         self.update_until(Some(publish))?;
@@ -664,6 +666,8 @@ impl<A: BackendApi> RendererCore<A> {
             }
         }
         Ok(PreparedFrameInfo {
+            render,
+            present,
             passes: frame.passes.len(),
             picture_tiles: frame.composite_state.tiles.len(),
             primitive_instances,
@@ -969,11 +973,19 @@ impl<A: BackendApi> Drop for RendererCore<A> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReadyFrame {
+    generation: u64,
+    publish: api::FramePublishId,
+    present: bool,
+    render_generation: u64,
+}
+
 #[derive(Default)]
 struct ReadyState {
     generation: u64,
-    frame: Option<(DocumentId, api::FramePublishId, bool)>,
-    documents: HashMap<DocumentId, (u64, api::FramePublishId, bool)>,
+    frame: Option<DocumentId>,
+    documents: HashMap<DocumentId, ReadyFrame>,
     shutdown: bool,
 }
 
@@ -984,19 +996,22 @@ struct FrameReady {
 }
 
 impl FrameReady {
-    fn publish(&self, document: DocumentId, publish: api::FramePublishId, present: bool) {
+    fn publish(&self, document: DocumentId, publish: api::FramePublishId, present: bool, render: bool) {
         let mut state = self.state.lock().unwrap();
         state.generation += 1;
-        state.frame = Some((document, publish, present));
+        state.frame = Some(document);
         let generation = state.generation;
-        state.documents.insert(document, (generation, publish, present));
+        let render_generation = if render { generation } else {
+            state.documents.get(&document).map_or(0, |frame| frame.render_generation)
+        };
+        state.documents.insert(document, ReadyFrame { generation, publish, present, render_generation });
         self.changed.notify_all();
     }
 
     fn wait(
         &self,
         generation: u64,
-    ) -> Result<(u64, DocumentId, api::FramePublishId, bool), String> {
+    ) -> Result<(u64, DocumentId, api::FramePublishId, bool, bool), String> {
         let (state, _) = self
             .changed
             .wait_timeout_while(
@@ -1013,14 +1028,16 @@ impl FrameReady {
             }
             .into());
         }
-        let (document, publish, present) = state.frame.ok_or("No WR frame notification")?;
-        Ok((state.generation, document, publish, present))
+        let document = state.frame.ok_or("No WR frame notification")?;
+        let frame = state.documents[&document];
+        Ok((frame.generation, document, frame.publish, frame.present, frame.render_generation > generation))
     }
 
-    fn wait_document(&self, document: DocumentId, generation: u64) -> Result<(u64, api::FramePublishId, bool), String> {
+    fn wait_document(&self, document: DocumentId, generation: u64) -> Result<(u64, api::FramePublishId, bool, bool), String> {
         let (state, _) = self.changed.wait_timeout_while(self.state.lock().unwrap(), Duration::from_secs(60),
-            |state| state.documents.get(&document).map_or(true, |frame| frame.0 <= generation) && !state.shutdown).unwrap();
-        state.documents.get(&document).filter(|frame| frame.0 > generation).copied()
+            |state| state.documents.get(&document).map_or(true, |frame| frame.generation <= generation) && !state.shutdown).unwrap();
+        state.documents.get(&document).filter(|frame| frame.generation > generation)
+            .map(|frame| (frame.generation, frame.publish, frame.present, frame.render_generation > generation))
             .ok_or_else(|| if state.shutdown { "WR backend shut down".into() } else { "Timed out waiting for WR document".into() })
     }
 }
@@ -1065,7 +1082,7 @@ impl RenderNotifier for FrameNotifier {
             metrics.add(if params.render { RenderCounter::RenderRequested } else { RenderCounter::NoRenderRequested }, 1);
             if params.scrolled { metrics.add(RenderCounter::ScrolledRequests, 1); }
         }
-        self.ready.publish(document, publish, params.present);
+        self.ready.publish(document, publish, params.present, params.render);
         self.inner.new_frame_ready(document, publish, params);
     }
 }
@@ -1126,13 +1143,83 @@ mod tests {
         let ready = FrameReady::default();
         let id = DocumentId::new(api::IdNamespace(7), 1);
         for serial in 1..=1000 {
-            ready.publish(id, api::FramePublishId(serial), true);
+            ready.publish(id, api::FramePublishId(serial), true, true);
         }
-        let (generation, document, publish, present) = ready.wait(0).unwrap();
+        let (generation, document, publish, present, render) = ready.wait(0).unwrap();
         assert!(present);
+        assert!(render);
         assert_eq!((generation, document, publish.0), (1000, id, 1000));
         ready.state.lock().unwrap().shutdown = true;
         assert!(ready.wait(generation).unwrap_err().contains("shut down"));
+    }
+
+    #[test]
+    fn ready_render_requests_survive_coalescing_per_document() {
+        let ready = FrameReady::default();
+        let first = DocumentId::new(api::IdNamespace(7), 1);
+        let second = DocumentId::new(api::IdNamespace(7), 2);
+        let publish = api::FramePublishId(42);
+        ready.publish(first, publish, true, true);
+        ready.publish(second, publish, false, false);
+        ready.publish(first, publish, true, false);
+        let (generation, latest, present, render) = ready.wait_document(first, 0).unwrap();
+        assert_eq!(latest, publish);
+        assert!(present && render);
+        let (_, _, present, render) = ready.wait_document(second, 0).unwrap();
+        assert!(!present && !render);
+        ready.publish(first, publish, false, false);
+        let (consumed, _, present, render) = ready.wait_document(first, generation).unwrap();
+        assert!(!present && !render);
+        ready.publish(first, publish, false, true);
+        ready.publish(first, publish, true, false);
+        let (_, _, present, render) = ready.wait_document(first, consumed).unwrap();
+        assert!(present && render);
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn prepared_frame_decisions_preserve_explicit_invalidation() {
+        use api::units::*;
+        use api::*;
+        use crate::render_api::Transaction;
+        let (mut renderer, sender) = create_vulkan_renderer(&Options { validation: true, ..Default::default() },
+            WebRenderOptions::default(), Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false))))).unwrap();
+        let mut api = sender.create_api();
+        let document = api.add_document(DeviceIntSize::new(16, 16));
+        let pipeline = PipelineId(0, 0);
+        let rect = LayoutRect::from_size(LayoutSize::new(16.0, 16.0));
+        let info = CommonItemProperties { clip_rect: rect, clip_chain_id: ClipChainId::INVALID,
+            spatial_id: SpatialId::root_scroll_node(pipeline), flags: PrimitiveFlags::default() };
+        let mut builder = DisplayListBuilder::new(pipeline);
+        builder.begin(60.0);
+        builder.push_rect(&info, rect, ColorF::new(1.0, 0.0, 0.0, 1.0));
+        let mut transaction = Transaction::new();
+        transaction.set_root_pipeline(pipeline);
+        transaction.set_display_list(Epoch(0), api.get_namespace_id(), builder.end());
+        transaction.generate_frame(1, true, false, RenderReasons::TESTING);
+        api.send_transaction(document, transaction);
+        let first = renderer.prepare_frame(document).unwrap();
+        assert!(first.render && first.present);
+        let pixels = renderer.render_frame().unwrap().pixels;
+        assert_eq!(pixels.len(), 16 * 16 * 4);
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel == [255, 0, 0, 255]));
+
+        let mut transaction = Transaction::new();
+        transaction.generate_frame(2, true, false, RenderReasons::TESTING);
+        api.send_transaction(document, transaction);
+        let unchanged = renderer.prepare_frame(document).unwrap();
+        assert!(!unchanged.render && unchanged.present);
+        assert!(renderer.prepare_frame_if_ready(document).unwrap().is_none());
+
+        let mut transaction = Transaction::new();
+        transaction.invalidate_rendered_frame(RenderReasons::TESTING);
+        transaction.generate_frame(3, true, false, RenderReasons::TESTING);
+        api.send_transaction(document, transaction);
+        let invalidated = renderer.prepare_frame(document).unwrap();
+        assert!(invalidated.render && invalidated.present);
+        assert!(renderer.core.document.as_ref().unwrap().frame.has_been_rendered);
+        assert_eq!(renderer.render_frame().unwrap().pixels, pixels);
+        api.delete_document(document);
     }
 
     struct Checkpoints(Arc<Mutex<Vec<Checkpoint>>>);
