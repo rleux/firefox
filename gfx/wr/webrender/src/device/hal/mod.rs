@@ -115,6 +115,7 @@ static NEXT_DEVICE_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// Offscreen bootstrap device. Rendering WR display lists is a separate integration step.
 pub struct Device<A: hal::Api> {
     cache_id: u64,
+    metrics: Option<std::sync::Arc<diagnostics::RenderMetrics>>,
     open: hal::OpenDevice<A>,
     queue_gate: std::sync::Arc<std::sync::Mutex<()>>,
     lost: DeviceLost,
@@ -148,6 +149,16 @@ pub struct MemoryStats {
     pub pipeline_epochs: usize,
     pub query_slots: usize,
     pub pending_queries: usize,
+}
+
+impl<A: hal::Api> Drop for Device<A> {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            let memory = self.memory.get();
+            metrics.set(diagnostics::RenderGauge::TextureBytes, memory.texture_bytes);
+            metrics.set(diagnostics::RenderGauge::BufferBytes, memory.buffer_bytes);
+        }
+    }
 }
 
 pub struct Readback {
@@ -426,6 +437,7 @@ impl<A: backend::BackendApi> Device<A> {
             .map_err(|_| "HAL device cache identity exhausted")?;
         Ok((Self {
             cache_id,
+            metrics: diagnostics::RenderMetrics::new(cache_id, false),
             open,
             queue_gate: std::sync::Arc::new(std::sync::Mutex::new(())),
             lost: DeviceLost::default(),

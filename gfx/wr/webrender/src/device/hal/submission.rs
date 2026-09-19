@@ -33,6 +33,7 @@ pub(super) struct Submission<A: hal::Api> {
     recording: bool,
     attempted: bool,
     complete: bool,
+    counted_pending: bool,
     completion_check: Option<CompletionCheck>,
     serial: u64,
     resources: Vec<Box<dyn Any>>,
@@ -51,6 +52,7 @@ impl<A: hal::Api> Submission<A> {
             recording: false,
             attempted: false,
             complete: false,
+            counted_pending: false,
             completion_check: None,
             serial,
             resources: Vec::new(),
@@ -81,6 +83,13 @@ impl<A: hal::Api> Submission<A> {
 
     fn recycle(&mut self) {
         assert!(self.complete);
+        if self.counted_pending {
+            if let Some(metrics) = &self.owner.metrics {
+                metrics.add(diagnostics::RenderCounter::CompletedSubmissions, 1);
+                metrics.release(diagnostics::RenderGauge::PendingSubmissions);
+            }
+            self.counted_pending = false;
+        }
         let buffer = self.buffer.take();
         unsafe {
             self.encoder().reset_all(buffer.into_iter());
@@ -140,6 +149,12 @@ impl<A: hal::Api> Submission<A> {
             };
             result.map_err(|e| format!("Submitting WR commands: {e:?}"))?;
         }
+        if let Some(metrics) = &self.owner.metrics {
+            metrics.add(diagnostics::RenderCounter::QueueSubmissions, 1);
+            if !surfaces.is_empty() { metrics.add(diagnostics::RenderCounter::SurfaceSubmissions, 1); }
+            metrics.retain(diagnostics::RenderGauge::PendingSubmissions);
+            self.counted_pending = true;
+        }
         for commit in self.commits.drain(..) {
             commit();
         }
@@ -191,6 +206,11 @@ impl<A: hal::Api> Drop for Submission<A> {
             if self.attempted && !self.complete {
                 let _guard = self.owner.queue_gate.lock().unwrap_or_else(|error| error.into_inner());
                 let _ = self.owner.open.queue.wait_for_idle();
+            }
+            if self.counted_pending {
+                if let Some(metrics) = &self.owner.metrics {
+                    metrics.release(diagnostics::RenderGauge::PendingSubmissions);
+                }
             }
             if let Some(mut encoder) = self.encoder.take() {
                 if self.recording {
@@ -432,8 +452,11 @@ mod tests {
     #[test]
     #[ignore = "Requires Vulkan"]
     fn native_completion_probe_gates_retirement_and_errors() {
+        use diagnostics::{RenderCounter, RenderGauge, RenderMetrics};
         for fail in [false, true] {
             let mut device = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+            let metrics = RenderMetrics::for_test(device.cache_id, 0);
+            device.metrics = Some(metrics.clone());
             device.completion_probe = Some(if fail {
                 |_, _| Ok(Box::new(|_| Err("native command buffer failed".into())))
             } else {
@@ -445,6 +468,8 @@ mod tests {
             let notice = complete.clone();
             queue.recording().unwrap().on_complete(move || notice.set(true));
             queue.submit().unwrap();
+            assert_eq!(metrics.snapshot().count(RenderCounter::QueueSubmissions), 1);
+            assert_eq!(metrics.snapshot().gauge(RenderGauge::PendingSubmissions), 1);
             unsafe { owner.open.queue.wait_for_idle() }.unwrap();
             let result = queue.poll();
             assert!(!complete.get());
@@ -458,13 +483,20 @@ mod tests {
                 assert!(complete.get());
                 assert!(!owner.lost.get());
             }
+            drop(queue);
+            assert_eq!(metrics.snapshot().gauge(RenderGauge::PendingSubmissions), 0);
+            assert_eq!(metrics.snapshot().count(RenderCounter::CompletedSubmissions), u64::from(!fail));
         }
     }
 
     #[test]
     #[ignore = "Requires Vulkan"]
     fn failed_submit_does_not_publish_completion() {
-        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap());
+        use diagnostics::{RenderCounter, RenderGauge, RenderMetrics};
+        let mut device = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
+        let metrics = RenderMetrics::for_test(device.cache_id, 0);
+        device.metrics = Some(metrics.clone());
+        let owner = Rc::new(device);
         let queue = SubmissionQueue::new(&owner, 3, false);
         let completed = Rc::new(std::cell::Cell::new(false));
         let notice = completed.clone();
@@ -476,6 +508,8 @@ mod tests {
         assert!(queue.wait_for(1).is_err());
         assert!(!completed.get());
         assert!(queue.recording().is_err());
+        assert_eq!(metrics.snapshot().count(RenderCounter::QueueSubmissions), 0);
+        assert_eq!(metrics.snapshot().gauge(RenderGauge::PendingSubmissions), 0);
     }
 
     #[test]

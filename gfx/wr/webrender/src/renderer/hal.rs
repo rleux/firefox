@@ -57,6 +57,7 @@ macro_rules! renderer_facade {
             pub fn has_presentable_output(&self) -> bool { self.core.has_presentable_output() }
             pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> { self.core.prepare_frame_if_ready(document_id) }
             pub fn prepare_frame(&mut self, document_id: DocumentId) -> Result<PreparedFrameInfo, String> { self.core.prepare_frame(document_id) }
+            pub fn render_metrics(&self) -> Option<(crate::device::hal::diagnostics::RenderMetricsSnapshot, crate::device::hal::diagnostics::RenderMetricsSnapshot)> { self.core.gpu.render_metrics() }
             pub fn render_frame(&mut self) -> Result<FrameOutput, String> { self.core.render_frame() }
             pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> { self.core.render() }
             pub fn read_pixels_rgba8(&self, rect: api::units::FramebufferIntRect) -> Result<Vec<u8>, String> { self.core.read_pixels_rgba8(rect) }
@@ -288,6 +289,7 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
     let notifier = Box::new(FrameNotifier {
         inner: notifier,
         ready: ready.clone(),
+        metrics: gpu.metrics(),
     });
     let (result_tx, result_rx) = unbounded_channel();
     let BackendConnection {
@@ -404,6 +406,9 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     pub fn update(&mut self) -> Result<(), String> {
+        if let Some(metrics) = self.gpu.metrics() {
+            metrics.add(crate::device::hal::diagnostics::RenderCounter::Updates, 1);
+        }
         self.gpu.poll()?;
         self.update_until(self.target_frame_publish_id)
     }
@@ -506,6 +511,9 @@ impl<A: BackendApi> RendererCore<A> {
                     self.document = None;
                     self.parked_documents.clear();
                     self.last_output = None;
+                    if let Some(metrics) = self.gpu.metrics() {
+                        metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes, 0);
+                    }
                     self.last_descriptor = None;
                     self.last_device_rect = None;
                 }
@@ -543,7 +551,12 @@ impl<A: BackendApi> RendererCore<A> {
                 _,
             ))
             | ResultMsg::SetParameter(api::Parameter::Int(api::IntParameter::BatchedUploadThreshold, _)) => {}
-            ResultMsg::ForceRedraw => self.force_redraw = true,
+            ResultMsg::ForceRedraw => {
+                self.force_redraw = true;
+                if let Some(metrics) = self.gpu.metrics() {
+                    metrics.add(crate::device::hal::diagnostics::RenderCounter::ForceRedraws, 1);
+                }
+            }
             ResultMsg::DebugCommand(command) => {
                 use crate::render_api::DebugCommand;
                 match command {
@@ -584,6 +597,9 @@ impl<A: BackendApi> RendererCore<A> {
                     self.document_id = None;
                     self.parked_documents.clear();
                     self.last_output = None;
+                    if let Some(metrics) = self.gpu.metrics() {
+                        metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes, 0);
+                    }
                     self.last_descriptor = None;
                     self.last_device_rect = None;
                     self.gpu.load_capture(config, externals)?;
@@ -681,6 +697,10 @@ impl<A: BackendApi> RendererCore<A> {
         let output = self
             .gpu
             .render(&mut document.frame, Vec::new(), self.clear_color)?;
+        if let Some(metrics) = self.gpu.metrics() {
+            metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes,
+                output.size[0] as u64 * output.size[1] as u64 * 4);
+        }
         if document.frame.present {
             self.gpu.end_compositor_frame(&document.frame, FrameCompletion { owner: self.backend_id, serial: output.serial })?;
         }
@@ -940,6 +960,9 @@ impl<A: BackendApi> RendererCore<A> {
 
 impl<A: BackendApi> Drop for RendererCore<A> {
     fn drop(&mut self) {
+        if let Some(metrics) = self.gpu.metrics() {
+            metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes, 0);
+        }
         if let Some(sender) = self.api_tx.take() {
             let _ = sender.send(ApiMsg::UnregisterWindow(self.backend_id, None));
         }
@@ -1005,15 +1028,21 @@ impl FrameReady {
 struct FrameNotifier {
     inner: Box<dyn RenderNotifier>,
     ready: Arc<FrameReady>,
+    metrics: Option<Arc<crate::device::hal::diagnostics::RenderMetrics>>,
 }
 impl RenderNotifier for FrameNotifier {
     fn clone(&self) -> Box<dyn RenderNotifier> {
         Box::new(Self {
             inner: self.inner.clone(),
             ready: self.ready.clone(),
+            metrics: self.metrics.clone(),
         })
     }
     fn wake_up(&self, composite_needed: bool) {
+        if let Some(metrics) = &self.metrics {
+            use crate::device::hal::diagnostics::RenderCounter;
+            metrics.add(if composite_needed { RenderCounter::WakeRender } else { RenderCounter::WakeUpdate }, 1);
+        }
         self.inner.wake_up(composite_needed);
     }
     fn external_event(&self, event: api::ExternalEvent) {
@@ -1030,6 +1059,12 @@ impl RenderNotifier for FrameNotifier {
         publish: api::FramePublishId,
         params: &api::FrameReadyParams,
     ) {
+        if let Some(metrics) = &self.metrics {
+            use crate::device::hal::diagnostics::RenderCounter;
+            metrics.add(RenderCounter::FrameReady, 1);
+            metrics.add(if params.render { RenderCounter::RenderRequested } else { RenderCounter::NoRenderRequested }, 1);
+            if params.scrolled { metrics.add(RenderCounter::ScrolledRequests, 1); }
+        }
         self.ready.publish(document, publish, params.present);
         self.inner.new_frame_ready(document, publish, params);
     }
@@ -1069,6 +1104,7 @@ mod tests {
         let notifier = FrameNotifier {
             inner: Box::new(ShutdownNotice(notified.clone())),
             ready,
+            metrics: None,
         };
         notifier.clone().shut_down();
         assert!(notified.load(Ordering::SeqCst));
@@ -1079,6 +1115,7 @@ mod tests {
         let notifier = FrameNotifier {
             inner: Box::new(ShutdownNotice(notified.clone())),
             ready: Arc::new(FrameReady::default()),
+            metrics: None,
         };
         notifier.clone().external_event(api::ExternalEvent::from_raw(42));
         assert!(notified.load(Ordering::SeqCst));
