@@ -6,6 +6,7 @@ use super::*;
 use super::backend::{BackendApi, ShaderCache, ShaderInputMode};
 use super::submission::SubmissionQueue;
 use super::resources::{Buffer, Owned, Texture, texture_format};
+use super::diagnostics::{RenderCounter, RenderGauge, RenderMetrics, RenderMetricsSnapshot};
 use super::external::{ReleaseQueue, dispatch_releases};
 use std::{cell::{Cell, RefCell}, collections::HashMap, mem, rc::Rc};
 use api::{ColorF, ImageBufferKind, PremultipliedColorF, units::*};
@@ -288,6 +289,7 @@ pub(crate) struct FrameRenderer<A: BackendApi> {
     resource_upload_bytes: u64,
     surface: Option<super::surface::SurfaceState<A>>,
     presentation_pipelines: HashMap<wgt::TextureFormat, Rc<present::PresentationPipeline<A>>>,
+    metrics: Option<std::sync::Arc<RenderMetrics>>,
 }
 
 impl<A: BackendApi> FrameRenderer<A> {
@@ -312,6 +314,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     pub fn new(device: Device<A>) -> Result<Self> {
         let shader_input = A::shader_input()?;
         println!("HAL shader input: {}", shader_input.name());
+        let metrics = RenderMetrics::new(device.cache_id, true);
         let owner = Rc::new(device);
         let native = &owner.open.device;
         let sampler = |filter, mipmap| -> Result<_> {
@@ -411,7 +414,18 @@ impl<A: BackendApi> FrameRenderer<A> {
             resource_upload_bytes: 0,
             surface: None,
             presentation_pipelines: HashMap::new(),
+            metrics,
         })
+    }
+
+    pub(crate) fn metrics(&self) -> Option<std::sync::Arc<RenderMetrics>> { self.metrics.clone() }
+
+    fn count(&self, counter: RenderCounter, amount: u64) {
+        if let Some(metrics) = &self.metrics { metrics.add(counter, amount); }
+    }
+
+    pub fn render_metrics(&self) -> Option<(RenderMetricsSnapshot, RenderMetricsSnapshot)> {
+        Some((self.metrics.as_ref()?.snapshot(), self.owner.metrics.as_ref()?.snapshot()))
     }
 
     pub fn has_acquired_surface(&self) -> bool {
@@ -601,6 +615,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     pub fn poll(&self) -> Result<()> {
+        self.count(RenderCounter::Polls, 1);
         if self.is_failed() {
             let _ = self.submissions.poll();
             dispatch_releases(&self.releases);
@@ -610,6 +625,13 @@ impl<A: BackendApi> FrameRenderer<A> {
         dispatch_releases(&self.releases);
         let result = result.and_then(|_| self.external_device.poll());
         if result.is_err() { self.failed.set(true); }
+        if let Some(metrics) = &self.owner.metrics {
+            let memory = self.owner.memory.get();
+            metrics.set(RenderGauge::TextureBytes, memory.texture_bytes);
+            metrics.set(RenderGauge::BufferBytes, memory.buffer_bytes);
+            metrics.report_if_due();
+        }
+        if let Some(metrics) = &self.metrics { metrics.report_if_due(); }
         result
     }
 
@@ -637,6 +659,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         let lease = self.external_provider.as_mut().ok_or("No HAL external-image provider is installed")?
             .acquire(id, channel, composited)?;
         lease.attach_releases(&self.releases);
+        lease.attach_metrics(self.owner.metrics.as_ref());
         Ok(lease)
     }
 
@@ -918,7 +941,13 @@ impl<A: BackendApi> FrameRenderer<A> {
                         lease.complete_cpu_copy();
                     }
                 }
-                if uploaded { self.resource_upload_bytes += upload_bytes; }
+                if uploaded {
+                    self.resource_upload_bytes += upload_bytes;
+                    if let Some(metrics) = &self.owner.metrics {
+                        metrics.add(RenderCounter::ResourceUploads, 1);
+                        metrics.add(RenderCounter::ResourceUploadBytes, upload_bytes);
+                    }
+                }
             }
             self.generate_mips(&texture)?;
         }
@@ -2373,6 +2402,8 @@ impl<A: BackendApi> FrameRenderer<A> {
         clear: ColorF,
         composite: bool,
     ) -> Result<RenderedFrame<A>> {
+        self.count(RenderCounter::Executions, 1);
+        if !composite { self.count(RenderCounter::OffscreenExecutions, 1); }
         self.depths.clear();
         for updates in updates {
             self.update(updates)?;
@@ -2439,6 +2470,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                     self.target(target, &data, &frame.render_tasks, &mut stats)?;
                 }
                 for target in &pass.picture_cache {
+                    self.count(RenderCounter::RasterizedTiles, 1);
                     stats.color_targets += 1;
                     let native_id = match target.surface {
                         ResolvedSurfaceTexture::Native { id, size } => {
@@ -2539,6 +2571,8 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         stats.color_targets += 1;
         self.acquire_composite_tiles(frame)?;
+        self.count(RenderCounter::FullCompositions, 1);
+        self.count(RenderCounter::ComposedPixels, size.width as u64 * size.height as u64);
         let output = self.texture_pool.acquire(
             size.width as u32,
             size.height as u32,
@@ -2738,6 +2772,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             || rect.max.x as u32 > frame.size[0] || rect.max.y as u32 > frame.size[1] {
             return Err("Invalid HAL readback rectangle".into());
         }
+        self.count(RenderCounter::Readbacks, 1);
         let size = [rect.width() as u32, rect.height() as u32];
         let layout = self.owner.layout(size[0], size[1])?;
         let buffer = self.readback_buffer(&layout)?;

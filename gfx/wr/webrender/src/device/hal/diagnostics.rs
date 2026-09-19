@@ -7,6 +7,10 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+#[path = "render_metrics.rs"]
+mod render_metrics;
+pub use render_metrics::{RenderCounter, RenderGauge, RenderMetrics, RenderMetricsSnapshot};
+
 fn flag(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")
 }

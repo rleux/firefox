@@ -52,6 +52,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         if result.is_err() && surface.acquired.is_none() {
             self.failed.set(true);
         }
+        if matches!(result, Ok(PresentationStatus::Acquired)) {
+            self.count(RenderCounter::Acquires, 1);
+        }
         result
     }
 
@@ -68,6 +71,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             self.submissions.submit_surfaces(&[&acquired.texture])?;
             self.submissions.wait()?;
             surface.discard();
+            self.count(RenderCounter::Discards, 1);
         }
         Ok(())
     }
@@ -165,6 +169,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         self.submissions.submit_surfaces(&[&acquired.texture])?;
         let status = self.surface.as_mut().unwrap().present()?;
+        if matches!(status, PresentationStatus::Presented { .. }) {
+            self.count(RenderCounter::Presents, 1);
+        }
         self.failed.set(false);
         Ok(status)
     }

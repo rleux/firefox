@@ -264,6 +264,7 @@ pub(super) struct LeaseState {
     release: Option<ReleaseCallback>,
     native: Option<(Rc<Cell<usize>>, Rc<Cell<bool>>)>,
     queue: RefCell<Option<ReleaseQueue>>,
+    metrics: RefCell<Option<Arc<diagnostics::RenderMetrics>>>,
 }
 
 impl LeaseState {
@@ -283,7 +284,14 @@ impl Drop for LeaseState {
             count.set(count.get() - 1);
             if status == ExternalImageRelease::Abandoned { failed.set(true); }
         }
-        if let Some(release) = self.release.take() {
+        if let Some(mut release) = self.release.take() {
+            if let Some(metrics) = self.metrics.get_mut().take() {
+                release = Box::new(move |status| {
+                    metrics.add(diagnostics::RenderCounter::ExternalLeaseReleases, 1);
+                    metrics.release(diagnostics::RenderGauge::ExternalLeases);
+                    release(status);
+                });
+            }
             if let Some(queue) = self.queue.get_mut().as_ref() { queue.borrow_mut().push((release, status)); }
             else { release(status); }
         }
@@ -303,6 +311,7 @@ impl ExternalImageLease {
                release: impl FnOnce(ExternalImageRelease) + 'static) -> Result<Self> {
         let mut lease = Self { descriptor, uv, generation, source, state: Rc::new(LeaseState {
             uses: Cell::new(0), completed: Cell::new(0), release: Some(Box::new(release)), native: None, queue: RefCell::new(None),
+            metrics: RefCell::new(None),
         }) };
         validate_descriptor(descriptor)?;
         if !uv.to_array().iter().all(|value| value.is_finite())
@@ -331,6 +340,17 @@ impl ExternalImageLease {
 
     pub(super) fn attach_releases(&self, queue: &ReleaseQueue) {
         *self.state.queue.borrow_mut() = Some(queue.clone());
+    }
+
+    pub(super) fn attach_metrics(&self, metrics: Option<&Arc<diagnostics::RenderMetrics>>) {
+        if let Some(metrics) = metrics {
+            let mut attached = self.state.metrics.borrow_mut();
+            if attached.is_none() {
+                metrics.add(diagnostics::RenderCounter::ExternalLeaseAcquires, 1);
+                metrics.retain(diagnostics::RenderGauge::ExternalLeases);
+                *attached = Some(metrics.clone());
+            }
+        }
     }
 
     pub(super) fn complete_cpu_copy(&self) {
@@ -368,6 +388,37 @@ mod tests {
     use super::*;
     use api::{ImageFormat, ImageDescriptorFlags};
     use std::cell::RefCell;
+
+    #[test]
+    fn lease_metrics_follow_queued_callback_for_each_terminal_status() {
+        use diagnostics::{RenderCounter, RenderGauge, RenderMetrics};
+        for expected in [ExternalImageRelease::Unused, ExternalImageRelease::Complete, ExternalImageRelease::Abandoned] {
+            let metrics = RenderMetrics::for_test(1, 0);
+            let queue = Rc::new(RefCell::new(Vec::new()));
+            let released = Rc::new(Cell::new(None));
+            let callback = released.clone();
+            let descriptor = ImageDescriptor::new(1, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+            let lease = ExternalImageLease::new(descriptor, TexelRect::new(0.0, 0.0, 1.0, 1.0), 1,
+                ExternalImageSource::Buffer(Arc::new(vec![0; 4])), move |status| callback.set(Some(status))).unwrap();
+            lease.attach_releases(&queue);
+            lease.attach_metrics(Some(&metrics));
+            lease.attach_metrics(Some(&metrics));
+            match expected {
+                ExternalImageRelease::Unused => {},
+                ExternalImageRelease::Complete => lease.complete_cpu_copy(),
+                ExternalImageRelease::Abandoned => lease.state.uses.set(1),
+            }
+            drop(lease);
+            assert_eq!(released.get(), None);
+            assert_eq!(metrics.snapshot().count(RenderCounter::ExternalLeaseAcquires), 1);
+            assert_eq!(metrics.snapshot().count(RenderCounter::ExternalLeaseReleases), 0);
+            assert_eq!(metrics.snapshot().gauge(RenderGauge::ExternalLeases), 1);
+            dispatch_releases(&queue);
+            assert_eq!(released.get(), Some(expected));
+            assert_eq!(metrics.snapshot().count(RenderCounter::ExternalLeaseReleases), 1);
+            assert_eq!(metrics.snapshot().gauge(RenderGauge::ExternalLeases), 0);
+        }
+    }
 
     #[test]
     fn rejects_invalid_cpu_images_and_releases_unused_lease() {

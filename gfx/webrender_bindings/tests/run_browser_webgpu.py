@@ -35,9 +35,18 @@ def main():
         default="full",
     )
     parser.add_argument("--sync-instrumentation", action="store_true")
+    parser.add_argument("--render-metrics", choices=["on", "off"], default="off")
     parser.add_argument(
         "--scenario",
-        choices=["basic", "lifecycle", "windows", "reset", "crash", "offscreen"],
+        choices=[
+            "basic",
+            "lifecycle",
+            "windows",
+            "reset",
+            "crash",
+            "offscreen",
+            "metrics",
+        ],
         default="basic",
     )
     parser.add_argument("--record-baseline-defects", action="store_true")
@@ -86,6 +95,7 @@ def main():
         "VK_INSTANCE_LAYERS",
         "VK_LAYER_VALIDATE_SYNC",
         "MESA_VK_WSI_DEBUG",
+        "WR_HAL_RENDER_METRICS",
     ]:
         env.pop(name, None)
     env.update(
@@ -133,6 +143,8 @@ def main():
         )
     if args.adapter:
         env["MOZ_WR_VULKAN_ADAPTER"] = args.adapter
+    if args.render_metrics == "on":
+        env["WR_HAL_RENDER_METRICS"] = "1"
     if args.software_presentation:
         env["MESA_VK_WSI_DEBUG"] = "sw"
     prefs = {
@@ -167,7 +179,15 @@ def main():
     ]
     for name, value in prefs.items():
         command += ["--setpref", f"{name}={value}"]
-    command.append(str(Path(__file__).with_name("test_webgpu_dmabuf_browser.py")))
+    command.append(
+        str(
+            Path(__file__).with_name(
+                "test_hal_render_metrics.py"
+                if args.scenario == "metrics"
+                else "test_webgpu_dmabuf_browser.py"
+            )
+        )
+    )
     print(f"Output: {output}", flush=True)
     with (output / "test.log").open("w") as log, (output / "window-manager.log").open(
         "w"
