@@ -22,6 +22,7 @@ HAL_ENVELOPE = {
     "lastWorkNs",
 }
 SOFTWARE_RENDERERS = ["llvmpipe", "lavapipe", "softpipe", "software", "swiftshader"]
+LIGHT_TREE_RETRIES = 2
 HAL_COUNTERS = {
     "frameReady",
     "renderRequested",
@@ -179,7 +180,17 @@ class Sampler:
         self._thread = None
         self._error = None
 
-    def _stats(self):
+    def _validate_root(self, result):
+        root = result.get(self.root_pid)
+        if root is None:
+            raise ProcessLookupError(f"Root process {self.root_pid} is unavailable")
+        identity = f"{self.root_pid}:{root['startTimeTicks']}"
+        if self._root_identity is None:
+            self._root_identity = identity
+        elif self._root_identity != identity:
+            raise RuntimeError("Root process identity changed")
+
+    def _stats_full(self):
         result = {}
         for entry in self.proc_root.iterdir():
             if not entry.name.isdigit():
@@ -189,22 +200,132 @@ class Sampler:
             except FileNotFoundError:
                 continue
             result[stat["pid"]] = stat
-        root = result.get(self.root_pid)
-        if root is None:
-            raise ProcessLookupError(f"Root process {self.root_pid} is unavailable")
-        identity = f"{self.root_pid}:{root['startTimeTicks']}"
-        if self._root_identity is None:
-            self._root_identity = identity
-        elif self._root_identity != identity:
-            raise RuntimeError("Root process identity changed")
+        self._validate_root(result)
         owned = {self.root_pid}
         while True:
             expanded = owned | {
                 pid for pid, stat in result.items() if stat["parentPid"] in owned
             }
             if expanded == owned:
-                return result, owned
+                return (
+                    result,
+                    owned,
+                    {
+                        "method": "whole-proc-scan",
+                        "raceLimited": True,
+                        "retries": 0,
+                        "threadsVisited": None,
+                        "childLinks": None,
+                    },
+                )
             owned = expanded
+
+    def _stats_light_once(self):
+        result = {}
+        parents = {self.root_pid: None}
+        pending = [self.root_pid]
+        threads_visited = 0
+        child_links = 0
+        while pending:
+            pid = pending.pop()
+            expected_parent = parents[pid]
+            process_path = self.proc_root / str(pid)
+            try:
+                before = _read_stat(process_path / "stat")
+            except FileNotFoundError as error:
+                if pid == self.root_pid:
+                    raise ProcessLookupError(
+                        f"Root process {self.root_pid} is unavailable"
+                    ) from error
+                raise RuntimeError(f"Process {pid} disappeared") from error
+            if expected_parent is not None and before["parentPid"] != expected_parent:
+                raise RuntimeError(f"Process {pid} changed parent")
+            try:
+                threads = list((process_path / "task").iterdir())
+            except FileNotFoundError as error:
+                raise RuntimeError(
+                    f"Process {pid} task directory disappeared"
+                ) from error
+            children = set()
+            process_threads = 0
+            for thread in threads:
+                if not thread.name.isdigit():
+                    continue
+                try:
+                    text = (thread / "children").read_text()
+                except FileNotFoundError as error:
+                    raise RuntimeError(
+                        f"Process {pid} thread {thread.name} disappeared"
+                    ) from error
+                threads_visited += 1
+                process_threads += 1
+                try:
+                    thread_children = {int(child) for child in text.split()}
+                except ValueError as error:
+                    raise RuntimeError(
+                        f"Process {pid} thread {thread.name} children are invalid"
+                    ) from error
+                children.update(thread_children)
+                child_links += len(thread_children)
+            if process_threads == 0:
+                raise RuntimeError(f"Process {pid} has no readable threads")
+            try:
+                after = _read_stat(process_path / "stat")
+            except FileNotFoundError as error:
+                raise RuntimeError(f"Process {pid} disappeared") from error
+            if (
+                before["startTimeTicks"] != after["startTimeTicks"]
+                or before["parentPid"] != after["parentPid"]
+            ):
+                raise RuntimeError(f"Process {pid} identity changed during discovery")
+            result[pid] = after
+            for child in children:
+                previous_parent = parents.setdefault(child, pid)
+                if previous_parent != pid:
+                    raise RuntimeError(f"Process {child} appeared under two parents")
+                if child not in result:
+                    pending.append(child)
+        self._validate_root(result)
+        collector_pid = os.getpid()
+        if collector_pid not in result:
+            try:
+                collector_path = self.proc_root / str(collector_pid) / "stat"
+                collector_before = _read_stat(collector_path)
+                collector_after = _read_stat(collector_path)
+                if (
+                    collector_before["startTimeTicks"]
+                    != collector_after["startTimeTicks"]
+                ):
+                    raise RuntimeError("Collector identity changed during discovery")
+                result[collector_pid] = collector_after
+            except FileNotFoundError:
+                pass
+        return (
+            result,
+            set(parents),
+            {
+                "method": "proc-task-children",
+                "raceLimited": True,
+                "retries": 0,
+                "threadsVisited": threads_visited,
+                "childLinks": child_links,
+            },
+        )
+
+    def _stats(self, detail):
+        if detail == "full":
+            return self._stats_full()
+        last_error = None
+        for retry in range(LIGHT_TREE_RETRIES + 1):
+            try:
+                result, owned, discovery = self._stats_light_once()
+                discovery["retries"] = retry
+                return result, owned, discovery
+            except RuntimeError as error:
+                last_error = error
+        raise RuntimeError(
+            f"Light process tree remained unstable after {LIGHT_TREE_RETRIES} retries: {last_error}"
+        ) from last_error
 
     def _host(self, stats, owned, tick, detail):
         def cpu_stat(text):
@@ -245,13 +366,15 @@ class Sampler:
             "wholeHostCpuTicks": _optional_value(self.proc_root / "stat", cpu_stat),
             "loadAverage": _optional_value(self.proc_root / "loadavg", load_average),
             "backgroundProcessCpu": {
-                "available": True,
-                "processCount": len(background),
-                "cpuSeconds": sum(
-                    stat["userTicks"] + stat["systemTicks"] for stat in background
-                )
-                / tick,
-                "reason": None,
+                "available": detail == "full",
+                "processCount": len(background) if detail == "full" else None,
+                "cpuSeconds": (
+                    sum(stat["userTicks"] + stat["systemTicks"] for stat in background)
+                    / tick
+                    if detail == "full"
+                    else None
+                ),
+                "reason": None if detail == "full" else "not-collected",
             },
             "cpuClocksKHz": None,
             "cpuGovernors": None,
@@ -286,7 +409,7 @@ class Sampler:
             raise ValueError("detail must be light or full")
         sampling_start = self.clock()
         sampling_cpu_start = time.thread_time()
-        stats, owned = self._stats()
+        stats, owned, discovery = self._stats(detail)
         cpu_sample_time = self.clock()
         tick = os.sysconf("SC_CLK_TCK")
         page = os.sysconf("SC_PAGE_SIZE")
@@ -411,6 +534,7 @@ class Sampler:
             "timeSeconds": self.clock(),
             "cpuSampleTimeSeconds": cpu_sample_time,
             "detailLevel": detail,
+            "processDiscovery": discovery,
             "rootIdentity": self._root_identity,
             "processes": processes,
             "totals": totals,
@@ -712,6 +836,9 @@ def validate_report(report, expected):
             ):
                 errors.append("startup settling final identities are invalid")
     timing_sampling = expected.get("timingSampling") is True
+    tree_sampling = expected.get("treeSampling") is True
+    if tree_sampling and not timing_sampling:
+        errors.append("tree sampling requires timing sampling")
     if timing_sampling:
         detail_levels = [
             sample.get("detailLevel") if isinstance(sample, dict) else None
@@ -772,6 +899,42 @@ def validate_report(report, expected):
         if detail_level not in [None, "light", "full"]:
             errors.append(f"processMetrics[{index}].detailLevel is invalid")
         light_sample = detail_level == "light"
+        discovery = sample.get("processDiscovery")
+        if discovery is not None or tree_sampling:
+            if not isinstance(discovery, dict):
+                errors.append(f"processMetrics[{index}].processDiscovery is invalid")
+            elif light_sample:
+                if (
+                    discovery.get("method") != "proc-task-children"
+                    or discovery.get("raceLimited") is not True
+                    or not isinstance(discovery.get("retries"), int)
+                    or isinstance(discovery.get("retries"), bool)
+                    or not 0 <= discovery["retries"] <= LIGHT_TREE_RETRIES
+                    or any(
+                        not isinstance(discovery.get(key), int)
+                        or isinstance(discovery.get(key), bool)
+                        or discovery[key] < 0
+                        for key in ["threadsVisited", "childLinks"]
+                    )
+                    or (
+                        isinstance(sample.get("processes"), dict)
+                        and discovery.get("threadsVisited", -1)
+                        < len(sample["processes"])
+                    )
+                ):
+                    errors.append(
+                        f"processMetrics[{index}].light processDiscovery is invalid"
+                    )
+            elif (
+                discovery.get("method") != "whole-proc-scan"
+                or discovery.get("raceLimited") is not True
+                or discovery.get("retries") != 0
+                or discovery.get("threadsVisited") is not None
+                or discovery.get("childLinks") is not None
+            ):
+                errors.append(
+                    f"processMetrics[{index}].full processDiscovery is invalid"
+                )
         cpu_sample_time = sample.get("cpuSampleTimeSeconds")
         if cpu_sample_time is not None or timing_sampling:
             if not _finite_number(cpu_sample_time) or cpu_sample_time < 0:
@@ -1039,16 +1202,25 @@ def validate_report(report, expected):
                     ):
                         errors.append(f"processMetrics[{index}].host.{name} is invalid")
             background = host.get("backgroundProcessCpu")
-            if (
-                not isinstance(background, dict)
-                or background.get("available") is not True
-                or not isinstance(background.get("processCount"), int)
-                or isinstance(background.get("processCount"), bool)
-                or background.get("processCount", -1) < 0
-                or not _finite_number(background.get("cpuSeconds"))
-                or background.get("cpuSeconds", -1) < 0
-                or background.get("reason") is not None
-            ):
+            background_invalid = not isinstance(background, dict)
+            if not background_invalid and light_sample and tree_sampling:
+                background_invalid = (
+                    background.get("available") is not False
+                    or background.get("processCount") is not None
+                    or background.get("cpuSeconds") is not None
+                    or background.get("reason") != "not-collected"
+                )
+            elif not background_invalid:
+                background_invalid = (
+                    background.get("available") is not True
+                    or not isinstance(background.get("processCount"), int)
+                    or isinstance(background.get("processCount"), bool)
+                    or background.get("processCount", -1) < 0
+                    or not _finite_number(background.get("cpuSeconds"))
+                    or background.get("cpuSeconds", -1) < 0
+                    or background.get("reason") is not None
+                )
+            if background_invalid:
                 errors.append(
                     f"processMetrics[{index}].host.backgroundProcessCpu is invalid"
                 )

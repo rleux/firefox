@@ -178,6 +178,7 @@ def main():
         "workload": args.workload,
         "collectorTelemetry": True,
         "timingSampling": args.phase == "timing",
+        "treeSampling": args.phase == "timing",
         "startupSettling": args.phase in ("timing", "memory"),
     }
     config = {
