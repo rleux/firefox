@@ -14,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
+import renderer_benchmark_metrics as metrics
 from renderer_benchmark_metrics import (
     HAL_COUNTERS,
     HAL_GAUGES,
@@ -29,6 +30,12 @@ def stat_line(pid, parent, start, user=10, system=5, rss=3, comm="test process")
     fields += [str(user), str(system)] + ["0"] * 6
     fields += [str(start), "0", str(rss)]
     return f"{pid} ({comm}) " + " ".join(fields) + "\n"
+
+
+def children_file(proc, pid, thread=None, children=()):
+    path = proc / str(pid) / "task" / str(thread or pid) / "children"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(" ".join(str(child) for child in children))
 
 
 def valid_report():
@@ -209,6 +216,23 @@ def with_timing_sampling(report):
     for index, sample in enumerate([first, middle, last]):
         sample["detailLevel"] = "full" if index in [0, 2] else "light"
         sample["cpuSampleTimeSeconds"] = 1.0 + index * 0.5
+        sample["processDiscovery"] = (
+            {
+                "method": "whole-proc-scan",
+                "raceLimited": True,
+                "retries": 0,
+                "threadsVisited": None,
+                "childLinks": None,
+            }
+            if index in [0, 2]
+            else {
+                "method": "proc-task-children",
+                "raceLimited": True,
+                "retries": 0,
+                "threadsVisited": 1,
+                "childLinks": 0,
+            }
+        )
     middle["drmClients"] = None
     for key in [
         "fdCount",
@@ -231,6 +255,12 @@ def with_timing_sampling(report):
         "platformProfile",
     ]:
         middle["host"][key] = None
+    middle["host"]["backgroundProcessCpu"] = {
+        "available": False,
+        "processCount": None,
+        "cpuSeconds": None,
+        "reason": "not-collected",
+    }
     report["processMetrics"] = [first, middle, last]
     return report
 
@@ -355,6 +385,7 @@ class TestSampler(unittest.TestCase):
             directory.mkdir(parents=True)
             (directory / "stat").write_text(stat_line(10, 1, 100))
             (directory / "fdinfo").write_text("must not be read")
+            children_file(proc, 10)
             (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
             (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
             sampler = Sampler(10, True, proc_root=proc, sys_root=sys)
@@ -378,6 +409,7 @@ class TestSampler(unittest.TestCase):
             proc = Path(temporary)
             (proc / "10/fdinfo").mkdir(parents=True)
             (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            children_file(proc, 10)
             (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
             (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
             with Sampler(
@@ -398,6 +430,143 @@ class TestSampler(unittest.TestCase):
             sampler = Sampler(10, proc_root=proc, sys_root=proc)
             with self.assertRaises(ValueError):
                 sampler.sample_once("medium")
+
+    def test_light_tree_finds_nonleader_and_recursive_children(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for pid, parent, start in [
+                (10, 1, 100),
+                (20, 10, 200),
+                (30, 20, 300),
+            ]:
+                path = proc / str(pid)
+                path.mkdir(parents=True)
+                (path / "stat").write_text(stat_line(pid, parent, start))
+            children_file(proc, 10)
+            children_file(proc, 10, thread=12, children=[20])
+            children_file(proc, 20, children=[30])
+            children_file(proc, 30)
+            (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
+            (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with patch("renderer_benchmark_metrics.os.getpid", return_value=99):
+                sample = sampler.sample_once("light")
+            self.assertEqual(set(sample["processes"]), {"10:100", "20:200", "30:300"})
+            self.assertEqual(
+                sample["processDiscovery"],
+                {
+                    "method": "proc-task-children",
+                    "raceLimited": True,
+                    "retries": 0,
+                    "threadsVisited": 4,
+                    "childLinks": 2,
+                },
+            )
+
+    def test_light_tree_rejects_missing_access_and_parent_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            (proc / "10/stat").parent.mkdir(parents=True)
+            (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            (proc / "10/task/10/children").mkdir(parents=True)
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with self.assertRaises(OSError):
+                sampler.sample_once("light")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for pid, parent, start in [(10, 1, 100), (20, 1, 200)]:
+                path = proc / str(pid)
+                path.mkdir(parents=True)
+                (path / "stat").write_text(stat_line(pid, parent, start))
+            children_file(proc, 10, children=[20])
+            children_file(proc, 20)
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with self.assertRaisesRegex(RuntimeError, "remained unstable"):
+                sampler.sample_once("light")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            (proc / "10/stat").parent.mkdir(parents=True)
+            (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            children_file(proc, 10, children=[20])
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with self.assertRaisesRegex(RuntimeError, "remained unstable"):
+                sampler.sample_once("light")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with self.assertRaises(ProcessLookupError):
+                sampler.sample_once("light")
+
+    def test_light_tree_detects_root_and_collector_reuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for pid, parent, start in [(10, 1, 100), (20, 1, 200)]:
+                path = proc / str(pid)
+                path.mkdir(parents=True)
+                (path / "stat").write_text(stat_line(pid, parent, start))
+            children_file(proc, 10)
+            (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
+            (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            sampler.sample_once("light")
+            (proc / "10/stat").write_text(stat_line(10, 1, 101))
+            with self.assertRaisesRegex(RuntimeError, "remained unstable"):
+                sampler.sample_once("light")
+
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            original = metrics._read_stat
+            collector_reads = 0
+
+            def changing_collector(path):
+                nonlocal collector_reads
+                stat = original(path)
+                if path == proc / "20/stat":
+                    collector_reads += 1
+                    stat["startTimeTicks"] += collector_reads % 2
+                return stat
+
+            with patch("renderer_benchmark_metrics.os.getpid", return_value=20):
+                with patch(
+                    "renderer_benchmark_metrics._read_stat",
+                    side_effect=changing_collector,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "remained unstable"):
+                        sampler.sample_once("light")
+
+    def test_light_tree_reports_bounded_race_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            for pid, parent, start in [(10, 1, 100), (20, 10, 200)]:
+                path = proc / str(pid)
+                path.mkdir(parents=True)
+                (path / "stat").write_text(stat_line(pid, parent, start))
+            children_file(proc, 10, children=[20])
+            children_file(proc, 20)
+            (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
+            (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            original = metrics._read_stat
+            missing_once = True
+
+            def transient_child(path):
+                nonlocal missing_once
+                if path == proc / "20/stat" and missing_once:
+                    missing_once = False
+                    raise FileNotFoundError(path)
+                return original(path)
+
+            with patch("renderer_benchmark_metrics.os.getpid", return_value=99):
+                with patch(
+                    "renderer_benchmark_metrics._read_stat",
+                    side_effect=transient_child,
+                ):
+                    sample = sampler.sample_once("light")
+            self.assertEqual(sample["processDiscovery"]["retries"], 1)
+            self.assertEqual(set(sample["processes"]), {"10:100", "20:200"})
 
 
 @unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
@@ -583,7 +752,7 @@ class TestValidateReport(unittest.TestCase):
 
     def test_timing_sampling_requires_full_endpoints_and_light_middle(self):
         report = with_timing_sampling(valid_report())
-        config = {**expected(), "timingSampling": True}
+        config = {**expected(), "timingSampling": True, "treeSampling": True}
         self.assertEqual(validate_report(report, config), [])
 
         report = with_timing_sampling(valid_report())
@@ -599,9 +768,22 @@ class TestValidateReport(unittest.TestCase):
         self.assertIn("timing sampling requires light intermediate samples", errors)
         self.assertIn("processMetrics[1].detailLevel is invalid", errors)
 
+    def test_prior_tiered_report_without_tree_schema_remains_valid(self):
+        report = with_timing_sampling(valid_report())
+        for sample in report["processMetrics"]:
+            sample.pop("processDiscovery")
+        report["processMetrics"][1]["host"]["backgroundProcessCpu"] = {
+            "available": True,
+            "processCount": 1,
+            "cpuSeconds": 2.0,
+            "reason": None,
+        }
+        config = {**expected(), "timingSampling": True}
+        self.assertEqual(validate_report(report, config), [])
+
     def test_light_sample_rejects_collected_heavy_data(self):
         report = with_timing_sampling(valid_report())
-        config = {**expected(), "timingSampling": True}
+        config = {**expected(), "timingSampling": True, "treeSampling": True}
         middle = report["processMetrics"][1]
         middle["totals"]["fdCount"] = 1
         middle["drmClients"] = {}
@@ -612,14 +794,37 @@ class TestValidateReport(unittest.TestCase):
             "reason": "not-available",
         }
         middle["processes"]["10:100"]["fdCount"] = 1
+        middle["host"]["backgroundProcessCpu"] = {
+            "available": True,
+            "processCount": 1,
+            "cpuSeconds": 2,
+            "reason": None,
+        }
         errors = validate_report(report, config)
         self.assertIn("processMetrics[1].light totals must omit heavy data", errors)
         self.assertIn("processMetrics[1].light drmClients must be null", errors)
         self.assertIn("processMetrics[1].light host.cpuClocksKHz must be null", errors)
+        self.assertIn("processMetrics[1].host.backgroundProcessCpu is invalid", errors)
         self.assertIn("process 10:100 light heavy data must be null", errors)
 
+    def test_timing_sampling_rejects_missing_or_malformed_discovery(self):
+        config = {**expected(), "timingSampling": True, "treeSampling": True}
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][1].pop("processDiscovery")
+        self.assertIn(
+            "processMetrics[1].processDiscovery is invalid",
+            validate_report(report, config),
+        )
+
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][1]["processDiscovery"]["threadsVisited"] = 0
+        self.assertIn(
+            "processMetrics[1].light processDiscovery is invalid",
+            validate_report(report, config),
+        )
+
     def test_timing_sampling_requires_ordered_cpu_anchor_span(self):
-        config = {**expected(), "timingSampling": True}
+        config = {**expected(), "timingSampling": True, "treeSampling": True}
         report = with_timing_sampling(valid_report())
         report["processMetrics"][-1]["cpuSampleTimeSeconds"] = 1.0
         self.assertIn(

@@ -83,7 +83,7 @@ work; group by process/device/renderer and compare appropriate complete snapshot
 never add cumulative records. See [counter definitions](VulkanRendering.md).
 
 Every process sample retains PID plus start-time identity, per-process CPU and
-RSS, collector CPU and aggregate host CPU/load/background counters. Full samples
+RSS, collector CPU and aggregate host CPU/load counters. Full samples
 also retain FD counts, DRM client identities/raw counters, and available host
 state. Memory
 samples distinguish available PSS/private coverage from missing data. Primary
@@ -99,7 +99,17 @@ lose departed-process CPU, so use whole-host CPU ticks and saved process identit
 evidence when investigating contention.
 
 Timing collects full first/last samples and light intermediate samples at a
-250 ms wait cadence. Light samples skip FD/fdinfo, memory rollups and sysfs
+250 ms wait cadence. Light samples discover browser descendants recursively
+through every thread's Linux `/proc/PID/task/TID/children`, then read only the
+browser tree and collector process statistics. They omit the aggregate
+outside-browser process counter; whole-host CPU/load remain available. Full
+samples retain the whole-host process scan. Missing child-discovery access fails
+collection. As with other sampled process observations, this is not an atomic
+snapshot: the [kernel children interface](https://docs.kernel.org/filesystems/proc.html#proc-pid-task-tid-children-information-about-task-children)
+can miss children during process churn. Never infer complete lifecycle accounting
+or the absence of short-lived processes from stable sampled identities.
+
+Light samples also skip FD/fdinfo, memory rollups and sysfs
 clock/temperature/power/governor/profile reads. Their omitted fields are explicitly
 null or marked not collected; they are not zero measurements. Memory and smoke
 retain full sampling. Endpoint-only hardware readings cannot establish conditions
