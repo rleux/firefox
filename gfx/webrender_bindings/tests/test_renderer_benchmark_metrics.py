@@ -3,7 +3,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -15,6 +20,7 @@ from renderer_benchmark_metrics import (
     validate_environment,
     validate_report,
 )
+from run_renderer_benchmark import stop
 
 
 def stat_line(pid, parent, start, user=10, system=5, rss=3, comm="test process"):
@@ -259,6 +265,73 @@ class TestSampler(unittest.TestCase):
             with Sampler(10, interval=10, proc_root=proc, sys_root=proc) as sampler:
                 self.assertEqual(len(sampler.samples), 1)
             self.assertEqual(len(sampler.samples), 2)
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
+class TestOwnedCleanup(unittest.TestCase):
+    def test_sigterm_cleans_separate_session_child_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child_pid = root / "child.pid"
+            child_ready = root / "child.ready"
+            cleaned = root / "cleaned"
+            module_path = str(Path(__file__).parent.resolve())
+            child_source = """
+import pathlib
+import signal
+import sys
+import time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text("ready")
+time.sleep(60)
+"""
+            owner_source = f"""
+import pathlib
+import subprocess
+import sys
+import time
+sys.path.insert(0, {module_path!r})
+from run_renderer_benchmark import install_termination_handler, stop
+install_termination_handler()
+child = subprocess.Popen(
+    [sys.executable, "-c", {child_source!r}, {str(child_ready)!r}],
+    start_new_session=True,
+)
+deadline = time.monotonic() + 5
+while not pathlib.Path({str(child_ready)!r}).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not pathlib.Path({str(child_ready)!r}).exists():
+    raise RuntimeError("child did not start")
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+try:
+    while True:
+        time.sleep(1)
+finally:
+    stop(child)
+    pathlib.Path({str(cleaned)!r}).write_text("yes")
+"""
+            owner = subprocess.Popen(
+                [sys.executable, "-c", owner_source], start_new_session=True
+            )
+            unrelated = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not child_pid.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(child_pid.exists())
+                owned_pid = int(child_pid.read_text())
+                os.killpg(owner.pid, signal.SIGTERM)
+                self.assertEqual(owner.wait(timeout=15), 128 + signal.SIGTERM)
+                self.assertTrue(cleaned.exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(owned_pid, 0)
+                self.assertIsNone(unrelated.poll())
+            finally:
+                stop(owner)
+                stop(unrelated)
 
 
 class TestValidateReport(unittest.TestCase):
