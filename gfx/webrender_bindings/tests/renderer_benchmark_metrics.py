@@ -278,6 +278,8 @@ class Sampler:
         }
 
     def sample_once(self):
+        sampling_start = self.clock()
+        sampling_cpu_start = time.thread_time()
         stats, owned = self._stats()
         tick = os.sysconf("SC_CLK_TCK")
         page = os.sysconf("SC_PAGE_SIZE")
@@ -386,7 +388,7 @@ class Sampler:
                 value["memory"] is not None for value in processes.values()
             ),
         }
-        return {
+        result = {
             "timeSeconds": self.clock(),
             "rootIdentity": self._root_identity,
             "processes": processes,
@@ -394,6 +396,26 @@ class Sampler:
             "drmClients": drm_clients,
             "host": self._host(stats, owned, tick),
         }
+        collector_pid = os.getpid()
+        collector = stats.get(collector_pid)
+        result["collector"] = {
+            "available": collector is not None,
+            "pid": collector_pid if collector else None,
+            "startTimeTicks": collector["startTimeTicks"] if collector else None,
+            "identity": f"{collector_pid}:{collector['startTimeTicks']}"
+            if collector
+            else None,
+            "userCpuSeconds": collector["userTicks"] / tick if collector else None,
+            "systemCpuSeconds": collector["systemTicks"] / tick if collector else None,
+            "cpuSeconds": (collector["userTicks"] + collector["systemTicks"]) / tick
+            if collector
+            else None,
+        }
+        result["sampling"] = {
+            "threadCpuSeconds": time.thread_time() - sampling_cpu_start,
+            "wallSeconds": self.clock() - sampling_start,
+        }
+        return result
 
     def _run(self):
         try:
@@ -602,6 +624,8 @@ def validate_report(report, expected):
     identities = []
     process_cpu_samples = []
     total_cpu_samples = []
+    collector_identities = []
+    collector_cpu_samples = []
     previous_time = None
     for index, sample in enumerate(process_metrics):
         if not isinstance(sample, dict):
@@ -624,6 +648,83 @@ def validate_report(report, expected):
         previous_time = sample_time if _finite_number(sample_time) else previous_time
         processes = sample.get("processes")
         totals = sample.get("totals")
+        collector_required = expected.get("collectorTelemetry") is True
+        collector = sample.get("collector")
+        sampling = sample.get("sampling")
+        if collector is None:
+            if collector_required:
+                errors.append(f"processMetrics[{index}].collector is missing")
+        elif not isinstance(collector, dict):
+            errors.append(f"processMetrics[{index}].collector is invalid")
+        elif not isinstance(collector.get("available"), bool):
+            errors.append(f"processMetrics[{index}].collector.available is invalid")
+        elif collector["available"]:
+            pid = collector.get("pid")
+            start_time = collector.get("startTimeTicks")
+            identity = collector.get("identity")
+            cpu_values = {
+                key: collector.get(key)
+                for key in ["userCpuSeconds", "systemCpuSeconds", "cpuSeconds"]
+            }
+            if (
+                not isinstance(pid, int)
+                or isinstance(pid, bool)
+                or pid <= 0
+                or not isinstance(start_time, int)
+                or isinstance(start_time, bool)
+                or start_time <= 0
+                or identity != f"{pid}:{start_time}"
+            ):
+                errors.append(f"processMetrics[{index}].collector identity is invalid")
+            if any(
+                not _finite_number(value) or value < 0 for value in cpu_values.values()
+            ) or (
+                all(_finite_number(value) for value in cpu_values.values())
+                and not math.isclose(
+                    cpu_values["cpuSeconds"],
+                    cpu_values["userCpuSeconds"] + cpu_values["systemCpuSeconds"],
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                errors.append(f"processMetrics[{index}].collector CPU is invalid")
+            if isinstance(processes, dict) and (
+                identity in processes
+                or any(
+                    isinstance(process, dict) and process.get("pid") == pid
+                    for process in processes.values()
+                )
+            ):
+                errors.append(
+                    f"processMetrics[{index}].collector overlaps the target tree"
+                )
+            collector_identities.append(identity)
+            collector_cpu_samples.append(cpu_values)
+        else:
+            nullable = [
+                "pid",
+                "startTimeTicks",
+                "identity",
+                "userCpuSeconds",
+                "systemCpuSeconds",
+                "cpuSeconds",
+            ]
+            if any(
+                key not in collector or collector[key] is not None for key in nullable
+            ):
+                errors.append(
+                    f"processMetrics[{index}].unavailable collector fields must be null"
+                )
+            if collector_required:
+                errors.append(f"processMetrics[{index}].collector is unavailable")
+        if sampling is None:
+            if collector_required or collector is not None:
+                errors.append(f"processMetrics[{index}].sampling is missing")
+        elif not isinstance(sampling, dict) or any(
+            not _finite_number(sampling.get(key)) or sampling[key] < 0
+            for key in ["threadCpuSeconds", "wallSeconds"]
+        ):
+            errors.append(f"processMetrics[{index}].sampling is invalid")
         if not isinstance(totals, dict):
             errors.append(f"processMetrics[{index}].totals is invalid")
         else:
@@ -802,6 +903,18 @@ def validate_report(report, expected):
                 or (fd_count is not None and fdinfo_coverage > fd_count)
             ):
                 errors.append(f"process {identity} fdInfoCoverage is invalid")
+    if collector_identities and any(
+        identity != collector_identities[0] for identity in collector_identities[1:]
+    ):
+        errors.append("collector identity changed")
+    for before, after in zip(collector_cpu_samples, collector_cpu_samples[1:]):
+        if any(
+            _finite_number(before.get(key))
+            and _finite_number(after.get(key))
+            and after[key] < before[key]
+            for key in ["userCpuSeconds", "systemCpuSeconds", "cpuSeconds"]
+        ):
+            errors.append("collector CPU counters decreased")
     stable_identities = identities and all(
         identity == identities[0] for identity in identities[1:]
     )

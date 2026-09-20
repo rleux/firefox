@@ -175,6 +175,7 @@ def main():
         "allowSoftware": args.allow_software,
         "phase": args.phase,
         "workload": args.workload,
+        "collectorTelemetry": True,
     }
     config = {
         "expected": expected,

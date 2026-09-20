@@ -12,6 +12,7 @@ import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from renderer_benchmark_metrics import (
     HAL_COUNTERS,
@@ -181,6 +182,25 @@ def expected(phase="timing"):
     }
 
 
+def with_collector(report, available=True):
+    report["processMetrics"] = deepcopy(report["processMetrics"])
+    for index, sample in enumerate(report["processMetrics"]):
+        sample["collector"] = {
+            "available": available,
+            "pid": 20 if available else None,
+            "startTimeTicks": 200 if available else None,
+            "identity": "20:200" if available else None,
+            "userCpuSeconds": 0.1 + index * 0.01 if available else None,
+            "systemCpuSeconds": 0.05 + index * 0.01 if available else None,
+            "cpuSeconds": 0.15 + index * 0.02 if available else None,
+        }
+        sample["sampling"] = {
+            "threadCpuSeconds": 0.003,
+            "wallSeconds": 0.002,
+        }
+    return report
+
+
 def diagnostic_record():
     return {
         "version": 1,
@@ -225,7 +245,8 @@ class TestSampler(unittest.TestCase):
             profile.parent.mkdir(parents=True)
             profile.write_text("balanced\n")
             sampler = Sampler(10, True, proc_root=proc, sys_root=sys, clock=lambda: 5.0)
-            sample = sampler.sample_once()
+            with patch("renderer_benchmark_metrics.os.getpid", return_value=20):
+                sample = sampler.sample_once()
             self.assertEqual(set(sample["processes"]), {"10:100", "11:110"})
             self.assertEqual(sample["totals"]["memoryCoverage"], 2)
             self.assertEqual(sample["totals"]["pssBytes"], 8192)
@@ -236,6 +257,16 @@ class TestSampler(unittest.TestCase):
             self.assertEqual(client["observations"], 2)
             self.assertFalse(sample["host"]["cpuClocksKHz"]["available"])
             self.assertEqual(sample["host"]["backgroundProcessCpu"]["processCount"], 1)
+            self.assertEqual(sample["collector"]["identity"], "20:200")
+            self.assertEqual(sample["collector"]["startTimeTicks"], 200)
+            self.assertEqual(
+                sample["collector"]["cpuSeconds"], 15 / os.sysconf("SC_CLK_TCK")
+            )
+            self.assertEqual(
+                sample["totals"]["cpuSeconds"], 30 / os.sysconf("SC_CLK_TCK")
+            )
+            self.assertGreaterEqual(sample["sampling"]["threadCpuSeconds"], 0)
+            self.assertGreaterEqual(sample["sampling"]["wallSeconds"], 0)
             self.assertEqual(sample["host"]["wholeHostCpuTicks"]["value"]["idle"], 4)
             self.assertEqual(sample["host"]["loadAverage"]["value"]["runnable"], 2)
             self.assertEqual(
@@ -250,7 +281,22 @@ class TestSampler(unittest.TestCase):
             (proc / "10/fdinfo").mkdir(parents=True)
             (proc / "10/stat").write_text(stat_line(10, 1, 100))
             sampler = Sampler(10, proc_root=proc, sys_root=proc)
-            sampler.sample_once()
+            with patch("renderer_benchmark_metrics.os.getpid", return_value=99):
+                collector = sampler.sample_once()["collector"]
+                self.assertFalse(collector["available"])
+                self.assertTrue(
+                    all(
+                        collector[key] is None
+                        for key in [
+                            "pid",
+                            "startTimeTicks",
+                            "identity",
+                            "userCpuSeconds",
+                            "systemCpuSeconds",
+                            "cpuSeconds",
+                        ]
+                    )
+                )
             (proc / "10/stat").write_text(stat_line(10, 1, 101))
             with self.assertRaises(RuntimeError):
                 sampler.sample_once()
@@ -368,6 +414,85 @@ class TestValidateReport(unittest.TestCase):
 
     def test_valid_timing_report(self):
         self.assertEqual(validate_report(valid_report(), expected()), [])
+
+    def test_required_collector_telemetry_is_validated(self):
+        required = {**expected(), "collectorTelemetry": True}
+        self.assertIn(
+            "processMetrics[0].collector is missing",
+            validate_report(valid_report(), required),
+        )
+        report = with_collector(valid_report())
+        self.assertEqual(validate_report(report, required), [])
+
+    def test_collector_identity_cpu_and_sampling_rejections(self):
+        required = {**expected(), "collectorTelemetry": True}
+
+        report = with_collector(valid_report())
+        report["processMetrics"][0]["collector"]["identity"] = "20:201"
+        self.assertIn(
+            "processMetrics[0].collector identity is invalid",
+            validate_report(report, required),
+        )
+
+        report = with_collector(valid_report())
+        report["processMetrics"][0]["collector"]["cpuSeconds"] = 9
+        self.assertIn(
+            "processMetrics[0].collector CPU is invalid",
+            validate_report(report, required),
+        )
+
+        report = with_collector(valid_report())
+        report["processMetrics"][0]["sampling"]["threadCpuSeconds"] = float("nan")
+        self.assertIn(
+            "processMetrics[0].sampling is invalid",
+            validate_report(report, required),
+        )
+
+    def test_collector_must_be_stable_monotonic_and_outside_target_tree(self):
+        required = {**expected(), "collectorTelemetry": True}
+
+        report = with_collector(valid_report())
+        report["processMetrics"][1]["collector"].update(
+            pid=21, startTimeTicks=210, identity="21:210"
+        )
+        self.assertIn("collector identity changed", validate_report(report, required))
+
+        report = with_collector(valid_report())
+        report["processMetrics"][1]["collector"].update(
+            userCpuSeconds=0.09, systemCpuSeconds=0.04, cpuSeconds=0.13
+        )
+        self.assertIn(
+            "collector CPU counters decreased", validate_report(report, required)
+        )
+
+        report = with_collector(valid_report())
+        report["processMetrics"][0]["collector"].update(
+            pid=10, startTimeTicks=100, identity="10:100"
+        )
+        self.assertIn(
+            "processMetrics[0].collector overlaps the target tree",
+            validate_report(report, required),
+        )
+
+    def test_unavailable_collector_is_legacy_only_and_nullable(self):
+        report = with_collector(valid_report(), available=False)
+        self.assertEqual(validate_report(report, expected()), [])
+        required = {**expected(), "collectorTelemetry": True}
+        self.assertIn(
+            "processMetrics[0].collector is unavailable",
+            validate_report(report, required),
+        )
+        report["processMetrics"][0]["collector"]["pid"] = 20
+        self.assertIn(
+            "processMetrics[0].unavailable collector fields must be null",
+            validate_report(report, expected()),
+        )
+        report = with_collector(valid_report(), available=False)
+        report["processMetrics"][0]["collector"].pop("startTimeTicks")
+        self.assertIn(
+            "processMetrics[0].unavailable collector fields must be null",
+            validate_report(report, expected()),
+        )
 
     def test_backend_software_geometry_and_native_wsi_rejections(self):
         report = valid_report()
