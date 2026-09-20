@@ -167,3 +167,42 @@ backend, process, runtime-library, geometry and workload-pixel gates passed, wit
 no validation errors. These short Xvfb/Lavapipe and GL checks establish harness
 operability only. They are not native hardware results or performance data. Raw
 reports are under `artifacts/stage9/b7ba23c55b6/smoke/`.
+
+## Native sampling sensitivity screen
+
+The Stage 9 screen at harness revision `7ea9f8fa033` completed eight valid native
+Intel runs using the preserved Firefox binary, GPU process, 890×705 viewport and
+DPR 1. Each run used a fresh process/profile, startup settling, ten-second warmup
+and a sixty-second interval. Sampling waits of 250 ms and two seconds were
+compared once per workload/backend, with their order alternated between cases.
+
+CPU values below are percentages of one core, calculated from first/last CPU
+sample timestamps. Collector CPU is separate from Firefox CPU and is not
+subtracted from it.
+
+| Workload/backend | Firefox, 250 ms | Firefox, 2 s | Collector, 250 ms | Collector, 2 s |
+| --- | ---: | ---: | ---: | ---: |
+| Static GL | 0.83% | 0.85% | 4.53% | 0.65% |
+| Static Vulkan | 0.98% | 0.75% | 4.48% | 0.63% |
+| CSS GL | 17.71% | 18.94% | 5.08% | 0.78% |
+| CSS Vulkan | 25.26% | 24.91% | 5.36% | 0.75% |
+
+Two-second sampling reduced collector CPU by roughly 85%. CSS callback intervals
+averaged about 16.666 ms at both frequencies; these are not GPU completion or
+scanout measurements. Firefox CPU did not shift consistently with sampling
+frequency: CSS GL increased about 7% with sparse sampling, while CSS Vulkan
+decreased about 1.4%. With one observation per cell, this screen cannot separate
+sampling effects from run variation or establish a backend performance result.
+Lower collector cost does not prove negligible perturbation, and sparse samples
+provide less process-turnover coverage.
+
+Every raw run, the fixed order and analysis are retained under
+`artifacts/stage9/7ea9f8fa033/step-9.4a/sampling-sensitivity/`. The full paired
+series was not started by this screen.
+
+Use a fixed two-second interval for the subsequent browser series to reduce
+observer work, while retaining full endpoints and the sampled-lifecycle caveat.
+This is a protocol choice, not a correction for a measured bias. Four balanced
+pairs per workload must characterize run variability and backend deltas at that
+single cadence; inconsistent paired directions remain inconclusive. The full
+series also remains gated on separate Wrench-wrapper inspection overhead.
