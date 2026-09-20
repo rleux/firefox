@@ -218,6 +218,11 @@ def main():
         "layers.gpu-process.enabled": args.gpu_process,
         "privacy.reduceTimerPrecision": "false",
     }
+    if args.workload == "canvas":
+        prefs.update({
+            "gfx.canvas.accelerated": "false",
+            "gfx.canvas.accelerated.force-enabled": "false",
+        })
     timeout = math.ceil(args.duration + args.warmup) + 90
     command = [
         str(root / "mach"),
