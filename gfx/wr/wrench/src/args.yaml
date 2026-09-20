@@ -132,6 +132,23 @@ args:
       help: A string describing what to show on in the profiler HUD (See https://github.com/servo/webrender/wiki/Debugging-WebRender#anchor_6).
 
 subcommands:
+    - measure:
+        about: Measure fixed completed frames without presenting, retaining raw samples
+        args:
+          - INPUT:
+              required: true
+              index: 1
+          - OUTPUT:
+              required: true
+              index: 2
+          - frames:
+              long: frames
+              takes_value: true
+              default_value: "5"
+          - warmup:
+              long: warmup
+              takes_value: true
+              default_value: "2"
     - test_surface:
         about: Exercise HAL surface acquisition, presentation, resize, and discard
     - test_hal:

@@ -1052,7 +1052,7 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
     let backend = selected_backend(args)?;
 
     if args.value_of("hal_filtering").is_some()
-        && !matches!(args.subcommand_name(), Some("png" | "show" | "reftest" | "rawtest" | "test_invalidation")) {
+        && !matches!(args.subcommand_name(), Some("png" | "show" | "measure" | "reftest" | "rawtest" | "test_invalidation")) {
         return Err("--hal-filtering requires a renderer command".into());
     }
 
@@ -1082,13 +1082,13 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         }
     }
     let command = args.subcommand_name().unwrap_or("");
-    if !matches!(command, "test_init" | "test_hal" | "png" | "reftest" | "rawtest" | "test_invalidation" | "show") {
+    if !matches!(command, "test_init" | "test_hal" | "png" | "reftest" | "rawtest" | "test_invalidation" | "show" | "measure") {
         return Err(format!(
             "{command:?} is not implemented for HAL yet"
         ));
     }
     let dimensions = match args.value_of("size") {
-        None if matches!(command, "png" | "reftest" | "rawtest" | "test_invalidation" | "show") => [1920, 1080],
+        None if matches!(command, "png" | "reftest" | "rawtest" | "test_invalidation" | "show" | "measure") => [1920, 1080],
         None => [7, 5],
         Some("720p") => [1280, 720],
         Some("1080p") => [1920, 1080],
@@ -1107,6 +1107,21 @@ fn run(args: &clap::ArgMatches) -> Result<(), String> {
         adapter_name: args.value_of("hal_adapter").map(str::to_owned),
         validation: args.is_present("hal_validation"),
     };
+    if command == "measure" {
+        use crate::wrench::Wrench;
+        let measure_options = crate::measure::Options::from_args(args)?;
+        let size = webrender::api::units::DeviceIntSize::new(dimensions[0] as i32, dimensions[1] as i32);
+        let (notifier, rx) = crate::measure::notifier();
+        let start = std::time::Instant::now();
+        let mut wrench = Wrench::new_hal_backend(backend, &options, size, !args.is_present("no_subpixel_aa"), Some(notifier), compositor_config(args)?, None)?;
+        let initialization = start.elapsed();
+        wrench.renderer.configure_filtering(filtering(args))?;
+        if let Some(enabled) = compositor_clips_override(args)? { wrench.set_compositor_clips_override(enabled); }
+        let info = serde_json::json!({"api": format!("{:?}", wrench.renderer.info().backend), "renderer": wrench.renderer.info().name, "target": "HAL owned texture"});
+        let result = crate::measure::run(&mut wrench, &rx, size, &measure_options, info, initialization);
+        wrench.api.shut_down(true);
+        return result;
+    }
     if command == "png" {
         return render_png(args, &options, dimensions);
     }
