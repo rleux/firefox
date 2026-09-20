@@ -2375,11 +2375,23 @@ impl<A: BackendApi> FrameRenderer<A> {
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
     ) -> Result<RenderedFrame<A>> {
-        self.execute(frame, updates, clear, frame.present)
+        self.execute(frame, updates, clear, frame.present, None)
+    }
+
+    pub fn render_retained(
+        &mut self, frame: &mut Frame, clear: ColorF,
+        previous: &RenderedFrame<A>, damage: DeviceIntRect,
+    ) -> Result<RenderedFrame<A>> {
+        if !self.has_owned_output(previous) || previous.origin != frame.device_rect.min
+            || previous.size != [frame.device_rect.width() as u32, frame.device_rect.height() as u32]
+            || damage.is_empty() || !frame.device_rect.contains_box(&damage) {
+            return Err("Invalid retained HAL composition target or damage".into());
+        }
+        self.execute(frame, Vec::new(), clear, frame.present, Some((previous, damage)))
     }
 
     pub fn render_offscreen(&mut self, frame: &mut Frame) -> Result<()> {
-        self.execute(frame, Vec::new(), ColorF::TRANSPARENT, false)
+        self.execute(frame, Vec::new(), ColorF::TRANSPARENT, false, None)
             .map(|_| ())
     }
 
@@ -2389,13 +2401,14 @@ impl<A: BackendApi> FrameRenderer<A> {
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
         composite: bool,
+        retained: Option<(&RenderedFrame<A>, DeviceIntRect)>,
     ) -> Result<RenderedFrame<A>> {
         if self.is_failed() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         self.poll()?;
         self.failed.set(true);
-        let result = self.render_inner(frame, updates, clear, composite);
+        let result = self.render_inner(frame, updates, clear, composite, retained);
         if result.is_err() { self.abort(); }
         self.external_images.clear();
         self.native_targets.clear();
@@ -2413,6 +2426,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         updates: Vec<ResourceUpdateList>,
         clear: ColorF,
         composite: bool,
+        retained: Option<(&RenderedFrame<A>, DeviceIntRect)>,
     ) -> Result<RenderedFrame<A>> {
         self.count(RenderCounter::Executions, 1);
         if !composite { self.count(RenderCounter::OffscreenExecutions, 1); }
@@ -2583,19 +2597,20 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         stats.color_targets += 1;
         self.acquire_composite_tiles(frame)?;
-        self.count(RenderCounter::FullCompositions, 1);
-        self.count(RenderCounter::ComposedPixels, size.width as u64 * size.height as u64);
-        let output = self.texture_pool.acquire(
-            size.width as u32,
-            size.height as u32,
-            wgt::TextureFormat::Rgba8Unorm,
-            true,
-        )?;
-        {
+        let (output, damage) = if let Some((previous, damage)) = retained {
+            self.count(RenderCounter::PartialCompositions, 1);
+            (previous.texture.as_ref().unwrap().clone(), damage)
+        } else {
+            self.count(RenderCounter::FullCompositions, 1);
+            let output = self.texture_pool.acquire(
+                size.width as u32, size.height as u32, wgt::TextureFormat::Rgba8Unorm, true,
+            )?;
             let mut commands = self.submissions.recording()?;
             output.invalidate(&mut commands);
-        }
-        let mut draws = vec![self.clear(frame.device_rect, clear)];
+            (output, frame.device_rect)
+        };
+        self.count(RenderCounter::ComposedPixels, damage.width() as u64 * damage.height() as u64);
+        let mut draws = vec![self.clear(damage, clear)];
         let mut layer_rects = Vec::new();
         for tile in frame.composite_state.tiles.iter().rev() {
             let state = &frame.composite_state;
@@ -2608,6 +2623,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             else {
                 continue;
             };
+            if !clip_rect.round_out().to_i32().intersects(&damage) { continue; }
             layer_rects.push(clip_rect.round_out().to_i32());
             let transform = state.get_device_transform(tile.transform_index);
             let flip = (transform.scale.x < 0.0, transform.scale.y < 0.0);
@@ -2657,7 +2673,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 clear_color: None,
                 count_in_stats: true,
                 readback: None,
-                scissor: frame.device_rect,
+                scissor: damage,
             });
         }
         if matches!(self.compositor, CompositorConfig::Layer { .. }) {

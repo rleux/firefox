@@ -117,3 +117,36 @@ current boundary draw. They are a functional baseline for later exact Rust
 snapshot tests, not a zero-work assertion, isolated cause attribution or
 hardware-performance result. The Intel ICD enumerated no device in this test
 environment, so this baseline makes no Intel GPU claim.
+
+## Retained partial composition
+
+Vulkan Draw compositors can update an initialized owned final target using WebRender's
+valid dirty rectangles. The initial supported subset requires the same document,
+output dimensions/origin, clear color, surface generation and composition
+descriptor, a newly built frame, and no deferred external images or external
+compositor surfaces. Dirty regions are clamped and combined into one rectangle.
+The renderer clears that rectangle and composites all intersecting contributors
+in their original order. Pixels outside it remain untouched.
+
+Unknown or invalid damage, an empty/full-size dirty union, forced redraw, changed
+composition metadata, external images, and Native/Layer compositors use a full
+composition. Full fallbacks report full output damage, including recomposition
+of an already-rendered frame after external-image invalidation. Surface
+presentation still copies the full output in this stage.
+
+`WR_HAL_FORCE_FULL_COMPOSITION=1` disables partial composition for a comparison
+run using the same binary. `partialCompositions` and `composedPixels` describe
+final-target work; they do not include tile rasterization or presentation area.
+Retained writes and previously requested readback copies share the renderer's
+submission queue, so asynchronous readbacks retain their requested pixels
+without adding a full-target copy or CPU wait before each partial update.
+
+The retained-composition validation passed 167 ordinary tests, six focused
+partial-composition tests and six retained-output tests using llvmpipe with
+Vulkan validation. In the 2048 by 1024 queued-readback case, the retained
+update composed 524,288 pixels, 25% of the 2,097,152-pixel full target. The
+queued readback preserved the preceding output and the updated pixels matched
+the forced-full control. Both renderers drained all pending submissions. This
+is correctness and work-counter evidence from a software Vulkan device, not a
+hardware-performance result. Detailed results are in
+`artifacts/vulkan-idle-rendering/2a/partial-lavapipe-final-result.txt`.

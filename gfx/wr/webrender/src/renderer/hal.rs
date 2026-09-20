@@ -102,6 +102,9 @@ pub use metal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_
 #[cfg(all(test, wr_hal_vulkan))]
 #[path = "hal_reuse_tests.rs"]
 mod reuse_tests;
+#[cfg(all(test, wr_hal_vulkan))]
+#[path = "hal_partial_tests.rs"]
+mod partial_tests;
 
 pub enum RenderOutcome {
     Rendered(super::RenderResults),
@@ -200,6 +203,7 @@ pub(crate) struct RendererCore<A: BackendApi> {
     clear_color: api::ColorF,
     last_output: Option<RenderedFrame<A>>,
     output_identity: Option<OutputIdentity>,
+    partial_composition: bool,
     readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest<A>>>,
     readback_bytes: Cell<u64>,
     next_readback: Cell<u64>,
@@ -329,6 +333,8 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
         sender,
     } = init::create_render_backend(&mut options, notifier, result_tx, config, resources)
         .map_err(|error| format!("Starting render backend: {error:?}"))?;
+    let partial_composition = gpu.info().backend == wgpu_types::Backend::Vulkan
+        && std::env::var("WR_HAL_FORCE_FULL_COMPOSITION").as_deref() != Ok("1");
     Ok((
         RendererCore {
             target_frame_publish_id: None,
@@ -349,6 +355,7 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
             clear_color: options.clear_color,
             last_output: None,
             output_identity: None,
+            partial_composition,
             readbacks: RefCell::new(HashMap::new()),
             readback_bytes: Cell::new(0),
             next_readback: Cell::new(1),
@@ -793,33 +800,34 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     fn execute_frame(&mut self) -> Result<RenderedFrame<A>, String> {
+        let retained = self.partial_composition && !self.force_redraw
+            && self.output_identity.is_some() && self.output_identity == self.current_output_identity()
+            && self.last_output.as_ref().map_or(false, |output| self.gpu.has_owned_output(output));
         self.output_identity = None;
         let start = std::time::Instant::now();
         let document = self.document.as_mut().ok_or("No prepared WR frame")?;
         let frame = &document.frame;
         let state = &frame.composite_state;
-        let damage = if !frame.present || frame.device_rect.is_empty() {
-            Vec::new()
-        } else if self.force_redraw || !state.dirty_rects_are_valid
-            || self.last_device_rect != Some(frame.device_rect)
-            || self.last_descriptor.as_ref() != Some(&state.descriptor)
-            || !frame.deferred_resolves.is_empty() {
-            vec![frame.device_rect]
-        } else if frame.has_been_rendered {
-            Vec::new()
-        } else {
+        let partial_damage = if retained && frame.present && !frame.has_been_rendered
+            && state.dirty_rects_are_valid && self.last_descriptor.as_ref() == Some(&state.descriptor)
+            && frame.deferred_resolves.is_empty() && state.external_surfaces.is_empty() {
             state.tiles.iter().filter_map(|tile| {
                 if tile.local_dirty_rect.is_empty() { return None; }
                 state.get_device_rect(&tile.local_dirty_rect, tile.transform_index)
                     .intersection(&tile.device_clip_rect)
                     .map(|rect| rect.round_out().to_i32())
                     .and_then(|rect| rect.intersection(&frame.device_rect))
-            }).collect()
-        };
+            }).reduce(|a, b| a.union(&b))
+                .filter(|rect| !rect.is_empty() && *rect != frame.device_rect)
+        } else { None };
+        let damage = if !frame.present || frame.device_rect.is_empty() { Vec::new() }
+            else { vec![partial_damage.unwrap_or(frame.device_rect)] };
         let did_rasterize = !frame.has_been_rendered && state.did_rasterize_any_tile;
-        let output = self
-            .gpu
-            .render(&mut document.frame, Vec::new(), self.clear_color)?;
+        let output = if let Some(damage) = partial_damage {
+            self.gpu.render_retained(&mut document.frame, self.clear_color, self.last_output.as_ref().unwrap(), damage)?
+        } else {
+            self.gpu.render(&mut document.frame, Vec::new(), self.clear_color)?
+        };
         if let Some(metrics) = self.gpu.metrics() {
             metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes,
                 output.size[0] as u64 * output.size[1] as u64 * 4);
