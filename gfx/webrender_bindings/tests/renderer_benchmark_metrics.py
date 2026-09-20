@@ -428,6 +428,16 @@ def validate_environment(report, expected):
     errors = []
     if not isinstance(report, dict):
         return ["report must be an object"]
+    if expected.get("workload") == "canvas":
+        policy = report.get("canvasPolicy")
+        if (
+            not isinstance(policy, dict)
+            or policy.get("accelerated") is not False
+            or policy.get("forceEnabled") is not False
+        ):
+            errors.append(
+                "canvas producer policy must disable acceleration and force-enable"
+            )
     backend = report.get("backend")
     if not isinstance(backend, dict):
         return ["missing report.backend"]

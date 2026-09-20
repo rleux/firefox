@@ -335,6 +335,22 @@ finally:
 
 
 class TestValidateReport(unittest.TestCase):
+    def test_canvas_requires_the_same_software_producer_policy(self):
+        report = valid_report()
+        config = {**expected(), "workload": "canvas"}
+        error = "canvas producer policy must disable acceleration and force-enable"
+        for policy in [
+            None,
+            {},
+            {"accelerated": True, "forceEnabled": False},
+            {"accelerated": False, "forceEnabled": True},
+            {"accelerated": 0, "forceEnabled": 0},
+        ]:
+            report["canvasPolicy"] = policy
+            self.assertIn(error, validate_environment(report, config))
+        report["canvasPolicy"] = {"accelerated": False, "forceEnabled": False}
+        self.assertEqual(validate_environment(report, config), [])
+
     def test_environment_preflight_is_independent_of_workload(self):
         report = valid_report()
         for key in [

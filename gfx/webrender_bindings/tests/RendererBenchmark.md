@@ -53,6 +53,11 @@ intervals. These callbacks measure page scheduling and workload updates, not
 completed GPU frames or display scanout. The canvas case must not be called an
 isolated texture-upload benchmark without diagnostic evidence of that path.
 
+The canvas workload explicitly disables accelerated Canvas2D and its force-enable
+preference on both backends, and verifies those effective settings. This keeps
+the producer policy fixed while WR remains selected independently. It does not
+measure accelerated Canvas2D or a native WebGL/WebGPU transfer path.
+
 Warmup runs the same workload before measurement. Backend/geometry/library checks
 and compositor screenshots occur outside the measured interval. The process
 sampling interval brackets the Marionette call and is slightly wider than the

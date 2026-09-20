@@ -195,6 +195,16 @@ class TestRendererBenchmark(MarionetteTestCase):
     def test_renderer_workload(self):
         expected = self.config["expected"]
         self.report["backend"] = self.backend()
+        if expected["workload"] == "canvas":
+            with self.marionette.using_context("chrome"):
+                self.report["canvasPolicy"] = self.marionette.execute_script(
+                    """
+                    return {
+                      accelerated: Services.prefs.getBoolPref('gfx.canvas.accelerated'),
+                      forceEnabled: Services.prefs.getBoolPref('gfx.canvas.accelerated.force-enabled')
+                    };
+                    """
+                )
         identities = self.identities()
         self.report["processIds"] = identities
         renderer_pid = (
