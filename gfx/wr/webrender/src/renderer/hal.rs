@@ -1738,9 +1738,13 @@ mod tests {
         renderer.core.document.as_mut().unwrap().frame.device_rect = original_rect;
         let pipeline_info = renderer.flush_pipeline_info();
         renderer.render().unwrap();
-        let unchanged = renderer.render().unwrap();
-        assert!(unchanged.dirty_rects.is_empty());
-        assert!(!unchanged.did_rasterize_any_tile);
+        let repeated = renderer.render().unwrap();
+        assert_eq!(repeated.dirty_rects.as_slice(), &[original_rect]);
+        assert!(!repeated.did_rasterize_any_tile);
+        let repeated_completion = renderer.frame_completion().unwrap();
+        assert!(matches!(renderer.render_if_needed().unwrap(), RenderOutcome::Reused));
+        assert!(renderer.core.damage.is_empty());
+        assert_eq!(renderer.frame_completion().unwrap(), repeated_completion);
         let (shot, shot_size) = renderer.get_screenshot_async(original_rect, DeviceIntSize::new(16, 16), ImageFormat::BGRA8).unwrap();
         assert_eq!(shot_size, DeviceIntSize::new(16, 16));
         assert!(renderer.map_and_recycle_screenshot(shot, &mut [0; 1], 1, ImageFormat::RGBA8).is_err());
