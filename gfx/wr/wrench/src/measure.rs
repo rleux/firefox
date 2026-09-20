@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ pub struct Options {
     output: PathBuf,
     frames: usize,
     warmup: usize,
+    inspection_ms: u64,
 }
 
 impl Options {
@@ -37,11 +39,15 @@ impl Options {
         };
         let frames = count("frames")?;
         if frames == 0 { return Err("frames must be positive".into()); }
+        let inspection_ms = args.value_of("inspection_ms").unwrap().parse::<u64>()
+            .map_err(|_| "Invalid inspection duration")?;
+        if inspection_ms > 10_000 { return Err("inspection-ms exceeds 10000".into()); }
         Ok(Self {
             input: PathBuf::from(args.value_of("INPUT").unwrap()),
             output: PathBuf::from(args.value_of("OUTPUT").unwrap()),
             frames,
             warmup: count("warmup")?,
+            inspection_ms,
         })
     }
 }
@@ -75,7 +81,7 @@ pub fn run<R: ReftestRenderer>(
     if options.output == png || options.output.exists() || png.exists() {
         return Err("Measurement output or image already exists, or output has .png extension".into());
     }
-    let output = OpenOptions::new().write(true).create_new(true).open(&options.output)
+    let mut output = OpenOptions::new().write(true).create_new(true).open(&options.output)
         .map_err(|e| e.to_string())?;
     let mut reader = YamlFrameReader::new(&options.input);
     wrench.configure_measurement();
@@ -112,7 +118,7 @@ pub fn run<R: ReftestRenderer>(
         .ok_or("Final readback dimensions mismatch")?;
     image = image::imageops::flip_vertical(&image);
     image.save(&png).map_err(|e| e.to_string())?;
-    serde_json::to_writer_pretty(output, &serde_json::json!({
+    serde_json::to_writer_pretty(&mut output, &serde_json::json!({
         "schemaVersion": 1,
         "completed": true,
         "backend": backend,
@@ -121,9 +127,15 @@ pub fn run<R: ReftestRenderer>(
         "image": png,
         "frames": options.frames,
         "warmupFrames": options.warmup,
+        "inspectionMs": options.inspection_ms,
         "contextAndRendererInitializationNs": initialization.as_nanos() as u64,
         "completion": "one-pixel synchronous readback per frame",
         "presents": 0,
         "samples": samples,
-    })).map_err(|e| e.to_string())
+    })).map_err(|e| e.to_string())?;
+    output.flush().map_err(|e| e.to_string())?;
+    if options.inspection_ms != 0 {
+        std::thread::sleep(Duration::from_millis(options.inspection_ms));
+    }
+    Ok(())
 }
