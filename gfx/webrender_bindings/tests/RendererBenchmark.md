@@ -93,6 +93,19 @@ coverage. That work runs outside the measured browser tree but can still perturb
 the host. The pilot must compare instrumentation sensitivity before this is used
 for primary timing; a successful smoke only establishes schema and operability.
 
+Samples also identify the collector process and its CPU counters separately from
+the browser tree. That process includes sampling and Marionette harness threads.
+Per-sample thread CPU and wall costs cover collection itself. Missing collector
+identity is explicit; it is never reported as zero cost. Sampling waits 250 ms
+after each collection, so actual cadence includes collection time. Use the
+first/last sample timestamps for CPU-rate denominators, not the wider host call
+bracket. These reads are non-atomic and clock-tick quantized. Characterize
+collection overhead separately; do not subtract it from browser or host results
+as though its effect on scheduling and GPU contention were known.
+New run configurations require valid, stable collector attribution outside the
+Firefox process tree. Older schema-1 pilot reports remain readable without those
+fields and cannot support collector-cost attribution.
+
 The runner records binary/fixture hashes, configuration, command, selected
 environment and complete logs. The fixture records runtime library mappings
 and hashes before/after measurement, including the exact mapped `libxul` and
