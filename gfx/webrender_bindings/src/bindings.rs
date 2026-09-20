@@ -683,6 +683,14 @@ pub extern "C" fn wr_renderer_render(
 }
 
 #[no_mangle]
+pub extern "C" fn wr_renderer_service_hidden_frame(renderer: &mut Renderer) -> bool {
+    renderer
+        .service_hidden_frame()
+        .map_err(|error| error!("Hidden Vulkan frame: {}", error))
+        .is_ok()
+}
+
+#[no_mangle]
 pub extern "C" fn wr_renderer_force_redraw(renderer: &mut Renderer) {
     renderer.force_redraw();
 }

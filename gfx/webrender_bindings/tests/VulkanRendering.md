@@ -115,8 +115,10 @@ gauges returned to zero. These phase deltas include the preceding checkpoint
 boundary and queue draining because the poll snapshot is taken before the
 current boundary draw. They are a functional baseline for later exact Rust
 snapshot tests, not a zero-work assertion, isolated cause attribution or
-hardware-performance result. The Intel ICD enumerated no device in this test
-environment, so this baseline makes no Intel GPU claim.
+hardware-performance result. The P0 windowed browser route could not initialize
+the Intel ICD in that test environment, so the baseline used llvmpipe. Later
+Intel offscreen validation succeeded; the P0 result does not establish that the
+hardware device was absent.
 
 ## Retained partial composition
 
@@ -219,3 +221,69 @@ ancestor, focus independence, hidden and missing WM properties, malformed and
 truncated properties, preservation of an Xlib-queued event, and a destroyed
 window returning unknown without a fatal X error. The report is in
 `artifacts/vulkan-idle/stage3a-x11/report.json`.
+
+## Hidden-window servicing
+
+For a healthy, unpaused Vulkan renderer, a reliably hidden native window skips
+swapchain acquisition, final window composition and presentation. Renderer
+messages, pipeline updates, `FrameRendered` notifications and frame-completion
+IDs still advance. Required texture-cache/offscreen passes execute, and existing
+completion polling drains submitted work and external-image releases. No polling
+is added once the queues are idle, and no browser animation or scheduling policy
+is changed. Each window has independent visibility state.
+
+Explicit readback, profiler screenshots and composition recording can still
+render a fresh owned final target while hidden, without acquiring or presenting
+a window surface. Existing empty-size capture failure and lifecycle/device pause
+handling remain in effect. Pending screenshot queues continue to be serviced.
+Restoration forces a full refresh from WebRender's latest state rather than
+replaying hidden frames.
+
+`hiddenSkips` counts serviced hidden requests. It is separate from actual
+`offscreenExecutions`, `fullCompositions`, `partialCompositions`, `acquires` and
+`presents`; explicit hidden captures legitimately increase composition/readback
+counts. Legacy embedding frame accounting still sees a serviced request, so use
+the HAL work counters when distinguishing logical frames from GPU rendering.
+
+The focused Intel offscreen validation passed all 18 cases: five hidden-frame,
+six partial-composition, six retained-output and one draw-presentation test. It
+used the Intel ICD, native SPIR-V and the fixed Vulkan loader with validation;
+the only driver message was the expected experimental Xe KMD warning. This is
+offscreen correctness coverage and does not establish native-window behavior or
+hardware performance. Detailed results are in
+`artifacts/vulkan-idle-rendering/3b/intel-offscreen-result.txt`.
+
+`WR_HAL_FORCE_VISIBLE=1` disables the native hidden-window optimization for a
+same-binary control. It does not map, focus or change the native window, and
+existing lifecycle/device pause checks still apply.
+
+The private-X11 browser workspace test passed with both GPU-process and
+parent-process WebRender. In each run, three fresh hidden requests advanced
+updates and `hiddenSkips` without executions, compositions, readbacks, surface
+acquires or presents, while another window presented three frames. A hidden
+capture then added one readback and one full composition with no surface work,
+returned the expected 890 by 617 red image, and restoration displayed the newer
+green state through the native X window. Pending submissions and leases drained
+to zero. Resizing the hidden client to 760 by 620 performed only required
+offscreen work, with no final composition or surface operation. Two further
+hide/restore cycles in each process mode again serviced hidden requests without
+screen work and restored the exact current native pixel. The other window
+continued presenting and its animation advanced throughout the test.
+
+The minimized-window diagnostic produced the same result with the optimization
+enabled and with `WR_HAL_FORCE_VISIBLE=1`: no main-window HAL frame or readback
+work was recorded, and both 890 by 617 WebDriver captures were transparent. The
+other window remained active and native restoration displayed the expected
+green state. This records unchanged minimized-capture behavior relative to the
+new optimization; it does not attribute the behavior to browser internals.
+Reports are under `artifacts/vulkan-idle-rendering/3b/` in
+`browser-workspace-gpu/`, `browser-workspace-parent/`,
+`browser-iconify-gpu-opt/` and `browser-iconify-gpu-control/`.
+
+Browser interoperability coverage remained limited by this host setup. The
+Lavapipe WebGPU control rendered correct Vulkan pixels but could not produce the
+required direct DMA-BUF import marker under Xvfb. The WebGL fixture rejected its
+software producer, and the Intel windowed Vulkan route could not initialize.
+These unavailable gates are not pixel regressions, and the successful Intel
+offscreen tests do not replace native-window interoperability coverage. None of
+these correctness results is a timing measurement.

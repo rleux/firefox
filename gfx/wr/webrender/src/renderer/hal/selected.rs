@@ -178,6 +178,9 @@ impl SelectedRenderer {
     pub fn render_if_needed(&mut self) -> Result<RenderOutcome, String> {
         dispatch!(&mut self.inner, render_if_needed())
     }
+    pub fn service_hidden_frame(&mut self) -> Result<(), String> {
+        dispatch!(&mut self.inner, service_hidden_frame())
+    }
     pub fn has_current_output(&self) -> bool {
         dispatch!(&self.inner, has_current_output())
     }

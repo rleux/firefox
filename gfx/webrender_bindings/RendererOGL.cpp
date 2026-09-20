@@ -274,8 +274,21 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   bool fullRender = false;
   bool needPostRenderCall = false;
   bool beginFrame = !mThread->IsHandlingDeviceReset();
+  bool needsPixels = aReadbackBuffer.isSome() ||
+                     layers::ProfilerScreenshots::IsEnabled() ||
+                     mCompositionRecorder;
+#ifdef MOZ_WIDGET_ANDROID
+  needsPixels |= mPendingScreenPixelsRequest.isSome();
+#endif
+  bool hidden = beginFrame && present && !mCompositor->IsPaused() &&
+                mCompositor->IsWindowHidden();
+  if (hidden && needsPixels && mCompositor->GetBufferSize().IsEmpty()) {
+    hidden = false;
+  }
+  const bool windowPresent = present && !hidden;
+  const bool skipRender = hidden && !needsPixels;
 
-  if (beginFrame && present) {
+  if (beginFrame && windowPresent) {
     if (!mCompositor->GetWidget()->PreRender(&widgetContext)) {
       // XXX This could cause oom in webrender since pending_texture_updates is
       // not handled. It needs to be addressed.
@@ -327,9 +340,14 @@ RenderedFrameId RendererOGL::UpdateAndRender(
 
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
-  bool rendered =
-      wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
-                         aOutStats, &dirtyRects, &didRasterize);
+  bool rendered;
+  if (skipRender) {
+    *aOutStats = RendererStats{};
+    rendered = wr_renderer_service_hidden_frame(mRenderer);
+  } else {
+    rendered = wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
+                                  aOutStats, &dirtyRects, &didRasterize);
+  }
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
@@ -337,7 +355,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   // until explicitly cleared by CheckAndClearDidRasterize().
   mLastFrameDidRasterize = mLastFrameDidRasterize || didRasterize;
   if (!rendered) {
-    if (present) {
+    if (windowPresent) {
       mCompositor->CancelFrame();
     }
     if (needPostRenderCall) {
@@ -366,8 +384,12 @@ RenderedFrameId RendererOGL::UpdateAndRender(
                 mRenderer, aReadbackSize.ref().width,
                 aReadbackSize.ref().height, aReadbackFormat.ref(),
                 &aReadbackBuffer.ref()[0], aReadbackBuffer.ref().length())) {
-          mCompositor->CancelFrame();
-          mCompositor->GetWidget()->PostRender(&widgetContext);
+          if (windowPresent) {
+            mCompositor->CancelFrame();
+          }
+          if (needPostRenderCall) {
+            mCompositor->GetWidget()->PostRender(&widgetContext);
+          }
           RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
           return RenderedFrameId();
         }
@@ -381,7 +403,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     MaybeCaptureScreenPixels();
 #endif
 
-    if (size.Width() != 0 && size.Height() != 0) {
+    if (!skipRender && size.Width() != 0 && size.Height() != 0) {
       if (!mCompositor->MaybeGrabScreenshot(size.ToUnknownSize())) {
         mScreenshotGrabber.MaybeGrabScreenshot(this, size.ToUnknownSize());
       }
@@ -390,10 +412,13 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     // Frame recording must happen before EndFrame, as we must ensure we read
     // the contents of the back buffer before any calls to SwapBuffers which
     // might invalidate it.
-    MaybeRecordFrame(mLastPipelineInfo);
+    if (!skipRender) {
+      MaybeRecordFrame(mLastPipelineInfo);
+    }
     frameId = mCompositor->EndFrame(dirtyRects);
-    MOZ_ASSERT(needPostRenderCall);
-    mCompositor->GetWidget()->PostRender(&widgetContext);
+    if (needPostRenderCall) {
+      mCompositor->GetWidget()->PostRender(&widgetContext);
+    }
   }
 
 #if defined(ENABLE_FRAME_LATENCY_LOG)

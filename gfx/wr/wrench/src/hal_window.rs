@@ -104,7 +104,14 @@ impl Pane {
         if self.gpu_timing {
             for timing in self.wrench.renderer.take_gpu_timings()? { println!("HAL GPU window={} ns={}", self.number, timing.nanoseconds); }
         }
-        if self.hidden() { return Ok(false); }
+        if self.hidden() {
+            if self.redraw && !self.pending_frame {
+                if self.present { self.wrench.renderer.service_hidden_frame()?; }
+                else { self.wrench.renderer.render_if_needed()?; }
+                self.redraw = false;
+            }
+            return Ok(false);
+        }
         if watch && !self.pending_frame && !self.redraw && Instant::now() >= self.retry_at { self.do_frame = true; }
         if self.do_frame && !self.pending_frame && Instant::now() >= self.retry_at {
             self.thing.do_frame(&mut self.wrench);
