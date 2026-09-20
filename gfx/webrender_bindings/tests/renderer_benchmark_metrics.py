@@ -158,6 +158,7 @@ class Sampler:
         self,
         root_pid,
         include_memory=False,
+        timing=False,
         interval=0.25,
         proc_root=Path("/proc"),
         sys_root=Path("/sys"),
@@ -167,6 +168,7 @@ class Sampler:
             raise ValueError("interval must be positive")
         self.root_pid = int(root_pid)
         self.include_memory = include_memory
+        self.timing = timing
         self.interval = float(interval)
         self.proc_root = Path(proc_root)
         self.sys_root = Path(sys_root)
@@ -204,26 +206,7 @@ class Sampler:
                 return result, owned
             owned = expanded
 
-    def _host(self, stats, owned, tick):
-        clocks = _optional_values(
-            self.sys_root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"),
-            int,
-        )
-        temperatures = _optional_values(
-            self.sys_root.glob("class/thermal/thermal_zone*/temp"), int
-        )
-        power_paths = list(self.sys_root.glob("class/power_supply/*/online"))
-        power_paths += list(self.sys_root.glob("class/power_supply/*/status"))
-        power_paths += list(self.sys_root.glob("class/power_supply/*/capacity"))
-        power = _optional_values(power_paths, str)
-        governors = _optional_values(
-            self.sys_root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor"),
-            str,
-        )
-        platform_profile = _optional_value(
-            self.sys_root / "firmware/acpi/platform_profile", str
-        )
-
+    def _host(self, stats, owned, tick, detail):
         def cpu_stat(text):
             line = next(
                 (line for line in text.splitlines() if line.startswith("cpu ")), None
@@ -258,7 +241,7 @@ class Sampler:
             }
 
         background = [stat for pid, stat in stats.items() if pid not in owned]
-        return {
+        result = {
             "wholeHostCpuTicks": _optional_value(self.proc_root / "stat", cpu_stat),
             "loadAverage": _optional_value(self.proc_root / "loadavg", load_average),
             "backgroundProcessCpu": {
@@ -270,17 +253,41 @@ class Sampler:
                 / tick,
                 "reason": None,
             },
-            "cpuClocksKHz": clocks,
-            "cpuGovernors": governors,
-            "temperaturesMilliC": temperatures,
-            "power": power,
-            "platformProfile": platform_profile,
+            "cpuClocksKHz": None,
+            "cpuGovernors": None,
+            "temperaturesMilliC": None,
+            "power": None,
+            "platformProfile": None,
         }
+        if detail == "light":
+            return result
+        result["cpuClocksKHz"] = _optional_values(
+            self.sys_root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"),
+            int,
+        )
+        result["temperaturesMilliC"] = _optional_values(
+            self.sys_root.glob("class/thermal/thermal_zone*/temp"), int
+        )
+        power_paths = list(self.sys_root.glob("class/power_supply/*/online"))
+        power_paths += list(self.sys_root.glob("class/power_supply/*/status"))
+        power_paths += list(self.sys_root.glob("class/power_supply/*/capacity"))
+        result["power"] = _optional_values(power_paths, str)
+        result["cpuGovernors"] = _optional_values(
+            self.sys_root.glob("devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor"),
+            str,
+        )
+        result["platformProfile"] = _optional_value(
+            self.sys_root / "firmware/acpi/platform_profile", str
+        )
+        return result
 
-    def sample_once(self):
+    def sample_once(self, detail="full"):
+        if detail not in ["light", "full"]:
+            raise ValueError("detail must be light or full")
         sampling_start = self.clock()
         sampling_cpu_start = time.thread_time()
         stats, owned = self._stats()
+        cpu_sample_time = self.clock()
         tick = os.sysconf("SC_CLK_TCK")
         page = os.sysconf("SC_PAGE_SIZE")
         processes = {}
@@ -298,65 +305,68 @@ class Sampler:
                 "cpuSeconds": (stat["userTicks"] + stat["systemTicks"]) / tick,
                 "rssBytes": stat["rssPages"] * page,
                 "fdCount": None,
-                "fdInfoCoverage": 0,
+                "fdInfoCoverage": 0 if detail == "full" else None,
                 "memory": None,
                 "errors": [],
             }
-            if self.include_memory:
+            if detail == "full":
+                if self.include_memory:
+                    try:
+                        process["memory"] = _rollup(
+                            self.proc_root / str(pid) / "smaps_rollup"
+                        )
+                    except OSError as error:
+                        process["errors"].append(f"smaps_rollup: {error}")
+                    except (KeyError, ValueError) as error:
+                        raise ValueError(
+                            f"Invalid smaps_rollup for {identity}: {error}"
+                        )
+                fdinfo = self.proc_root / str(pid) / "fdinfo"
                 try:
-                    process["memory"] = _rollup(
-                        self.proc_root / str(pid) / "smaps_rollup"
-                    )
-                except OSError as error:
-                    process["errors"].append(f"smaps_rollup: {error}")
-                except (KeyError, ValueError) as error:
-                    raise ValueError(f"Invalid smaps_rollup for {identity}: {error}")
-            fdinfo = self.proc_root / str(pid) / "fdinfo"
-            try:
-                descriptors = list(fdinfo.iterdir())
-                process["fdCount"] = len(descriptors)
-            except FileNotFoundError:
-                process["errors"].append("fdinfo: process departed")
-                descriptors = []
-            except OSError as error:
-                process["errors"].append(f"fdinfo: {error}")
-                descriptors = []
-            for descriptor in descriptors:
-                try:
-                    lines = descriptor.read_text().splitlines()
-                    process["fdInfoCoverage"] += 1
-                    raw = {
-                        name: value.strip()
-                        for line in lines
-                        if line.startswith("drm-")
-                        for name, value in [line.split(":", 1)]
-                    }
+                    descriptors = list(fdinfo.iterdir())
+                    process["fdCount"] = len(descriptors)
                 except FileNotFoundError:
-                    continue
+                    process["errors"].append("fdinfo: process departed")
+                    descriptors = []
                 except OSError as error:
-                    process["errors"].append(f"fdinfo/{descriptor.name}: {error}")
-                    continue
-                if "drm-client-id" not in raw:
-                    continue
-                drm_identity = (
-                    raw.get("drm-pdev", "global") + "/" + raw["drm-client-id"]
-                )
-                client = drm_clients.setdefault(
-                    drm_identity,
-                    {
-                        "identity": drm_identity,
-                        "raw": raw,
-                        "firstRaw": raw,
-                        "lastRaw": raw,
-                        "observations": 0,
-                        "owners": [],
-                    },
-                )
-                client["raw"] = raw
-                client["lastRaw"] = raw
-                client["observations"] += 1
-                if identity not in client["owners"]:
-                    client["owners"].append(identity)
+                    process["errors"].append(f"fdinfo: {error}")
+                    descriptors = []
+                for descriptor in descriptors:
+                    try:
+                        lines = descriptor.read_text().splitlines()
+                        process["fdInfoCoverage"] += 1
+                        raw = {
+                            name: value.strip()
+                            for line in lines
+                            if line.startswith("drm-")
+                            for name, value in [line.split(":", 1)]
+                        }
+                    except FileNotFoundError:
+                        continue
+                    except OSError as error:
+                        process["errors"].append(f"fdinfo/{descriptor.name}: {error}")
+                        continue
+                    if "drm-client-id" not in raw:
+                        continue
+                    drm_identity = (
+                        raw.get("drm-pdev", "global") + "/" + raw["drm-client-id"]
+                    )
+                    client = drm_clients.setdefault(
+                        drm_identity,
+                        {
+                            "identity": drm_identity,
+                            "raw": raw,
+                            "firstRaw": raw,
+                            "lastRaw": raw,
+                            "observations": 0,
+                            "owners": [],
+                        },
+                    )
+                    client["raw"] = raw
+                    client["lastRaw"] = raw
+                    client["observations"] += 1
+                    if identity not in client["owners"]:
+                        client["owners"].append(identity)
             processes[identity] = process
         totals = {
             "cpuSeconds": sum(value["cpuSeconds"] for value in processes.values()),
@@ -367,34 +377,45 @@ class Sampler:
                 value["systemCpuSeconds"] for value in processes.values()
             ),
             "rssBytes": sum(value["rssBytes"] for value in processes.values()),
-            "fdCount": sum(value["fdCount"] or 0 for value in processes.values()),
-            "fdCoverage": sum(
-                value["fdCount"] is not None for value in processes.values()
-            ),
-            "fdInfoCoverage": sum(
-                value["fdInfoCoverage"] for value in processes.values()
-            ),
-            "pssBytes": sum(
-                value["memory"]["pssBytes"]
-                for value in processes.values()
-                if value["memory"] is not None
-            ),
-            "privateBytes": sum(
-                value["memory"]["privateBytes"]
-                for value in processes.values()
-                if value["memory"] is not None
-            ),
-            "memoryCoverage": sum(
-                value["memory"] is not None for value in processes.values()
-            ),
+            "fdCount": None,
+            "fdCoverage": None,
+            "fdInfoCoverage": None,
+            "pssBytes": None,
+            "privateBytes": None,
+            "memoryCoverage": None,
         }
+        if detail == "full":
+            totals.update(
+                fdCount=sum(value["fdCount"] or 0 for value in processes.values()),
+                fdCoverage=sum(
+                    value["fdCount"] is not None for value in processes.values()
+                ),
+                fdInfoCoverage=sum(
+                    value["fdInfoCoverage"] for value in processes.values()
+                ),
+                pssBytes=sum(
+                    value["memory"]["pssBytes"]
+                    for value in processes.values()
+                    if value["memory"] is not None
+                ),
+                privateBytes=sum(
+                    value["memory"]["privateBytes"]
+                    for value in processes.values()
+                    if value["memory"] is not None
+                ),
+                memoryCoverage=sum(
+                    value["memory"] is not None for value in processes.values()
+                ),
+            )
         result = {
             "timeSeconds": self.clock(),
+            "cpuSampleTimeSeconds": cpu_sample_time,
+            "detailLevel": detail,
             "rootIdentity": self._root_identity,
             "processes": processes,
             "totals": totals,
-            "drmClients": drm_clients,
-            "host": self._host(stats, owned, tick),
+            "drmClients": drm_clients if detail == "full" else None,
+            "host": self._host(stats, owned, tick, detail),
         }
         collector_pid = os.getpid()
         collector = stats.get(collector_pid)
@@ -420,13 +441,15 @@ class Sampler:
     def _run(self):
         try:
             while not self._stop.wait(self.interval):
-                self.samples.append(self.sample_once())
+                self.samples.append(
+                    self.sample_once("light" if self.timing else "full")
+                )
         except BaseException as error:
             self._error = error
             self._stop.set()
 
     def __enter__(self):
-        self.samples.append(self.sample_once())
+        self.samples.append(self.sample_once("full"))
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self
@@ -436,7 +459,7 @@ class Sampler:
         self._thread.join()
         final_error = None
         try:
-            self.samples.append(self.sample_once())
+            self.samples.append(self.sample_once("full"))
         except BaseException as error:
             final_error = error
         if exception_type is None:
@@ -610,6 +633,117 @@ def validate_report(report, expected):
         errors.append("processMetrics must be a list")
         process_metrics = []
     phase = expected.get("phase")
+    if expected.get("startupSettling") is True:
+        startup = report.get("startupSettling")
+        if not isinstance(startup, dict):
+            errors.append("startup settling report is missing")
+        else:
+            minimum_age = startup.get("minimumAgeSeconds")
+            required_stable = startup.get("requiredStableSeconds")
+            timeout = startup.get("timeoutSeconds")
+            elapsed = startup.get("elapsedSeconds")
+            root_age = startup.get("rootAgeSeconds")
+            stable = startup.get("stableSeconds")
+            if (
+                startup.get("passed") is not True
+                or minimum_age != 65
+                or required_stable != 5
+                or timeout != 120
+                or not _finite_number(elapsed)
+                or not _finite_number(root_age)
+                or not _finite_number(stable)
+                or elapsed < required_stable
+                or elapsed >= timeout
+                or root_age < minimum_age
+                or stable < required_stable
+            ):
+                errors.append("startup settling report is invalid")
+            first_root = (
+                process_metrics[0].get("rootIdentity")
+                if process_metrics and isinstance(process_metrics[0], dict)
+                else None
+            )
+            if (
+                not isinstance(startup.get("rootIdentity"), str)
+                or startup.get("rootIdentity") != first_root
+            ):
+                errors.append("startup settling root identity mismatch")
+            transitions = startup.get("transitions")
+            previous_transition_time = None
+            if not isinstance(transitions, list) or not transitions:
+                errors.append("startup settling transitions are invalid")
+            else:
+                for index, transition in enumerate(transitions):
+                    if not isinstance(transition, dict):
+                        errors.append(f"startup settling transition {index} is invalid")
+                        continue
+                    transition_time = transition.get("elapsedSeconds")
+                    transition_age = transition.get("rootAgeSeconds")
+                    maps_valid = all(
+                        isinstance(transition.get(name), dict)
+                        and all(
+                            isinstance(identity, str) and isinstance(comm, str)
+                            for identity, comm in transition[name].items()
+                        )
+                        for name in ["added", "removed"]
+                    )
+                    if (
+                        not _finite_number(transition_time)
+                        or transition_time < 0
+                        or not _finite_number(transition_age)
+                        or transition_age < 0
+                        or (
+                            previous_transition_time is not None
+                            and transition_time < previous_transition_time
+                        )
+                        or (_finite_number(elapsed) and transition_time > elapsed)
+                        or not maps_valid
+                    ):
+                        errors.append(f"startup settling transition {index} is invalid")
+                    if _finite_number(transition_time):
+                        previous_transition_time = transition_time
+            final_identities = startup.get("finalIdentities")
+            if (
+                not isinstance(final_identities, list)
+                or not final_identities
+                or any(not isinstance(identity, str) for identity in final_identities)
+                or len(set(final_identities)) != len(final_identities)
+                or startup.get("rootIdentity") not in final_identities
+            ):
+                errors.append("startup settling final identities are invalid")
+    timing_sampling = expected.get("timingSampling") is True
+    if timing_sampling:
+        detail_levels = [
+            sample.get("detailLevel") if isinstance(sample, dict) else None
+            for sample in process_metrics
+        ]
+        if phase != "timing":
+            errors.append("timing sampling requires timing phase")
+        if (
+            len(detail_levels) < 2
+            or detail_levels[0] != "full"
+            or detail_levels[-1] != "full"
+        ):
+            errors.append("timing sampling requires full endpoint samples")
+        if any(level != "light" for level in detail_levels[1:-1]):
+            errors.append("timing sampling requires light intermediate samples")
+        if len(process_metrics) >= 2 and all(
+            isinstance(sample, dict)
+            for sample in [process_metrics[0], process_metrics[-1]]
+        ):
+            first_cpu_time = process_metrics[0].get("cpuSampleTimeSeconds")
+            last_cpu_time = process_metrics[-1].get("cpuSampleTimeSeconds")
+            first_time = process_metrics[0].get("timeSeconds")
+            last_time = process_metrics[-1].get("timeSeconds")
+            if not (
+                _finite_number(first_cpu_time)
+                and _finite_number(last_cpu_time)
+                and last_cpu_time > first_cpu_time
+                and _finite_number(first_time)
+                and _finite_number(last_time)
+                and last_time > first_time
+            ):
+                errors.append("timing sampling requires a positive endpoint interval")
     interval_start = report.get("hostIntervalStart")
     interval_end = report.get("hostIntervalEnd")
     if process_metrics and (
@@ -627,12 +761,45 @@ def validate_report(report, expected):
     collector_identities = []
     collector_cpu_samples = []
     previous_time = None
+    previous_cpu_sample_time = None
     for index, sample in enumerate(process_metrics):
         if not isinstance(sample, dict):
             errors.append(f"processMetrics[{index}] must be an object")
             continue
         if not isinstance(sample.get("rootIdentity"), str):
             errors.append(f"processMetrics[{index}].rootIdentity is invalid")
+        detail_level = sample.get("detailLevel")
+        if detail_level not in [None, "light", "full"]:
+            errors.append(f"processMetrics[{index}].detailLevel is invalid")
+        light_sample = detail_level == "light"
+        cpu_sample_time = sample.get("cpuSampleTimeSeconds")
+        if cpu_sample_time is not None or timing_sampling:
+            if not _finite_number(cpu_sample_time) or cpu_sample_time < 0:
+                errors.append(
+                    f"processMetrics[{index}].cpuSampleTimeSeconds is invalid"
+                )
+            elif (
+                previous_cpu_sample_time is not None
+                and cpu_sample_time < previous_cpu_sample_time
+            ):
+                errors.append("CPU sample time decreased")
+            elif (
+                _finite_number(interval_start)
+                and _finite_number(interval_end)
+                and not interval_start <= cpu_sample_time <= interval_end
+            ):
+                errors.append(
+                    f"processMetrics[{index}] CPU sample lies outside the host interval"
+                )
+            elif (
+                _finite_number(sample.get("timeSeconds"))
+                and cpu_sample_time > sample["timeSeconds"]
+            ):
+                errors.append(
+                    f"processMetrics[{index}] CPU sample time exceeds sample time"
+                )
+            if _finite_number(cpu_sample_time):
+                previous_cpu_sample_time = cpu_sample_time
         sample_time = sample.get("timeSeconds")
         if not _finite_number(sample_time) or sample_time < 0:
             errors.append(f"processMetrics[{index}].timeSeconds is invalid")
@@ -733,16 +900,30 @@ def validate_report(report, expected):
                 "userCpuSeconds",
                 "systemCpuSeconds",
                 "rssBytes",
+            ]:
+                value = totals.get(key)
+                if not _finite_number(value) or value < 0:
+                    errors.append(f"processMetrics[{index}].totals.{key} is invalid")
+            heavy_total_keys = [
                 "fdCount",
                 "fdCoverage",
                 "fdInfoCoverage",
                 "pssBytes",
                 "privateBytes",
                 "memoryCoverage",
-            ]:
-                value = totals.get(key)
-                if not _finite_number(value) or value < 0:
-                    errors.append(f"processMetrics[{index}].totals.{key} is invalid")
+            ]
+            if light_sample:
+                if any(totals.get(key) is not None for key in heavy_total_keys):
+                    errors.append(
+                        f"processMetrics[{index}].light totals must omit heavy data"
+                    )
+            else:
+                for key in heavy_total_keys:
+                    value = totals.get(key)
+                    if not _finite_number(value) or value < 0:
+                        errors.append(
+                            f"processMetrics[{index}].totals.{key} is invalid"
+                        )
             total_cpu_samples.append({
                 key: totals.get(key)
                 for key in [
@@ -751,17 +932,20 @@ def validate_report(report, expected):
                     "systemCpuSeconds",
                 ]
             })
-        if not isinstance(sample.get("drmClients"), dict):
+        drm_clients = sample.get("drmClients")
+        if light_sample:
+            if drm_clients is not None:
+                errors.append(f"processMetrics[{index}].light drmClients must be null")
+        elif not isinstance(drm_clients, dict):
             errors.append(f"processMetrics[{index}].drmClients is invalid")
         host = sample.get("host")
         if not isinstance(host, dict):
             errors.append(f"processMetrics[{index}].host is invalid")
         else:
-            for name in [
-                "wholeHostCpuTicks",
-                "loadAverage",
-                "platformProfile",
-            ]:
+            single_names = ["wholeHostCpuTicks", "loadAverage"]
+            if not light_sample:
+                single_names.append("platformProfile")
+            for name in single_names:
                 envelope = host.get(name)
                 value = envelope.get("value") if isinstance(envelope, dict) else None
                 value_valid = (
@@ -817,35 +1001,43 @@ def validate_report(report, expected):
                     )
                 ):
                     errors.append(f"processMetrics[{index}].host.{name} is invalid")
-            for name in [
+            heavy_host_names = [
                 "cpuClocksKHz",
                 "cpuGovernors",
                 "temperaturesMilliC",
                 "power",
-            ]:
-                envelope = host.get(name)
-                if (
-                    not isinstance(envelope, dict)
-                    or not isinstance(envelope.get("available"), bool)
-                    or not isinstance(envelope.get("values"), dict)
-                    or not isinstance(envelope.get("errors"), dict)
-                    or "reason" not in envelope
-                    or (
-                        envelope.get("available")
-                        and (
-                            not envelope.get("values")
-                            or envelope.get("reason") is not None
+            ]
+            if light_sample:
+                for name in ["platformProfile", *heavy_host_names]:
+                    if host.get(name) is not None:
+                        errors.append(
+                            f"processMetrics[{index}].light host.{name} must be null"
                         )
-                    )
-                    or (
-                        not envelope.get("available")
-                        and (
-                            envelope.get("values")
-                            or not isinstance(envelope.get("reason"), str)
+            else:
+                for name in heavy_host_names:
+                    envelope = host.get(name)
+                    if (
+                        not isinstance(envelope, dict)
+                        or not isinstance(envelope.get("available"), bool)
+                        or not isinstance(envelope.get("values"), dict)
+                        or not isinstance(envelope.get("errors"), dict)
+                        or "reason" not in envelope
+                        or (
+                            envelope.get("available")
+                            and (
+                                not envelope.get("values")
+                                or envelope.get("reason") is not None
+                            )
                         )
-                    )
-                ):
-                    errors.append(f"processMetrics[{index}].host.{name} is invalid")
+                        or (
+                            not envelope.get("available")
+                            and (
+                                envelope.get("values")
+                                or not isinstance(envelope.get("reason"), str)
+                            )
+                        )
+                    ):
+                        errors.append(f"processMetrics[{index}].host.{name} is invalid")
             background = host.get("backgroundProcessCpu")
             if (
                 not isinstance(background, dict)
@@ -887,22 +1079,30 @@ def validate_report(report, expected):
             if identity != f"{process.get('pid')}:{process.get('startTimeTicks')}":
                 errors.append(f"process {identity} identity is invalid")
             fd_count = process.get("fdCount")
-            if fd_count is not None and (
-                not isinstance(fd_count, int)
-                or isinstance(fd_count, bool)
-                or fd_count < 0
-            ):
-                errors.append(f"process {identity} fdCount is invalid")
-            if fd_count is None and not process.get("errors"):
-                errors.append(f"process {identity} fdCount coverage is unexplained")
             fdinfo_coverage = process.get("fdInfoCoverage")
-            if (
-                not isinstance(fdinfo_coverage, int)
-                or isinstance(fdinfo_coverage, bool)
-                or fdinfo_coverage < 0
-                or (fd_count is not None and fdinfo_coverage > fd_count)
-            ):
-                errors.append(f"process {identity} fdInfoCoverage is invalid")
+            if light_sample:
+                if (
+                    fd_count is not None
+                    or fdinfo_coverage is not None
+                    or process.get("memory") is not None
+                ):
+                    errors.append(f"process {identity} light heavy data must be null")
+            else:
+                if fd_count is not None and (
+                    not isinstance(fd_count, int)
+                    or isinstance(fd_count, bool)
+                    or fd_count < 0
+                ):
+                    errors.append(f"process {identity} fdCount is invalid")
+                if fd_count is None and not process.get("errors"):
+                    errors.append(f"process {identity} fdCount coverage is unexplained")
+                if (
+                    not isinstance(fdinfo_coverage, int)
+                    or isinstance(fdinfo_coverage, bool)
+                    or fdinfo_coverage < 0
+                    or (fd_count is not None and fdinfo_coverage > fd_count)
+                ):
+                    errors.append(f"process {identity} fdInfoCoverage is invalid")
     if collector_identities and any(
         identity != collector_identities[0] for identity in collector_identities[1:]
     ):

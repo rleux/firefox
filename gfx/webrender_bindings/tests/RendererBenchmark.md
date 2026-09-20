@@ -58,6 +58,14 @@ preference on both backends, and verifies those effective settings. This keeps
 the producer policy fixed while WR remains selected independently. It does not
 measure accelerated Canvas2D or a native WebGL/WebGPU transfer path.
 
+Timing and memory runs first wait until the Firefox parent is at least 65 seconds
+old, then require an unchanged PID/start-time process tree for five seconds.
+This lets scheduled startup maintenance, including crash-report ping cleanup,
+finish before workload preparation and warmup. The gate records identity
+transitions, fails after 120 seconds, and does not disable crash reporting or
+relax the measurement's process-turnover rule. Short smoke runs skip this gate.
+Fresh-process comparisons must budget this settling time for every arm.
+
 Warmup runs the same workload before measurement. Backend/geometry/library checks
 and compositor screenshots occur outside the measured interval. The process
 sampling interval brackets the Marionette call and is slightly wider than the
@@ -74,8 +82,10 @@ Diagnostic records include startup and post-interval boundary
 work; group by process/device/renderer and compare appropriate complete snapshots,
 never add cumulative records. See [counter definitions](VulkanRendering.md).
 
-Process samples retain PID plus start-time identity, per-process CPU and RSS,
-FD counts, DRM client identities/raw counters, and available host state. Memory
+Every process sample retains PID plus start-time identity, per-process CPU and
+RSS, collector CPU and aggregate host CPU/load/background counters. Full samples
+also retain FD counts, DRM client identities/raw counters, and available host
+state. Memory
 samples distinguish available PSS/private coverage from missing data. Primary
 steady timing rejects process turnover because subtracting the totals of changing
 process sets can lose CPU consumed by a departed child. Short-lived processes
@@ -88,23 +98,29 @@ explicit unavailable envelopes. The aggregate background-process counter can
 lose departed-process CPU, so use whole-host CPU ticks and saved process identity
 evidence when investigating contention.
 
-The sampler scans browser-process fdinfo at 250 ms cadence to retain DRM and FD
-coverage. That work runs outside the measured browser tree but can still perturb
-the host. The pilot must compare instrumentation sensitivity before this is used
-for primary timing; a successful smoke only establishes schema and operability.
+Timing collects full first/last samples and light intermediate samples at a
+250 ms wait cadence. Light samples skip FD/fdinfo, memory rollups and sysfs
+clock/temperature/power/governor/profile reads. Their omitted fields are explicitly
+null or marked not collected; they are not zero measurements. Memory and smoke
+retain full sampling. Endpoint-only hardware readings cannot establish conditions
+throughout the interval. Collection runs outside the browser tree but can still
+perturb the host; calibrate its overhead before primary timing.
 
 Samples also identify the collector process and its CPU counters separately from
 the browser tree. That process includes sampling and Marionette harness threads.
 Per-sample thread CPU and wall costs cover collection itself. Missing collector
 identity is explicit; it is never reported as zero cost. Sampling waits 250 ms
 after each collection, so actual cadence includes collection time. Use the
-first/last sample timestamps for CPU-rate denominators, not the wider host call
-bracket. These reads are non-atomic and clock-tick quantized. Characterize
+first/last `cpuSampleTimeSeconds` timestamps for new CPU-rate denominators; they
+are captured immediately after the process-stat scan. Older reports only have
+`timeSeconds`, captured after per-process collection. Do not use the wider host
+call bracket. These reads are non-atomic and clock-tick quantized. Characterize
 collection overhead separately; do not subtract it from browser or host results
 as though its effect on scheduling and GPU contention were known.
 New run configurations require valid, stable collector attribution outside the
 Firefox process tree. Older schema-1 pilot reports remain readable without those
-fields and cannot support collector-cost attribution.
+fields and cannot support collector-cost attribution. New timing configurations
+also require full endpoints, light intermediate samples and valid CPU timestamps.
 
 The runner records binary/fixture hashes, configuration, command, selected
 environment and complete logs. The fixture records runtime library mappings
@@ -120,6 +136,8 @@ paired-series orchestration require their own audited protocols before use.
 `test_renderer_benchmark_metrics.py` exercises malformed/incomplete reports,
 wrong backend/software fallback, geometry changes, diagnostic availability,
 process identity turnover and sampling failures without launching a browser.
+`test_renderer_benchmark_startup.py` checks startup age, child turnover, PID reuse,
+root replacement and bounded timeout with deterministic clocks.
 Browser smoke results and implementation limits belong in the corresponding
 Stage 9 run manifest; no historical result is a current-build pass.
 

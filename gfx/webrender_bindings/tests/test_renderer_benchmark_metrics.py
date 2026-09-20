@@ -201,6 +201,40 @@ def with_collector(report, available=True):
     return report
 
 
+def with_timing_sampling(report):
+    report["processMetrics"] = deepcopy(report["processMetrics"])
+    first, last = report["processMetrics"]
+    middle = deepcopy(first)
+    middle["timeSeconds"] = 1.5
+    for index, sample in enumerate([first, middle, last]):
+        sample["detailLevel"] = "full" if index in [0, 2] else "light"
+        sample["cpuSampleTimeSeconds"] = 1.0 + index * 0.5
+    middle["drmClients"] = None
+    for key in [
+        "fdCount",
+        "fdCoverage",
+        "fdInfoCoverage",
+        "pssBytes",
+        "privateBytes",
+        "memoryCoverage",
+    ]:
+        middle["totals"][key] = None
+    for process in middle["processes"].values():
+        process["fdCount"] = None
+        process["fdInfoCoverage"] = None
+        process["memory"] = None
+    for key in [
+        "cpuClocksKHz",
+        "cpuGovernors",
+        "temperaturesMilliC",
+        "power",
+        "platformProfile",
+    ]:
+        middle["host"][key] = None
+    report["processMetrics"] = [first, middle, last]
+    return report
+
+
 def diagnostic_record():
     return {
         "version": 1,
@@ -311,6 +345,59 @@ class TestSampler(unittest.TestCase):
             with Sampler(10, interval=10, proc_root=proc, sys_root=proc) as sampler:
                 self.assertEqual(len(sampler.samples), 1)
             self.assertEqual(len(sampler.samples), 2)
+
+    def test_light_sample_avoids_heavy_process_and_sysfs_reads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            proc = root / "proc"
+            sys = root / "sys"
+            directory = proc / "10"
+            directory.mkdir(parents=True)
+            (directory / "stat").write_text(stat_line(10, 1, 100))
+            (directory / "fdinfo").write_text("must not be read")
+            (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
+            (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
+            sampler = Sampler(10, True, proc_root=proc, sys_root=sys)
+            with patch(
+                "renderer_benchmark_metrics._rollup",
+                side_effect=AssertionError("smaps must not be read"),
+            ):
+                with patch(
+                    "renderer_benchmark_metrics._optional_values",
+                    side_effect=AssertionError("sysfs must not be read"),
+                ):
+                    sample = sampler.sample_once("light")
+            self.assertEqual(sample["detailLevel"], "light")
+            self.assertIsNone(sample["drmClients"])
+            self.assertIsNone(sample["totals"]["fdCount"])
+            self.assertIsNone(sample["host"]["cpuClocksKHz"])
+            self.assertEqual(sample["processes"]["10:100"]["errors"], [])
+
+    def test_timing_context_has_full_endpoints_and_light_intermediates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            (proc / "10/fdinfo").mkdir(parents=True)
+            (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            (proc / "stat").write_text("cpu 1 2 3 4 5 6 7 8 9 10\n")
+            (proc / "loadavg").write_text("0.10 0.20 0.30 2/50 123\n")
+            with Sampler(
+                10, timing=True, interval=0.01, proc_root=proc, sys_root=proc
+            ) as sampler:
+                time.sleep(0.025)
+            levels = [sample["detailLevel"] for sample in sampler.samples]
+            self.assertEqual(levels[0], "full")
+            self.assertEqual(levels[-1], "full")
+            self.assertTrue(levels[1:-1])
+            self.assertEqual(set(levels[1:-1]), {"light"})
+
+    def test_sample_detail_rejects_unknown_value(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proc = Path(temporary)
+            (proc / "10/stat").parent.mkdir(parents=True)
+            (proc / "10/stat").write_text(stat_line(10, 1, 100))
+            sampler = Sampler(10, proc_root=proc, sys_root=proc)
+            with self.assertRaises(ValueError):
+                sampler.sample_once("medium")
 
 
 @unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
@@ -492,6 +579,160 @@ class TestValidateReport(unittest.TestCase):
         self.assertIn(
             "processMetrics[0].unavailable collector fields must be null",
             validate_report(report, expected()),
+        )
+
+    def test_timing_sampling_requires_full_endpoints_and_light_middle(self):
+        report = with_timing_sampling(valid_report())
+        config = {**expected(), "timingSampling": True}
+        self.assertEqual(validate_report(report, config), [])
+
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][0]["detailLevel"] = "light"
+        self.assertIn(
+            "timing sampling requires full endpoint samples",
+            validate_report(report, config),
+        )
+
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][1]["detailLevel"] = "medium"
+        errors = validate_report(report, config)
+        self.assertIn("timing sampling requires light intermediate samples", errors)
+        self.assertIn("processMetrics[1].detailLevel is invalid", errors)
+
+    def test_light_sample_rejects_collected_heavy_data(self):
+        report = with_timing_sampling(valid_report())
+        config = {**expected(), "timingSampling": True}
+        middle = report["processMetrics"][1]
+        middle["totals"]["fdCount"] = 1
+        middle["drmClients"] = {}
+        middle["host"]["cpuClocksKHz"] = {
+            "available": False,
+            "values": {},
+            "errors": {},
+            "reason": "not-available",
+        }
+        middle["processes"]["10:100"]["fdCount"] = 1
+        errors = validate_report(report, config)
+        self.assertIn("processMetrics[1].light totals must omit heavy data", errors)
+        self.assertIn("processMetrics[1].light drmClients must be null", errors)
+        self.assertIn("processMetrics[1].light host.cpuClocksKHz must be null", errors)
+        self.assertIn("process 10:100 light heavy data must be null", errors)
+
+    def test_timing_sampling_requires_ordered_cpu_anchor_span(self):
+        config = {**expected(), "timingSampling": True}
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][-1]["cpuSampleTimeSeconds"] = 1.0
+        self.assertIn(
+            "timing sampling requires a positive endpoint interval",
+            validate_report(report, config),
+        )
+
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][0].pop("cpuSampleTimeSeconds")
+        self.assertIn(
+            "processMetrics[0].cpuSampleTimeSeconds is invalid",
+            validate_report(report, config),
+        )
+
+        report = with_timing_sampling(valid_report())
+        report["processMetrics"][1]["cpuSampleTimeSeconds"] = 1.6
+        self.assertIn(
+            "processMetrics[1] CPU sample time exceeds sample time",
+            validate_report(report, config),
+        )
+
+    def test_startup_settling_gate(self):
+        report = valid_report()
+        report["startupSettling"] = {
+            "passed": True,
+            "minimumAgeSeconds": 65,
+            "requiredStableSeconds": 5,
+            "timeoutSeconds": 120,
+            "elapsedSeconds": 66,
+            "rootAgeSeconds": 70,
+            "stableSeconds": 5,
+            "rootIdentity": "10:100",
+            "transitions": [
+                {
+                    "elapsedSeconds": 0.1,
+                    "rootAgeSeconds": 65,
+                    "added": {"10:100": "firefox"},
+                    "removed": {},
+                }
+            ],
+            "finalIdentities": ["10:100", "11:110"],
+        }
+        config = {**expected(), "startupSettling": True}
+        self.assertEqual(validate_report(report, config), [])
+
+        report["startupSettling"]["rootIdentity"] = "11:110"
+        self.assertIn(
+            "startup settling root identity mismatch",
+            validate_report(report, config),
+        )
+        report["startupSettling"].update(rootIdentity="10:100", elapsedSeconds=120)
+        self.assertIn(
+            "startup settling report is invalid", validate_report(report, config)
+        )
+        report["startupSettling"].update(elapsedSeconds="bad", stableSeconds=4)
+        self.assertIn(
+            "startup settling report is invalid", validate_report(report, config)
+        )
+
+    def test_startup_settling_transition_and_final_identity_rejections(self):
+        report = valid_report()
+        report["startupSettling"] = {
+            "passed": True,
+            "minimumAgeSeconds": 65,
+            "requiredStableSeconds": 5,
+            "timeoutSeconds": 120,
+            "elapsedSeconds": 66,
+            "rootAgeSeconds": 70,
+            "stableSeconds": 5,
+            "rootIdentity": "10:100",
+            "transitions": [],
+            "finalIdentities": ["10:100"],
+        }
+        config = {**expected(), "startupSettling": True}
+        self.assertIn(
+            "startup settling transitions are invalid",
+            validate_report(report, config),
+        )
+
+        report["startupSettling"]["transitions"] = [
+            {
+                "elapsedSeconds": 67,
+                "rootAgeSeconds": -1,
+                "added": {10: "firefox"},
+                "removed": [],
+            }
+        ]
+        self.assertIn(
+            "startup settling transition 0 is invalid",
+            validate_report(report, config),
+        )
+        report["startupSettling"]["transitions"] = [
+            {
+                "elapsedSeconds": 1,
+                "rootAgeSeconds": 66,
+                "added": {"10:100": "firefox"},
+                "removed": {},
+            },
+            {
+                "elapsedSeconds": 0.5,
+                "rootAgeSeconds": 66.5,
+                "added": {},
+                "removed": {},
+            },
+        ]
+        self.assertIn(
+            "startup settling transition 1 is invalid",
+            validate_report(report, config),
+        )
+        report["startupSettling"]["finalIdentities"] = ["11:110", "11:110"]
+        self.assertIn(
+            "startup settling final identities are invalid",
+            validate_report(report, config),
         )
 
     def test_backend_software_geometry_and_native_wsi_rejections(self):
