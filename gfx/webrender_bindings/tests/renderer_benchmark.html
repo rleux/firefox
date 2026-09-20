@@ -1,0 +1,137 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8">
+<title>WebRender local measurement fixture</title>
+<style>
+  html, body { margin: 0; background: rgb(240, 240, 240); overflow: hidden; }
+  #sentinel { position: fixed; inset: 0 auto auto 0; inline-size: 32px; block-size: 32px; background: rgb(220, 40, 60); z-index: 10; }
+  #scene { position: absolute; inset: 48px; }
+  #tile { inline-size: 96px; block-size: 96px; background: rgb(20, 180, 80); }
+  #tile.alternate { background: rgb(40, 80, 220); }
+  .css #tile { animation: movement 1s linear infinite alternate; }
+  @keyframes movement { to { transform: translateX(320px); } }
+  #scroller { overflow: auto; block-size: 450px; display: none; }
+  .scroll #scroller { display: block; }
+  #long { block-size: 12000px; background: repeating-linear-gradient(to bottom, #164 0 20px, #acf 20px 40px); }
+  canvas { display: none; }
+  .canvas canvas { display: block; }
+  #filters { display: none; position: relative; inline-size: 600px; block-size: 400px; clip-path: circle(45%); filter: blur(2px); background: linear-gradient(120deg, #369, #edc); font: 24px sans-serif; }
+  #filter-marker { position: absolute; inset-block-start: 180px; inset-inline-start: 280px; inline-size: 40px; block-size: 40px; background: rgb(80, 160, 200); }
+  .filters #filters { display: block; animation: movement 1s linear infinite alternate; }
+</style>
+<div id="sentinel"></div>
+<main id="scene" tabindex="0">
+  <div id="tile"></div>
+  <div id="scroller"><div id="long"></div></div>
+  <canvas id="canvas" width="512" height="512"></canvas>
+  <div id="filters">WebRender text, clipping and filtering. Fixed local content.<span id="filter-marker"></span></div>
+</main>
+<script>
+  const scene = document.getElementById("scene");
+  const tile = document.getElementById("tile");
+  const scroller = document.getElementById("scroller");
+  const canvas = document.getElementById("canvas");
+  let workload;
+  let frameCount = 0;
+  let previous = null;
+  let intervals = [];
+  let recording = false;
+  let animationFrame = null;
+  let events = [];
+  let context = null;
+  const changed = event => {
+    if (recording) {
+      events.push({type: event.type, time: performance.now()});
+    }
+  };
+  for (const type of ["blur", "resize"]) {
+    window.addEventListener(type, changed);
+  }
+  document.addEventListener("visibilitychange", changed);
+
+  function animate(now) {
+    if (recording && previous !== null) {
+      intervals.push(now - previous);
+    }
+    previous = now;
+    frameCount++;
+    if (workload === "dirty") {
+      tile.classList.toggle("alternate", frameCount % 2 === 0);
+    } else if (workload === "scroll") {
+      scroller.scrollTop = (frameCount * 7) % 11000;
+    } else if (workload === "canvas") {
+      context.fillStyle = frameCount % 2 ? "rgb(20, 180, 80)" : "rgb(40, 80, 220)";
+      context.fillRect(0, 0, 512, 512);
+    }
+    animationFrame = requestAnimationFrame(animate);
+  }
+
+  window.rendererBenchmark = {
+    prepare(name) {
+      workload = name;
+      scene.className = name;
+      scene.focus();
+      if (name === "canvas") {
+        context = canvas.getContext("2d", {alpha: false});
+      }
+      if (name !== "static") {
+        animationFrame = requestAnimationFrame(animate);
+      }
+    },
+    warmup(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    },
+    measure(ms) {
+      intervals = [];
+      events = [];
+      previous = null;
+      const initialFrames = frameCount;
+      const start = performance.now();
+      recording = true;
+      return new Promise(resolve => setTimeout(() => {
+        recording = false;
+        resolve({
+          name: workload,
+          requestedDurationMs: ms,
+          durationMs: performance.now() - start,
+          completed: true,
+          samples: intervals,
+          updates: frameCount - initialFrames,
+          events,
+        });
+      }, ms));
+    },
+    stop() {
+      cancelAnimationFrame(animationFrame);
+      for (const animation of document.getAnimations()) {
+        animation.pause();
+      }
+    },
+    checkpoint() {
+      const center = element => {
+        const rect = element.getBoundingClientRect();
+        return [Math.floor(rect.x + rect.width / 2), Math.floor(rect.y + rect.height / 2)];
+      };
+      const green = [20, 180, 80, 255];
+      const blue = [40, 80, 220, 255];
+      const points = [[8, 8], center(tile)];
+      const expected = [[220, 40, 60, 255], workload === "dirty" && frameCount % 2 === 0 ? blue : green];
+      if (workload === "scroll") {
+        const rect = scroller.getBoundingClientRect();
+        const point = [Math.floor(rect.x + 11), Math.floor(rect.y + 11)];
+        const row = Math.floor((point[1] - rect.y + scroller.scrollTop) / 20);
+        points.push(point);
+        expected.push(row % 2 ? [170, 204, 255, 255] : [17, 102, 68, 255]);
+      } else if (workload === "canvas") {
+        points.push(center(canvas));
+        expected.push(frameCount % 2 ? green : blue);
+      } else if (workload === "filters") {
+        points.push(center(document.getElementById("filter-marker")));
+        expected.push([80, 160, 200, 255]);
+      }
+      return {points, expected, frames: frameCount, scrollTop: scroller.scrollTop};
+    },
+  };
+</script>
