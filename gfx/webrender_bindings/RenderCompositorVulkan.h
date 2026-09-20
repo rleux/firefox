@@ -7,6 +7,9 @@
 
 #include "RenderCompositor.h"
 #include "base/timer.h"
+#ifdef MOZ_X11
+#  include "X11WindowVisibility.h"
+#endif
 
 class DMABufSurfaceYUV;
 
@@ -37,6 +40,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
   RenderedFrameId GetLastCompletedFrameId() override;
   RenderedFrameId UpdateFrameId() override;
   bool MakeCurrent() override { return true; }
+  bool IsWindowHidden() override;
   gfx::DeviceResetReason IsContextLost(bool aForce) override;
   void Pause() override;
   bool Resume() override;
@@ -49,6 +53,10 @@ class RenderCompositorVulkan final : public RenderCompositor {
   bool PollCompletions(bool aNotify);
   void PollPendingFrames();
   WrHalSurface mSurface;
+#ifdef MOZ_X11
+  X11WindowVisibility mWindowVisibility;
+  bool mWindowWasHidden = false;
+#endif
   // RendererOGL owns this renderer and deletes it before this compositor.
   Renderer* mRenderer = nullptr;
   uint64_t mCompletedFrame = 1;

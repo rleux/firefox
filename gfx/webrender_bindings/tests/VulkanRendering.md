@@ -194,3 +194,28 @@ reported no error. These samples do not prove full-window pixel equivalence and
 the area counters are not a timing result. The test used llvmpipe, so it makes
 no hardware-performance claim. The report is in
 `artifacts/vulkan-idle/stage2b-wrench/report.json`.
+
+## Native X11 visibility
+
+The Vulkan compositor's native visibility query distinguishes unmapped or
+unviewable windows and the WM's `_NET_WM_STATE_HIDDEN` property from visible and
+unknown states. An unmapped ancestor is reflected in the client window's map
+state. Focus and mere coverage by another window do not determine hidden state.
+Workspace hiding is recognized when the WM reports it through these signals;
+unsupported or unknown states remain renderable.
+
+Checked XCB replies use the existing X11 connection without replacing Xlib's
+error handler, taking events away from GTK, or opening another connection.
+Attribute and property requests are batched into one round trip after atom
+initialization. Missing properties on a viewable window mean visible; malformed
+or truncated properties never establish visibility. Failed queries mean unknown.
+Queries run only when requested by the renderer, with no visibility timer.
+Returning from hidden to visible or unknown invalidates output for a full refresh.
+Native visibility remains independent of explicit renderer Pause/Resume.
+
+The native X11 visibility suite passed all eight cases on a private Xvfb
+display, with no skipped or failed tests. It covered map state, an unmapped
+ancestor, focus independence, hidden and missing WM properties, malformed and
+truncated properties, preservation of an Xlib-queued event, and a destroyed
+window returning unknown without a fatal X error. The report is in
+`artifacts/vulkan-idle/stage3a-x11/report.json`.

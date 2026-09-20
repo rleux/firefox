@@ -81,6 +81,7 @@ class RenderCompositor {
   virtual void* swgl() const { return nullptr; }
 
   virtual bool MakeCurrent();
+  virtual bool IsWindowHidden() { return false; }
   virtual bool GetHalSurface(WrHalSurface* aSurface) const { return false; }
   virtual void SetRenderer(Renderer* aRenderer) {}
 
