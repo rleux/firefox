@@ -149,6 +149,11 @@ subcommands:
               long: warmup
               takes_value: true
               default_value: "2"
+          - inspection_ms:
+              long: inspection-ms
+              takes_value: true
+              default_value: "0"
+              help: Keep the context alive after writing results for external device inspection
     - test_surface:
         about: Exercise HAL surface acquisition, presentation, resize, and discard
     - test_hal:

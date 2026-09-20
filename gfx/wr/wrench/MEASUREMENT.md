@@ -72,6 +72,13 @@ does not certify equality across backends or replace deferred Wrench acceptance.
 Record unsupported scenes/driver routes as such. Do not widen reference tolerances
 or silently fall back to another API to obtain a successful measurement.
 
+`--inspection-ms` optionally keeps the context alive after complete JSON and PNG
+output is written, allowing an external collector to inspect the process's open
+render-node descriptors. It defaults to zero and is bounded at 10000 milliseconds.
+The hold is recorded in JSON and excluded from initialization and frame timings;
+whole-process elapsed/CPU observations include it. Apply the same hold to both
+backends. Renderer names alone do not prove matching physical GPUs.
+
 ## Initial correctness checks
 
 The five-frame, two-warmup `alpha-depth.yaml` check passed with window-backed GL
@@ -86,3 +93,12 @@ baseline's `png` command wrote the expected image and then failed with
 are destroyed fixed the failure. Both the new measurement command and the existing
 windowed `png` command then exited successfully with unchanged pixels. Evidence
 is retained under `artifacts/stage9/b7ba23c55b6/wrench-smoke/`.
+
+The inspection hold was then checked with a native X11 GL backbuffer and a
+non-presenting Vulkan owned texture on the same Intel PCI device
+`0000:00:02.0`. Both completed five measured frames plus two warmups at
+257×129, reported zero presentations and produced byte-identical PNGs. Live
+render-node descriptors and DRM fdinfo independently identified the same PCI
+device. This is bounded correctness and device-identity evidence, not a timing
+result or a Vulkan native-presentation measurement. Raw records are under
+`artifacts/stage9/f65c3cdc877/step-9.2/native-wrench-v4/`.
