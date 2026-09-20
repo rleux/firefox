@@ -206,3 +206,40 @@ This is a protocol choice, not a correction for a measured bias. Four balanced
 pairs per workload must characterize run variability and backend deltas at that
 single cadence; inconsistent paired directions remain inconclusive. The full
 series also remains gated on separate Wrench-wrapper inspection overhead.
+
+## Wrench post-result inspection
+
+The local `artifacts/stage9/b7ba23c55b6/run_wrench_case.py` driver delegates
+measurement readiness and live-capture ordering to
+`wrench_benchmark_inspection.py`. Wrench creates its result file before rendering;
+the driver waits for fully parsed JSON with the expected schema, completed flag
+and inspection hold, plus the final PNG. The preserved Wrench measurement command
+writes the PNG and completed JSON after its timed frames, then retains its
+renderer and device during the requested hold.
+
+Before readiness, the driver only polls the process and result file at 25 ms
+intervals. It then takes two full process/FD/DRM/library-mapping captures during
+the existing 500 ms hold. It records readiness and capture timestamps and checks
+that the process remains alive before and after each capture. Missing readiness,
+an invalid result, early exit, capture failure or timeout rejects the run.
+The completed-result hash must still match after normal process exit. Library
+hashing happens after exit. The separate PNG correctness command retains its
+earlier inspection path because it has no measurement result or inspection hold.
+
+The manifest labels these snapshots `post-result`. Their CPU counters do not
+measure CPU consumed by the timed frames, and their host state does not describe
+conditions throughout rendering. Device and library observations establish the
+route during the retained post-result lifetime, not continuous monitoring of the
+render interval. File/process polling still has a cost; this protocol removes
+expensive inspection from the timed work without claiming zero observer overhead.
+
+Validation passed eleven offline inspection tests and nine live correctness
+checks against the preserved Wrench v4 binary. All eight measurement cases
+captured exactly two post-result snapshots, kept the process alive across both
+captures, and retained the same completed-result hash through exit. Both captures
+finished 65–90 ms after readiness. Native GL/Vulkan pairs for alpha, deterministic
+text and clip/blur matched PCI `0000:00:02.0` and produced identical PNGs.
+Software GL/Vulkan under Xvfb and the legacy GL PNG path also passed. These
+checks establish capture and routing correctness. Raw evidence and the reviewed
+artifact driver are retained under
+`artifacts/stage9/2fbacb7082c/step-9.4a/wrench-inspection/`.
