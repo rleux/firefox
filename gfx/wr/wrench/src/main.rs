@@ -179,9 +179,10 @@ mod swgl {
 
 pub enum WindowWrapper {
     Windowed {
-        window: Window,
-        gl_surface: Surface<WindowSurface>,
+        // The native window must outlive its GL context and drawable.
         gl_context: PossiblyCurrentContext,
+        gl_surface: Surface<WindowSurface>,
+        window: Window,
         is_gles: bool,
         gl: Rc<dyn gl::Gl>,
         sw_ctx: Option<swgl::Context>,
