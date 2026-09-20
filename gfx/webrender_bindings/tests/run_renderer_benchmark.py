@@ -19,6 +19,14 @@ from renderer_benchmark_metrics import validate_report
 WORKLOADS = ("static", "css", "dirty", "scroll", "canvas", "filters")
 
 
+def install_termination_handler():
+    def terminate(signum, _frame):
+        signal.signal(signum, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+
+
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -32,15 +40,16 @@ def group_exists(group):
         return False
 
 
-def stop(process):
+def stop(process, grace=5):
     group = process.pid
     if group_exists(group):
         try:
             os.killpg(group, signal.SIGTERM)
         except ProcessLookupError:
             pass
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + grace
         while group_exists(group) and time.monotonic() < deadline:
+            process.poll()
             time.sleep(0.05)
     if group_exists(group):
         try:
@@ -128,7 +137,7 @@ def main():
         try:
             return process.wait()
         finally:
-            stop(process)
+            stop(process, grace=30)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     binary = args.binary.resolve(strict=True)
@@ -314,4 +323,5 @@ def main():
 
 
 if __name__ == "__main__":
+    install_termination_handler()
     raise SystemExit(main())
