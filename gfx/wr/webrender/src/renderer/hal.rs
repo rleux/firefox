@@ -60,6 +60,9 @@ macro_rules! renderer_facade {
             pub fn render_metrics(&self) -> Option<(crate::device::hal::diagnostics::RenderMetricsSnapshot, crate::device::hal::diagnostics::RenderMetricsSnapshot)> { self.core.gpu.render_metrics() }
             pub fn render_frame(&mut self) -> Result<FrameOutput, String> { self.core.render_frame() }
             pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> { self.core.render() }
+            pub fn render_if_needed(&mut self) -> Result<RenderOutcome, String> { self.core.render_if_needed() }
+            pub fn has_current_output(&self) -> bool { self.core.has_current_output() }
+            pub fn has_pending_gpu_work(&self) -> bool { self.core.gpu.has_pending_gpu_work() }
             pub fn read_pixels_rgba8(&self, rect: api::units::FramebufferIntRect) -> Result<Vec<u8>, String> { self.core.read_pixels_rgba8(rect) }
             pub fn frame_completion(&self) -> Option<FrameCompletion> { self.core.frame_completion() }
             pub fn submit_work(&self) -> Result<FrameCompletion, String> { self.core.gpu.submit_work().map(|serial| FrameCompletion { owner: self.core.backend_id, serial }) }
@@ -95,6 +98,30 @@ pub use selected::{BackendKind, SelectedRenderer, create_renderer_for_backend};
 mod metal;
 #[cfg(wr_hal_metal)]
 pub use metal::{MetalRenderer, create_metal_renderer, create_metal_renderer_for_window, create_metal_renderer_for_layer};
+
+#[cfg(all(test, wr_hal_vulkan))]
+#[path = "hal_reuse_tests.rs"]
+mod reuse_tests;
+
+pub enum RenderOutcome {
+    Rendered(super::RenderResults),
+    Reused,
+    Skipped,
+}
+
+#[derive(Default)]
+struct PreparedRequest {
+    generation: u64,
+    render: Option<bool>,
+}
+
+#[derive(PartialEq)]
+struct OutputIdentity {
+    document: DocumentId,
+    rect: api::units::DeviceIntRect,
+    clear_color: api::ColorF,
+    surface_generation: Option<u64>,
+}
 
 pub(crate) const MAX_DEPTH_IDS: i32 = 1 << 22;
 
@@ -163,7 +190,7 @@ pub(crate) struct RendererCore<A: BackendApi> {
     pending_message: Option<ResultMsg>,
     document_id: Option<DocumentId>,
     parked_documents: HashMap<DocumentId, RenderedDocument>,
-    prepared_generations: HashMap<DocumentId, u64>,
+    prepared_requests: HashMap<DocumentId, PreparedRequest>,
     cpu_timings: std::collections::VecDeque<CpuTiming>,
     slow_cpu_frame_threshold: Duration,
     resource_upload_time: Duration,
@@ -172,6 +199,7 @@ pub(crate) struct RendererCore<A: BackendApi> {
     last_compositor_surfaces: [usize; 2],
     clear_color: api::ColorF,
     last_output: Option<RenderedFrame<A>>,
+    output_identity: Option<OutputIdentity>,
     readbacks: RefCell<HashMap<ReadbackHandle, ReadbackRequest<A>>>,
     readback_bytes: Cell<u64>,
     next_readback: Cell<u64>,
@@ -311,7 +339,7 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
             pending_message: None,
             document_id: None,
             parked_documents: HashMap::new(),
-            prepared_generations: HashMap::new(),
+            prepared_requests: HashMap::new(),
             cpu_timings: std::collections::VecDeque::new(),
             slow_cpu_frame_threshold: Duration::from_millis(10),
             resource_upload_time: Duration::ZERO,
@@ -320,6 +348,7 @@ pub(crate) fn create_renderer_with_factory<A: BackendApi>(
             last_compositor_surfaces: [0; 2],
             clear_color: options.clear_color,
             last_output: None,
+            output_identity: None,
             readbacks: RefCell::new(HashMap::new()),
             readback_bytes: Cell::new(0),
             next_readback: Cell::new(1),
@@ -349,6 +378,7 @@ impl<A: BackendApi> RendererCore<A> {
     pub fn set_external_image_provider(&mut self, provider: Box<dyn crate::device::hal::ExternalImageProvider>) -> Result<(), String> {
         self.flush_required_frame()?;
         self.gpu.set_external_image_provider(provider);
+        self.output_identity = None;
         Ok(())
     }
 
@@ -358,9 +388,21 @@ impl<A: BackendApi> RendererCore<A> {
     pub fn is_failed(&self) -> bool { self.gpu.is_failed() }
 
     pub fn surface_info(&self) -> Option<crate::device::hal::SurfaceInfo> { self.gpu.surface_info() }
-    pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<(), String> { self.gpu.resize_surface(size) }
-    pub fn acquire_surface(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.gpu.acquire_surface() }
-    pub fn discard_surface(&mut self) -> Result<(), String> { self.gpu.discard_surface() }
+    pub fn resize_surface(&mut self, size: [u32; 2]) -> Result<(), String> {
+        self.output_identity = None;
+        self.gpu.resize_surface(size)
+    }
+    pub fn acquire_surface(&mut self) -> Result<crate::device::hal::PresentationStatus, String> {
+        let status = self.gpu.acquire_surface();
+        if !matches!(status, Ok(crate::device::hal::PresentationStatus::Acquired)) {
+            self.output_identity = None;
+        }
+        status
+    }
+    pub fn discard_surface(&mut self) -> Result<(), String> {
+        self.output_identity = None;
+        self.gpu.discard_surface()
+    }
     pub fn present(&mut self) -> Result<crate::device::hal::PresentationStatus, String> {
         self.gpu.present_output(self.last_output.as_ref().ok_or("No rendered frame to present")?)
     }
@@ -427,6 +469,7 @@ impl<A: BackendApi> RendererCore<A> {
                 document.frame.has_been_rendered = false;
             }
             self.document_id = Some(id);
+            self.output_identity = None;
             self.force_redraw = true;
         }
         Ok(())
@@ -457,6 +500,11 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     fn apply_resources(&mut self, updates: ResourceUpdateList) -> Result<(), String> {
+        if !updates.is_nop() {
+            for request in self.prepared_requests.values_mut() {
+                if request.render == Some(false) { request.render = None; }
+            }
+        }
         let start = std::time::Instant::now();
         self.gpu.update_resources(vec![updates])?;
         self.resource_upload_time += start.elapsed();
@@ -494,6 +542,8 @@ impl<A: BackendApi> RendererCore<A> {
                 }
                 self.apply_resources(updates)?;
                 self.document = Some(document);
+                let request = self.prepared_requests.entry(id).or_default();
+                if request.render == Some(false) { request.render = None; }
             }
             ResultMsg::RenderDocumentOffscreen(id, mut document, updates) => {
                 self.check_document(id)?;
@@ -513,6 +563,7 @@ impl<A: BackendApi> RendererCore<A> {
                     self.document = None;
                     self.parked_documents.clear();
                     self.last_output = None;
+                    self.output_identity = None;
                     if let Some(metrics) = self.gpu.metrics() {
                         metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes, 0);
                     }
@@ -599,6 +650,7 @@ impl<A: BackendApi> RendererCore<A> {
                     self.document_id = None;
                     self.parked_documents.clear();
                     self.last_output = None;
+                    self.output_identity = None;
                     if let Some(metrics) = self.gpu.metrics() {
                         metrics.set(crate::device::hal::diagnostics::RenderGauge::RetainedOutputBytes, 0);
                     }
@@ -631,19 +683,21 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     pub fn prepare_frame_if_ready(&mut self, document_id: DocumentId) -> Result<Option<PreparedFrameInfo>, String> {
-        let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
+        let previous = self.prepared_requests.get(&document_id).map_or(0, |request| request.generation);
         let ready = self.ready.state.lock().unwrap().documents.get(&document_id)
             .map_or(false, |frame| frame.generation > previous);
         if ready { self.prepare_frame(document_id).map(Some) } else { Ok(None) }
     }
 
     pub fn prepare_frame(&mut self, document_id: DocumentId) -> Result<PreparedFrameInfo, String> {
-        let previous = self.prepared_generations.get(&document_id).copied().unwrap_or(0);
+        let previous = self.prepared_requests.get(&document_id).map_or(0, |request| request.generation);
         let (generation, publish, present, render) = self.ready.wait_document(document_id, previous)?;
         self.ready_generation = generation;
-        self.prepared_generations.insert(document_id, generation);
         self.update_until(Some(publish))?;
         self.check_document(document_id)?;
+        let request = self.prepared_requests.entry(document_id).or_default();
+        request.generation = generation;
+        request.render = Some(render || request.render == Some(true));
         if let Some(document) = &mut self.document {
             document.frame.present = present;
         }
@@ -674,7 +728,72 @@ impl<A: BackendApi> RendererCore<A> {
         })
     }
 
+    fn current_output_identity(&self) -> Option<OutputIdentity> {
+        Some(OutputIdentity {
+            document: self.document_id?,
+            rect: self.document.as_ref()?.frame.device_rect,
+            clear_color: self.clear_color,
+            surface_generation: self.surface_info().map(|surface| surface.generation),
+        })
+    }
+
+    pub fn has_current_output(&self) -> bool {
+        let Some(id) = self.document_id else { return false; };
+        let Some(request) = self.prepared_requests.get(&id) else { return false; };
+        let Some(document) = self.document.as_ref() else { return false; };
+        let Some(output) = self.last_output.as_ref() else { return false; };
+        let pending = self.ready.state.lock().unwrap().documents.get(&id)
+            .map_or(false, |frame| frame.generation > request.generation);
+        request.render == Some(false) && !pending && !self.force_redraw && !self.is_failed()
+            && document.frame.present && !document.frame.must_be_drawn()
+            && self.output_identity.is_some() && self.output_identity == self.current_output_identity()
+            && output.origin == document.frame.device_rect.min
+            && output.size == [document.frame.device_rect.width() as u32, document.frame.device_rect.height() as u32]
+            && self.gpu.has_owned_output(output)
+    }
+
+    pub fn render_if_needed(&mut self) -> Result<RenderOutcome, String> {
+        let id = self.document_id.ok_or("Prepare a WR frame before conditional rendering")?;
+        {
+            let generation = self.prepared_requests.get(&id).map_or(0, |request| request.generation);
+            if self.ready.state.lock().unwrap().documents.get(&id)
+                .map_or(false, |frame| frame.generation > generation) {
+                return Err("Prepare the pending WR frame before conditional rendering".into());
+            }
+        }
+        let skip_offscreen = !self.is_failed()
+            && self.document_id.and_then(|id| self.prepared_requests.get(&id))
+                .map_or(false, |request| request.render == Some(false))
+            && self.document.as_ref().map_or(false, |document| {
+                !document.frame.present && !document.frame.must_be_drawn()
+            });
+        if !skip_offscreen && !self.has_current_output() { return self.render().map(RenderOutcome::Rendered); }
+        if !skip_offscreen {
+            if let Some(metrics) = self.gpu.metrics() {
+                metrics.add(crate::device::hal::diagnostics::RenderCounter::ReusedOutputs, 1);
+            }
+        }
+        self.damage.clear();
+        self.did_rasterize = false;
+        if let Some(document) = &mut self.document {
+            document.frame.has_been_rendered = true;
+            document.profile.clear();
+            document.frame_stats.take();
+        }
+        self.notify(Checkpoint::FrameRendered);
+        Ok(if skip_offscreen { RenderOutcome::Skipped } else { RenderOutcome::Reused })
+    }
+
+    fn store_output(&mut self, output: RenderedFrame<A>) {
+        self.output_identity = self.current_output_identity();
+        self.last_output = Some(output);
+        if let Some(id) = self.document_id {
+            self.prepared_requests.entry(id).or_default().render = Some(false);
+        }
+    }
+
     fn execute_frame(&mut self) -> Result<RenderedFrame<A>, String> {
+        self.output_identity = None;
         let start = std::time::Instant::now();
         let document = self.document.as_mut().ok_or("No prepared WR frame")?;
         let frame = &document.frame;
@@ -736,7 +855,7 @@ impl<A: BackendApi> RendererCore<A> {
         let output = self.execute_frame()?;
         let size = output.size;
         let stats = output.stats;
-        self.last_output = Some(output);
+        self.store_output(output);
         let pixels = if size[0] == 0 || size[1] == 0 {
             Vec::new()
         } else {
@@ -772,7 +891,7 @@ impl<A: BackendApi> RendererCore<A> {
         if let Some(stats) = document.frame_stats.take() {
             results.stats.merge(&stats);
         }
-        self.last_output = Some(output);
+        self.store_output(output);
         Ok(results)
     }
 

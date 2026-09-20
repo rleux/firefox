@@ -175,6 +175,15 @@ impl SelectedRenderer {
     pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> {
         dispatch!(&mut self.inner, render())
     }
+    pub fn render_if_needed(&mut self) -> Result<RenderOutcome, String> {
+        dispatch!(&mut self.inner, render_if_needed())
+    }
+    pub fn has_current_output(&self) -> bool {
+        dispatch!(&self.inner, has_current_output())
+    }
+    pub fn has_pending_gpu_work(&self) -> bool {
+        dispatch!(&self.inner, has_pending_gpu_work())
+    }
     pub fn read_pixels_rgba8(
         &self,
         rect: api::units::FramebufferIntRect,

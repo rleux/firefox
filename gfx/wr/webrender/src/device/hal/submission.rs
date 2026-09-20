@@ -315,6 +315,8 @@ impl<A: hal::Api> SubmissionQueue<A> {
         self.uploads.upload(bytes, usage)
     }
 
+    pub fn has_pending_work(&self) -> bool { !self.state.borrow().pending.is_empty() }
+
     pub fn memory(&self, stats: &mut MemoryStats) {
         let state = self.state.borrow();
         stats.in_flight = state.pending.len();

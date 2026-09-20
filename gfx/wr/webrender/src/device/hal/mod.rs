@@ -56,7 +56,7 @@ pub use self::vulkan::{Win32Image, Win32ImageLayout, Win32Export, Win32Copy, Win
 pub use self::vulkan::{AndroidBufferColor, AndroidBufferAlpha, HardwareBufferCopy};
 #[cfg(wr_hal_vulkan)]
 pub use crate::renderer::hal::{create_vulkan_renderer, create_vulkan_renderer_with_compositor, create_vulkan_renderer_for_window, Renderer};
-pub use crate::renderer::hal::{CpuTiming, GpuTiming, PreparedFrameInfo, ReadbackHandle, RecordedFrameHandle, RendererMemoryReport, ScreenshotHandle};
+pub use crate::renderer::hal::{CpuTiming, GpuTiming, PreparedFrameInfo, RenderOutcome, ReadbackHandle, RecordedFrameHandle, RendererMemoryReport, ScreenshotHandle};
 pub use self::render::{DrawStats, FrameOutput};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

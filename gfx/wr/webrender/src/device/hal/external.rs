@@ -48,6 +48,7 @@ pub(super) trait ImageDevice: Any {
     fn create(&self, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<NativeImage>;
     fn update(&self, image: &NativeImage, descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()>;
     fn poll(&self) -> Result<()>;
+    fn has_pending_gpu_work(&self) -> bool;
     fn poll_consumer(&self) -> Result<bool>;
     fn submitted(&self) -> u64;
     fn device_id(&self) -> u64;
@@ -155,6 +156,9 @@ impl<A: hal::Api> ImageDevice for Producer<A> {
     fn poll(&self) -> Result<()> {
         self.progress().map(|_| ())
     }
+    fn has_pending_gpu_work(&self) -> bool {
+        self.submissions.has_pending_work() || !self.releases.borrow().is_empty()
+    }
     fn poll_consumer(&self) -> Result<bool> {
         let mut attached = false;
         let result = self.ensure_healthy().and_then(|_| {
@@ -216,6 +220,7 @@ impl ExternalImageDevice {
         self.0.update(image, descriptor, bytes)
     }
     pub fn poll(&self) -> Result<()> { self.0.poll() }
+    pub fn has_pending_gpu_work(&self) -> bool { self.0.has_pending_gpu_work() }
     /// Progress another renderer outside its command recording without retaining it.
     /// Returns whether that renderer's submission queue still exists.
     pub fn consumer_poller(&self) -> Rc<dyn Fn() -> Result<bool>> {

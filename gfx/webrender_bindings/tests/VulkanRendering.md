@@ -7,6 +7,39 @@ use the same frame publication ID. Once consumed, that request no longer makes
 subsequent no-render notifications request rendering. This metadata alone does
 not establish that the caller has retained valid output after resize or loss.
 
+`render_if_needed()` returns `Rendered`, `Reused`, or `Skipped` for an offscreen
+notification that needs no GPU work. Call `prepare_frame()` or
+`prepare_frame_if_ready()` first: conditional rendering rejects an unconsumed
+ready notification instead of drawing stale state. Per-document render requests
+remain pending across later no-render notifications until a successful draw.
+Legacy `render()` and `render_frame()` remain explicit render operations.
+
+Reuse requires a current initialized owned output for the active document,
+matching its dimensions, origin, clear color and surface generation. Required
+offscreen work, forced redraw, document changes, invalid output and device loss
+prevent reuse. Reuse still fulfills `FrameRendered` notifications; it does not
+acquire, compose, submit or present. Wrench services every prepared frame through
+this API and can re-present retained pixels for a genuine expose. Its explicit
+`--hal-frames` and `--no-block` modes continue rendering repeated scenes.
+
+Completion polling checks both renderer and external-image producer queues and
+queued release callbacks. It stops once those queues drain. Firefox retains its
+existing render decision path: its update-only frame completion does not submit
+GPU work unless commands are pending, and does not present without an acquired
+surface. These changes do not infer equivalence from DOM or display-list equality.
+
+Stage 1b validation passed 167 ordinary tests and six focused Lavapipe reuse
+tests. A private-Xvfb Wrench run with llvmpipe, the fixed Vulkan loader and
+validation layers recorded no executions, full compositions, presentations or
+device submissions during a fresh 3.2-second static interval. Resize and
+minimize/restore preserved the expected red pixels, and `--hal-frames 3`
+presented exactly three frames. Watch mode recorded 17 authoritative render
+requests and executions for both an untouched interval and an identical file
+rewrite before displaying the updated green pixels; those phases are controls
+showing that reuse does not override WebRender's render decision. Artifacts are
+under `artifacts/vulkan-idle/stage1b-wrench/`. This is functional llvmpipe
+coverage and makes no hardware-performance claim.
+
 Set `WR_HAL_RENDER_METRICS=1` before launching a HAL renderer to collect
 aggregate rendering counters. It emits `WR HAL render metrics: {json}` at most
 once per second during existing renderer polling, and a final record when the

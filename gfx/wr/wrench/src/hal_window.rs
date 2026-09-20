@@ -6,7 +6,7 @@ use crate::wrench::{Wrench, WrenchThing};
 use std::{collections::HashMap, path::{Path, PathBuf}, rc::Rc, time::{Duration, Instant}};
 use webrender::api::*;
 use webrender::api::units::*;
-use webrender::hal::{Options, PresentationStatus, RecordedFrameHandle, SelectedRenderer as Renderer, SurfaceOptions};
+use webrender::hal::{Options, PresentationStatus, RecordedFrameHandle, RenderOutcome, SelectedRenderer as Renderer, SurfaceOptions};
 use webrender::render_api::{CaptureBits, ClearCache, DebugCommand, Transaction};
 use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy}, keyboard::{Key, NamedKey}, window::{Window, WindowId}};
@@ -18,7 +18,7 @@ struct Notifier { window: WindowId, generation: u64, proxy: EventLoopProxy<Wake>
 impl RenderNotifier for Notifier {
     fn clone(&self) -> Box<dyn RenderNotifier> { Box::new(Self { window: self.window, generation: self.generation, proxy: self.proxy.clone() }) }
     fn wake_up(&self, composite: bool) { let _ = self.proxy.send_event(Wake { window: self.window, generation: self.generation, composite }); }
-    fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, params: &FrameReadyParams) { self.wake_up(params.present); }
+    fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, params: &FrameReadyParams) { self.wake_up(params.render); }
 }
 
 struct Screenshot { handle: RecordedFrameHandle, size: DeviceIntSize, pixels: Vec<u8>, path: PathBuf }
@@ -39,6 +39,8 @@ struct Pane {
     do_frame: bool,
     pending_frame: bool,
     redraw: bool,
+    expose: bool,
+    present: bool,
     looping: bool,
     frames: u64,
     retry_at: Instant,
@@ -80,8 +82,9 @@ impl Pane {
         if self.needs_update {
             self.wrench.renderer.update()?;
             self.needs_update = false;
-            if self.wrench.renderer.prepare_frame_if_ready(self.wrench.document_id)?.is_some() {
+            if let Some(info) = self.wrench.renderer.prepare_frame_if_ready(self.wrench.document_id)? {
                 self.pending_frame = false;
+                self.present = info.present;
                 self.redraw = true;
             }
             if verbose {
@@ -103,15 +106,22 @@ impl Pane {
         }
         if self.hidden() { return Ok(false); }
         if watch && !self.pending_frame && !self.redraw && Instant::now() >= self.retry_at { self.do_frame = true; }
-        if self.do_frame && !self.pending_frame {
+        if self.do_frame && !self.pending_frame && Instant::now() >= self.retry_at {
             self.thing.do_frame(&mut self.wrench);
             self.do_frame = false;
             self.pending_frame = true;
         }
         if self.redraw && !self.pending_frame && self.wrench.renderer.has_frame() && Instant::now() >= self.retry_at {
-            self.wrench.renderer.render()?;
-            if !self.wrench.renderer.has_presentable_output() {
+            let rendered = if limit.is_some() || no_block {
+                self.wrench.renderer.render()?;
+                true
+            } else {
+                matches!(self.wrench.renderer.render_if_needed()?, RenderOutcome::Rendered(_))
+            };
+            if !self.present || (!rendered && !self.expose) || !self.wrench.renderer.has_presentable_output() {
+                self.expose = false;
                 self.redraw = false;
+                self.advance(limit, no_block, watch, true);
                 return Ok(false);
             }
             let status = self.wrench.renderer.acquire_surface()?;
@@ -121,18 +131,23 @@ impl Pane {
             } else { status };
             if let PresentationStatus::Presented { .. } = status {
                 self.redraw = false;
+                self.expose = false;
                 self.frames += 1;
                 if self.frames == 1 || verbose { eprintln!("HAL WINDOW presented number={} frame={}", self.number, self.frames); }
                 if limit.map_or(false, |limit| self.frames >= limit) { return Ok(true); }
-                if self.looping || limit.is_some() { self.thing.next_frame(); self.do_frame = true; }
-                if no_block { self.do_frame = true; }
-                self.retry_at = Instant::now() + if watch { Duration::from_millis(50) } else { Duration::ZERO };
+                self.advance(limit, no_block, watch, false);
             } else {
                 self.retry_at = Instant::now() + Duration::from_millis(50);
             }
         }
-        if !self.pending_frame && (self.do_frame || (self.redraw && Instant::now() >= self.retry_at)) { self.window.request_redraw(); }
         Ok(false)
+    }
+
+    fn advance(&mut self, limit: Option<u64>, no_block: bool, watch: bool, skipped: bool) {
+        if self.looping || limit.is_some() { self.thing.next_frame(); self.do_frame = true; }
+        if no_block { self.do_frame = true; }
+        self.retry_at = Instant::now() + if watch { Duration::from_millis(50) }
+            else if skipped { Duration::from_millis(16) } else { Duration::ZERO };
     }
 
     fn capture_root() -> PathBuf {
@@ -233,7 +248,7 @@ impl App<'_> {
         self.panes.insert(window.id(), Pane { window, wrench, thing, number, size, scale,
             pending_size: Some(initial_size), pending_scale: None,
             occluded: false, minimized: false, suspended: false, needs_update: true, do_frame: false, pending_frame: true,
-            redraw: false, looping: false, frames: 0, retry_at: Instant::now(), cursor: WorldPoint::zero(), screenshots: Vec::new(), gpu_timing: false });
+            redraw: false, expose: false, present: true, looping: false, frames: 0, retry_at: Instant::now(), cursor: WorldPoint::zero(), screenshots: Vec::new(), gpu_timing: false });
         Ok(())
     }
 
@@ -287,7 +302,6 @@ impl ApplicationHandler<Wake> for App<'_> {
             if pane.number != wake.generation { return; }
             pane.needs_update = true;
             pane.redraw |= wake.composite;
-            if !pane.hidden() { pane.window.request_redraw(); }
         }
     }
 
@@ -295,7 +309,7 @@ impl ApplicationHandler<Wake> for App<'_> {
         let Some(pane) = self.panes.get_mut(&id) else { return; };
         match event {
             WindowEvent::CloseRequested => self.close(id, event_loop),
-            WindowEvent::RedrawRequested => { pane.redraw = true; pane.needs_update = true; }
+            WindowEvent::RedrawRequested => { pane.redraw = true; pane.expose = true; pane.needs_update = true; }
             WindowEvent::Focused(focused) => {
                 pane.redraw |= focused;
                 pane.needs_update = true;
@@ -342,7 +356,7 @@ impl ApplicationHandler<Wake> for App<'_> {
                 Ok(false) => {}
                 Err(error) => { self.error = Some(error); event_loop.exit(); return; }
             }
-            retry |= !pane.screenshots.is_empty() || pane.wrench.renderer.memory_stats().in_flight > 0
+            retry |= !pane.screenshots.is_empty() || pane.wrench.renderer.has_pending_gpu_work()
                 || (!pane.hidden() && (pane.redraw || pane.do_frame || pane.looping || watch));
         }
         for id in close { self.close(id, event_loop); }
