@@ -36,6 +36,12 @@ def main():
     )
     parser.add_argument("--sync-instrumentation", action="store_true")
     parser.add_argument("--render-metrics", choices=["on", "off"], default="off")
+    parser.add_argument("--force-visible", action="store_true")
+    parser.add_argument(
+        "--hidden-phase",
+        choices=["workspace", "iconify"],
+        default="workspace",
+    )
     parser.add_argument(
         "--scenario",
         choices=[
@@ -46,6 +52,7 @@ def main():
             "crash",
             "offscreen",
             "metrics",
+            "hidden-visibility",
         ],
         default="basic",
     )
@@ -96,6 +103,7 @@ def main():
         "VK_LAYER_VALIDATE_SYNC",
         "MESA_VK_WSI_DEBUG",
         "WR_HAL_RENDER_METRICS",
+        "WR_HAL_FORCE_VISIBLE",
     ]:
         env.pop(name, None)
     env.update(
@@ -119,6 +127,7 @@ def main():
             str(args.loader_directory.resolve()) if args.loader_directory else ""
         ),
         WR_WEBGPU_BASELINE_DEFECTS="1" if args.record_baseline_defects else "0",
+        WR_HAL_HIDDEN_BROWSER_PHASE=args.hidden_phase,
         GDK_BACKEND="x11",
         MOZ_NO_REMOTE="1",
         WGPU_VALIDATION="1" if args.validation_layers else "0",
@@ -143,8 +152,10 @@ def main():
         )
     if args.adapter:
         env["MOZ_WR_VULKAN_ADAPTER"] = args.adapter
-    if args.render_metrics == "on":
+    if args.render_metrics == "on" or args.scenario == "hidden-visibility":
         env["WR_HAL_RENDER_METRICS"] = "1"
+    if args.force_visible:
+        env["WR_HAL_FORCE_VISIBLE"] = "1"
     if args.software_presentation:
         env["MESA_VK_WSI_DEBUG"] = "sw"
     prefs = {
@@ -184,7 +195,11 @@ def main():
             Path(__file__).with_name(
                 "test_hal_render_metrics.py"
                 if args.scenario == "metrics"
-                else "test_webgpu_dmabuf_browser.py"
+                else (
+                    "test_hal_hidden_visibility.py"
+                    if args.scenario == "hidden-visibility"
+                    else "test_webgpu_dmabuf_browser.py"
+                )
             )
         )
     )

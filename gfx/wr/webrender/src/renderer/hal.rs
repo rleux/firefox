@@ -62,6 +62,7 @@ macro_rules! renderer_facade {
             pub fn render(&mut self) -> Result<crate::renderer::RenderResults, String> { self.core.render() }
             pub fn render_if_needed(&mut self) -> Result<RenderOutcome, String> { self.core.render_if_needed() }
             pub fn has_current_output(&self) -> bool { self.core.has_current_output() }
+            pub fn service_hidden_frame(&mut self) -> Result<(), String> { self.core.service_hidden_frame() }
             pub fn has_pending_gpu_work(&self) -> bool { self.core.gpu.has_pending_gpu_work() }
             pub fn read_pixels_rgba8(&self, rect: api::units::FramebufferIntRect) -> Result<Vec<u8>, String> { self.core.read_pixels_rgba8(rect) }
             pub fn frame_completion(&self) -> Option<FrameCompletion> { self.core.frame_completion() }
@@ -105,6 +106,9 @@ mod reuse_tests;
 #[cfg(all(test, wr_hal_vulkan))]
 #[path = "hal_partial_tests.rs"]
 mod partial_tests;
+#[cfg(all(test, wr_hal_vulkan))]
+#[path = "hal_hidden_tests.rs"]
+mod hidden_tests;
 
 pub enum RenderOutcome {
     Rendered(super::RenderResults),
@@ -668,6 +672,28 @@ impl<A: BackendApi> RendererCore<A> {
                 }
             },
             ResultMsg::RefreshShader(_) => return Err("HAL runtime shader reload is unavailable; rebuild the shader pack".into()),
+        }
+        Ok(())
+    }
+
+    pub fn service_hidden_frame(&mut self) -> Result<(), String> {
+        self.output_identity = None;
+        self.force_redraw = true;
+        if self.gpu.has_acquired_surface() { self.gpu.discard_surface()?; }
+        self.flush_required_frame()?;
+        self.gpu.poll()?;
+        self.damage.clear();
+        self.did_rasterize = false;
+        self.resource_upload_time = Duration::ZERO;
+        self.last_upload_time = Duration::ZERO;
+        self.last_upload_bytes = self.gpu.take_resource_upload_bytes();
+        if let Some(document) = &mut self.document {
+            document.profile.clear();
+            document.frame_stats.take();
+        }
+        self.notify(Checkpoint::FrameRendered);
+        if let Some(metrics) = self.gpu.metrics() {
+            metrics.add(crate::device::hal::diagnostics::RenderCounter::HiddenSkips, 1);
         }
         Ok(())
     }

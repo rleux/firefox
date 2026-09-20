@@ -236,6 +236,27 @@ impl Renderer {
         }
     }
 
+    pub fn service_hidden_frame(&mut self) -> Result<(), String> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Vulkan(r) => {
+                let result = (|| {
+                    if let Some(error) = &r.error {
+                        return Err(error.clone());
+                    }
+                    r.renderer
+                        .select_document(r.document.ok_or("Missing Vulkan document")?)?;
+                    r.renderer.service_hidden_frame()
+                })();
+                result.map_err(|error: String| {
+                    r.error = Some(error.clone());
+                    error
+                })
+            },
+            Self::Gl(_) => Err("Hidden frame servicing is unavailable for this renderer".into()),
+        }
+    }
+
     pub fn trim_transient_resources(&mut self, buffers: bool) {
         match self {
             Self::Gl(r) => r.trim_transient_resources(buffers),

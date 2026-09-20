@@ -233,6 +233,17 @@ RenderCompositorVulkan::RenderCompositorVulkan(
 }
 
 bool RenderCompositorVulkan::IsWindowHidden() {
+  static const bool forceVisible = [] {
+    const char* value = PR_GetEnv("WR_HAL_FORCE_VISIBLE");
+    return value && !strcmp(value, "1");
+  }();
+  if (forceVisible) {
+    return false;
+  }
+  if (!mRenderer || mPaused || mFailed ||
+      wr_renderer_vulkan_failed(mRenderer)) {
+    return false;
+  }
 #ifdef MOZ_X11
   const bool hidden =
       mWindowVisibility.Query() == X11WindowVisibility::State::Hidden;
