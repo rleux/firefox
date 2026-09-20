@@ -16,6 +16,7 @@ from marionette_harness import MarionetteTestCase
 
 sys.path.insert(0, str(Path(__file__).parent))
 from renderer_benchmark_metrics import Sampler, validate_environment, validate_report
+from renderer_benchmark_startup import wait_for_startup
 
 
 class TestRendererBenchmark(MarionetteTestCase):
@@ -206,6 +207,13 @@ class TestRendererBenchmark(MarionetteTestCase):
                     """
                 )
         identities = self.identities()
+        if expected.get("startupSettling"):
+            self.report["startupSettling"] = {}
+            wait_for_startup(
+                Sampler(identities["parent"]), self.report["startupSettling"]
+            )
+            self.assertEqual(self.identities(), identities)
+            self.assertEqual(self.backend(), self.report["backend"])
         self.report["processIds"] = identities
         renderer_pid = (
             identities["gpu"] if expected["process"] == "GPU" else identities["parent"]
@@ -235,7 +243,9 @@ class TestRendererBenchmark(MarionetteTestCase):
             )
         else:
             with Sampler(
-                identities["parent"], include_memory=expected["phase"] == "memory"
+                identities["parent"],
+                include_memory=expected["phase"] == "memory",
+                timing=expected.get("timingSampling", False),
             ) as sampler:
                 self.report["workload"] = self.call(
                     "measure", self.config["duration"] * 1000

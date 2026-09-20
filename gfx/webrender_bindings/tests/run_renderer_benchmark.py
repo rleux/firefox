@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from renderer_benchmark_metrics import validate_report
+from renderer_benchmark_startup import STARTUP_TIMEOUT_SECONDS
 
 WORKLOADS = ("static", "css", "dirty", "scroll", "canvas", "filters")
 
@@ -176,6 +177,8 @@ def main():
         "phase": args.phase,
         "workload": args.workload,
         "collectorTelemetry": True,
+        "timingSampling": args.phase == "timing",
+        "startupSettling": args.phase in ("timing", "memory"),
     }
     config = {
         "expected": expected,
@@ -225,6 +228,8 @@ def main():
             "gfx.canvas.accelerated.force-enabled": "false",
         })
     timeout = math.ceil(args.duration + args.warmup) + 90
+    if expected["startupSettling"]:
+        timeout += STARTUP_TIMEOUT_SECONDS
     command = [
         str(root / "mach"),
         "marionette-test",
@@ -248,6 +253,7 @@ def main():
         Path(__file__).with_name("test_renderer_benchmark.py"),
         Path(__file__).with_name("renderer_benchmark.html"),
         Path(__file__).with_name("renderer_benchmark_metrics.py"),
+        Path(__file__).with_name("renderer_benchmark_startup.py"),
         binary,
         libxul,
     ]
