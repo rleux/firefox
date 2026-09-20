@@ -826,6 +826,11 @@ impl<R> Wrench<R> {
         if self.record_frame_start { self.frame_start_sender.push(Instant::now()); }
     }
 
+    pub(crate) fn configure_measurement(&mut self) {
+        self.record_frame_start = false;
+        self.rebuild_display_lists = true;
+    }
+
     pub fn send_lists(
         &mut self,
         frame_number: &mut u32,
