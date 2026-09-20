@@ -37,6 +37,9 @@ pub(crate) trait BackendApi: hal::Api + sealed::Sealed {
         mode: ShaderInputMode,
         cache: &mut ShaderCache,
     ) -> Result<Self::ShaderModule>;
+    fn request_surface_preservation(_surface: &Self::Surface) -> bool { false }
+    fn has_native_swapchain(_surface: &Self::Surface) -> bool { false }
+    fn surface_image_id(_texture: &Self::Texture) -> Option<u64> { None }
     fn supports_presentation_blit(_device: &Device<Self>, _format: wgt::TextureFormat) -> bool { false }
     unsafe fn record_presentation_blit(
         _device: &Self::Device,
@@ -45,6 +48,7 @@ pub(crate) trait BackendApi: hal::Api + sealed::Sealed {
         _target: &Self::Texture,
         _source_size: [u32; 2],
         _target_size: [u32; 2],
+        _region: Option<[u32; 4]>,
     ) -> Result<()> { Err("Native presentation blit is unavailable".into()) }
 }
 
