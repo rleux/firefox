@@ -439,6 +439,18 @@ impl<A: BackendApi> FrameRenderer<A> {
         result
     }
 
+    pub fn has_pending_gpu_work(&self) -> bool {
+        self.submissions.has_pending_work() || !self.releases.borrow().is_empty()
+            || self.external_device.has_pending_gpu_work()
+    }
+
+    pub fn has_owned_output(&self, output: &RenderedFrame<A>) -> bool {
+        matches!(self.compositor, CompositorConfig::Draw)
+            && output.texture.as_ref().map_or(false, |texture| {
+                texture.belongs_to(&self.owner) && texture.initialized()
+            })
+    }
+
     pub fn memory_stats(&self) -> MemoryStats {
         let mut stats = self.owner.memory.get();
         (stats.query_slots, stats.pending_queries) = self.queries.borrow().counts();
