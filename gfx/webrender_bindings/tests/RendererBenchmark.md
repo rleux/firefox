@@ -99,7 +99,14 @@ lose departed-process CPU, so use whole-host CPU ticks and saved process identit
 evidence when investigating contention.
 
 Timing collects full first/last samples and light intermediate samples at a
-250 ms wait cadence. Light samples discover browser descendants recursively
+250 ms wait cadence by default. `--sample-interval` accepts 0.25–2 seconds for
+timing sensitivity controls; other phases retain the default. The requested
+interval is recorded in the configuration and checked against the sampler's
+actual interval in the report. A longer interval observes process turnover less
+frequently. Compare such controls separately from primary runs, retaining the
+full endpoint checks, startup settling and all observed-identity gates.
+
+Light samples discover browser descendants recursively
 through every thread's Linux `/proc/PID/task/TID/children`, then read only the
 browser tree and collector process statistics. They omit the aggregate
 outside-browser process counter; whole-host CPU/load remain available. Full
@@ -119,8 +126,9 @@ perturb the host; calibrate its overhead before primary timing.
 Samples also identify the collector process and its CPU counters separately from
 the browser tree. That process includes sampling and Marionette harness threads.
 Per-sample thread CPU and wall costs cover collection itself. Missing collector
-identity is explicit; it is never reported as zero cost. Sampling waits 250 ms
-after each collection, so actual cadence includes collection time. Use the
+identity is explicit; it is never reported as zero cost. Sampling waits the
+configured interval after each collection, so actual cadence includes collection
+time. Use the
 first/last `cpuSampleTimeSeconds` timestamps for new CPU-rate denominators; they
 are captured immediately after the process-stat scan. Older reports only have
 `timeSeconds`, captured after per-process collection. Do not use the wider host

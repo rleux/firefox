@@ -78,6 +78,7 @@ def main():
     parser.add_argument("--workload", choices=WORKLOADS, default="static")
     parser.add_argument("--duration", type=float, default=2)
     parser.add_argument("--warmup", type=float, default=1)
+    parser.add_argument("--sample-interval", type=float, default=0.25)
     parser.add_argument("--viewport", nargs=2, type=int, default=[890, 617])
     parser.add_argument("--renderer")
     parser.add_argument("--allow-software", action="store_true")
@@ -94,6 +95,10 @@ def main():
         or not 0 <= args.warmup <= 120
     ):
         parser.error("Duration must be 0.1–600 seconds and warmup 0–120 seconds")
+    if not math.isfinite(args.sample_interval) or not 0.25 <= args.sample_interval <= 2:
+        parser.error("Sample interval must be 0.25–2 seconds")
+    if args.phase != "timing" and args.sample_interval != 0.25:
+        parser.error("Custom sample intervals require the timing phase")
     if args.viewport[0] < 800 or args.viewport[1] < 600:
         parser.error("Viewport must be at least 800 by 600 pixels")
     if args.phase == "smoke" and args.duration > 5:
@@ -181,6 +186,8 @@ def main():
         "treeSampling": args.phase == "timing",
         "startupSettling": args.phase in ("timing", "memory"),
     }
+    if args.phase != "diagnostic":
+        expected["sampleIntervalSeconds"] = args.sample_interval
     config = {
         "expected": expected,
         "duration": args.duration,

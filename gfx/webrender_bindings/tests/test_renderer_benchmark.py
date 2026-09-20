@@ -246,11 +246,13 @@ class TestRendererBenchmark(MarionetteTestCase):
                 identities["parent"],
                 include_memory=expected["phase"] == "memory",
                 timing=expected.get("timingSampling", False),
+                interval=expected.get("sampleIntervalSeconds", 0.25),
             ) as sampler:
                 self.report["workload"] = self.call(
                     "measure", self.config["duration"] * 1000
                 )
             self.report["processMetrics"] = sampler.samples
+            self.report["samplingIntervalSeconds"] = sampler.interval
         self.report["hostIntervalEnd"] = time.monotonic()
         self.report["geometryAfter"] = self.geometry()
         self.call("stop")
