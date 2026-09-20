@@ -223,7 +223,28 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
 RenderCompositorVulkan::RenderCompositorVulkan(
     const RefPtr<widget::CompositorWidget>& aWidget,
     const WrHalSurface& aSurface)
-    : RenderCompositor(aWidget), mSurface(aSurface) {}
+    : RenderCompositor(aWidget),
+      mSurface(aSurface)
+#ifdef MOZ_X11
+      ,
+      mWindowVisibility(aSurface.display, aSurface.window)
+#endif
+{
+}
+
+bool RenderCompositorVulkan::IsWindowHidden() {
+#ifdef MOZ_X11
+  const bool hidden =
+      mWindowVisibility.Query() == X11WindowVisibility::State::Hidden;
+  if (mWindowWasHidden && !hidden && mRenderer) {
+    wr_renderer_force_redraw(mRenderer);
+  }
+  mWindowWasHidden = hidden;
+  return hidden;
+#else
+  return false;
+#endif
+}
 
 bool RenderCompositorVulkan::GetHalSurface(WrHalSurface* aSurface) const {
   *aSurface = mSurface;

@@ -44,6 +44,10 @@ if CONFIG["OS_TARGET"] == "Linux" and CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     UNIFIED_SOURCES += [
         "TestRenderCompositorVulkan.cpp",
     ]
+    if CONFIG["MOZ_X11"]:
+        SOURCES += [
+            "TestX11WindowVisibility.cpp",
+        ]
 
 if CONFIG["OS_TARGET"] == "Darwin":
     # Not in UNIFIED_SOURCES: MacIOSurface.h includes Carbon headers (MacTypes.h)
