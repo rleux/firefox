@@ -431,6 +431,14 @@ class TestSampler(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sampler.sample_once("medium")
 
+    def test_sampler_interval_must_be_finite_and_positive(self):
+        for interval in [0, -1, float("nan"), float("inf"), True, "0.25"]:
+            with self.subTest(interval=interval):
+                with self.assertRaises(ValueError):
+                    Sampler(10, interval=interval)
+        self.assertEqual(Sampler(10, interval=0.01).interval, 0.01)
+        self.assertEqual(Sampler(10, interval=10).interval, 10)
+
     def test_light_tree_finds_nonleader_and_recursive_children(self):
         with tempfile.TemporaryDirectory() as temporary:
             proc = Path(temporary)
@@ -845,6 +853,39 @@ class TestValidateReport(unittest.TestCase):
             "processMetrics[1] CPU sample time exceeds sample time",
             validate_report(report, config),
         )
+
+    def test_report_sample_interval_contract(self):
+        report = valid_report()
+        report["samplingIntervalSeconds"] = 0.25
+        config = {**expected(), "sampleIntervalSeconds": 0.25}
+        self.assertEqual(validate_report(report, config), [])
+
+        report.pop("samplingIntervalSeconds")
+        self.assertIn(
+            "report sample interval is missing", validate_report(report, config)
+        )
+
+        report["samplingIntervalSeconds"] = 2
+        self.assertIn(
+            "report sample interval mismatch", validate_report(report, config)
+        )
+
+        report["samplingIntervalSeconds"] = float("nan")
+        self.assertIn(
+            "report sample interval is invalid", validate_report(report, config)
+        )
+
+        for interval in [0.2, 2.1, float("nan"), float("inf"), True]:
+            with self.subTest(interval=interval):
+                invalid = {**expected(), "sampleIntervalSeconds": interval}
+                self.assertIn(
+                    "expected sample interval is invalid",
+                    validate_report(valid_report(), invalid),
+                )
+
+        legacy = valid_report()
+        legacy["samplingIntervalSeconds"] = 10
+        self.assertEqual(validate_report(legacy, expected()), [])
 
     def test_startup_settling_gate(self):
         report = valid_report()

@@ -165,8 +165,8 @@ class Sampler:
         sys_root=Path("/sys"),
         clock=time.monotonic,
     ):
-        if interval <= 0:
-            raise ValueError("interval must be positive")
+        if not _finite_number(interval) or interval <= 0:
+            raise ValueError("interval must be finite and positive")
         self.root_pid = int(root_pid)
         self.include_memory = include_memory
         self.timing = timing
@@ -757,6 +757,23 @@ def validate_report(report, expected):
         errors.append("processMetrics must be a list")
         process_metrics = []
     phase = expected.get("phase")
+    interval_required = "sampleIntervalSeconds" in expected
+    expected_interval = expected.get("sampleIntervalSeconds")
+    actual_interval = report.get("samplingIntervalSeconds")
+    expected_interval_valid = (
+        _finite_number(expected_interval) and 0.25 <= expected_interval <= 2
+    )
+    if interval_required and not expected_interval_valid:
+        errors.append("expected sample interval is invalid")
+    if actual_interval is not None and (
+        not _finite_number(actual_interval) or actual_interval <= 0
+    ):
+        errors.append("report sample interval is invalid")
+    if interval_required:
+        if actual_interval is None:
+            errors.append("report sample interval is missing")
+        elif expected_interval_valid and actual_interval != expected_interval:
+            errors.append("report sample interval mismatch")
     if expected.get("startupSettling") is True:
         startup = report.get("startupSettling")
         if not isinstance(startup, dict):
