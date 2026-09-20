@@ -150,3 +150,47 @@ the forced-full control. Both renderers drained all pending submissions. This
 is correctness and work-counter evidence from a software Vulkan device, not a
 hardware-performance result. Detailed results are in
 `artifacts/vulkan-idle-rendering/2a/partial-lavapipe-final-result.txt`.
+
+## Preserved Vulkan swapchain images
+
+Incremental presentation is enabled only for native Vulkan swapchains configured
+with clipping disabled. The HAL requests this explicitly; other wgpu clients
+keep their existing clipping default. Vulkan permits obscured swapchain pixels
+to be undefined when clipping is enabled, so a stable image handle alone is
+insufficient. See the [Vulkan swapchain configuration contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkSwapchainCreateInfoKHR.html).
+
+The renderer tracks the output version stored in each native `VkImage` and unions
+damage from the output versions that image missed. It retains at most 32 changes
+and 16 image versions. Unknown images, expired history, size changes, stale output
+handles and unsupported surfaces use full updates. Reconfiguration, discard,
+loss and suboptimal presentation invalidate image history. A known image with no
+new damage still submits the acquire/present semaphore synchronization, without
+copying pixels. Image contents are reused in the `PRESENT` layout only after a
+successful tracked presentation.
+
+`WR_HAL_FORCE_FULL_PRESENT=1` provides the full-presentation control while keeping
+the same preservation configuration. It is independent of
+`WR_HAL_FORCE_FULL_COMPOSITION`. `fullPresentUpdates`, `partialPresentUpdates`,
+`unchangedPresentUpdates` and `presentPixels` count recorded update work, including
+attempts that may fail later. `initializedSurfaceImages` samples the current
+tracked image count during polling. Configuration logs and `SurfaceInfo` expose
+`contents_preserved`; these are configuration diagnostics, not per-frame logs.
+Presentation damage hints from `VK_KHR_incremental_present` are not required for
+these GPU copy/draw savings and are not added here.
+
+Vulkan presentation preserves the tracked image contents and does not itself
+modify them. This history therefore applies to a window rendered exclusively
+through this Vulkan swapchain. Any non-Vulkan client pixel write to the platform
+window invalidates the tracked contents and requires a fresh full render before
+the next presentation.
+
+The native X11 validation passed with both blit and draw presentation routes,
+their forced-full controls, three rotating swapchain images, resize and injected
+surface loss. The incremental runs recorded 18,270,048 presented pixels instead
+of 44,042,912, a 58.52% reduction in recorded presentation area, while saving
+25,772,864 pixel updates. Six synthetic expose checks caused no render
+executions. All 36 sampled pixels matched, queues drained and Vulkan validation
+reported no error. These samples do not prove full-window pixel equivalence and
+the area counters are not a timing result. The test used llvmpipe, so it makes
+no hardware-performance claim. The report is in
+`artifacts/vulkan-idle/stage2b-wrench/report.json`.

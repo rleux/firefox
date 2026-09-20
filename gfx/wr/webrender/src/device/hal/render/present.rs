@@ -66,6 +66,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             .surface
             .as_mut()
             .ok_or("Renderer has no window surface")?;
+        surface.image_versions.clear();
         if let Some(acquired) = &surface.acquired {
             drop(self.submissions.recording()?);
             self.submissions.submit_surfaces(&[&acquired.texture])?;
@@ -77,6 +78,15 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     pub fn present_output(&mut self, output: &RenderedFrame<A>) -> Result<PresentationStatus> {
+        let result = self.present_output_inner(output);
+        if result.is_err() {
+            if let Some(surface) = &mut self.surface { surface.image_versions.clear(); }
+        }
+        result
+    }
+
+    fn present_output_inner(&mut self, output: &RenderedFrame<A>) -> Result<PresentationStatus> {
+        use super::present_history::Repair;
         if self.is_failed() {
             return Err("Cannot present a failed renderer".into());
         }
@@ -84,97 +94,96 @@ impl<A: BackendApi> FrameRenderer<A> {
             self.discard_surface()?;
             return Ok(PresentationStatus::Suspended);
         }
-        if self
-            .surface
-            .as_ref()
-            .ok_or("Renderer has no window surface")?
-            .acquired
-            .is_none()
-        {
+        if self.surface.as_ref().ok_or("Renderer has no window surface")?.acquired.is_none() {
             let status = self.acquire_surface()?;
-            if status != PresentationStatus::Acquired {
-                return Ok(status);
-            }
+            if status != PresentationStatus::Acquired { return Ok(status); }
         }
         let surface = self.surface.as_ref().unwrap();
         let config = surface.config.as_ref().unwrap();
         let format = config.format;
         let size = [config.extent.width, config.extent.height];
         let method = surface.presentation;
+        let acquired = surface.acquired.as_ref().unwrap();
+        let target: &A::Texture = acquired.texture.borrow();
+        let image_id = if surface.info.contents_preserved && !acquired.suboptimal {
+            A::surface_image_id(target)
+        } else { None };
+        let previous = image_id.and_then(|id| surface.image_versions.get(&id).copied());
+        let repair = if self.force_full_present || image_id.is_none() || output.size != size {
+            Repair::Full
+        } else {
+            self.output_history.repair(output.serial, output.size, previous)
+        };
+        let region = match repair {
+            Repair::Partial(rect) => Some([rect.min.x as u32, rect.min.y as u32, rect.width() as u32, rect.height() as u32]),
+            _ => None,
+        };
+        let from = if repair == Repair::Full { wgt::TextureUses::UNINITIALIZED } else { wgt::TextureUses::PRESENT };
         let source = output.texture.as_ref().unwrap();
-        let draw = if method == PresentationMethod::Draw {
+        let draw = if method == PresentationMethod::Draw && repair != Repair::Unchanged {
             let region = PresentationRegion::new(
-                [0, 0, output.size[0], output.size[1]],
-                [0, 0, size[0], size[1]],
-                [source.size.width, source.size.height],
-                size,
+                region.unwrap_or([0, 0, output.size[0], output.size[1]]),
+                region.unwrap_or([0, 0, size[0], size[1]]),
+                [source.size.width, source.size.height], size,
             )?;
             Some((self.presentation_pipeline(format)?, region))
-        } else {
-            None
-        };
+        } else { None };
         let surface = self.surface.as_ref().unwrap();
         let acquired = surface.acquired.as_ref().unwrap();
         let target: &A::Texture = acquired.texture.borrow();
         self.failed.set(true);
-        if let Some((pipeline, region)) = draw {
-            self.record_present_draw(
-                pipeline,
-                source,
-                target,
-                format,
-                size,
-                region,
-                wgt::TextureUses::UNINITIALIZED,
-                wgt::TextureUses::PRESENT,
-            )?;
-        } else {
-            let mut commands = self.submissions.recording()?;
-            let previous = source.current_usage();
-            source.transition(&mut commands, wgt::TextureUses::COPY_SRC);
-            let range = presentation_range();
-            unsafe {
-                commands
-                    .encoder()
-                    .transition_textures(std::iter::once(hal::TextureBarrier {
-                        queue_family_ownership_transfer: None,
-                        texture: target,
-                        range: range.clone(),
-                        usage: hal::StateTransition {
-                            from: wgt::TextureUses::UNINITIALIZED,
-                            to: wgt::TextureUses::COPY_DST,
-                        },
-                    }));
-                A::record_presentation_blit(
-                    &self.owner.open.device,
-                    commands.encoder(),
-                    &source.raw,
-                    target,
-                    output.size,
-                    size,
-                )?;
-                commands
-                    .encoder()
-                    .transition_textures(std::iter::once(hal::TextureBarrier {
-                        queue_family_ownership_transfer: None,
-                        texture: target,
-                        range,
-                        usage: hal::StateTransition {
-                            from: wgt::TextureUses::COPY_DST,
-                            to: wgt::TextureUses::PRESENT,
-                        },
-                    }));
+        match repair {
+            Repair::Unchanged => {
+                self.count(RenderCounter::UnchangedPresentUpdates, 1);
+                drop(self.submissions.recording()?);
             }
-            source.transition(&mut commands, previous);
+            _ => {
+                self.count(if repair == Repair::Full { RenderCounter::FullPresentUpdates }
+                    else { RenderCounter::PartialPresentUpdates }, 1);
+                let rect = region.unwrap_or([0, 0, size[0], size[1]]);
+                self.count(RenderCounter::PresentPixels, rect[2] as u64 * rect[3] as u64);
+                if let Some((pipeline, region)) = draw {
+                    self.record_present_draw(pipeline, source, target, format, size, region,
+                        from, wgt::TextureUses::PRESENT)?;
+                } else {
+                    let mut commands = self.submissions.recording()?;
+                    let previous = source.current_usage();
+                    source.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+                    let range = presentation_range();
+                    unsafe {
+                        commands.encoder().transition_textures(std::iter::once(hal::TextureBarrier {
+                            queue_family_ownership_transfer: None, texture: target, range: range.clone(),
+                            usage: hal::StateTransition { from, to: wgt::TextureUses::COPY_DST },
+                        }));
+                        A::record_presentation_blit(&self.owner.open.device, commands.encoder(),
+                            &source.raw, target, output.size, size, region)?;
+                        commands.encoder().transition_textures(std::iter::once(hal::TextureBarrier {
+                            queue_family_ownership_transfer: None, texture: target, range,
+                            usage: hal::StateTransition { from: wgt::TextureUses::COPY_DST, to: wgt::TextureUses::PRESENT },
+                        }));
+                    }
+                    source.transition(&mut commands, previous);
+                }
+            }
         }
         self.submissions.submit_surfaces(&[&acquired.texture])?;
-        let status = self.surface.as_mut().unwrap().present()?;
-        if matches!(status, PresentationStatus::Presented { .. }) {
-            self.count(RenderCounter::Presents, 1);
+        let surface = self.surface.as_mut().unwrap();
+        let status = surface.present()?;
+        if matches!(status, PresentationStatus::Presented { suboptimal: false }) {
+            if let Some(id) = image_id {
+                if !surface.image_versions.contains_key(&id) && surface.image_versions.len() >= 16 {
+                    surface.image_versions.clear();
+                }
+                surface.image_versions.insert(id, output.serial);
+            }
+        } else {
+            surface.image_versions.clear();
         }
+        if matches!(status, PresentationStatus::Presented { .. }) { self.count(RenderCounter::Presents, 1); }
         self.failed.set(false);
         Ok(status)
     }
+
 }
 
 fn presentation_range() -> wgt::ImageSubresourceRange {

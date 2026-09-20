@@ -166,6 +166,18 @@ impl super::backend::BackendApi for hal::api::Vulkan {
         cache.create_module::<Self>(device, artifact, fragment, mode)
     }
 
+    fn request_surface_preservation(surface: &Self::Surface) -> bool {
+        surface.set_native_swapchain_clipped(false)
+    }
+
+    fn has_native_swapchain(surface: &Self::Surface) -> bool {
+        surface.raw_native_swapchain().is_some()
+    }
+
+    fn surface_image_id(texture: &Self::Texture) -> Option<u64> {
+        Some(ash::vk::Handle::as_raw(unsafe { texture.raw_handle() }))
+    }
+
     fn supports_presentation_blit(device: &Device<Self>, format: wgt::TextureFormat) -> bool {
         let instance = device.open.device.shared_instance().raw_instance();
         let format = match format {
@@ -181,12 +193,20 @@ impl super::backend::BackendApi for hal::api::Vulkan {
     }
 
     unsafe fn record_presentation_blit(device: &Self::Device, encoder: &mut Self::CommandEncoder,
-        source: &Self::Texture, target: &Self::Texture, source_size: [u32; 2], target_size: [u32; 2]) -> Result<()> {
+        source: &Self::Texture, target: &Self::Texture, source_size: [u32; 2], target_size: [u32; 2], region: Option<[u32; 4]>) -> Result<()> {
         let raw = device.raw_device();
         let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
+        if region.is_some() && source_size != target_size {
+            return Err("Partial Vulkan presentation requires matching extents".into());
+        }
+        let offsets = |rect: [u32; 4]| [
+            vk::Offset3D { x: rect[0] as i32, y: rect[1] as i32, z: 0 },
+            vk::Offset3D { x: (rect[0] + rect[2]) as i32, y: (rect[1] + rect[3]) as i32, z: 1 },
+        ];
+        let source_rect = region.unwrap_or([0, 0, source_size[0], source_size[1]]);
+        let target_rect = region.unwrap_or([0, 0, target_size[0], target_size[1]]);
         let blit = vk::ImageBlit::default().src_subresource(layers).dst_subresource(layers)
-            .src_offsets([vk::Offset3D::default(), vk::Offset3D { x: source_size[0] as i32, y: source_size[1] as i32, z: 1 }])
-            .dst_offsets([vk::Offset3D::default(), vk::Offset3D { x: target_size[0] as i32, y: target_size[1] as i32, z: 1 }]);
+            .src_offsets(offsets(source_rect)).dst_offsets(offsets(target_rect));
         raw.cmd_blit_image(encoder.raw_handle(), source.raw_handle(), vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             target.raw_handle(), vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[blit], vk::Filter::NEAREST);
         Ok(())

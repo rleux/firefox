@@ -230,6 +230,16 @@ pub struct Surface {
 }
 
 impl Surface {
+    /// Sets clipping for subsequent native Vulkan swapchain configurations.
+    /// Returns false for surfaces backed by another presentation API.
+    pub fn set_native_swapchain_clipped(&self, clipped: bool) -> bool {
+        let Some(surface) = self.inner.as_any().downcast_ref::<swapchain::NativeSurface>() else {
+            return false;
+        };
+        surface.set_clipped(clipped);
+        true
+    }
+
     /// Returns the raw Vulkan surface handle.
     ///
     /// Returns `None` if the surface is a DXGI surface.

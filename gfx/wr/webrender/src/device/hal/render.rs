@@ -44,6 +44,7 @@ mod shaders {
 #[cfg(any(feature = "capture", feature = "replay"))]
 mod capture;
 mod present;
+mod present_history;
 
 const PIPELINE_ABI: u32 = 1;
 
@@ -289,6 +290,8 @@ pub(crate) struct FrameRenderer<A: BackendApi> {
     resource_upload_bytes: u64,
     surface: Option<super::surface::SurfaceState<A>>,
     presentation_pipelines: HashMap<wgt::TextureFormat, Rc<present::PresentationPipeline<A>>>,
+    output_history: present_history::OutputHistory,
+    force_full_present: bool,
     metrics: Option<std::sync::Arc<RenderMetrics>>,
 }
 
@@ -300,6 +303,7 @@ impl<A: BackendApi> FrameRenderer<A> {
 
     fn abort(&mut self) {
         self.failed.set(true);
+        if let Some(surface) = &mut self.surface { surface.image_versions.clear(); }
         self.submissions.discard_recording();
         self.external_images.clear();
         self.native_targets.clear();
@@ -414,6 +418,8 @@ impl<A: BackendApi> FrameRenderer<A> {
             resource_upload_bytes: 0,
             surface: None,
             presentation_pipelines: HashMap::new(),
+            output_history: present_history::OutputHistory::default(),
+            force_full_present: std::env::var("WR_HAL_FORCE_FULL_PRESENT").as_deref() == Ok("1"),
             metrics,
         })
     }
@@ -643,7 +649,11 @@ impl<A: BackendApi> FrameRenderer<A> {
             metrics.set(RenderGauge::BufferBytes, memory.buffer_bytes);
             metrics.report_if_due();
         }
-        if let Some(metrics) = &self.metrics { metrics.report_if_due(); }
+        if let Some(metrics) = &self.metrics {
+            metrics.set(RenderGauge::InitializedSurfaceImages,
+                self.surface.as_ref().map_or(0, |surface| surface.image_versions.len()) as u64);
+            metrics.report_if_due();
+        }
         result
     }
 
@@ -2414,7 +2424,15 @@ impl<A: BackendApi> FrameRenderer<A> {
         self.native_targets.clear();
         self.layer_targets.clear();
         dispatch_releases(&self.releases);
-        if result.is_ok() {
+        if let Ok(output) = &result {
+            if output.texture.is_some() {
+                let damage = retained.map_or(frame.device_rect, |(_, damage)| damage);
+                let local = DeviceIntRect::new(
+                    DeviceIntPoint::new(damage.min.x - output.origin.x, damage.min.y - output.origin.y),
+                    DeviceIntPoint::new(damage.max.x - output.origin.x, damage.max.y - output.origin.y),
+                );
+                self.output_history.record(output.serial, output.size, local);
+            }
             self.failed.set(false);
         }
         result
