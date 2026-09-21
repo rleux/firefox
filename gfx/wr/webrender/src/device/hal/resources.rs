@@ -893,7 +893,7 @@ mod tests {
             })
             .unwrap(),
         );
-        let width = (owner.capabilities.alignments.buffer_copy_pitch.get() / 4).max(2);
+        let width = u32::try_from((owner.capabilities.alignments.buffer_copy_pitch.get() / 4).max(2)).unwrap();
         let row = width as usize * 4;
         for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
             for padding in [0, 4] {
