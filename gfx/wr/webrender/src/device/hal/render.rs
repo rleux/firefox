@@ -3299,7 +3299,7 @@ mod shader_tests {
         let mut renderer = FrameRenderer::new(owner).unwrap();
         let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
         let left = DeviceIntRect::from_size(DeviceIntSize::new(2, 4));
-        let right = left.translate(DeviceIntVector::new(2, 0));
+        let right = left.translate(DeviceIntVector2D::new(2, 0));
         let source = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
             TextureFilter::Nearest, false).unwrap();
         let source_pixels: Vec<u8> = (0..4).flat_map(|y| {
