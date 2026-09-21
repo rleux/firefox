@@ -16,6 +16,7 @@ from marionette_harness import MarionetteTestCase
 
 sys.path.insert(0, str(Path(__file__).parent))
 from renderer_benchmark_metrics import Sampler, validate_environment, validate_report
+from renderer_benchmark_perf import PerfRecorder
 from renderer_benchmark_startup import wait_for_startup
 
 
@@ -32,6 +33,7 @@ class TestRendererBenchmark(MarionetteTestCase):
         self.server = None
         self.thread = None
         self.cleaned = False
+        self.perf = None
         try:
             self.configure_fixture()
         except BaseException:
@@ -87,9 +89,13 @@ class TestRendererBenchmark(MarionetteTestCase):
             return
         self.cleaned = True
         try:
-            (self.output / "report.json").write_text(
-                json.dumps(self.report, indent=2) + "\n"
-            )
+            try:
+                if self.perf:
+                    self.perf.close()
+            finally:
+                (self.output / "report.json").write_text(
+                    json.dumps(self.report, indent=2) + "\n"
+                )
         finally:
             if self.server:
                 if self.thread and self.thread.is_alive():
@@ -236,6 +242,17 @@ class TestRendererBenchmark(MarionetteTestCase):
         self.call("warmup", self.config["warmup"] * 1000)
         self.report["geometryBefore"] = self.geometry()
         self.assertEqual(validate_environment(self.report, expected), [])
+        if expected["phase"] == "profile":
+            config = expected["perf"]
+            self.report["perf"] = {"version": config["version"]}
+            self.perf = PerfRecorder(
+                config["binary"],
+                renderer_pid,
+                self.output,
+                self.report["perf"],
+                event=config["event"],
+            )
+            self.perf.start()
         self.report["hostIntervalStart"] = time.monotonic()
         if expected["phase"] == "diagnostic":
             self.report["workload"] = self.call(
@@ -248,14 +265,22 @@ class TestRendererBenchmark(MarionetteTestCase):
                 timing=expected.get("timingSampling", False),
                 interval=expected.get("sampleIntervalSeconds", 0.25),
             ) as sampler:
-                self.report["workload"] = self.call(
-                    "measure", self.config["duration"] * 1000
-                )
+                if self.perf:
+                    self.perf.enable()
+                try:
+                    self.report["workload"] = self.call(
+                        "measure", self.config["duration"] * 1000
+                    )
+                finally:
+                    if self.perf and self.perf.recording:
+                        self.perf.disable()
             self.report["processMetrics"] = sampler.samples
             self.report["samplingIntervalSeconds"] = sampler.interval
         self.report["hostIntervalEnd"] = time.monotonic()
         self.report["geometryAfter"] = self.geometry()
         self.call("stop")
+        if self.perf:
+            self.perf.finish()
         self.assertEqual(self.identities(), identities)
         self.assertEqual(self.backend(), self.report["backend"])
         self.report["mappingsAfter"] = self.mappings(renderer_pid)

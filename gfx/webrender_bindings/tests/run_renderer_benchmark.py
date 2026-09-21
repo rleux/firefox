@@ -73,12 +73,16 @@ def main():
     parser.add_argument("--display", choices=("xvfb", "native"), default="xvfb")
     parser.add_argument("--gpu-process", choices=("true", "false"), default="true")
     parser.add_argument(
-        "--phase", choices=("smoke", "timing", "diagnostic", "memory"), default="smoke"
+        "--phase",
+        choices=("smoke", "timing", "diagnostic", "memory", "profile"),
+        default="smoke",
     )
     parser.add_argument("--workload", choices=WORKLOADS, default="static")
     parser.add_argument("--duration", type=float, default=2)
     parser.add_argument("--warmup", type=float, default=1)
-    parser.add_argument("--sample-interval", type=float, default=0.25)
+    parser.add_argument("--sample-interval", type=float)
+    parser.add_argument("--perf-binary", type=Path)
+    parser.add_argument("--perf-event", choices=("cpu-clock:uk", "cpu-clock:u"))
     parser.add_argument("--viewport", nargs=2, type=int, default=[890, 617])
     parser.add_argument("--renderer")
     parser.add_argument("--allow-software", action="store_true")
@@ -89,6 +93,8 @@ def main():
     parser.add_argument("--force-full-composition", action="store_true")
     parser.add_argument("--force-full-present", action="store_true")
     args = parser.parse_args()
+    if args.sample_interval is None:
+        args.sample_interval = 2 if args.phase == "profile" else 0.25
     if (
         not all(math.isfinite(v) for v in (args.duration, args.warmup))
         or not 0.1 <= args.duration <= 600
@@ -97,8 +103,15 @@ def main():
         parser.error("Duration must be 0.1–600 seconds and warmup 0–120 seconds")
     if not math.isfinite(args.sample_interval) or not 0.25 <= args.sample_interval <= 2:
         parser.error("Sample interval must be 0.25–2 seconds")
-    if args.phase != "timing" and args.sample_interval != 0.25:
-        parser.error("Custom sample intervals require the timing phase")
+    if args.phase not in ("timing", "profile") and args.sample_interval != 0.25:
+        parser.error("Custom sample intervals require timing or profile phase")
+    if args.phase == "profile":
+        if not args.perf_binary or args.gpu_process != "true":
+            parser.error("Profiles require --perf-binary and the GPU process")
+        if args.sample_interval != 2:
+            parser.error("Profiles require a two-second process sampling interval")
+    elif args.perf_binary or args.perf_event:
+        parser.error("Perf options require the profile phase")
     if args.viewport[0] < 800 or args.viewport[1] < 600:
         parser.error("Viewport must be at least 800 by 600 pixels")
     if args.phase == "smoke" and args.duration > 5:
@@ -107,17 +120,17 @@ def main():
         not os.environ.get("DISPLAY") or args.software_presentation
     ):
         parser.error("Native runs require DISPLAY and native presentation")
-    if args.phase in ("timing", "memory") and (
+    if args.phase in ("timing", "memory", "profile") and (
         args.validation_layers
         or args.loader_directory
         or args.allow_software
         or args.display != "native"
     ):
         parser.error(
-            "Timing/memory require native hardware with the system loader and no validation"
+            "Timing/memory/profile require native hardware with the system loader and no validation"
         )
-    if args.phase in ("timing", "memory") and not args.renderer:
-        parser.error("Timing/memory require an expected renderer identity")
+    if args.phase in ("timing", "memory", "profile") and not args.renderer:
+        parser.error("Timing/memory/profile require an expected renderer identity")
     if args.backend == "gl" and (
         args.force_full_composition or args.force_full_present
     ):
@@ -145,7 +158,9 @@ def main():
         finally:
             stop(process, grace=30)
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(
+        parents=True, exist_ok=False, mode=0o700 if args.phase == "profile" else 0o777
+    )
     binary = args.binary.resolve(strict=True)
     env = os.environ.copy()
     for key in list(env):
@@ -182,12 +197,28 @@ def main():
         "phase": args.phase,
         "workload": args.workload,
         "collectorTelemetry": True,
-        "timingSampling": args.phase == "timing",
-        "treeSampling": args.phase == "timing",
-        "startupSettling": args.phase in ("timing", "memory"),
+        "timingSampling": args.phase in ("timing", "profile"),
+        "treeSampling": args.phase in ("timing", "profile"),
+        "startupSettling": args.phase in ("timing", "memory", "profile"),
     }
     if args.phase != "diagnostic":
         expected["sampleIntervalSeconds"] = args.sample_interval
+    if args.phase == "profile":
+        perf = args.perf_binary.resolve(strict=True)
+        if not os.access(perf, os.X_OK):
+            parser.error("Perf binary must be executable")
+        expected["perf"] = {
+            "binary": str(perf),
+            "sha256": sha256(perf),
+            "event": args.perf_event or "cpu-clock:uk",
+            "version": subprocess.run(
+                [str(perf), "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip(),
+        }
     config = {
         "expected": expected,
         "duration": args.duration,
@@ -262,6 +293,7 @@ def main():
         Path(__file__).with_name("renderer_benchmark.html"),
         Path(__file__).with_name("renderer_benchmark_metrics.py"),
         Path(__file__).with_name("renderer_benchmark_startup.py"),
+        Path(__file__).with_name("renderer_benchmark_perf.py"),
         binary,
         libxul,
     ]
@@ -288,6 +320,13 @@ def main():
         "prefs": prefs,
         "status": "starting",
     }
+    if args.phase == "profile":
+        manifest["profilingEnvironment"] = {
+            "perfEventParanoid": Path("/proc/sys/kernel/perf_event_paranoid")
+            .read_text()
+            .strip(),
+            "kptrRestrict": Path("/proc/sys/kernel/kptr_restrict").read_text().strip(),
+        }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     status = 1
     with (output / "driver.log").open("w") as log, (output / "window-manager.log").open(
