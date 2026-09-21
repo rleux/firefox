@@ -251,6 +251,20 @@ pub(super) fn bytes_per_pixel(format: wgt::TextureFormat) -> usize {
     }
 }
 
+#[inline]
+fn convert_rgba_pixels<const SWIZZLE: bool, const OPAQUE: bool>(source: &[u8], target: &mut [u8]) {
+    assert_eq!(source.len(), target.len());
+    assert_eq!(source.len() % 4, 0);
+    for (source, target) in source.as_chunks::<4>().0.iter().zip(target.as_chunks_mut::<4>().0) {
+        let mut pixel = u32::from_le_bytes(*source);
+        if SWIZZLE {
+            pixel = (pixel & 0xff00_ff00) | (pixel.rotate_left(16) & 0x00ff_00ff);
+        }
+        if OPAQUE { pixel |= 0xff00_0000; }
+        *target = pixel.to_le_bytes();
+    }
+}
+
 impl<A: hal::Api> Texture<A> {
     pub fn new(
         owner: &Rc<Device<A>>,
@@ -764,16 +778,11 @@ impl<A: hal::Api> Texture<A> {
                     + (rect.min.x - destination.min.x) as usize * bpp;
                 let dst = &mut packed[start..start + row_bytes];
                 let source = &data[src..src + row_bytes];
-                if swizzle || force_alpha {
-                    let (red, blue) = if swizzle { (2, 0) } else { (0, 2) };
-                    for (source, pixel) in source.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-                        pixel.copy_from_slice(&[
-                            source[red], source[1], source[blue],
-                            if force_alpha { 255 } else { source[3] },
-                        ]);
-                    }
-                } else {
-                    dst.copy_from_slice(source);
+                match (swizzle, force_alpha) {
+                    (false, false) => dst.copy_from_slice(source),
+                    (false, true) => convert_rgba_pixels::<false, true>(source, dst),
+                    (true, false) => convert_rgba_pixels::<true, false>(source, dst),
+                    (true, true) => convert_rgba_pixels::<true, true>(source, dst),
                 }
             }
             Ok(())
@@ -866,6 +875,33 @@ impl<A: hal::Api> Texture<A> {
 #[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_conversion_preserves_unaligned_pixel_bytes() {
+        for length in [0, 4, 16, 52, 508, 4096] {
+            for offset in 0..4 {
+                let source: Vec<u8> = (0..length + offset).map(|index| (index % 251) as u8).collect();
+                let source = &source[offset..];
+                for (swizzle, opaque) in [(false, true), (true, false), (true, true)] {
+                    let mut expected = source.to_vec();
+                    for pixel in expected.chunks_exact_mut(4) {
+                        if swizzle { pixel.swap(0, 2); }
+                        if opaque { pixel[3] = 255; }
+                    }
+                    let mut target = vec![0xa5; length + offset + 7];
+                    let pixels = &mut target[offset..offset + length];
+                    match (swizzle, opaque) {
+                        (false, true) => convert_rgba_pixels::<false, true>(source, pixels),
+                        (true, false) => convert_rgba_pixels::<true, false>(source, pixels),
+                        (true, true) => convert_rgba_pixels::<true, true>(source, pixels),
+                        _ => unreachable!(),
+                    }
+                    assert_eq!(&target[offset..offset + length], expected);
+                    assert!(target[..offset].iter().chain(&target[offset + length..]).all(|byte| *byte == 0xa5));
+                }
+            }
+        }
+    }
 
     #[test]
     #[ignore = "Requires Vulkan"]
