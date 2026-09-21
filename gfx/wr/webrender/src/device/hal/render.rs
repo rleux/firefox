@@ -1418,6 +1418,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok(metadata)
     }
 
+    #[cfg(test)]
     fn key(
         &self,
         shader: Shader,
