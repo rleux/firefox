@@ -694,19 +694,28 @@ impl<A: hal::Api> Texture<A> {
         {
             return Err("HAL upload exceeds buffer limits".into());
         }
-        let mut packed = vec![0; packed_size];
-        for y in 0..rect.height() as usize {
-            let src = offset as usize + y * source_stride;
-            let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
-                + (rect.min.x - destination.min.x) as usize * bpp;
-            let dst = &mut packed[start..start + row_bytes];
-            dst.copy_from_slice(&data[src..src + row_bytes]);
-            if swizzle {
-                for pixel in dst.chunks_exact_mut(4) {
-                    pixel.swap(0, 2);
+        let packed = if !swizzle
+            && destination == rect
+            && source_stride == row_bytes
+            && pitch == row_bytes
+        {
+            std::borrow::Cow::Borrowed(&data[offset as usize..end])
+        } else {
+            let mut packed = vec![0; packed_size];
+            for y in 0..rect.height() as usize {
+                let src = offset as usize + y * source_stride;
+                let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
+                    + (rect.min.x - destination.min.x) as usize * bpp;
+                let dst = &mut packed[start..start + row_bytes];
+                dst.copy_from_slice(&data[src..src + row_bytes]);
+                if swizzle {
+                    for pixel in dst.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                    }
                 }
             }
-        }
+            std::borrow::Cow::Owned(packed)
+        };
         let staging = queue.upload(&packed, wgt::BufferUses::COPY_SRC)?;
         let mut commands = queue.recording()?;
         staging.transition(&mut commands, wgt::BufferUses::COPY_SRC);
@@ -749,6 +758,79 @@ impl<A: hal::Api> Texture<A> {
 #[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn contiguous_uploads_preserve_offsets_and_conversion() {
+        let owner = Rc::new(
+            create_vulkan_device(&Options {
+                validation: true,
+                ..Options::default()
+            })
+            .unwrap(),
+        );
+        let width = (owner.capabilities.alignments.buffer_copy_pitch.get() / 4).max(2);
+        let row = width as usize * 4;
+        for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
+            for padding in [0, 4] {
+                let queue = SubmissionQueue::new(&owner, 3, false);
+                let texture = Texture::new(
+                    &owner,
+                    width,
+                    2,
+                    wgt::TextureFormat::Rgba8Unorm,
+                    crate::device::TextureFilter::Nearest,
+                    false,
+                )
+                .unwrap();
+                let stride = row + padding;
+                let mut source = vec![0xa5; 7 + stride + row];
+                let color = if format == ImageFormat::RGBA8 {
+                    [23, 47, 89, 255]
+                } else {
+                    [89, 47, 23, 255]
+                };
+                for y in 0..2 {
+                    for pixel in source[7 + y * stride..7 + y * stride + row].chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&color);
+                    }
+                }
+                texture
+                    .upload_recorded(
+                        &owner,
+                        &queue,
+                        DeviceIntRect::from_size(api::units::DeviceIntSize::new(width as i32, 2)),
+                        &source,
+                        Some(stride as i32),
+                        7,
+                        Some(format),
+                    )
+                    .unwrap();
+                let layout = owner.layout(width, 2).unwrap();
+                let readback = Buffer::readback(&owner, &layout).unwrap();
+                let mut commands = queue.recording().unwrap();
+                commands.keep(readback.clone());
+                texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+                unsafe {
+                    copy_readback::<wgpu_hal::api::Vulkan>(
+                        commands.encoder(),
+                        &texture.raw,
+                        &readback.raw,
+                        &layout,
+                        texture.size,
+                        hal::FormatAspects::COLOR,
+                    );
+                }
+                readback.transition(&mut commands, wgt::BufferUses::MAP_READ);
+                drop(commands);
+                queue.wait().unwrap();
+                assert_eq!(
+                    owner.map_readback(&readback.raw, &layout).unwrap(),
+                    [23, 47, 89, 255].repeat(width as usize * 2)
+                );
+            }
+        }
+    }
 
     #[test]
     #[ignore = "Requires Vulkan"]
