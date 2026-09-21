@@ -161,15 +161,18 @@ impl<A: hal::Api> Submission<A> {
         Ok(())
     }
 
-    fn poll(&mut self) -> Result<bool> {
-        self.complete = unsafe {
+    fn fence_value(&self) -> Result<u64> {
+        unsafe {
             self.owner
                 .open
                 .device
                 .get_fence_value(&self.fence)
-                .map_err(|e| format!("Polling WR submission: {e:?}"))?
-                >= self.serial
-        };
+                .map_err(|e| format!("Polling WR submission: {e:?}"))
+        }
+    }
+
+    fn poll(&mut self, completed: u64) -> Result<bool> {
+        self.complete = completed >= self.serial;
         if self.complete {
             if let Some(check) = &self.completion_check {
                 self.complete = check(false).map_err(|error| { self.owner.lost.set(true); error })?;
@@ -288,11 +291,14 @@ impl<A: hal::Api> SubmissionQueue<A> {
     pub fn submitted(&self) -> u64 { self.state.borrow().submitted }
 
     fn retire(state: &mut QueueState<A>, wait: bool, timeout: Option<std::time::Duration>) -> Result<()> {
+        let completed = if wait { None } else {
+            state.pending.front().map(Submission::fence_value).transpose()?
+        };
         while let Some(front) = state.pending.front_mut() {
             if wait {
                 front.wait(timeout)?;
                 state.waits += 1;
-            } else if !front.poll()? {
+            } else if !front.poll(completed.unwrap())? {
                 break;
             }
             state.completed = front.serial;
@@ -313,6 +319,16 @@ impl<A: hal::Api> SubmissionQueue<A> {
     ) -> Result<Rc<super::resources::Buffer<A>>> {
         Self::retire(&mut self.state.borrow_mut(), false, self.wait_timeout)?;
         self.uploads.upload(bytes, usage)
+    }
+
+    pub fn upload_recording(
+        &self,
+        bytes: &[u8],
+        usage: wgt::BufferUses,
+    ) -> Result<(RefMut<'_, Submission<A>>, Rc<super::resources::Buffer<A>>)> {
+        let recording = self.recording()?;
+        let buffer = self.uploads.upload(bytes, usage)?;
+        Ok((recording, buffer))
     }
 
     pub fn has_pending_work(&self) -> bool { !self.state.borrow().pending.is_empty() }
@@ -557,7 +573,9 @@ mod tests {
         queue.recording().unwrap().keep(retained);
         queue.submit().unwrap();
         assert_eq!(queue.state.borrow().pending.len(), 2);
-        queue.recording().unwrap();
+        let (recording, upload) = queue.upload_recording(&[0; 16], wgt::BufferUses::VERTEX).unwrap();
+        drop(recording);
+        drop(upload);
         assert!(weak.upgrade().is_none());
         assert!(second.upgrade().is_some());
         assert_eq!(queue.state.borrow().waits, 1);
@@ -574,5 +592,30 @@ mod tests {
         queue.shutdown();
         assert!(abandoned.upgrade().is_none());
         assert_eq!(queue.state.borrow().completed, 3);
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn retirement_preserves_native_completion_prefix() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        queue.defer_poll.set(true);
+        let releases = Rc::new(RefCell::new(Vec::new()));
+        for serial in 1..=3 {
+            let notices = releases.clone();
+            queue.recording().unwrap().on_complete(move || notices.borrow_mut().push(serial));
+            queue.submit().unwrap();
+        }
+        let ready = Rc::new(std::cell::Cell::new(false));
+        let check = ready.clone();
+        queue.state.borrow_mut().pending[1].completion_check = Some(Box::new(move |_| Ok(check.get())));
+        unsafe { owner.open.queue.wait_for_idle() }.unwrap();
+        assert_eq!(queue.poll().unwrap(), 1);
+        assert_eq!(*releases.borrow(), [1]);
+        assert_eq!(queue.state.borrow().pending.len(), 2);
+        ready.set(true);
+        assert_eq!(queue.poll().unwrap(), 3);
+        assert_eq!(*releases.borrow(), [1, 2, 3]);
+        assert!(queue.state.borrow().pending.is_empty());
     }
 }
