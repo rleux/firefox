@@ -6,7 +6,7 @@ use super::*;
 use super::submission::{Submission, SubmissionQueue};
 use std::cell::Cell;
 use std::rc::Rc;
-use api::{ImageFormat, units::DeviceIntRect};
+use api::{ImageFormat, units::{DeviceIntPoint, DeviceIntRect}};
 
 pub(super) struct Owned<A: hal::Api, T> {
     owner: Rc<Device<A>>,
@@ -773,8 +773,57 @@ impl<A: hal::Api> Texture<A> {
             }
             Ok(())
         })?;
-        staging.transition(&mut commands, wgt::BufferUses::COPY_SRC);
-        self.transition(&mut commands, wgt::TextureUses::COPY_DST);
+        self.copy_staging(&mut commands, &staging, destination, pitch);
+        Ok(())
+    }
+
+    pub fn upload_zero_padded(
+        self: &Rc<Self>,
+        owner: &Rc<Device<A>>,
+        queue: &SubmissionQueue<A>,
+        rect: DeviceIntRect,
+        data: &[u8],
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.raw.owner, owner)
+            || !matches!(self.format, wgt::TextureFormat::Rgba32Float | wgt::TextureFormat::Rgba32Sint)
+            || rect.min != DeviceIntPoint::zero() || rect.is_empty()
+            || rect.width() as u32 != self.size.width || rect.height() as u32 > self.size.height {
+            return Err("Invalid HAL data texture upload".into());
+        }
+        let row = (rect.width() as usize).checked_mul(16).ok_or("HAL upload row overflow")?;
+        let capacity = row.checked_mul(rect.height() as usize).ok_or("HAL upload size overflow")?;
+        if data.len() > capacity {
+            return Err("HAL data texture source exceeds upload".into());
+        }
+        let destination = if self.initialized() { rect } else {
+            DeviceIntRect::from_size(api::units::DeviceIntSize::new(self.size.width as i32, self.size.height as i32))
+        };
+        let alignment = owner.capabilities.alignments.buffer_copy_pitch.get() as usize;
+        let pitch = row.div_ceil(alignment).checked_mul(alignment).ok_or("HAL upload pitch overflow")?;
+        let size = pitch.checked_mul(destination.height() as usize).ok_or("HAL upload size overflow")?;
+        if size as u64 > owner.capabilities.limits.max_buffer_size || size > isize::MAX as usize {
+            return Err("HAL upload exceeds buffer limits".into());
+        }
+        let (mut commands, staging) = queue.upload_recording_with(size, wgt::BufferUses::COPY_SRC, |packed| {
+            packed.fill(0);
+            for (source, target) in data.chunks(row).zip(packed.chunks_mut(pitch)) {
+                target[..source.len()].copy_from_slice(source);
+            }
+            Ok(())
+        })?;
+        self.copy_staging(&mut commands, &staging, destination, pitch);
+        Ok(())
+    }
+
+    fn copy_staging(
+        self: &Rc<Self>,
+        commands: &mut super::submission::Submission<A>,
+        staging: &Rc<Buffer<A>>,
+        destination: DeviceIntRect,
+        pitch: usize,
+    ) {
+        staging.transition(commands, wgt::BufferUses::COPY_SRC);
+        self.transition(commands, wgt::TextureUses::COPY_DST);
         unsafe {
             commands.encoder().copy_buffer_to_texture(
                 &staging.raw,
@@ -804,9 +853,8 @@ impl<A: hal::Api> Texture<A> {
                 }),
             );
         }
-        self.transition(&mut commands, wgt::TextureUses::RESOURCE);
-        self.initialize(&mut commands);
-        Ok(())
+        self.transition(commands, wgt::TextureUses::RESOURCE);
+        self.initialize(commands);
     }
 }
 
