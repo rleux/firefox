@@ -44,6 +44,7 @@ mod shaders {
 
 #[cfg(any(feature = "capture", feature = "replay"))]
 mod capture;
+mod composite;
 mod present;
 mod present_history;
 
@@ -215,6 +216,7 @@ pub struct DrawStats {
     pub wr_draw_calls: usize,
     pub native_passes: usize,
     pub primitive_instances: usize,
+    /// Drawn RGB composite instances, including visible tile fragments.
     pub composite_tiles: usize,
     pub color_targets: usize,
     pub alpha_targets: usize,
@@ -2699,23 +2701,18 @@ impl<A: BackendApi> FrameRenderer<A> {
         self.count(RenderCounter::ComposedPixels, damage.width() as u64 * damage.height() as u64);
         let mut draws = vec![self.clear(damage, clear)];
         let mut layer_rects = Vec::new();
-        for tile in frame.composite_state.tiles.iter().rev() {
-            let state = &frame.composite_state;
+        let state = &frame.composite_state;
+        let optimize_composite = matches!(self.compositor, CompositorConfig::Draw);
+        for region in composite::regions(state, frame.device_rect, damage, optimize_composite) {
+            let tile = &state.tiles[region.tile_index];
             let rect = state.get_device_rect(&tile.local_rect, tile.transform_index);
-            let valid = state.get_device_rect(&tile.local_valid_rect, tile.transform_index);
-            let Some(clip_rect) = tile
-                .device_clip_rect
-                .intersection(&valid)
-                .and_then(|r| r.intersection(&frame.device_rect.to_f32()))
-            else {
-                continue;
-            };
-            if !clip_rect.round_out().to_i32().intersects(&damage) { continue; }
+            let clip_rect = region.rect;
             layer_rects.push(clip_rect.round_out().to_i32());
             let transform = state.get_device_transform(tile.transform_index);
             let flip = (transform.scale.x < 0.0, transform.scale.y < 0.0);
             let clip = tile
                 .clip_index
+                .filter(|_| region.needs_mask)
                 .map(|index| state.get_compositor_clip(index));
             let (instance, textures, shader) = match tile.surface {
                 CompositeTileSurface::Color { color } => (
@@ -2749,9 +2746,9 @@ impl<A: BackendApi> FrameRenderer<A> {
                     }
                 }
             };
-            draws.push(Draw {
+            let draw = Draw {
                 shader,
-                blend: 1,
+                blend: region.blend,
                 depth: 0,
                 count: 1,
                 instances: Instances::owned(bytes(&[instance])),
@@ -2761,7 +2758,12 @@ impl<A: BackendApi> FrameRenderer<A> {
                 count_in_stats: true,
                 readback: None,
                 scissor: damage,
-            });
+            };
+            if optimize_composite {
+                composite::push_draw(&mut draws, draw);
+            } else {
+                draws.push(draw);
+            }
         }
         if matches!(self.compositor, CompositorConfig::Layer { .. }) {
             let input_layers: Vec<_> = layer_rects.iter().map(|rect| crate::composite::CompositorInputLayer {
