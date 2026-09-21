@@ -763,12 +763,17 @@ impl<A: hal::Api> Texture<A> {
                 let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
                     + (rect.min.x - destination.min.x) as usize * bpp;
                 let dst = &mut packed[start..start + row_bytes];
-                dst.copy_from_slice(&data[src..src + row_bytes]);
+                let source = &data[src..src + row_bytes];
                 if swizzle || force_alpha {
-                    for pixel in dst.chunks_exact_mut(4) {
-                        if swizzle { pixel.swap(0, 2); }
-                        if force_alpha { pixel[3] = 255; }
+                    let (red, blue) = if swizzle { (2, 0) } else { (0, 2) };
+                    for (source, pixel) in source.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                        pixel.copy_from_slice(&[
+                            source[red], source[1], source[blue],
+                            if force_alpha { 255 } else { source[3] },
+                        ]);
                     }
+                } else {
+                    dst.copy_from_slice(source);
                 }
             }
             Ok(())
@@ -873,34 +878,39 @@ mod tests {
         }
         let mut descriptor = api::ImageDescriptor::new(2, 2, ImageFormat::BGRA8, api::ImageDescriptorFlags::empty());
         descriptor.stride = Some(12);
-        for (width, height, offset, color) in [(2, 2, 0, [23, 47, 89, 255]), (1, 1, 1, [255, 23, 47, 89])] {
-            let texture = Texture::new(&owner, 7, 5, wgt::TextureFormat::Rgba8Unorm,
-                crate::device::TextureFilter::Nearest, false).unwrap();
-            let rect = DeviceIntRect::from_origin_and_size(api::units::DeviceIntPoint::new(2, 1),
-                api::units::DeviceIntSize::new(width, height));
-            texture.upload_recorded_with_alpha(&owner, &queue, rect, &source, Some(12), offset,
-                Some(ImageFormat::BGRA8), Some(descriptor)).unwrap();
-            let layout = owner.layout(7, 5).unwrap();
-            let readback = Buffer::readback(&owner, &layout).unwrap();
-            let mut commands = queue.recording().unwrap();
-            commands.keep(readback.clone());
-            texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
-            unsafe {
-                copy_readback::<wgpu_hal::api::Vulkan>(commands.encoder(), &texture.raw,
-                    &readback.raw, &layout, texture.size, hal::FormatAspects::COLOR);
+        for (format, aligned, shifted) in [
+            (wgt::TextureFormat::Rgba8Unorm, [23, 47, 89, 255], [255, 23, 47, 89]),
+            (wgt::TextureFormat::Bgra8Unorm, [89, 47, 23, 255], [47, 23, 255, 89]),
+        ] {
+            for (width, height, offset, color) in [(2, 2, 0, aligned), (1, 1, 1, shifted)] {
+                let texture = Texture::new(&owner, 7, 5, format,
+                    crate::device::TextureFilter::Nearest, false).unwrap();
+                let rect = DeviceIntRect::from_origin_and_size(api::units::DeviceIntPoint::new(2, 1),
+                    api::units::DeviceIntSize::new(width, height));
+                texture.upload_recorded_with_alpha(&owner, &queue, rect, &source, Some(12), offset,
+                    Some(ImageFormat::BGRA8), Some(descriptor)).unwrap();
+                let layout = owner.layout(7, 5).unwrap();
+                let readback = Buffer::readback(&owner, &layout).unwrap();
+                let mut commands = queue.recording().unwrap();
+                commands.keep(readback.clone());
+                texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+                unsafe {
+                    copy_readback::<wgpu_hal::api::Vulkan>(commands.encoder(), &texture.raw,
+                        &readback.raw, &layout, texture.size, hal::FormatAspects::COLOR);
+                }
+                readback.transition(&mut commands, wgt::BufferUses::MAP_READ);
+                drop(commands);
+                queue.wait().unwrap();
+                let pixels = owner.map_readback(&readback.raw, &layout).unwrap();
+                for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                    let x = (index % 7) as i32;
+                    let y = (index / 7) as i32;
+                    assert_eq!(pixel, if x >= 2 && x < 2 + width && y >= 1 && y < 1 + height { &color } else { &[0; 4] });
+                }
+                assert_eq!(source[3], 11);
+                assert_eq!(source[15], 11);
+                assert_eq!(&source[8..12], &[0xa5; 4]);
             }
-            readback.transition(&mut commands, wgt::BufferUses::MAP_READ);
-            drop(commands);
-            queue.wait().unwrap();
-            let pixels = owner.map_readback(&readback.raw, &layout).unwrap();
-            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
-                let x = (index % 7) as i32;
-                let y = (index / 7) as i32;
-                assert_eq!(pixel, if x >= 2 && x < 2 + width && y >= 1 && y < 1 + height { &color } else { &[0; 4] });
-            }
-            assert_eq!(source[3], 11);
-            assert_eq!(source[15], 11);
-            assert_eq!(&source[8..12], &[0xa5; 4]);
         }
     }
 
@@ -958,9 +968,9 @@ mod tests {
                 let stride = row + padding;
                 let mut source = vec![0xa5; 7 + stride + row];
                 let color = if format == ImageFormat::RGBA8 {
-                    [23, 47, 89, 255]
+                    [23, 47, 89, 131]
                 } else {
-                    [89, 47, 23, 255]
+                    [89, 47, 23, 131]
                 };
                 for y in 0..2 {
                     for pixel in source[7 + y * stride..7 + y * stride + row].chunks_exact_mut(4) {
@@ -998,7 +1008,7 @@ mod tests {
                 queue.wait().unwrap();
                 assert_eq!(
                     owner.map_readback(&readback.raw, &layout).unwrap(),
-                    [23, 47, 89, 255].repeat(width as usize * 2)
+                    [23, 47, 89, 131].repeat(width as usize * 2)
                 );
             }
         }
