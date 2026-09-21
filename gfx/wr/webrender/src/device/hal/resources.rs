@@ -721,8 +721,7 @@ impl<A: hal::Api> Texture<A> {
             }
             std::borrow::Cow::Owned(packed)
         };
-        let staging = queue.upload(&packed, wgt::BufferUses::COPY_SRC)?;
-        let mut commands = queue.recording()?;
+        let (mut commands, staging) = queue.upload_recording(&packed, wgt::BufferUses::COPY_SRC)?;
         staging.transition(&mut commands, wgt::BufferUses::COPY_SRC);
         self.transition(&mut commands, wgt::TextureUses::COPY_DST);
         unsafe {
