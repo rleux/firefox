@@ -319,7 +319,6 @@ void RenderCompositorVulkan::PollPendingFrames() { PollCompletions(true); }
 bool RenderCompositorVulkan::WaitForGPU() { return PollCompletions(false); }
 
 RenderedFrameId RenderCompositorVulkan::GetLastCompletedFrameId() {
-  WaitForGPU();
   return RenderedFrameId{mCompletedFrame};
 }
 

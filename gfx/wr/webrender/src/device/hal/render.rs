@@ -676,16 +676,20 @@ impl<A: BackendApi> FrameRenderer<A> {
         result
     }
 
-    pub fn poll(&self) -> Result<()> {
+    pub fn poll(&self) -> Result<()> { self.poll_completed().map(|_| ()) }
+
+    pub fn poll_completed(&self) -> Result<u64> {
         self.count(RenderCounter::Polls, 1);
         if self.is_failed() {
             let _ = self.submissions.poll();
             dispatch_releases(&self.releases);
             return Err("HAL renderer requires recreation".into());
         }
-        let result = self.submissions.poll().and_then(|completed| self.queries.borrow_mut().poll(completed));
+        let result = self.submissions.poll().and_then(|completed| {
+            self.queries.borrow_mut().poll(completed).map(|_| completed)
+        });
         dispatch_releases(&self.releases);
-        let result = result.and_then(|_| self.external_device.poll());
+        let result = result.and_then(|completed| self.external_device.poll().map(|_| completed));
         if result.is_err() { self.failed.set(true); }
         if let Some(metrics) = &self.owner.metrics {
             let memory = self.owner.memory.get();
@@ -1720,6 +1724,8 @@ impl<A: BackendApi> FrameRenderer<A> {
             self.uniforms.insert(matrix_key, buffer.clone());
             buffer
         };
+        let submissions = self.submissions.clone();
+        let mut commands = submissions.recording()?;
         let mut resources = Vec::new();
         let mut sampled = Vec::new();
         for draw in draws {
@@ -1751,8 +1757,8 @@ impl<A: BackendApi> FrameRenderer<A> {
             );
             let pipeline = self.pipeline(key)?;
             let input = draw.instances.bytes();
-            let buffer = self.submissions.upload_with(
-                packed_instance_size(shader, input)?, wgt::BufferUses::VERTEX, |destination| {
+            let buffer = submissions.upload_in_recording(
+                &commands, packed_instance_size(shader, input)?, wgt::BufferUses::VERTEX, |destination| {
                     pack_instances(shader, input, destination);
                     Ok(())
                 },
@@ -1853,7 +1859,6 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         let initialized = target.initialized() && load_clear.is_none();
         let clear = load_clear.unwrap_or(ColorF::TRANSPARENT);
-        let mut commands = self.submissions.recording()?;
         commands.keep(uniform.clone());
         for (_, buffer, group) in &resources {
             commands.keep((buffer.clone(), group.clone()));

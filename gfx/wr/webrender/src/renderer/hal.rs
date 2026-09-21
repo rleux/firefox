@@ -38,6 +38,7 @@ macro_rules! renderer_facade {
             pub fn discard_surface(&mut self) -> Result<(), String> { self.core.discard_surface() }
             pub fn present(&mut self) -> Result<crate::device::hal::PresentationStatus, String> { self.core.present() }
             pub fn poll(&self) -> Result<(), String> { self.core.poll() }
+            pub fn poll_completed(&self) -> Result<FrameCompletion, String> { self.core.poll_completed() }
             pub fn enable_gpu_profiling(&self, enabled: bool) -> bool { self.core.enable_gpu_profiling(enabled) }
             pub fn take_gpu_timings(&self) -> Result<Vec<GpuTiming>, String> { self.core.take_gpu_timings() }
             pub fn take_cpu_timings(&mut self) -> Vec<CpuTiming> { self.core.take_cpu_timings() }
@@ -419,6 +420,9 @@ impl<A: BackendApi> RendererCore<A> {
     }
 
     pub fn poll(&self) -> Result<(), String> { self.gpu.poll() }
+    pub fn poll_completed(&self) -> Result<FrameCompletion, String> {
+        self.gpu.poll_completed().map(|serial| FrameCompletion { owner: self.backend_id, serial })
+    }
 
     pub fn enable_gpu_profiling(&self, enabled: bool) -> bool { self.gpu.enable_gpu_profiling(enabled) }
 
@@ -1710,6 +1714,7 @@ mod tests {
         ).unwrap();
         assert!(other.poll_readback(old_crop).is_err());
         assert!(other.poll_completion(completion).is_err());
+        assert!(completion.is_complete_at(other.poll_completed().unwrap()).is_err());
         drop(other);
         renderer.core.document.as_mut().unwrap().frame.device_rect = DeviceIntRect::from_origin_and_size(
             DeviceIntPoint::new(5, 7), DeviceIntSize::new(40, 40),
@@ -1722,6 +1727,7 @@ mod tests {
         }).collect();
         assert_eq!(renderer.wait_readback(old_crop).unwrap(), expected_crop);
         assert!(renderer.poll_completion(completion).unwrap());
+        assert!(completion.is_complete_at(renderer.poll_completed().unwrap()).unwrap());
         assert!(renderer.poll_readback(old_crop).is_err());
         renderer.cancel_readback(cancelled).unwrap();
         assert!(renderer.wait_readback(cancelled).is_err());

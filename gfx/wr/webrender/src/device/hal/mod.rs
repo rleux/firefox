@@ -65,6 +65,15 @@ pub struct FrameCompletion {
     pub(crate) serial: u64,
 }
 
+impl FrameCompletion {
+    pub fn is_complete_at(self, observed: Self) -> Result<bool> {
+        if self.owner != observed.owner {
+            return Err("HAL completion belongs to another renderer".into());
+        }
+        Ok(self.serial <= observed.serial)
+    }
+}
+
 pub use wgpu_types::Backend as NativeBackend;
 
 #[derive(Clone, Debug)]
