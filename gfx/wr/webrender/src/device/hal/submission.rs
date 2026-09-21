@@ -647,6 +647,35 @@ mod tests {
 
     #[test]
     #[ignore = "Requires Vulkan"]
+    fn repeated_transitions_keep_lifetimes_without_duplicate_commits() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        let buffer = super::super::resources::Buffer::new(&owner, &[0; 16], wgt::BufferUses::VERTEX).unwrap();
+        let texture = super::super::resources::Texture::new(&owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            crate::device::TextureFilter::Nearest, false).unwrap();
+        let mut commands = queue.recording().unwrap();
+        buffer.transition(&mut commands, wgt::BufferUses::VERTEX);
+        texture.transition(&mut commands, wgt::TextureUses::COPY_DST);
+        let commits = commands.commits.len();
+        let resources = commands.resources.len();
+        buffer.transition(&mut commands, wgt::BufferUses::VERTEX);
+        texture.transition(&mut commands, wgt::TextureUses::COPY_DST);
+        assert_eq!(commands.commits.len(), commits);
+        assert_eq!(commands.resources.len(), resources + 2);
+        assert_ne!(texture.committed_usage(), wgt::TextureUses::COPY_DST);
+        drop(commands);
+        queue.wait().unwrap();
+        assert_eq!(texture.committed_usage(), wgt::TextureUses::COPY_DST);
+        let mut commands = queue.recording().unwrap();
+        texture.transition(&mut commands, wgt::TextureUses::COPY_DST);
+        assert!(commands.commits.is_empty());
+        assert_eq!(commands.resources.len(), 1);
+        drop(commands);
+        queue.wait().unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
     fn recording_uploads_keep_distinct_live_buffers() {
         let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
         let queue = SubmissionQueue::new(&owner, 3, false);

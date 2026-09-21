@@ -1859,9 +1859,8 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         let initialized = target.initialized() && load_clear.is_none();
         let clear = load_clear.unwrap_or(ColorF::TRANSPARENT);
-        commands.keep(uniform.clone());
-        for (_, buffer, group) in &resources {
-            commands.keep((buffer.clone(), group.clone()));
+        for (_, _, group) in &resources {
+            commands.keep(group.clone());
         }
         for (texture, binding, shader, count) in sampled {
             if !texture.sample_initialized() {
@@ -1955,21 +1954,32 @@ impl<A: BackendApi> FrameRenderer<A> {
                 0.0..1.0,
             );
             commands.encoder().set_vertex_buffer(0, self.quad.binding());
+            let mut last_scissor = None;
+            let mut last_pipeline: Option<&Rc<Pipeline<A>>> = None;
+            let mut last_group: Option<&Rc<Descriptor<A>>> = None;
             for (draw, (pipeline, buffer, group)) in draws.iter().zip(&resources) {
                 let full = full_rect;
                 let Some(rect) = draw.scissor.intersection(&full) else {
                     continue;
                 };
-                commands.encoder().set_scissor_rect(&hal::Rect {
-                    x: (rect.min.x - origin.x) as u32,
-                    y: (rect.min.y - origin.y) as u32,
-                    w: rect.width() as u32,
-                    h: rect.height() as u32,
-                });
-                commands.encoder().set_render_pipeline(&pipeline.raw);
-                commands
-                    .encoder()
-                    .set_bind_group(&pipeline.layout, 0, &group.raw, &[]);
+                if last_scissor != Some(rect) {
+                    commands.encoder().set_scissor_rect(&hal::Rect {
+                        x: (rect.min.x - origin.x) as u32,
+                        y: (rect.min.y - origin.y) as u32,
+                        w: rect.width() as u32,
+                        h: rect.height() as u32,
+                    });
+                    last_scissor = Some(rect);
+                }
+                let pipeline_changed = last_pipeline.map_or(true, |last| !Rc::ptr_eq(last, pipeline));
+                if pipeline_changed {
+                    commands.encoder().set_render_pipeline(&pipeline.raw);
+                    last_pipeline = Some(pipeline);
+                }
+                if pipeline_changed || last_group.map_or(true, |last| !Rc::ptr_eq(last, group)) {
+                    commands.encoder().set_bind_group(&pipeline.layout, 0, &group.raw, &[]);
+                    last_group = Some(group);
+                }
                 commands.encoder().set_vertex_buffer(1, buffer.binding());
                 commands.encoder().draw(0, 4, 0, draw.count);
                 stats.draw_calls += 1;
