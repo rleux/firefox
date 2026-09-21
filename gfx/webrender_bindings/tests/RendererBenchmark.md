@@ -323,40 +323,97 @@ comparisons ran:
 | 6 | `dd0723320e5` | Apply WebRender tile occlusion and opaque handling; batch compatible instances. |
 | 7 | `94e206c9d0e` | Group nonaliasing blits and skip empty passes while preserving target usage. |
 
-The validated runtime includes test alias correction `8fde78129f1` and test-only
-helper cleanup `ff124f5264c`. Submission boundaries, external-image lifetime and
-producer-return completion, texture initialization, and retained-damage guards
-remain intact. Native and Layer compositors retain their previous composition
-behavior. CPU-buffer images still require GPU uploads; this series does not make
-that path zero-copy.
+The final runtime includes test alias correction `8fde78129f1`, test-only
+helper cleanup `ff124f5264c`, and conversion correction `21cb9ad95df`.
+Submission boundaries, external-image lifetime and producer-return completion,
+texture initialization, and retained-damage guards remain intact. Native and
+Layer compositors retain their previous composition behavior. CPU-buffer images
+still require GPU uploads; this series does not make that path zero-copy.
 
-Combined validation passed 178 ordinary WebRender tests, six ordinary bridge
-tests, and 54 focused GPU tests on each of Lavapipe and Intel with Vulkan
-validation. The GPU checks cover resources, submissions, rendering, composition,
-blits, renderer lifecycle, hidden work, output reuse, and partial damage.
-Additional native checks passed six Vulkan DMA-BUF tests, asynchronous WebGL
-completion and bounded ownership on both AR24 and AB24, and three real VA-API
-NV12/P010 sampling and release cases. Scoped lint, the Linux `hal-metal` feature
-check, Firefox binaries, and Canvas/CSS/dirty/filter Xvfb software-Vulkan pixel
-checks passed. Native Metal validation still requires macOS.
+The first measured candidate exposed a performance regression despite passing
+pixel and lifetime tests: all four Canvas pairs increased GPU-process CPU, with
+a median increase of 110.20%. CSS stayed mixed near zero. A valid user-space
+Linux perf capture attributed 48.67% of samples to the memory-copy routine and
+additional samples to upload/slice/iterator helpers. The scalar conversion used
+a four-byte slice copy for each pixel. `21cb9ad95df` replaces it with typed byte
+arrays and fixed word operations, retaining a fused pass without per-pixel slice
+copies. A Rust probe verified exact bytes, unaligned inputs and vectorized loops;
+its heap-memory timings were not treated as GPU-mapped-memory evidence. A fresh
+balanced browser pilot then showed GPU CPU reductions of 7.29% and 8.05%.
+
+Initial combined validation passed 178 ordinary WebRender tests, six ordinary
+bridge tests, and 54 focused GPU tests on each of Lavapipe and Intel with Vulkan
+validation. The GPU checks covered resources, submissions, rendering,
+composition, blits, renderer lifecycle, hidden work, output reuse, and partial
+damage. Additional native checks passed six Vulkan DMA-BUF tests, asynchronous
+WebGL completion and bounded ownership on both AR24 and AB24, and three real
+VA-API NV12/P010 sampling and release cases. After the conversion correction,
+validation passed 179 ordinary WebRender tests, six bridge tests and eight
+focused resource/buffer tests on each driver. Scoped lint, the Linux `hal-metal`
+feature check, Firefox binaries, and Canvas/CSS/dirty/filter Xvfb software-Vulkan
+pixel checks passed again. Native Metal validation still requires macOS.
 
 The system Mesa EGL library was renamed aside. The WebGL producer fixtures used
 an isolated, package-matching workspace copy selected by a fixture-only GLVND
 vendor file. Host libraries and browser/benchmark environments were unchanged.
-An initial test compile error, two zero-test filter attempts per driver, and the
-initial EGL fixture failure remain preserved as rejected attempts.
+Initial test-compilation, zero-test-filter and EGL fixture failures remain
+preserved as rejected attempts. The kernel-inclusive perf request was rejected
+by the event-attribute check under host policy; the explicit user-space fallback
+capture passed, without changing host settings.
 
-The final snapshot is built from `ff124f5264c`; its libxul SHA-256 is
-`40aa4be880abd17b1ce12675f8dbf4ff7481d2cfc72238e7af1d144e62dddede`.
-Validation logs, snapshot/source pins, and the prepared comparison plan are under
+The corrected snapshot is built from `21cb9ad95df`; its libxul SHA-256 is
+`fd9503db18ee924d4f8fab635bfba92b7caacd5fe0ebdb45edd8cff4d3aebbf5`.
+It was compared with the accepted final snapshot of the four upload changes
+below, using fresh cases throughout. None of the regressed candidate's timing
+samples enter these results. The immutable full plan is
+`66d3dc2167fdba951e508a49a592434cd0f6e4485d8cade2baf49ae20e417179`.
+
+All sixteen native Intel/X11 timing cases passed without retries: four balanced
+Vulkan Canvas pairs, two CSS pairs and two same-final-binary GL/Vulkan pairs.
+They retained startup settling, ten-second warmup, sixty-second workload and
+two-second sampling. Negative changes below mean lower CPU use; each percentage
+is computed within a pair before taking the median.
+
+| Canvas pair | GPU total CPU change | GPU user | GPU system | Whole Firefox |
+| --- | ---: | ---: | ---: | ---: |
+| 1 AB | -6.46% | -9.66% | +4.86% | -5.72% |
+| 2 BA | -8.91% | -12.43% | +4.03% | -7.16% |
+| 3 AB | -13.15% | -15.32% | -5.53% | -10.45% |
+| 4 BA | -8.06% | -10.47% | +0.59% | -6.12% |
+| Median paired change | -8.48% | -11.45% | +2.31% | -6.64% |
+
+GPU total and whole-Firefox CPU decreased in all four pairs. System CPU did not
+consistently improve. Median callback cadence remained about 16.666 ms, with
+p99 around 17.20–17.22 ms. One corrected arm had a mean of 16.731 ms and an update
+rate 0.39% below its paired baseline; the paired median update-rate change was
+-0.01%. Callback cadence is not scanout latency or isolated GPU execution time.
+CSS GPU CPU changes were -3.58% and +0.44%, which do not establish a consistent
+GPU CPU improvement; whole-Firefox changes were -1.15% and -0.46%.
+
+The separate same-final-binary comparison still favors OpenGL:
+
+| Pair | Vulkan GPU CPU excess over GL | Vulkan whole-Firefox CPU excess over GL |
+| --- | ---: | ---: |
+| 1 GL/Vulkan | +28.21% | +18.93% |
+| 2 Vulkan/GL | +29.25% | +18.94% |
+| Median paired excess | +28.73% | +18.94% |
+
+These API comparisons are distinct from the Vulkan before/after reductions.
+They are local results for this hardware and workload, not a general API ranking
+or a causal comparison with older GL reference runs.
+
+The exploratory memory pair ran last. Its baseline passed, but the final case
+failed strict FD-info coverage: one of 191 snapshots observed 43 GPU-process
+file descriptors and read 42 FD-info records. The series stopped at that failure
+as designed, with no timeout or surviving child processes. The rejected final
+arm and unmatched memory baseline are excluded from comparison; no memory
+improvement or leak conclusion is claimed, and the coverage gate was not relaxed.
+All sixteen earlier timing cases remain valid.
+
+Corrected validation, pilot/full raw data, pins and analysis are under
+`artifacts/stage9/842be2fc039/conversion-fix/`. The initial regressed series,
+profiling evidence and Rust conversion probe are retained separately under
 `artifacts/stage9/842be2fc039/seven-perf-steps/`.
-
-The native comparison has not run yet. The prepared 18-arm protocol uses four
-balanced baseline/final Vulkan Canvas pairs, two CSS pairs, one exploratory
-memory pair, and two balanced same-final-binary GL/Vulkan pairs. Its baseline is
-the accepted final snapshot from the four upload optimizations below. No
-performance improvement is claimed for this seven-change series before those
-measurements complete.
 
 ## Combined upload optimization comparison
 
