@@ -73,10 +73,10 @@ struct PendingVulkanFrame {
 #[cfg(target_os = "linux")]
 impl VulkanRenderer {
     fn poll_frames(&mut self) -> Result<(), String> {
-        self.renderer.poll()?;
+        let completed = self.renderer.poll_completed()?;
         let device = self.renderer.external_image_device();
         while let Some(frame) = self.frames.front_mut() {
-            if frame.returned.is_none() && self.renderer.poll_completion(frame.draw)? {
+            if frame.returned.is_none() && frame.draw.is_complete_at(completed)? {
                 frame.returned = Some(device.submitted());
             }
             if !frame

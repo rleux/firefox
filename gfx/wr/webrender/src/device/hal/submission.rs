@@ -321,13 +321,16 @@ impl<A: hal::Api> SubmissionQueue<A> {
         self.uploads.upload(bytes, usage)
     }
 
-    pub fn upload_with(
+    pub fn upload_in_recording(
         &self,
+        recording: &Submission<A>,
         length: usize,
         usage: wgt::BufferUses,
         write: impl FnOnce(&mut [u8]) -> Result<()>,
     ) -> Result<Rc<super::resources::Buffer<A>>> {
-        Self::retire(&mut self.state.borrow_mut(), false, self.wait_timeout)?;
+        if !Rc::ptr_eq(&recording.owner, &self.owner) || !recording.recording {
+            return Err("HAL upload requires a recording on the same device".into());
+        }
         self.uploads.upload_with(length, usage, write)
     }
 
@@ -640,6 +643,29 @@ mod tests {
         assert_eq!(queue.poll().unwrap(), 3);
         assert_eq!(*releases.borrow(), [1, 2, 3]);
         assert!(queue.state.borrow().pending.is_empty());
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn recording_uploads_keep_distinct_live_buffers() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        let mut commands = queue.recording().unwrap();
+        let first = queue.upload_in_recording(&commands, 16, wgt::BufferUses::VERTEX, |bytes| {
+            bytes.fill(17);
+            Ok(())
+        }).unwrap();
+        let second = queue.upload_in_recording(&commands, 16, wgt::BufferUses::VERTEX, |bytes| {
+            bytes.fill(23);
+            Ok(())
+        }).unwrap();
+        assert_ne!(first.allocation_id, second.allocation_id);
+        first.transition(&mut commands, wgt::BufferUses::VERTEX);
+        second.transition(&mut commands, wgt::BufferUses::VERTEX);
+        drop(commands);
+        assert_eq!(queue.submitted(), 0);
+        queue.wait().unwrap();
+        assert_eq!(queue.submitted(), 1);
     }
 
     #[test]
