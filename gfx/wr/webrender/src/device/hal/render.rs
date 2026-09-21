@@ -1038,19 +1038,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         filter: TextureFilter,
         stats: &mut DrawStats,
     ) -> Result<()> {
-        if !src.initialized() {
-            return Err("Sampling uninitialized HAL blit source".into());
-        }
-        for format in [src.format, dst.format] {
-            if !matches!(
-                format,
-                wgt::TextureFormat::Rgba8Unorm
-                    | wgt::TextureFormat::Bgra8Unorm
-                    | wgt::TextureFormat::R8Unorm
-            ) {
-                return Err(format!("Unsupported HAL blit conversion for {format:?}"));
-            }
-        }
+        let Some(draw) = self.blit_draw(src, dst, src_rect, dst_rect, filter)? else {
+            return Ok(());
+        };
         if src.overlaps(dst) {
             let scratch =
                 self.texture_pool
@@ -1066,10 +1056,56 @@ impl<A: BackendApi> FrameRenderer<A> {
             self.copy_native(src, &scratch, full, full)?;
             return self.record_blit(&scratch, dst, src_rect, dst_rect, filter, stats);
         }
+        self.draw_pass(dst, &[draw], &HashMap::new(), stats)
+    }
+
+    fn queue_blit<'a>(
+        &mut self,
+        src: &Rc<Texture<A>>,
+        dst: &Rc<Texture<A>>,
+        src_rect: DeviceIntRect,
+        dst_rect: DeviceIntRect,
+        filter: TextureFilter,
+        draws: &mut Vec<Draw<'a, A>>,
+        stats: &mut DrawStats,
+    ) -> Result<()> {
+        if src.overlaps(dst) {
+            self.draw_pass(dst, draws, &HashMap::new(), stats)?;
+            draws.clear();
+            self.record_blit(src, dst, src_rect, dst_rect, filter, stats)
+        } else {
+            if let Some(draw) = self.blit_draw(src, dst, src_rect, dst_rect, filter)? {
+                draws.push(draw);
+            }
+            Ok(())
+        }
+    }
+
+    fn blit_draw(
+        &self,
+        src: &Rc<Texture<A>>,
+        dst: &Rc<Texture<A>>,
+        src_rect: DeviceIntRect,
+        dst_rect: DeviceIntRect,
+        filter: TextureFilter,
+    ) -> Result<Option<Draw<'static, A>>> {
+        if !src.initialized() {
+            return Err("Sampling uninitialized HAL blit source".into());
+        }
+        for format in [src.format, dst.format] {
+            if !matches!(
+                format,
+                wgt::TextureFormat::Rgba8Unorm
+                    | wgt::TextureFormat::Bgra8Unorm
+                    | wgt::TextureFormat::R8Unorm
+            ) {
+                return Err(format!("Unsupported HAL blit conversion for {format:?}"));
+            }
+        }
         let mut source_rect = src_rect.to_f32();
         let mut target_rect = dst_rect.to_f32();
         if source_rect.is_empty() || target_rect.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let clip = |s0: f32, s1: f32, d0: f32, d1: f32, sw: f32, dw: f32| {
             let lo = 0.0f32.max(-s0 / (s1 - s0)).max(-d0 / (d1 - d0));
@@ -1108,7 +1144,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             dst.size.height as f32,
         );
         if source_rect.is_empty() || target_rect.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let instance = ScalingInstance::new(target_rect, source_rect, false);
 
@@ -1125,7 +1161,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             readback: None,
             scissor: dst_rect,
         };
-        self.draw_pass(dst, &[draw], &HashMap::new(), stats)
+        Ok(Some(draw))
     }
 
     fn generate_mips(&mut self, texture: &Rc<Texture<A>>) -> Result<()> {
@@ -1659,6 +1695,11 @@ impl<A: BackendApi> FrameRenderer<A> {
         stats: &mut DrawStats,
         origin: DeviceIntPoint,
     ) -> Result<()> {
+        if draws.is_empty() && target.initialized() {
+            let mut commands = self.submissions.recording()?;
+            target.transition(&mut commands, wgt::TextureUses::RESOURCE);
+            return Ok(());
+        }
         let size = target.size;
         let full_rect = DeviceIntRect::from_origin_and_size(
             origin,
@@ -2274,7 +2315,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             ));
             draws.push(self.task_draw(Shader::Clear, 0, &clears, &BatchTextures::empty(), full)?);
         }
-        if !target.resolve_ops.is_empty() {
+        if !target.resolve_ops.is_empty() || !target.blits.is_empty() {
             self.draw_pass(&texture, &draws, data, stats)?;
             draws.clear();
             for resolve in &target.resolve_ops {
@@ -2289,36 +2330,36 @@ impl<A: BackendApi> FrameRenderer<A> {
                         )
                     {
                         let source = self.source(source_task.get_texture_source())?;
-                        self.record_blit(
+                        self.queue_blit(
                             &source,
                             &texture,
                             source_rect,
                             destination_rect,
                             TextureFilter::Linear,
+                            &mut draws,
                             stats,
                         )?;
                     }
                 }
             }
-        }
-        if !target.blits.is_empty() {
-            self.draw_pass(&texture, &draws, data, stats)?;
-            draws.clear();
             for blit in &target.blits {
                 let task = &tasks[blit.source];
                 let source = self.source(task.get_texture_source())?;
                 let source_rect = blit
                     .source_rect
                     .translate(task.get_target_rect().min.to_vector());
-                self.record_blit(
+                self.queue_blit(
                     &source,
                     &texture,
                     source_rect,
                     blit.target_rect,
                     TextureFilter::Linear,
+                    &mut draws,
                     stats,
                 )?;
             }
+            self.draw_pass(&texture, &draws, data, stats)?;
+            draws.clear();
         }
         for (name, features, instances) in [
             ("cs_border_solid", "", &target.border_segments_solid),
@@ -3226,6 +3267,70 @@ mod shader_tests {
                 assert_eq!(pixels(&renderer, &texture), expected);
             }
         }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn empty_passes_preserve_initialization_and_clear_effects() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, true).unwrap();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
+        let mut stats = DrawStats::default();
+        renderer.draw_pass(&target, &[], &HashMap::new(), &mut stats).unwrap();
+        assert_eq!(stats.native_passes, 1);
+        assert_eq!(pixels(&renderer, &target), vec![0; 4 * 4 * 4]);
+        renderer.draw_pass(&target, &[], &HashMap::new(), &mut stats).unwrap();
+        assert_eq!(stats.native_passes, 1);
+        assert_eq!(target.current_usage(), wgt::TextureUses::RESOURCE);
+        let clear = renderer.clear(rect, ColorF::WHITE);
+        renderer.draw_pass(&target, &[clear], &HashMap::new(), &mut stats).unwrap();
+        assert_eq!(stats.native_passes, 2);
+        renderer.draw_pass(&target, &[], &HashMap::new(), &mut stats).unwrap();
+        assert_eq!(stats.native_passes, 2);
+        assert_eq!(pixels(&renderer, &target), vec![255; 4 * 4 * 4]);
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn batched_blits_preserve_order_across_alias_copies() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(4, 4));
+        let left = DeviceIntRect::from_size(DeviceIntSize::new(2, 4));
+        let right = left.translate(DeviceIntVector::new(2, 0));
+        let source = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, false).unwrap();
+        let source_pixels: Vec<u8> = (0..4).flat_map(|y| {
+            (0..4).flat_map(move |x| [23 + x * 47, 17 + y * 53, 89, 255])
+        }).collect();
+        source.upload_recorded(&renderer.owner, &renderer.submissions, rect,
+            &source_pixels, None, 0, None).unwrap();
+        let mut results = Vec::new();
+        for batch in [false, true] {
+            let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+                TextureFilter::Nearest, true).unwrap();
+            let mut stats = DrawStats::default();
+            let mut draws = Vec::new();
+            for (image, from, to) in [
+                (&source, left, left),
+                (&source, right, right),
+                (&target, left, right),
+                (&source, rect, left),
+            ] {
+                if batch {
+                    renderer.queue_blit(image, &target, from, to, TextureFilter::Nearest,
+                        &mut draws, &mut stats).unwrap();
+                } else {
+                    renderer.record_blit(image, &target, from, to, TextureFilter::Nearest, &mut stats).unwrap();
+                }
+            }
+            renderer.draw_pass(&target, &draws, &HashMap::new(), &mut stats).unwrap();
+            results.push((pixels(&renderer, &target), stats.native_passes));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        assert!(results[1].1 < results[0].1);
     }
 
     #[test]
