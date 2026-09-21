@@ -308,6 +308,56 @@ separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
 plan and incremental execution record are retained under
 `artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
 
+## Seven subsequent renderer optimizations
+
+Seven further changes were committed separately before any combined tests or
+comparisons ran:
+
+| Step | Commit | Change |
+| --- | --- | --- |
+| 1 | `a32af4f871a` | Cache shader metadata and avoid preparing native bindings on descriptor hits. |
+| 2 | `2de4d89710f` | Stage frame data directly and pack borrowed instance data into mapped uploads. |
+| 3 | `4bf70b251c9` | Share recording preparation across uploads and reuse completion observations. |
+| 4 | `8fc90ec3980` | Remove redundant transition callbacks and repeated draw-state commands. |
+| 5 | `096da359293` | Fuse channel and opaque-alpha conversion with source-to-staging copying. |
+| 6 | `dd0723320e5` | Apply WebRender tile occlusion and opaque handling; batch compatible instances. |
+| 7 | `94e206c9d0e` | Group nonaliasing blits and skip empty passes while preserving target usage. |
+
+The validated runtime includes test alias correction `8fde78129f1` and test-only
+helper cleanup `ff124f5264c`. Submission boundaries, external-image lifetime and
+producer-return completion, texture initialization, and retained-damage guards
+remain intact. Native and Layer compositors retain their previous composition
+behavior. CPU-buffer images still require GPU uploads; this series does not make
+that path zero-copy.
+
+Combined validation passed 178 ordinary WebRender tests, six ordinary bridge
+tests, and 54 focused GPU tests on each of Lavapipe and Intel with Vulkan
+validation. The GPU checks cover resources, submissions, rendering, composition,
+blits, renderer lifecycle, hidden work, output reuse, and partial damage.
+Additional native checks passed six Vulkan DMA-BUF tests, asynchronous WebGL
+completion and bounded ownership on both AR24 and AB24, and three real VA-API
+NV12/P010 sampling and release cases. Scoped lint, the Linux `hal-metal` feature
+check, Firefox binaries, and Canvas/CSS/dirty/filter Xvfb software-Vulkan pixel
+checks passed. Native Metal validation still requires macOS.
+
+The system Mesa EGL library was renamed aside. The WebGL producer fixtures used
+an isolated, package-matching workspace copy selected by a fixture-only GLVND
+vendor file. Host libraries and browser/benchmark environments were unchanged.
+An initial test compile error, two zero-test filter attempts per driver, and the
+initial EGL fixture failure remain preserved as rejected attempts.
+
+The final snapshot is built from `ff124f5264c`; its libxul SHA-256 is
+`40aa4be880abd17b1ce12675f8dbf4ff7481d2cfc72238e7af1d144e62dddede`.
+Validation logs, snapshot/source pins, and the prepared comparison plan are under
+`artifacts/stage9/842be2fc039/seven-perf-steps/`.
+
+The native comparison has not run yet. The prepared 18-arm protocol uses four
+balanced baseline/final Vulkan Canvas pairs, two CSS pairs, one exploratory
+memory pair, and two balanced same-final-binary GL/Vulkan pairs. Its baseline is
+the accepted final snapshot from the four upload optimizations below. No
+performance improvement is claimed for this seven-change series before those
+measurements complete.
+
 ## Combined upload optimization comparison
 
 Four subsequent changes were committed separately before combined validation:
