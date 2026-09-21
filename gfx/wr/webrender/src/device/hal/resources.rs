@@ -174,10 +174,10 @@ impl<A: hal::Api> Buffer<A> {
 
     pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::BufferUses) {
         commands.keep(self.clone());
-        let resource = self.clone();
-        commands.commit(move || resource.committed_state.set(to));
         let from = self.state.replace(to);
         if from != to {
+            let resource = self.clone();
+            commands.commit(move || resource.committed_state.set(to));
             unsafe {
                 commands
                     .encoder()
@@ -592,10 +592,10 @@ impl<A: hal::Api> Texture<A> {
             1
         };
         for level in self.base_mip..self.base_mip + count {
-            let resource = self.clone();
-            commands.commit(move || resource.states[level as usize].committed.set(to));
             let from = self.states[level as usize].usage.replace(to);
             if from != to {
+                let resource = self.clone();
+                commands.commit(move || resource.states[level as usize].committed.set(to));
                 unsafe {
                     commands
                         .encoder()
