@@ -68,6 +68,7 @@ pub(super) struct Buffer<A: hal::Api> {
     pub size: u64,
     pub allocation_id: u64,
     pub usage: wgt::BufferUses,
+    mapping: Option<hal::BufferMapping>,
     used_size: Cell<u64>,
     state: Cell<wgt::BufferUses>,
     committed_state: Cell<wgt::BufferUses>,
@@ -79,6 +80,8 @@ impl<A: hal::Api> Buffer<A> {
         if size > owner.capabilities.limits.max_buffer_size {
             return Err("HAL buffer exceeds device limit".into());
         }
+        let allocation_id = owner.next_texture_id.get();
+        let next_id = allocation_id.checked_add(1).ok_or("HAL buffer identity overflow")?;
         let device = &owner.open.device;
         let raw = unsafe {
             device.create_buffer(&hal::BufferDescriptor {
@@ -90,32 +93,28 @@ impl<A: hal::Api> Buffer<A> {
         }
         .map_err(|e| format!("Creating buffer: {e:?}"))?;
         let raw = Owned::new(owner, raw, A::Device::destroy_buffer).accounted(false, size);
-        unsafe {
-            let mapping = device
-                .map_buffer(&raw, 0..size)
-                .map_err(|e| format!("Mapping upload: {e:?}"))?;
-            std::ptr::write_bytes(mapping.ptr.as_ptr(), 0, size as usize);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
-            if !mapping.is_coherent {
-                device.flush_mapped_ranges(&raw, std::iter::once(0..size));
-            }
-            device.unmap_buffer(&raw);
-        }
-        let allocation_id = owner.next_texture_id.get();
-        owner.next_texture_id.set(
-            allocation_id
-                .checked_add(1)
-                .ok_or("HAL buffer identity overflow")?,
-        );
-        Ok(Rc::new(Self {
+        let mapping = unsafe { device.map_buffer(&raw, 0..size) }
+            .map_err(|e| format!("Mapping upload: {e:?}"))?;
+        let buffer = Rc::new(Self {
             allocation_id,
             raw,
             size,
             usage: usage | wgt::BufferUses::MAP_WRITE,
+            mapping: Some(mapping),
             used_size: Cell::new((bytes.len() as u64).max(4)),
             state: Cell::new(wgt::BufferUses::MAP_WRITE),
             committed_state: Cell::new(wgt::BufferUses::MAP_WRITE),
-        }))
+        });
+        owner.next_texture_id.set(next_id);
+        let mapping = buffer.mapping.as_ref().unwrap();
+        unsafe {
+            std::ptr::write_bytes(mapping.ptr.as_ptr(), 0, size as usize);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
+            if !mapping.is_coherent {
+                device.flush_mapped_ranges(&buffer.raw, std::iter::once(0..size));
+            }
+        }
+        Ok(buffer)
     }
 
     pub fn readback(owner: &Rc<Device<A>>, layout: &ReadbackLayout) -> Result<Rc<Self>> {
@@ -139,6 +138,7 @@ impl<A: hal::Api> Buffer<A> {
             raw: Owned::new(owner, raw, A::Device::destroy_buffer).accounted(false, layout.size),
             size: layout.size,
             usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::MAP_READ,
+            mapping: None,
             used_size: Cell::new(layout.size),
             state: Cell::new(wgt::BufferUses::COPY_DST),
             committed_state: Cell::new(wgt::BufferUses::COPY_DST),
@@ -150,15 +150,12 @@ impl<A: hal::Api> Buffer<A> {
             return Err("HAL pooled buffer is too small".into());
         }
         let device = &self.raw.owner.open.device;
+        let mapping = self.mapping.as_ref().ok_or("HAL buffer is not mapped for upload")?;
         unsafe {
-            let mapping = device
-                .map_buffer(&self.raw, 0..self.size)
-                .map_err(|e| format!("Mapping pooled upload: {e:?}"))?;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
             if !mapping.is_coherent {
                 device.flush_mapped_ranges(&self.raw, std::iter::once(0..self.size));
             }
-            device.unmap_buffer(&self.raw);
         }
         self.used_size.set((bytes.len() as u64).max(4));
         self.state.set(wgt::BufferUses::MAP_WRITE);
@@ -188,6 +185,14 @@ impl<A: hal::Api> Buffer<A> {
             0,
             std::num::NonZeroU64::new(self.used_size.get()),
         )
+    }
+}
+
+impl<A: hal::Api> Drop for Buffer<A> {
+    fn drop(&mut self) {
+        if self.mapping.take().is_some() {
+            unsafe { self.raw.owner.open.device.unmap_buffer(&self.raw); }
+        }
     }
 }
 
@@ -758,6 +763,33 @@ impl<A: hal::Api> Texture<A> {
 #[cfg(all(test, wr_hal_vulkan))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn persistent_upload_mappings_preserve_pool_ownership() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let pool = super::super::pool::BufferPool::new(&owner);
+        let first = pool.upload(&[3, 5, 7], wgt::BufferUses::COPY_SRC).unwrap();
+        let pointer = first.mapping.as_ref().unwrap().ptr;
+        let second = pool.upload(&[11, 13, 17], wgt::BufferUses::COPY_SRC).unwrap();
+        assert!(!Rc::ptr_eq(&first, &second));
+        unsafe {
+            assert_eq!(std::slice::from_raw_parts(pointer.as_ptr(), 4), &[3, 5, 7, 0]);
+        }
+        drop(first);
+        drop(second);
+        let reused = pool.upload(&[19, 23, 29, 31], wgt::BufferUses::COPY_SRC).unwrap();
+        assert_eq!(reused.mapping.as_ref().unwrap().ptr, pointer);
+        unsafe {
+            assert_eq!(std::slice::from_raw_parts(pointer.as_ptr(), 4), &[19, 23, 29, 31]);
+        }
+        drop(reused);
+        pool.clear();
+        assert_eq!(owner.memory.get().buffers, 0);
+        let readback = Buffer::readback(&owner, &owner.layout(2, 2).unwrap()).unwrap();
+        assert!(readback.mapping.is_none());
+        assert!(readback.write(&[0; 16]).is_err());
+    }
 
     #[test]
     #[ignore = "Requires Vulkan"]
