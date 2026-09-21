@@ -251,6 +251,10 @@ class TestRendererBenchmark(MarionetteTestCase):
                 self.output,
                 self.report["perf"],
                 event=config["event"],
+                required_build_id_paths=[
+                    expected["runtime"]["binary"]["path"],
+                    expected["runtime"]["libxul"]["path"],
+                ],
             )
             self.perf.start()
         self.report["hostIntervalStart"] = time.monotonic()

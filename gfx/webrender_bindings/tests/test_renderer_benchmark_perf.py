@@ -10,7 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from renderer_benchmark_perf import PerfRecorder, parse_event_attributes
+from renderer_benchmark_perf import (
+    PerfRecorder,
+    parse_event_attributes,
+    parse_perf_script,
+    parse_tracking_build_id,
+)
 
 EVENT_LINE = (
     "cpu-clock:uk: type: 1 (PERF_TYPE_SOFTWARE), size: 136, config: 0 "
@@ -19,6 +24,16 @@ EVENT_LINE = (
     "read_format: ID|LOST, disabled: 1, inherit: 1, exclude_hv: 1, freq: 1, "
     "sample_id_all: 1, use_clockid: 1, sample_stack_user: 16384, clockid: 1"
 )
+TRACKING_LINE = (
+    "dummy:uH: type: 1, config: 0x9, sample_type: IP|TID|TIME, inherit: 1, build_id: 1"
+)
+
+
+def mmap_line(path, build_id):
+    return (
+        "0.000000000: PERF_RECORD_MMAP2 10/10: "
+        f"[0x400000(0x1000) @ 0 <{build_id}>]: r-xp {path}"
+    )
 
 
 class FakeProcess:
@@ -71,6 +86,41 @@ class PerfAttributeTests(unittest.TestCase):
         for text in ["", EVENT_LINE + "\n" + EVENT_LINE, "cpu-clock:uk: type: 1"]:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_event_attributes(text)
+
+    def test_tracking_build_id_parser(self):
+        self.assertEqual(parse_tracking_build_id(TRACKING_LINE), 1)
+        self.assertEqual(
+            parse_tracking_build_id(TRACKING_LINE.replace("build_id: 1", "")), 0
+        )
+        with self.assertRaises(ValueError):
+            parse_tracking_build_id("")
+
+    def test_build_id_and_sample_time_parsers(self):
+        build_ids, sample_times = parse_perf_script(
+            mmap_line("/tiny", "ab")
+            + "\n"
+            + mmap_line("/snapshot/firefox", "a" * 40)
+            + "\n"
+            + mmap_line("/snapshot/libxul.so", "b" * 32)
+            + "\n20.100000000:\n20.200000000: \n"
+        )
+        self.assertEqual(build_ids["/tiny"], "ab")
+        self.assertEqual(build_ids["/snapshot/firefox"], "a" * 40)
+        self.assertEqual(build_ids["/snapshot/libxul.so"], "b" * 32)
+        self.assertEqual(sample_times, [20.1, 20.2])
+        for text in [
+            "bad",
+            mmap_line("/odd", "abc") + "\n20.1:\n",
+            mmap_line("/long", "a" * 42) + "\n20.1:\n",
+            mmap_line("/zero", "0" * 40) + "\n20.1:\n",
+            mmap_line("/dso", "a" * 40)
+            + "\n"
+            + mmap_line("/dso", "b" * 40)
+            + "\n20.1:\n",
+            "20.2:\n20.1:\n",
+        ]:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_perf_script(text)
 
 
 class PerfControlTests(unittest.TestCase):
@@ -224,9 +274,21 @@ class PerfFinalizeTests(unittest.TestCase):
     def make_recorder(self, temporary):
         evidence = {
             "controls": [
-                {"command": "ping"},
-                {"command": "enable"},
-                {"command": "disable"},
+                {
+                    "command": "ping",
+                    "requestedTimeSeconds": 19.7,
+                    "acknowledgedTimeSeconds": 19.8,
+                },
+                {
+                    "command": "enable",
+                    "requestedTimeSeconds": 20.0,
+                    "acknowledgedTimeSeconds": 20.01,
+                },
+                {
+                    "command": "disable",
+                    "requestedTimeSeconds": 20.3,
+                    "acknowledgedTimeSeconds": 20.31,
+                },
             ]
         }
         value = PerfRecorder(
@@ -245,21 +307,38 @@ class PerfFinalizeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             value, evidence = self.make_recorder(temporary)
             value.process.wait.return_value = 0
+
+            def run_perf(command_line, **kwargs):
+                if command_line[1] == "evlist":
+                    return SimpleNamespace(
+                        stdout=EVENT_LINE + "\n" + TRACKING_LINE + "\n"
+                    )
+                kwargs["stdout"].write(
+                    mmap_line("/snapshot/firefox", "a" * 40)
+                    + "\n20.100000000:\n20.200000000:\n"
+                )
+                return SimpleNamespace()
+
             with patch.object(value, "check_target"), patch.object(
                 value, "command"
             ) as command, patch.object(value, "close"), patch(
                 "renderer_benchmark_perf.time.monotonic", side_effect=[20.0, 20.5]
             ), patch(
                 "renderer_benchmark_perf.subprocess.run",
-                return_value=SimpleNamespace(stdout=EVENT_LINE + "\n"),
-            ):
+                side_effect=run_perf,
+            ) as run:
                 value.finish()
             command.assert_called_once_with("stop")
             value.process.wait.assert_called_once_with(timeout=120)
             self.assertEqual(evidence["finalizeStartedTimeSeconds"], 20.0)
             self.assertEqual(evidence["finalizeEndedTimeSeconds"], 20.5)
             self.assertEqual(evidence["returncode"], 0)
+            self.assertEqual(evidence["trackingBuildId"], 1)
+            self.assertEqual(evidence["sampleCount"], 2)
+            self.assertEqual(evidence["firstSampleTimeSeconds"], 20.1)
+            self.assertEqual(evidence["lastSampleTimeSeconds"], 20.2)
             self.assertTrue(evidence["passed"])
+            self.assertEqual(run.call_count, 2)
 
     def test_finalization_timeout_is_preserved(self):
         with tempfile.TemporaryDirectory() as temporary:

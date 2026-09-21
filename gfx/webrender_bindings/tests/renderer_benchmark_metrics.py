@@ -1451,7 +1451,8 @@ def validate_report(report, expected):
         }
         if (
             not isinstance(event_attributes, dict)
-            or event_attributes.get("name") != expected_event
+            or not isinstance(event_attributes.get("name"), str)
+            or not event_attributes.get("name").startswith("cpu-clock:")
             or type(event_attributes.get("type")) is not int
             or event_attributes.get("type") != 1
             or type(event_attributes.get("config")) is not int
@@ -1524,8 +1525,8 @@ def validate_report(report, expected):
             or "--strict-freq" not in command
             or command_option("--clockid") != "mono"
             or "--no-buildid-cache" not in command
-            or "--buildid-all" not in command
-            or "--timestamp-boundary" not in command
+            or "--buildid-mmap" not in command
+            or "--buildid-all" in command
             or "--timestamp" not in command
             or "--sample-cpu" not in command
             or "-i" in command
@@ -1536,7 +1537,7 @@ def validate_report(report, expected):
             or "--tid" in command
             or type(perf.get("returncode")) is not int
             or perf.get("returncode") != 0
-            or perf.get("buildIdMode") != "all-dsos"
+            or perf.get("buildIdMode") != "mmap-events"
             or type(perf.get("controlTimeoutSeconds")) is not int
             or perf.get("controlTimeoutSeconds") != 10
             or type(perf.get("finalizeTimeoutSeconds")) is not int
@@ -1552,6 +1553,40 @@ def validate_report(report, expected):
             or not _sha256(perf.get("dataSha256"))
         ):
             errors.append("perf capture metadata is invalid")
+
+        required_build_id_paths = [
+            expected.get("runtime", {}).get(name, {}).get("path")
+            for name in ["binary", "libxul"]
+        ]
+        build_ids = perf.get("buildIds")
+        if (
+            perf.get("trackingBuildId") != 1
+            or perf.get("requiredBuildIdPaths") != required_build_id_paths
+            or not isinstance(build_ids, dict)
+            or not build_ids
+            or any(
+                not isinstance(path, str)
+                or not isinstance(build_id, str)
+                or not 2 <= len(build_id) <= 40
+                or len(build_id) % 2
+                or any(character not in "0123456789abcdef" for character in build_id)
+                or set(build_id) == {"0"}
+                for path, build_id in build_ids.items()
+            )
+            or any(path not in build_ids for path in required_build_id_paths)
+        ):
+            errors.append("perf build-ID metadata is invalid")
+
+        first_sample_time = perf.get("firstSampleTimeSeconds")
+        last_sample_time = perf.get("lastSampleTimeSeconds")
+        if (
+            type(perf.get("sampleCount")) is not int
+            or perf.get("sampleCount", 0) <= 0
+            or not _finite_number(first_sample_time)
+            or not _finite_number(last_sample_time)
+            or last_sample_time < first_sample_time
+        ):
+            errors.append("perf sample bounds are invalid")
 
         controls = perf.get("controls")
         control_names = ["ping", "enable", "disable", "stop"]
@@ -1596,6 +1631,14 @@ def validate_report(report, expected):
                     or (
                         _finite_number(finalize_started)
                         and stop_control[1] > finalize_started
+                    )
+                    or (
+                        _finite_number(first_sample_time)
+                        and first_sample_time < enable[0]
+                    )
+                    or (
+                        _finite_number(last_sample_time)
+                        and last_sample_time > disable[1]
                     )
                 ):
                     errors.append("perf control boundaries are invalid")
