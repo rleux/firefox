@@ -243,3 +243,67 @@ Software GL/Vulkan under Xvfb and the legacy GL PNG path also passed. These
 checks establish capture and routing correctness. Raw evidence and the reviewed
 artifact driver are retained under
 `artifacts/stage9/2fbacb7082c/step-9.4a/wrench-inspection/`.
+
+## Native steady-state baseline
+
+The full Stage 9.4a series at harness revision `4e8c88971fa` passed all 80 cases
+without a retry in 125.76 minutes: eight browser preflights, 48 browser timing
+arms and 24 Wrench arms. It used the preserved optimized development binaries,
+native Intel hardware, the system loader and no validation or render diagnostics.
+These results apply to this build, host and fixed fixture set.
+
+Browser timing used four GL/Vulkan pairs per workload in AB/BA/AB/BA order,
+fresh processes/profiles, startup settling, ten-second warmup, sixty-second
+measurement and two-second sampling. CPU rates use the CPU sample anchor span.
+The GL/Vulkan columns below are medians of run rates, expressed as percentages
+of one core. Paired changes are medians and ranges of the four pair-relative
+changes, rather than ratios of the column medians.
+
+| Workload | GL CPU | Vulkan CPU | Median paired change | Paired range | Direction |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Static | 1.02% | 0.97% | Inconclusive | -13.3% to +20.4% | Mixed |
+| CSS transform | 19.46% | 26.19% | +34.8% | +28.1% to +43.0% | Higher in 4/4 |
+| Small dirty update | 37.10% | 44.90% | +20.6% | +18.5% to +25.2% | Higher in 4/4 |
+| Scroll | 31.65% | 36.81% | +17.4% | +14.6% to +20.5% | Higher in 4/4 |
+| Software Canvas2D | 28.96% | 57.32% | +97.9% | +90.8% to +101.4% | Higher in 4/4 |
+| Filters | 22.38% | 30.98% | +38.5% | +32.2% to +50.5% | Higher in 4/4 |
+
+The extra CPU time is concentrated in the GPU process. For Canvas, its median
+paired increase is about 0.282 CPU seconds per sampled second, while the median
+increase for the entire Firefox tree is about 0.284. Process-level attribution
+does not identify the responsible renderer or driver functions. Active workload
+callback means remained near 16.666 ms, with per-run p99 values of 17.20–17.28 ms.
+Callback timing does not measure physical scanout or GPU completion. Collector
+CPU remained separate and was not subtracted from Firefox CPU.
+
+Wrench used four pairs per fixture, 200 warmup frames and 5000 measured frames
+per arm. The table compares each run's mean serialized frame roundtrip; the
+GL/Vulkan columns are medians of those run means. Each roundtrip includes
+scene readiness, the render call and synchronous completion readback. GL uses an
+X11 backbuffer without swaps; Vulkan uses an owned offscreen texture.
+
+| Fixture | GL roundtrip | Vulkan roundtrip | Median paired change | Paired range | Direction |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Alpha/owned image | 1.615 ms | 1.849 ms | +14.5% | +0.8% to +20.0% | Higher in 4/4 |
+| Deterministic text | 1.611 ms | 1.825 ms | +12.9% | +11.2% to +17.8% | Higher in 4/4 |
+| Clip/blur | 1.900 ms | 1.957 ms | Inconclusive | -2.3% to +14.4% | Mixed |
+
+Context/renderer initialization was observed separately before fixed-frame work.
+Median GL/Vulkan values were 83.98/22.61 ms for alpha, 72.71/20.41 ms for text
+and 71.05/22.25 ms for clip/blur. The routes differ: GL creates a native window
+and backbuffer, while Vulkan uses an offscreen target. Driver and application
+caches were not controlled as cold, so this does not support a general startup
+claim or offset the steady-state roundtrips.
+
+All twelve Wrench pairs matched PNG hashes and PCI identity. The post-result
+process snapshots are route evidence, not frame CPU measurements. Whole-run
+pairs are the independent observations; individual frames are not pooled as
+independent runs. Four pairs provide a bounded local comparison rather than a
+general performance guarantee. Static and clip/blur results remain inconclusive
+because their paired directions differ.
+
+The active browser CPU differences justify a focused GPU-process investigation,
+starting with the software Canvas workload. Cold-start, lifecycle, memory and
+separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
+plan and incremental execution record are retained under
+`artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
