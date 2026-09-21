@@ -321,6 +321,16 @@ impl<A: hal::Api> SubmissionQueue<A> {
         self.uploads.upload(bytes, usage)
     }
 
+    pub fn upload_with(
+        &self,
+        length: usize,
+        usage: wgt::BufferUses,
+        write: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<Rc<super::resources::Buffer<A>>> {
+        Self::retire(&mut self.state.borrow_mut(), false, self.wait_timeout)?;
+        self.uploads.upload_with(length, usage, write)
+    }
+
     #[cfg(test)]
     pub fn upload_recording(
         &self,

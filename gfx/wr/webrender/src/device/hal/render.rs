@@ -116,20 +116,38 @@ enum Shader {
     LegacyBrilinear(&'static str, &'static str),
 }
 
-// Match vertices at AA strip joins to prevent subpixel rasterization gaps.
-fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
-    let is_quad = match shader {
+fn is_quad_shader(shader: Shader) -> bool {
+    match shader {
         Shader::Quad => true,
         Shader::Other(name, _) | Shader::LegacyBrilinear(name, _) => {
             name.starts_with("ps_quad_") && name != "ps_quad_mask"
         }
         _ => false,
-    };
-    if !is_quad {
-        return input.to_vec();
     }
+}
+
+fn packed_instance_size(shader: Shader, input: &[u8]) -> Result<usize> {
+    if !is_quad_shader(shader) { return Ok(input.len()); }
     assert_eq!(input.len() % 16, 0);
-    let mut output = Vec::with_capacity(input.len());
+    let mut size = input.len();
+    for instance in input.chunks_exact(16) {
+        let word = u32::from_ne_bytes(instance[8..12].try_into().unwrap());
+        let part = (word >> 8) & 255;
+        if (word >> 24) & 8 != 0 && (part == 1 || part == 3) {
+            size = size.checked_add(((word >> 16) & 10).count_ones() as usize * 16)
+                .ok_or("HAL instance size overflow")?;
+        }
+    }
+    Ok(size)
+}
+
+// Match vertices at AA strip joins to prevent subpixel rasterization gaps.
+fn pack_instances(shader: Shader, input: &[u8], output: &mut [u8]) {
+    if !is_quad_shader(shader) {
+        output.copy_from_slice(input);
+        return;
+    }
+    let mut cursor = 0;
     for instance in input.chunks_exact(16) {
         let word = u32::from_ne_bytes(instance[8..12].try_into().unwrap());
         let part = (word >> 8) & 255;
@@ -139,15 +157,30 @@ fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
                     let edge = if replacement == 6 || replacement == 8 { 2 } else { 8 };
                     if (word >> 16) & edge == 0 { continue; }
                 }
-                output.extend_from_slice(&instance[..8]);
-                output.extend_from_slice(&((word & !0xff00) | (replacement << 8)).to_ne_bytes());
-                output.extend_from_slice(&instance[12..]);
+                let dst = &mut output[cursor..cursor + 16];
+                dst[..8].copy_from_slice(&instance[..8]);
+                dst[8..12].copy_from_slice(&((word & !0xff00) | (replacement << 8)).to_ne_bytes());
+                dst[12..].copy_from_slice(&instance[12..]);
+                cursor += 16;
             }
         } else {
-            output.extend_from_slice(instance);
+            output[cursor..cursor + 16].copy_from_slice(instance);
+            cursor += 16;
         }
     }
-    output
+    assert_eq!(cursor, output.len());
+}
+
+enum Instances<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl Instances<'_> {
+    fn owned(bytes: &[u8]) -> Self { Self::Owned(bytes.to_vec()) }
+    fn bytes(&self) -> &[u8] {
+        match self { Self::Borrowed(bytes) => bytes, Self::Owned(bytes) => bytes }
+    }
 }
 
 struct ShaderMetadata {
@@ -230,12 +263,12 @@ struct BoundTarget<A: hal::Api> {
     return_usage: wgt::TextureUses,
 }
 
-struct Draw<A: hal::Api> {
+struct Draw<'a, A: hal::Api> {
     shader: Shader,
     blend: u8,
     depth: u8,
     count: u32,
-    instances: Vec<u8>,
+    instances: Instances<'a>,
     textures: DrawTextures<A>,
     filter: Option<TextureFilter>,
     clear_color: Option<ColorF>,
@@ -625,7 +658,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             let target = &self.native_targets[&id];
             let texture = target.texture.clone();
             let origin = DeviceIntPoint::new(-target.origin.x, -target.origin.y);
-            let draw = Draw { shader, blend: 0, depth: 0, count: 1, instances: bytes(&[instance]).to_vec(),
+            let draw = Draw { shader, blend: 0, depth: 0, count: 1, instances: Instances::owned(bytes(&[instance])),
                 textures, filter: None, clear_color: None, count_in_stats: true, readback: None, scissor: rect };
             self.draw_pass_at(&texture, &[self.clear(rect, ColorF::TRANSPARENT), draw], data, stats, origin)?;
             stats.color_targets += 1;
@@ -819,21 +852,22 @@ impl<A: BackendApi> FrameRenderer<A> {
         })
     }
 
-    fn task_draw<T: GpuData>(
+    fn task_draw<'a, T: GpuData>(
         &self,
         shader: Shader,
         blend: u8,
-        instances: &[T],
+        instances: &'a [T],
         textures: &BatchTextures,
         scissor: DeviceIntRect,
-    ) -> Result<Draw<A>> {
-        let packed = pack_instances(shader, bytes(instances));
+    ) -> Result<Draw<'a, A>> {
+        let input = bytes(instances);
+        let size = packed_instance_size(shader, input)?;
         Ok(Draw {
             shader,
             blend,
             depth: 0,
-            count: u32::try_from(packed.len() / T::SIZE).map_err(|_| "Too many HAL instances")?,
-            instances: packed,
+            count: u32::try_from(size / T::SIZE).map_err(|_| "Too many HAL instances")?,
+            instances: Instances::Borrowed(input),
             textures: self.batch_textures(textures)?,
             filter: None,
             clear_color: None,
@@ -1077,7 +1111,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             blend: 0,
             depth: 0,
             count: 1,
-            instances: bytes(&[instance]).to_vec(),
+            instances: Instances::owned(bytes(&[instance])),
             textures: self.single_texture(src.clone()),
             filter: Some(filter),
             clear_color: None,
@@ -1257,8 +1291,6 @@ impl<A: BackendApi> FrameRenderer<A> {
         {
             return Err("HAL data texture exceeds buffer limits".into());
         }
-        let mut data = vec![0; size];
-        data[..source.len()].copy_from_slice(source);
         let mut cache = self.data_textures.borrow_mut();
         let texture = match cache.get(name) {
             Some(texture) if texture.size.height >= height_u32 && texture.format == format => {
@@ -1283,14 +1315,11 @@ impl<A: BackendApi> FrameRenderer<A> {
             }
         };
         drop(cache);
-        texture.upload_recorded(
+        texture.upload_zero_padded(
             &self.owner,
             &self.submissions,
             DeviceIntRect::from_size(DeviceIntSize::new(width as i32, height as i32)),
-            &data,
-            None,
-            0,
-            None,
+            source,
         )?;
         Ok(texture)
     }
@@ -1609,7 +1638,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     fn draw_pass(
         &mut self,
         target: &Rc<Texture<A>>,
-        draws: &[Draw<A>],
+        draws: &[Draw<'_, A>],
         data: &HashMap<&str, Rc<Texture<A>>>,
         stats: &mut DrawStats,
     ) -> Result<()> {
@@ -1619,7 +1648,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     fn draw_pass_at(
         &mut self,
         target: &Rc<Texture<A>>,
-        draws: &[Draw<A>],
+        draws: &[Draw<'_, A>],
         data: &HashMap<&str, Rc<Texture<A>>>,
         stats: &mut DrawStats,
         origin: DeviceIntPoint,
@@ -1721,9 +1750,13 @@ impl<A: BackendApi> FrameRenderer<A> {
                 target.format,
             );
             let pipeline = self.pipeline(key)?;
-            let buffer = self
-                .submissions
-                .upload(&draw.instances, wgt::BufferUses::VERTEX)?;
+            let input = draw.instances.bytes();
+            let buffer = self.submissions.upload_with(
+                packed_instance_size(shader, input)?, wgt::BufferUses::VERTEX, |destination| {
+                    pack_instances(shader, input, destination);
+                    Ok(())
+                },
+            )?;
             let artifact = metadata.artifact;
             let mut identities = SmallVec::new();
             let mut resolved: SmallVec<[(&Rc<Texture<A>>, usize); 16]> = SmallVec::new();
@@ -1961,7 +1994,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok(())
     }
 
-    fn clear(&self, rect: DeviceIntRect, color: ColorF) -> Draw<A> {
+    fn clear(&self, rect: DeviceIntRect, color: ColorF) -> Draw<'static, A> {
         let instance = ClearInstance {
             rect: [
                 rect.min.x as f32,
@@ -1976,7 +2009,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             blend: 0,
             depth: 0,
             count: 1,
-            instances: bytes(&[instance]).to_vec(),
+            instances: Instances::owned(bytes(&[instance])),
             textures: self.single_texture(self.dummy.clone()),
             filter: None,
             clear_color: Some(color),
@@ -1986,11 +2019,11 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
     }
 
-    fn batches(
+    fn batches<'a>(
         &self,
-        container: &AlphaBatchContainer,
+        container: &'a AlphaBatchContainer,
         rect: DeviceIntRect,
-        draws: &mut Vec<Draw<A>>,
+        draws: &mut Vec<Draw<'a, A>>,
     ) -> Result<()> {
         let has_depth = !container.opaque_batches.is_empty();
         let Some(scissor) = container
@@ -2048,7 +2081,8 @@ impl<A: BackendApi> FrameRenderer<A> {
                     BlendMode::PlusLighter => 8,
                     mode => return Err(format!("Unsupported HAL blend {mode:?}")),
                 };
-                let packed = pack_instances(shader, bytes(&batch.instances));
+                let input = bytes(&batch.instances);
+                let size = packed_instance_size(shader, input)?;
                 draws.push(Draw {
                     shader,
                     blend,
@@ -2059,8 +2093,8 @@ impl<A: BackendApi> FrameRenderer<A> {
                     } else {
                         2
                     },
-                    count: u32::try_from(packed.len() / 16).map_err(|_| "Too many HAL instances")?,
-                    instances: packed,
+                    count: u32::try_from(size / 16).map_err(|_| "Too many HAL instances")?,
+                    instances: Instances::Borrowed(input),
                     textures: self.batch_textures(&batch.key.textures)?,
                     filter: None,
                     clear_color: None,
@@ -2076,7 +2110,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     fn draw_batches(
         &mut self,
         target: &Rc<Texture<A>>,
-        draws: &[Draw<A>],
+        draws: &[Draw<'_, A>],
         data: &HashMap<&str, Rc<Texture<A>>>,
         tasks: &crate::render_task_graph::RenderTaskGraph,
         stats: &mut DrawStats,
@@ -2106,15 +2140,15 @@ impl<A: BackendApi> FrameRenderer<A> {
         self.draw_pass(target, &draws[start..], data, stats)
     }
 
-    fn masks(
+    fn masks<'a>(
         &self,
-        masks: &ClipMaskInstanceList,
+        masks: &'a ClipMaskInstanceList,
         rect: DeviceIntRect,
-        draws: &mut Vec<Draw<A>>,
+        draws: &mut Vec<Draw<'a, A>>,
     ) -> Result<()> {
         let mut group = |features,
-                         instances: &[crate::gpu_types::MaskInstance],
-                         scissored: &crate::internal_types::FastHashMap<
+                         instances: &'a [crate::gpu_types::MaskInstance],
+                         scissored: &'a crate::internal_types::FastHashMap<
             DeviceIntRect,
             crate::internal_types::FrameVec<crate::gpu_types::MaskInstance>,
         >|
@@ -2313,21 +2347,20 @@ impl<A: BackendApi> FrameRenderer<A> {
                 )?);
             }
         }
-        for (source, instances) in &target.scalings {
-            let external_instances;
+        for (source, values) in &target.scalings {
             let instances = if let TextureSource::External(source) = source {
                 let image = self.external_images.get(&source.index).ok_or("Missing external scaling image")?;
-                external_instances = instances.iter().map(|instance| ScalingInstance::new(
+                let adjusted: Vec<_> = values.iter().map(|instance| ScalingInstance::new(
                     instance.target_rect, DeviceRect::new(image.uv.uv0, image.uv.uv1), false,
-                )).collect::<Vec<_>>();
-                external_instances.as_slice()
-            } else { instances.as_slice() };
+                )).collect();
+                Instances::owned(bytes(&adjusted))
+            } else { Instances::Borrowed(bytes(values)) };
             draws.push(Draw {
                 shader: Shader::Other("cs_scale", "TEXTURE_2D"),
                 blend: 0,
                 depth: 0,
-                count: instances.len() as u32,
-                instances: bytes(instances).to_vec(),
+                count: values.len() as u32,
+                instances,
                 textures: self.single_texture(self.source(*source)?),
                 filter: None,
                 clear_color: None,
@@ -2706,7 +2739,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 blend: 1,
                 depth: 0,
                 count: 1,
-                instances: bytes(&[instance]).to_vec(),
+                instances: Instances::owned(bytes(&[instance])),
                 textures,
                 filter: None,
                 clear_color: None,
@@ -2739,7 +2772,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 let instance = CompositeInstance::new_rgb(rect.to_f32(), rect.to_f32(), PremultipliedColorF::WHITE,
                     DeviceIntRect::from_origin_and_size(target.origin, target.size).into(), false, (false, false), None);
                 composites.push(Draw {
-                    shader: Shader::Composite, blend: 1, depth: 0, count: 1, instances: bytes(&[instance]).to_vec(),
+                    shader: Shader::Composite, blend: 1, depth: 0, count: 1, instances: Instances::owned(bytes(&[instance])),
                     textures: self.single_texture(target.texture.clone()), filter: None, clear_color: None,
                     count_in_stats: false, readback: None, scissor: frame.device_rect,
                 });
@@ -2989,6 +3022,39 @@ mod shader_tests {
     use super::*;
 
     #[test]
+    fn staged_quad_instances_preserve_aa_join_order() {
+        for part in [0u32, 1, 2, 3] {
+            for edges in [0u32, 2, 8, 10] {
+                for aa in [0u32, 8] {
+                    let word = (aa << 24) | (edges << 16) | (part << 8) | 17;
+                    let words = [13u32, 23, word, 47].map(u32::to_ne_bytes);
+                    let source = words.as_flattened();
+                    let mut output = vec![0; packed_instance_size(Shader::Quad, source).unwrap()];
+                    pack_instances(Shader::Quad, source, &mut output);
+                    let mut expected = Vec::new();
+                    if aa != 0 && (part == 1 || part == 3) && edges & 2 != 0 {
+                        expected.push(if part == 1 { 6 } else { 8 });
+                    }
+                    expected.push(part);
+                    if aa != 0 && (part == 1 || part == 3) && edges & 8 != 0 {
+                        expected.push(if part == 1 { 7 } else { 9 });
+                    }
+                    assert_eq!(output.len(), expected.len() * 16);
+                    for (instance, part) in output.chunks_exact(16).zip(expected) {
+                        assert_eq!(&instance[..8], &source[..8]);
+                        assert_eq!(&instance[12..], &source[12..]);
+                        assert_eq!(u32::from_ne_bytes(instance[8..12].try_into().unwrap()),
+                            (word & !0xff00) | (part << 8));
+                    }
+                    let mut unmodified = vec![0; source.len()];
+                    pack_instances(Shader::Other("ps_quad_mask", ""), source, &mut unmodified);
+                    assert_eq!(unmodified, source);
+                }
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "Requires Vulkan"]
     fn pipeline_device_and_cache_isolation() {
         let owner = create_vulkan_device(&Options { validation: true, ..Default::default() }).unwrap();
@@ -3129,6 +3195,24 @@ mod shader_tests {
 
     #[test]
     #[ignore = "Requires Vulkan"]
+    fn data_staging_preserves_padding_and_empty_updates() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let renderer = FrameRenderer::new(owner).unwrap();
+        for format in [wgt::TextureFormat::Rgba32Float, wgt::TextureFormat::Rgba32Sint] {
+            let texture = Texture::new(&renderer.owner, 3, 4, format, TextureFilter::Nearest, false).unwrap();
+            let mut expected = vec![0; 3 * 4 * 16];
+            for (height, data) in [(2, vec![23u8; 80]), (1, vec![47; 13]), (1, Vec::new())] {
+                expected[..3 * height as usize * 16].fill(0);
+                expected[..data.len()].copy_from_slice(&data);
+                texture.upload_zero_padded(&renderer.owner, &renderer.submissions,
+                    DeviceIntRect::from_size(DeviceIntSize::new(3, height)), &data).unwrap();
+                assert_eq!(pixels(&renderer, &texture), expected);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
     fn blend_store_precision() {
         let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
         let mut renderer = FrameRenderer::new(owner).unwrap();
@@ -3202,7 +3286,7 @@ mod shader_tests {
             for filter in [TextureFilter::Nearest, TextureFilter::Linear] {
                 let draw = Draw {
                     shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
-                    instances: bytes(&[ScalingInstance::new(rect.to_f32(), rect.to_f32(), false)]).to_vec(),
+                    instances: Instances::owned(bytes(&[ScalingInstance::new(rect.to_f32(), rect.to_f32(), false)])),
                     textures: renderer.single_texture(source.clone()), filter: Some(filter), clear_color: None,
                     count_in_stats: false, readback: None, scissor: rect,
                 };
@@ -3357,7 +3441,7 @@ mod shader_tests {
                     renderer.draw_pass(&target, &[clear], &HashMap::new(), &mut DrawStats::default()).unwrap();
                     renderer.projection_override = Some(matrix);
                     let draw = Draw { shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
-                        instances: bytes(&[ScalingInstance::new(target_rect, source_rect, false)]).to_vec(),
+                        instances: Instances::owned(bytes(&[ScalingInstance::new(target_rect, source_rect, false)])),
                         textures: renderer.single_texture(source.clone()), filter: Some(filter), clear_color: None,
                         count_in_stats: false, readback: None, scissor: full };
                     renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
@@ -3391,7 +3475,7 @@ mod shader_tests {
                 let view = source.mip_view(level).unwrap();
                 let source_rect = DeviceRect::from_size(DeviceSize::new(view.size.width as f32, view.size.height as f32));
                 let draw = Draw { shader: Shader::Other("cs_scale", "TEXTURE_2D"), blend: 0, depth: 0, count: 1,
-                    instances: bytes(&[ScalingInstance::new(target_rect, source_rect, false)]).to_vec(),
+                    instances: Instances::owned(bytes(&[ScalingInstance::new(target_rect, source_rect, false)])),
                     textures: renderer.single_texture(view), filter: Some(TextureFilter::Trilinear), clear_color: None,
                     count_in_stats: false, readback: None, scissor: full };
                 renderer.draw_pass(&target, &[draw], &HashMap::new(), &mut DrawStats::default()).unwrap();
