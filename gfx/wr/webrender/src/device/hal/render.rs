@@ -24,6 +24,7 @@ use crate::picture::ResolvedSurfaceTexture;
 use crate::render_target::{PictureCacheTargetKind, RenderTarget};
 use crate::renderer::{vertex_descriptors as desc, MAX_VERTEX_TEXTURE_WIDTH};
 use webrender_build::hal::{ScalarType, ShaderArtifact};
+use smallvec::SmallVec;
 
 mod shaders {
     #[cfg(any(wr_hal_vulkan, wr_hal_metal))]
@@ -149,6 +150,14 @@ fn pack_instances(shader: Shader, input: &[u8]) -> Vec<u8> {
     output
 }
 
+struct ShaderMetadata {
+    artifact: &'static ShaderArtifact,
+    vertex: Vec<wgt::VertexAttribute>,
+    instances: Vec<wgt::VertexAttribute>,
+    stride: u64,
+    layout_digest: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct PipelineKey {
     device: u64,
@@ -245,7 +254,7 @@ struct Pipeline<A: hal::Api> {
 struct DescriptorKey {
     pipeline: PipelineKey,
     uniform: u64,
-    textures: Vec<(u64, u32, u32, wgt::TextureFormat, u8)>,
+    textures: SmallVec<[(u64, u32, u32, wgt::TextureFormat, u8); 16]>,
 }
 
 struct Descriptor<A: hal::Api> {
@@ -258,6 +267,7 @@ struct Descriptor<A: hal::Api> {
 pub(crate) struct FrameRenderer<A: BackendApi> {
     shader_input: ShaderInputMode,
     shader_cache: RefCell<ShaderCache>,
+    shader_metadata: RefCell<HashMap<Shader, Rc<ShaderMetadata>>>,
     pub(crate) filtering: Filtering,
     #[cfg(test)]
     projection_override: Option<[f32; 16]>,
@@ -386,6 +396,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok(Self {
             shader_input,
             shader_cache: RefCell::new(ShaderCache::default()),
+            shader_metadata: RefCell::new(HashMap::new()),
             filtering: Filtering::Standard,
             #[cfg(test)]
             projection_override: None,
@@ -1316,6 +1327,26 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
     }
 
+    fn shader_metadata(&self, shader: Shader) -> Result<Rc<ShaderMetadata>> {
+        if let Some(metadata) = self.shader_metadata.borrow().get(&shader) {
+            return Ok(metadata.clone());
+        }
+        use std::hash::{Hash, Hasher};
+        let artifact = Self::artifact(shader);
+        let layouts = vertex_layouts(Self::descriptor(shader), artifact)?;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        layouts.hash(&mut hash);
+        let metadata = Rc::new(ShaderMetadata {
+            artifact,
+            vertex: layouts.0,
+            instances: layouts.1,
+            stride: layouts.2,
+            layout_digest: hash.finish(),
+        });
+        self.shader_metadata.borrow_mut().insert(shader, metadata.clone());
+        Ok(metadata)
+    }
+
     fn key(
         &self,
         shader: Shader,
@@ -1323,11 +1354,19 @@ impl<A: BackendApi> FrameRenderer<A> {
         depth: u8,
         format: wgt::TextureFormat,
     ) -> Result<PipelineKey> {
-        use std::hash::{Hash, Hasher};
-        let artifact = Self::artifact(shader);
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        vertex_layouts(Self::descriptor(shader), artifact)?.hash(&mut hash);
-        Ok(PipelineKey {
+        let metadata = self.shader_metadata(shader)?;
+        Ok(self.key_with_metadata(shader, &metadata, blend, depth, format))
+    }
+
+    fn key_with_metadata(
+        &self,
+        shader: Shader,
+        metadata: &ShaderMetadata,
+        blend: u8,
+        depth: u8,
+        format: wgt::TextureFormat,
+    ) -> PipelineKey {
+        PipelineKey {
             device: self.owner.cache_id,
             backend: self.owner.info.backend,
             abi: PIPELINE_ABI,
@@ -1338,15 +1377,15 @@ impl<A: BackendApi> FrameRenderer<A> {
             blend,
             depth,
             format,
-            shader_digest: artifact.digest,
-            vertex_layout: hash.finish(),
+            shader_digest: metadata.artifact.digest,
+            vertex_layout: metadata.layout_digest,
             samples: 1,
             depth_format: if depth == 0 {
                 None
             } else {
                 Some(wgt::TextureFormat::Depth32Float)
             },
-        })
+        }
     }
 
     fn layouts(
@@ -1427,18 +1466,19 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok((layout, bindings))
     }
 
-    fn pipeline(&mut self, key: PipelineKey) -> Result<()> {
+    fn pipeline(&mut self, key: PipelineKey) -> Result<Rc<Pipeline<A>>> {
         if key.device != self.owner.cache_id || key.backend != self.owner.info.backend {
             return Err("HAL pipeline key belongs to another device/backend".into());
         }
-        if self.pipelines.contains_key(&key) {
-            return Ok(());
+        if let Some(pipeline) = self.pipelines.get(&key) {
+            return Ok(pipeline.clone());
         }
         if self.pipelines.len() >= 128 {
             self.pipelines.clear();
             self.descriptors.borrow_mut().clear();
         }
-        let artifact = Self::artifact(key.shader);
+        let metadata = self.shader_metadata(key.shader)?;
+        let artifact = metadata.artifact;
         if artifact.features.contains("DUAL_SOURCE_BLENDING")
             && !self
                 .owner
@@ -1448,18 +1488,17 @@ impl<A: BackendApi> FrameRenderer<A> {
             return Err("HAL adapter has no dual-source blending support".into());
         }
         let (layout, bindings) = Self::layouts(&self.owner, artifact)?;
-        let descriptor = Self::descriptor(key.shader);
-        let (vertex, instances, stride) = vertex_layouts(descriptor, artifact)?;
+
         let vertex_buffers = [
             Some(hal::VertexBufferLayout {
                 array_stride: 4,
                 step_mode: wgt::VertexStepMode::Vertex,
-                attributes: &vertex,
+                attributes: &metadata.vertex,
             }),
             Some(hal::VertexBufferLayout {
-                array_stride: stride,
+                array_stride: metadata.stride,
                 step_mode: wgt::VertexStepMode::Instance,
-                attributes: &instances,
+                attributes: &metadata.instances,
             }),
         ];
         let native = &self.owner.open.device;
@@ -1558,15 +1597,13 @@ impl<A: BackendApi> FrameRenderer<A> {
         if !super::diagnostics::quiet() {
             println!("HAL pipeline {:?} shader={:016x}", key, artifact.digest);
         }
-        self.pipelines.insert(
-            key,
-            Rc::new(Pipeline {
-                raw: Owned::new(&self.owner, pipeline, A::Device::destroy_render_pipeline),
-                layout,
-                bindings,
-            }),
-        );
-        Ok(())
+        let pipeline = Rc::new(Pipeline {
+            raw: Owned::new(&self.owner, pipeline, A::Device::destroy_render_pipeline),
+            layout,
+            bindings,
+        });
+        self.pipelines.insert(key, pipeline.clone());
+        Ok(pipeline)
     }
 
     fn draw_pass(
@@ -1642,12 +1679,12 @@ impl<A: BackendApi> FrameRenderer<A> {
         ];
         #[cfg(test)]
         let matrix = self.projection_override.unwrap_or(matrix);
-        let matrix_bytes: Vec<_> = matrix.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let matrix_key = matrix.map(f32::to_bits);
         let uniform = if let Some(buffer) = self.uniforms.get(&matrix_key) {
             buffer.clone()
         } else {
-            let buffer = Buffer::new(&self.owner, &matrix_bytes, wgt::BufferUses::UNIFORM)?;
+            let matrix_bytes = matrix.map(f32::to_ne_bytes);
+            let buffer = Buffer::new(&self.owner, matrix_bytes.as_flattened(), wgt::BufferUses::UNIFORM)?;
             if self.uniforms.len() >= 64 {
                 self.uniforms.clear();
             }
@@ -1675,84 +1712,46 @@ impl<A: BackendApi> FrameRenderer<A> {
                 texture.mip_count > 1 && draw.filter.unwrap_or(texture.filter) == TextureFilter::Trilinear) {
                 return Err("Legacy brilinear requires mipmapped images in sColor0".into());
             }
-            let key = self.key(shader, draw.blend, depth_mode, target.format)?;
-            self.pipeline(key)?;
-            let pipeline = self.pipelines[&key].clone();
+            let metadata = self.shader_metadata(shader)?;
+            let key = self.key_with_metadata(
+                shader,
+                &metadata,
+                draw.blend,
+                depth_mode,
+                target.format,
+            );
+            let pipeline = self.pipeline(key)?;
             let buffer = self
                 .submissions
                 .upload(&draw.instances, wgt::BufferUses::VERTEX)?;
-            let artifact = Self::artifact(shader);
-            let mut entries = Vec::new();
-            if artifact.projection_stages != 0 {
-                entries.push(hal::BindGroupEntry {
-                    binding: 0,
-                    resource_index: 0,
-                    count: 1,
-                });
-            }
-            let mut textures = Vec::new();
-            let mut texture_owners = Vec::new();
-            let mut identities = Vec::new();
-            let mut samplers = Vec::new();
+            let artifact = metadata.artifact;
+            let mut identities = SmallVec::new();
+            let mut resolved: SmallVec<[(&Rc<Texture<A>>, usize); 16]> = SmallVec::new();
             for binding in artifact.textures {
                 let texture = match binding.name {
                     "sColor0" => &draw.textures.colors[0],
                     "sColor1" => &draw.textures.colors[1],
                     "sColor2" => &draw.textures.colors[2],
                     "sClipMask" => &draw.textures.clip,
-                    name => data
-                        .get(name)
-                        .ok_or_else(|| format!("Missing HAL binding {name}"))?,
+                    name => data.get(name).ok_or_else(|| format!("Missing HAL binding {name}"))?,
                 };
+                if texture.overlaps(target) {
+                    return Err("HAL attachment feedback is unsupported".into());
+                }
                 sampled.push((texture.clone(), binding.name, shader, draw.count));
-                texture_owners.push(texture.clone());
                 let filter = if binding.name.starts_with("sColor") {
                     draw.filter.unwrap_or(texture.filter)
                 } else {
                     TextureFilter::Nearest
                 };
-                let filter_id = match filter {
+                let index = match filter {
                     TextureFilter::Nearest => 0,
                     TextureFilter::Linear => 1,
                     TextureFilter::Trilinear => 2,
                 };
-                identities.push((
-                    texture.allocation_id,
-                    texture.base_mip,
-                    texture.mip_count,
-                    texture.format,
-                    filter_id,
-                ));
-                if texture.overlaps(target) {
-                    return Err("HAL attachment feedback is unsupported".into());
-                }
-                entries.push(hal::BindGroupEntry {
-                    binding: binding.binding,
-                    resource_index: textures.len() as u32,
-                    count: 1,
-                });
-                textures.push(hal::TextureBinding {
-                    view: &*texture.view,
-                    usage: wgt::TextureUses::RESOURCE,
-                });
-                if binding.sampler_stages != 0 {
-                    entries.push(hal::BindGroupEntry {
-                        binding: binding.binding + 1,
-                        resource_index: samplers.len() as u32,
-                        count: 1,
-                    });
-                    let filter = if binding.name.starts_with("sColor") {
-                        draw.filter.unwrap_or(texture.filter)
-                    } else {
-                        TextureFilter::Nearest
-                    };
-                    let index = match filter {
-                        TextureFilter::Nearest => 0,
-                        TextureFilter::Linear => 1,
-                        TextureFilter::Trilinear => 2,
-                    };
-                    samplers.push(&*self.samplers[index]);
-                }
+                identities.push((texture.allocation_id, texture.base_mip,
+                    texture.mip_count, texture.format, index as u8));
+                resolved.push((texture, index));
             }
             let descriptor_key = DescriptorKey {
                 pipeline: key,
@@ -1763,6 +1762,26 @@ impl<A: BackendApi> FrameRenderer<A> {
             let group = if let Some(group) = cached {
                 group
             } else {
+                let mut entries = Vec::new();
+                let mut textures = Vec::new();
+                let mut texture_owners = Vec::new();
+                let mut samplers = Vec::new();
+                if artifact.projection_stages != 0 {
+                    entries.push(hal::BindGroupEntry { binding: 0, resource_index: 0, count: 1 });
+                }
+                for (binding, &(texture, filter)) in artifact.textures.iter().zip(&resolved) {
+                    entries.push(hal::BindGroupEntry {
+                        binding: binding.binding, resource_index: textures.len() as u32, count: 1,
+                    });
+                    textures.push(hal::TextureBinding { view: &*texture.view, usage: wgt::TextureUses::RESOURCE });
+                    texture_owners.push(texture.clone());
+                    if binding.sampler_stages != 0 {
+                        entries.push(hal::BindGroupEntry {
+                            binding: binding.binding + 1, resource_index: samplers.len() as u32, count: 1,
+                        });
+                        samplers.push(&*self.samplers[filter]);
+                    }
+                }
                 let raw = unsafe {
                     self.owner
                         .open
@@ -2977,6 +2996,8 @@ mod shader_tests {
         let shader = Shader::Other("ps_clear", "");
         let format = wgt::TextureFormat::Rgba8Unorm;
         let key = first.key(shader, 0, 0, format).unwrap();
+        let metadata = first.shader_metadata(shader).unwrap();
+        assert!(Rc::ptr_eq(&metadata, &first.shader_metadata(shader).unwrap()));
         first.pipeline(key).unwrap();
         let warm = first.pipelines[&key].clone();
         first.pipeline(key).unwrap();
@@ -2992,7 +3013,7 @@ mod shader_tests {
         let mut other = FrameRenderer::new(other_owner).unwrap();
         let other_key = other.key(shader, 0, 0, format).unwrap();
         assert_ne!(key, other_key);
-        assert!(other.pipeline(key).unwrap_err().contains("another device/backend"));
+        assert!(other.pipeline(key).err().unwrap().contains("another device/backend"));
         assert!(other.pipelines.is_empty());
         other.pipeline(other_key).unwrap();
         drop(first);
