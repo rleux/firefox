@@ -308,6 +308,59 @@ separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
 plan and incremental execution record are retained under
 `artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
 
+## Canvas profile findings
+
+The four native Canvas profiles collected with harness `b75e2db6e97` passed
+in GL/Vulkan/Vulkan/GL order, with no lost samples. They used the preserved
+Firefox binary, software Canvas2D producer, 890 by 705 viewport, ten-second
+warmup and thirty-second workload. Each completed 1800 or 1802 updates. These
+instrumented runs diagnose the earlier baseline; two repetitions per backend
+do not replace its timing results or establish statistical significance.
+
+The process-counter endpoint differences give the following GPU-process CPU
+rates, in CPU seconds per wall second:
+
+| Run | User | System | Total |
+| --- | ---: | ---: | ---: |
+| GL 03 | 0.1755 | 0.0435 | 0.2190 |
+| Vulkan 04 | 0.2328 | 0.2401 | 0.4730 |
+| Vulkan 05 | 0.2538 | 0.2658 | 0.5196 |
+| GL 06 | 0.1687 | 0.0442 | 0.2129 |
+
+The matched pairs have an additional 0.2540 and 0.3067 GPU-process CPU seconds
+per wall second with Vulkan. System time accounts for 77% and 72% of those
+differences. The whole Firefox tree increases by 0.2528 and 0.3106 CPU seconds
+per wall second, respectively. Process counters and sampled event periods are
+different estimates and are not expected to match exactly.
+
+In both Vulkan profiles, sampled page-fault work appears on call chains through
+`ExternalImages::acquire` and `Texture::upload_recorded`. The source snapshots
+external CPU bytes with `to_vec()`, then creates a separate packed upload buffer
+before copying into pooled GPU staging. Kernel samples mapped to
+`do_user_addr_fault` account for 11.78% and 10.30% of the total recorded periods.
+The samples connect this work to the copy paths, but omit the faulting virtual
+address: they cannot distinguish shared-source reads from temporary-buffer or
+staging writes, or attribute all additional CPU time to one allocation.
+
+Firefox/WebRender call chains resolve locally. Some Mesa leaf frames remain
+library offsets. Perf itself cannot resolve the kernel symbols in these files;
+the kernel names above come from a separate address-interval lookup against a
+hash-pinned, same-boot kallsyms snapshot. They are not native perf symbolization
+or off-CPU wait durations. Raw addresses remain in private local artifacts.
+
+The next bounded experiment is reuse of owned CPU snapshot storage in
+`ExternalImages::buffer`, retaining the existing copy, opaque-alpha handling
+and host-release contract. Storage must not be mutated while a previous lease
+holds it, and retained capacity must be bounded. This tests temporary allocation
+cost; it does not assume source faults will disappear. Any candidate still needs
+ownership/pixel checks and matched performance measurements before acceptance.
+Packed-upload changes remain a separate candidate. No production optimization
+was made as part of this profile collection.
+
+The fixed plan, raw captures, CPU calculations, perf analysis and independent
+review are retained under
+`artifacts/stage9/cff6f7717dc/step-9.5/canvas-investigation-retry-2/`.
+
 ## Linux perf investigation
 
 `--phase profile` records the identified GPU process with an explicitly supplied
