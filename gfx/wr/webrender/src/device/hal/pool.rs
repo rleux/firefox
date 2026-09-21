@@ -25,17 +25,32 @@ impl<A: hal::Api> BufferPool<A> {
     }
 
     pub fn upload(&self, bytes: &[u8], usage: wgt::BufferUses) -> Result<Rc<Buffer<A>>> {
+        self.upload_with(bytes.len(), usage, |destination| {
+            destination.copy_from_slice(bytes);
+            Ok(())
+        })
+    }
+
+    pub fn upload_with(
+        &self,
+        length: usize,
+        usage: wgt::BufferUses,
+        write: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<Rc<Buffer<A>>> {
         let mut buffers = self.buffers.borrow_mut();
         // Submission references disappear only after an observed completion fence.
-        if let Some(buffer) = buffers.iter().find(|buffer| {
-            Rc::strong_count(buffer) == 1
-                && buffer.usage == usage | wgt::BufferUses::MAP_WRITE
-                && buffer.size >= (bytes.len() as u64).max(4)
+        if let Some(index) = buffers.iter_mut().position(|buffer| {
+            Rc::get_mut(buffer).map_or(false, |buffer| {
+                buffer.usage == usage | wgt::BufferUses::MAP_WRITE
+                    && buffer.size >= (length as u64).max(4)
+            })
         }) {
-            buffer.write(bytes)?;
-            return Ok(buffer.clone());
+            let mut buffer = buffers.swap_remove(index);
+            Rc::get_mut(&mut buffer).unwrap().write_with(length, write)?;
+            buffers.push(buffer.clone());
+            return Ok(buffer);
         }
-        let buffer = Buffer::new(&self.owner, bytes, usage)?;
+        let buffer = Buffer::new_with(&self.owner, length, usage, write)?;
         let mut size: u64 = buffers.iter().map(|buffer| buffer.size).sum();
         let mut count = buffers.len();
         buffers.retain(|old| {

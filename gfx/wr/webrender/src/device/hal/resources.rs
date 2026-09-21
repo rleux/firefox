@@ -76,8 +76,20 @@ pub(super) struct Buffer<A: hal::Api> {
 
 impl<A: hal::Api> Buffer<A> {
     pub fn new(owner: &Rc<Device<A>>, bytes: &[u8], usage: wgt::BufferUses) -> Result<Rc<Self>> {
-        let size = (bytes.len() as u64).max(4).next_power_of_two();
-        if size > owner.capabilities.limits.max_buffer_size {
+        Self::new_with(owner, bytes.len(), usage, |destination| {
+            destination.copy_from_slice(bytes);
+            Ok(())
+        })
+    }
+
+    pub fn new_with(
+        owner: &Rc<Device<A>>,
+        length: usize,
+        usage: wgt::BufferUses,
+        write: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<Rc<Self>> {
+        let size = (length as u64).max(4).checked_next_power_of_two().ok_or("HAL buffer size overflow")?;
+        if size > owner.capabilities.limits.max_buffer_size || size > isize::MAX as u64 {
             return Err("HAL buffer exceeds device limit".into());
         }
         let allocation_id = owner.next_texture_id.get();
@@ -95,13 +107,13 @@ impl<A: hal::Api> Buffer<A> {
         let raw = Owned::new(owner, raw, A::Device::destroy_buffer).accounted(false, size);
         let mapping = unsafe { device.map_buffer(&raw, 0..size) }
             .map_err(|e| format!("Mapping upload: {e:?}"))?;
-        let buffer = Rc::new(Self {
+        let mut buffer = Rc::new(Self {
             allocation_id,
             raw,
             size,
             usage: usage | wgt::BufferUses::MAP_WRITE,
             mapping: Some(mapping),
-            used_size: Cell::new((bytes.len() as u64).max(4)),
+            used_size: Cell::new((length as u64).max(4)),
             state: Cell::new(wgt::BufferUses::MAP_WRITE),
             committed_state: Cell::new(wgt::BufferUses::MAP_WRITE),
         });
@@ -109,11 +121,8 @@ impl<A: hal::Api> Buffer<A> {
         let mapping = buffer.mapping.as_ref().unwrap();
         unsafe {
             std::ptr::write_bytes(mapping.ptr.as_ptr(), 0, size as usize);
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
-            if !mapping.is_coherent {
-                device.flush_mapped_ranges(&buffer.raw, std::iter::once(0..size));
-            }
         }
+        Rc::get_mut(&mut buffer).unwrap().write_with(length, write)?;
         Ok(buffer)
     }
 
@@ -145,19 +154,19 @@ impl<A: hal::Api> Buffer<A> {
         }))
     }
 
-    pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() as u64 > self.size {
+    pub fn write_with(&mut self, length: usize, write: impl FnOnce(&mut [u8]) -> Result<()>) -> Result<()> {
+        if length as u64 > self.size {
             return Err("HAL pooled buffer is too small".into());
         }
         let device = &self.raw.owner.open.device;
         let mapping = self.mapping.as_ref().ok_or("HAL buffer is not mapped for upload")?;
+        write(unsafe { std::slice::from_raw_parts_mut(mapping.ptr.as_ptr(), length) })?;
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr(), bytes.len());
             if !mapping.is_coherent {
                 device.flush_mapped_ranges(&self.raw, std::iter::once(0..self.size));
             }
         }
-        self.used_size.set((bytes.len() as u64).max(4));
+        self.used_size.set((length as u64).max(4));
         self.state.set(wgt::BufferUses::MAP_WRITE);
         self.committed_state.set(wgt::BufferUses::MAP_WRITE);
         Ok(())
@@ -631,6 +640,20 @@ impl<A: hal::Api> Texture<A> {
         offset: i32,
         source_format: Option<ImageFormat>,
     ) -> Result<()> {
+        self.upload_recorded_with_alpha(owner, queue, rect, data, stride, offset, source_format, None)
+    }
+
+    pub fn upload_recorded_with_alpha(
+        self: &Rc<Self>,
+        owner: &Rc<Device<A>>,
+        queue: &SubmissionQueue<A>,
+        rect: DeviceIntRect,
+        data: &[u8],
+        stride: Option<i32>,
+        offset: i32,
+        source_format: Option<ImageFormat>,
+        opaque: Option<api::ImageDescriptor>,
+    ) -> Result<()> {
         if self.aspect != wgt::TextureAspect::All {
             return Err("Cannot upload into a foreign video plane".into());
         }
@@ -699,29 +722,57 @@ impl<A: hal::Api> Texture<A> {
         {
             return Err("HAL upload exceeds buffer limits".into());
         }
-        let packed = if !swizzle
-            && destination == rect
-            && source_stride == row_bytes
-            && pitch == row_bytes
-        {
-            std::borrow::Cow::Borrowed(&data[offset as usize..end])
+        let mut force_alpha = false;
+        let data = if let Some(descriptor) = opaque {
+            super::external::validate_buffer(descriptor, data)?;
+            if !matches!(descriptor.format, ImageFormat::RGBA8 | ImageFormat::BGRA8) {
+                return Err("Opaque HAL upload requires RGBA or BGRA source pixels".into());
+            }
+            let original_row = descriptor.size.width as usize * 4;
+            let original_stride = descriptor.stride.map_or(original_row, |stride| stride as usize);
+            let start = descriptor.offset as usize;
+            let relative = (offset as usize).checked_sub(start);
+            force_alpha = bpp == 4 && source_stride == original_stride && relative.map_or(false, |relative| {
+                let column = relative % original_stride;
+                column % 4 == 0 && column + row_bytes <= original_row
+                    && relative / original_stride + rect.height() as usize <= descriptor.size.height as usize
+            });
+            if force_alpha {
+                std::borrow::Cow::Borrowed(data)
+            } else {
+                // Reinterpreted uploads still normalize alpha on the source pixel grid.
+                let mut normalized = data.to_vec();
+                for y in 0..descriptor.size.height as usize {
+                    for x in 0..descriptor.size.width as usize {
+                        normalized[start + y * original_stride + x * 4 + 3] = 255;
+                    }
+                }
+                std::borrow::Cow::Owned(normalized)
+            }
         } else {
-            let mut packed = vec![0; packed_size];
+            std::borrow::Cow::Borrowed(data)
+        };
+        let (mut commands, staging) = queue.upload_recording_with(packed_size, wgt::BufferUses::COPY_SRC, |packed| {
+            if !swizzle && !force_alpha && destination == rect && source_stride == row_bytes && pitch == row_bytes {
+                packed.copy_from_slice(&data[offset as usize..end]);
+                return Ok(());
+            }
+            if destination != rect || pitch != row_bytes { packed.fill(0); }
             for y in 0..rect.height() as usize {
                 let src = offset as usize + y * source_stride;
                 let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
                     + (rect.min.x - destination.min.x) as usize * bpp;
                 let dst = &mut packed[start..start + row_bytes];
                 dst.copy_from_slice(&data[src..src + row_bytes]);
-                if swizzle {
+                if swizzle || force_alpha {
                     for pixel in dst.chunks_exact_mut(4) {
-                        pixel.swap(0, 2);
+                        if swizzle { pixel.swap(0, 2); }
+                        if force_alpha { pixel[3] = 255; }
                     }
                 }
             }
-            std::borrow::Cow::Owned(packed)
-        };
-        let (mut commands, staging) = queue.upload_recording(&packed, wgt::BufferUses::COPY_SRC)?;
+            Ok(())
+        })?;
         staging.transition(&mut commands, wgt::BufferUses::COPY_SRC);
         self.transition(&mut commands, wgt::TextureUses::COPY_DST);
         unsafe {
@@ -765,6 +816,48 @@ mod tests {
 
     #[test]
     #[ignore = "Requires Vulkan"]
+    fn direct_staging_preserves_opaque_source_layout_and_zero_initialization() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        let mut source = vec![0xa5; 24];
+        for y in 0..2 {
+            source[y * 12..y * 12 + 8].copy_from_slice(&[89, 47, 23, 11].repeat(2));
+        }
+        let mut descriptor = api::ImageDescriptor::new(2, 2, ImageFormat::BGRA8, api::ImageDescriptorFlags::empty());
+        descriptor.stride = Some(12);
+        for (width, height, offset, color) in [(2, 2, 0, [23, 47, 89, 255]), (1, 1, 1, [255, 23, 47, 89])] {
+            let texture = Texture::new(&owner, 7, 5, wgt::TextureFormat::Rgba8Unorm,
+                crate::device::TextureFilter::Nearest, false).unwrap();
+            let rect = DeviceIntRect::from_origin_and_size(api::units::DeviceIntPoint::new(2, 1),
+                api::units::DeviceIntSize::new(width, height));
+            texture.upload_recorded_with_alpha(&owner, &queue, rect, &source, Some(12), offset,
+                Some(ImageFormat::BGRA8), Some(descriptor)).unwrap();
+            let layout = owner.layout(7, 5).unwrap();
+            let readback = Buffer::readback(&owner, &layout).unwrap();
+            let mut commands = queue.recording().unwrap();
+            commands.keep(readback.clone());
+            texture.transition(&mut commands, wgt::TextureUses::COPY_SRC);
+            unsafe {
+                copy_readback::<wgpu_hal::api::Vulkan>(commands.encoder(), &texture.raw,
+                    &readback.raw, &layout, texture.size, hal::FormatAspects::COLOR);
+            }
+            readback.transition(&mut commands, wgt::BufferUses::MAP_READ);
+            drop(commands);
+            queue.wait().unwrap();
+            let pixels = owner.map_readback(&readback.raw, &layout).unwrap();
+            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                let x = (index % 7) as i32;
+                let y = (index / 7) as i32;
+                assert_eq!(pixel, if x >= 2 && x < 2 + width && y >= 1 && y < 1 + height { &color } else { &[0; 4] });
+            }
+            assert_eq!(source[3], 11);
+            assert_eq!(source[15], 11);
+            assert_eq!(&source[8..12], &[0xa5; 4]);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
     fn persistent_upload_mappings_preserve_pool_ownership() {
         let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
         let pool = super::super::pool::BufferPool::new(&owner);
@@ -785,9 +878,9 @@ mod tests {
         drop(reused);
         pool.clear();
         assert_eq!(owner.memory.get().buffers, 0);
-        let readback = Buffer::readback(&owner, &owner.layout(2, 2).unwrap()).unwrap();
+        let mut readback = Buffer::readback(&owner, &owner.layout(2, 2).unwrap()).unwrap();
         assert!(readback.mapping.is_none());
-        assert!(readback.write(&[0; 16]).is_err());
+        assert!(Rc::get_mut(&mut readback).unwrap().write_with(16, |_| Ok(())).is_err());
     }
 
     #[test]

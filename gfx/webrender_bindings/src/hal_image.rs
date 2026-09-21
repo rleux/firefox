@@ -328,21 +328,28 @@ mod linux {
         buffers: Vec<Arc<Vec<u8>>>,
     }
 
+    fn buffer_layout(data: &WrHalBuffer) -> Result<(ImageDescriptor, usize), String> {
+        if data.data.is_null() || data.width <= 0 || data.height <= 0 || data.stride <= 0 {
+            return Err("Invalid HAL external buffer".into());
+        }
+        let row = (data.width as usize)
+            .checked_mul(data.format.bytes_per_pixel() as usize)
+            .ok_or("HAL external buffer row overflow")?;
+        let needed = (data.stride as usize)
+            .checked_mul(data.height as usize - 1)
+            .and_then(|n| n.checked_add(row))
+            .ok_or("HAL external buffer size overflow")?;
+        if row > data.stride as usize || needed > data.length || needed > isize::MAX as usize {
+            return Err("HAL external buffer layout exceeds its allocation".into());
+        }
+        let mut descriptor = ImageDescriptor::new(data.width, data.height, data.format, ImageDescriptorFlags::empty());
+        descriptor.stride = Some(data.stride);
+        Ok((descriptor, needed))
+    }
+
     impl BufferSnapshots {
         fn copy(&mut self, data: WrHalBuffer) -> Result<(ImageDescriptor, Arc<Vec<u8>>), String> {
-            if data.data.is_null() || data.width <= 0 || data.height <= 0 || data.stride <= 0 {
-                return Err("Invalid HAL external buffer".into());
-            }
-            let row = (data.width as usize)
-                .checked_mul(data.format.bytes_per_pixel() as usize)
-                .ok_or("HAL external buffer row overflow")?;
-            let needed = (data.stride as usize)
-                .checked_mul(data.height as usize - 1)
-                .and_then(|n| n.checked_add(row))
-                .ok_or("HAL external buffer size overflow")?;
-            if row > data.stride as usize || needed > data.length {
-                return Err("HAL external buffer layout exceeds its allocation".into());
-            }
+            let (descriptor, needed) = buffer_layout(&data)?;
             let source = unsafe { std::slice::from_raw_parts(data.data, needed) };
             let reusable = self
                 .buffers
@@ -368,9 +375,6 @@ mod linux {
                     }
                 }
             }
-            let mut descriptor =
-                ImageDescriptor::new(data.width, data.height, data.format, ImageDescriptorFlags::empty());
-            descriptor.stride = Some(data.stride);
             Ok((descriptor, snapshot))
         }
 
@@ -584,6 +588,16 @@ mod linux {
     }
 
     impl ExternalImages {
+        fn acquire_image(&self, id: ExternalImageId, channel: u8) -> Result<(WrHalImage, Lease), String> {
+            let mut image = std::mem::MaybeUninit::<WrHalImage>::uninit();
+            let raw = unsafe { wr_renderer_acquire_hal_image(self.handler.object(), id, channel, image.as_mut_ptr()) };
+            let lease = Lease {
+                raw: NonNull::new(raw).ok_or_else(|| format!("Unsupported HAL external image {id:?}/{channel}"))?,
+                status: WrHalImageRelease::Unused,
+            };
+            Ok((unsafe { image.assume_init() }, lease))
+        }
+
         pub fn new(handler: WrExternalImageHandler, device: ExternalImageDevice) -> Self {
             Self {
                 handler,
@@ -1080,14 +1094,27 @@ mod linux {
     }
 
     impl hal::ExternalImageProvider for ExternalImages {
-        fn acquire(&mut self, id: ExternalImageId, channel: u8, _: bool) -> Result<ExternalImageLease, String> {
-            let mut image = std::mem::MaybeUninit::<WrHalImage>::uninit();
-            let raw = unsafe { wr_renderer_acquire_hal_image(self.handler.object(), id, channel, image.as_mut_ptr()) };
-            let lease = Lease {
-                raw: NonNull::new(raw).ok_or_else(|| format!("Unsupported HAL external image {id:?}/{channel}"))?,
-                status: WrHalImageRelease::Unused,
+        fn with_buffer(
+            &mut self,
+            id: ExternalImageId,
+            channel: u8,
+            upload: &mut dyn FnMut(hal::ExternalImageBuffer<'_>) -> Result<(), String>,
+        ) -> Result<(), String> {
+            let (image, mut lease) = self.acquire_image(id, channel)?;
+            let data = match image.source {
+                WrHalImageSource::Buffer(data) => data,
+                _ => return Err("External buffer update requires CPU bytes".into()),
             };
-            let image = unsafe { image.assume_init() };
+            let (descriptor, needed) = buffer_layout(&data)?;
+            let source = unsafe { std::slice::from_raw_parts(data.data, needed) };
+            let opaque = data.opaque && matches!(data.format, ImageFormat::RGBA8 | ImageFormat::BGRA8);
+            upload(hal::ExternalImageBuffer::new(descriptor, source, opaque))?;
+            lease.status = WrHalImageRelease::Complete;
+            Ok(())
+        }
+
+        fn acquire(&mut self, id: ExternalImageId, channel: u8, _: bool) -> Result<ExternalImageLease, String> {
+            let (image, lease) = self.acquire_image(id, channel)?;
             match image.source {
                 WrHalImageSource::Buffer(data) => self.buffer(data, image.generation, lease),
                 WrHalImageSource::VulkanDmaBuf(data) => self.dmabuf(data, image.generation, lease),

@@ -18,7 +18,7 @@ pub mod diagnostics;
 mod compositor;
 pub use self::compositor::{CompositorConfig, CompositorTarget, LayerCompositor, NativeCompositor};
 pub use crate::composite::{CompositeDescriptor, CompositorInputLayer, NativeSurfaceOperation, NativeSurfaceOperationDetails};
-pub use self::external::{ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource, NativeImage};
+pub use self::external::{ExternalImageBuffer, ExternalImageDevice, ExternalImageLease, ExternalImageProvider, ExternalImageRelease, ExternalImageSource, NativeImage};
 pub(crate) mod backend;
 pub(crate) mod render;
 mod resources;
