@@ -302,15 +302,90 @@ independent runs. Four pairs provide a bounded local comparison rather than a
 general performance guarantee. Static and clip/blur results remain inconclusive
 because their paired directions differ.
 
-The active browser CPU differences justify a focused GPU-process investigation,
-starting with the software Canvas workload. Cold-start, lifecycle, memory and
+The active browser CPU differences motivated the Canvas GPU-process investigation
+and upload experiments below. Cold-start, lifecycle, memory and
 separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
 plan and incremental execution record are retained under
 `artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
 
+## Combined upload optimization comparison
+
+Four subsequent changes were committed separately before combined validation:
+
+- `f962370ded4`: bypass the packed temporary when the upload layout already matches.
+- `d9e8004c3ca`: retain upload mappings until buffer destruction, preserving
+  noncoherent flushes and unmap-before-destroy. The Vulkan allocator already
+  keeps OS mappings; this caches the HAL mapping and avoids repeated pointer
+  lookup and allocator locking.
+- `e19e9510d60`: sample the shared timeline fence once per retirement sweep and
+  prepare recording/upload together. Native completion checks, backpressure
+  and producer submission order remain intact.
+- `3876fcff133`: copy CPU external-image bytes directly into staging while a
+  synchronous callback holds the host lease. Packing, swizzling, initialization
+  and ordinary opaque-alpha correction happen in staging. The owned snapshot
+  interface remains available; unusual source-grid reinterpretations retain
+  an owned normalization fallback. Default providers retain deferred release
+  callbacks on both success and error. Missing or repeated callbacks fail.
+
+The final runtime includes test-only width correction `f48747661aa`. It was
+compared against the preserved snapshot-cache build from `02521a47281`, so these
+percentages describe the additional combined effect of the four changes. They
+do not isolate each commit's contribution or add directly to the earlier result.
+
+All sixteen native Intel/X11 cases passed without retries: four balanced Vulkan
+Canvas pairs, two Vulkan CSS pairs, one separate memory pair, and opening/closing
+OpenGL reference runs using the same final binary. Timing retained the established
+settling, ten-second warmup, sixty-second workload and two-second sampling.
+
+| Canvas pair | GPU total CPU change | GPU user | GPU system | Whole Firefox |
+| --- | ---: | ---: | ---: | ---: |
+| 1 AB | -29.20% | -12.37% | -59.20% | -23.60% |
+| 2 BA | -28.53% | -13.08% | -55.60% | -23.55% |
+| 3 AB | -23.94% | -7.50% | -53.07% | -18.91% |
+| 4 BA | -24.90% | -7.97% | -54.68% | -20.78% |
+| Median paired change | -26.71% | -10.17% | -55.14% | -22.16% |
+
+Both CPU components and the totals fell in all four pairs. Callback cadence
+remained around 16.666 ms, with p99 around 17.20 ms; this is CPU-use improvement
+under a fixed workload, not a GPU-duration or scanout measurement. The CSS
+shared-path cases also used less GPU CPU (-2.04% and -2.90%) and whole-Firefox
+CPU (-2.07% and -4.37%). Two pairs support a limited observation, not a general
+performance guarantee.
+
+The fresh OpenGL references show the remaining CPU gap:
+
+| Canvas variant | Median GPU CPU-s/s | Median whole-Firefox CPU-s/s |
+| --- | ---: | ---: |
+| Final build, OpenGL (two reference runs) | 0.1969 | 0.2922 |
+| Vulkan before the four changes | 0.4002 | 0.4981 |
+| Vulkan after the four changes | 0.2950 | 0.3917 |
+
+Relative to the GL reference median, Vulkan's descriptive whole-Firefox CPU
+excess narrowed from 70.46% to 34.05%, and its GPU-process excess from 103.21%
+to 49.81%. GL still used less CPU in this workload. The GL GPU CPU rates were
+0.1995 and 0.1944 at the window boundaries; these two references bracket drift
+but are not a balanced GL/Vulkan trial. Ratios of variant medians in this table
+are distinct from the median paired changes above.
+
+The separate memory pair produced 191 observations per run with the default
+250 ms sampler. GPU-process median PSS changed by +0.12 MiB, private memory by
+-0.38 MiB and RSS by -0.39 MiB; whole-Firefox medians changed by +2.40, +0.14
+and +8.14 MiB, respectively. Endpoint and windowed drift summaries are preserved
+separately. One short pair does not establish a leak or stable memory effect.
+The dense memory collector used about 10.48 CPU seconds per run, versus
+0.46–0.55 seconds in timing runs; it is reported separately and never subtracted.
+
+Validation passed six ordinary integration tests, 174 ordinary WebRender tests,
+and 16 focused buffer/resource/submission/external-image cases on each of
+Lavapipe and Intel with Vulkan validation. The Firefox binary build, final
+runtime snapshot and Xvfb software-Vulkan Canvas smoke also passed. The generic
+`hal-metal` feature check passed on Linux; native Metal validation still requires
+macOS. Raw results, frozen source/runtime/configuration pins and independent
+analysis are retained under `artifacts/stage9/02521a47281/four-upload-steps/`.
+
 ## CPU snapshot cache comparison
 
-The Vulkan CPU-image bridge reuses owned snapshot storage only when
+The earlier snapshot-cache optimization reuses owned storage only when
 `Arc::get_mut` confirms that no previous consumer or weak observer can see
 mutation. It still copies the validated source span, preserves stride padding
 and opaque-alpha correction, and releases the host image after copying. The
