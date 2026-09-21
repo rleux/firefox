@@ -1487,6 +1487,8 @@ def validate_report(report, expected):
         delayed_disabled = delay_value == "-1" or "--delay=-1" in (
             command if isinstance(command, list) else []
         )
+        finalize_started = perf.get("finalizeStartedTimeSeconds")
+        finalize_ended = perf.get("finalizeEndedTimeSeconds")
         if (
             perf.get("passed") is not True
             or not isinstance(command, list)
@@ -1522,6 +1524,8 @@ def validate_report(report, expected):
             or "--strict-freq" not in command
             or command_option("--clockid") != "mono"
             or "--no-buildid-cache" not in command
+            or "--buildid-all" not in command
+            or "--timestamp-boundary" not in command
             or "--timestamp" not in command
             or "--sample-cpu" not in command
             or "-i" in command
@@ -1532,6 +1536,14 @@ def validate_report(report, expected):
             or "--tid" in command
             or type(perf.get("returncode")) is not int
             or perf.get("returncode") != 0
+            or perf.get("buildIdMode") != "all-dsos"
+            or type(perf.get("controlTimeoutSeconds")) is not int
+            or perf.get("controlTimeoutSeconds") != 10
+            or type(perf.get("finalizeTimeoutSeconds")) is not int
+            or perf.get("finalizeTimeoutSeconds") != 120
+            or not _finite_number(finalize_started)
+            or not _finite_number(finalize_ended)
+            or finalize_ended < finalize_started
             or not isinstance(data_path, str)
             or not Path(data_path).is_absolute()
             or not isinstance(perf.get("dataBytes"), int)
@@ -1581,6 +1593,10 @@ def validate_report(report, expected):
                     or not interval_start <= enable[0] <= enable[1] <= interval_end
                     or not interval_start <= disable[0] <= disable[1] <= interval_end
                     or stop_control[0] < interval_end
+                    or (
+                        _finite_number(finalize_started)
+                        and stop_control[1] > finalize_started
+                    )
                 ):
                     errors.append("perf control boundaries are invalid")
     if phase == "memory" and process_metrics:

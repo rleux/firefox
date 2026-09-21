@@ -362,6 +362,8 @@ def profile_report():
             "--timestamp",
             "--sample-cpu",
             "--no-buildid-cache",
+            "--buildid-all",
+            "--timestamp-boundary",
             "-o",
             data_path,
         ],
@@ -388,6 +390,11 @@ def profile_report():
             },
         ],
         "returncode": 0,
+        "buildIdMode": "all-dsos",
+        "controlTimeoutSeconds": 10,
+        "finalizeTimeoutSeconds": 120,
+        "finalizeStartedTimeSeconds": 2.22,
+        "finalizeEndedTimeSeconds": 2.3,
         "dataPath": data_path,
         "dataBytes": 4096,
         "dataSha256": "e" * 64,
@@ -1102,6 +1109,10 @@ class TestValidateReport(unittest.TestCase):
             ("dataBytes", 0),
             ("dataSha256", "bad"),
             ("passed", False),
+            ("buildIdMode", "hits"),
+            ("controlTimeoutSeconds", 11),
+            ("finalizeTimeoutSeconds", 10),
+            ("finalizeEndedTimeSeconds", 2.1),
         ]
         for key, value in mutations:
             with self.subTest(key=key):
@@ -1114,6 +1125,18 @@ class TestValidateReport(unittest.TestCase):
 
         report, config = profile_report()
         report["perf"]["command"].remove("--strict-freq")
+        self.assertIn(
+            "perf capture metadata is invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["command"].remove("--buildid-all")
+        self.assertIn(
+            "perf capture metadata is invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["command"].remove("--timestamp-boundary")
         self.assertIn(
             "perf capture metadata is invalid", validate_report(report, config)
         )
@@ -1195,6 +1218,14 @@ class TestValidateReport(unittest.TestCase):
                     "perf control boundaries are invalid",
                     validate_report(report, config),
                 )
+
+        report, config = profile_report()
+        report["perf"]["finalizeStartedTimeSeconds"] = 2.2
+        report["perf"]["controls"][3]["acknowledgedTimeSeconds"] = 2.21
+        self.assertIn(
+            "perf control boundaries are invalid",
+            validate_report(report, config),
+        )
 
     def test_profile_validation_preserves_errors_for_malformed_process_samples(self):
         report, config = profile_report()

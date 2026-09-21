@@ -13,6 +13,8 @@ from pathlib import Path
 
 from renderer_benchmark_metrics import _read_stat
 
+PERF_FINALIZE_TIMEOUT_SECONDS = 120
+
 
 def parse_event_attributes(text):
     events = [line for line in text.splitlines() if line.startswith("cpu-clock")]
@@ -44,17 +46,29 @@ def parse_event_attributes(text):
 
 
 class PerfRecorder:
-    def __init__(self, binary, pid, output, evidence, event="cpu-clock:uk", timeout=10):
+    def __init__(
+        self,
+        binary,
+        pid,
+        output,
+        evidence,
+        event="cpu-clock:uk",
+        timeout=10,
+        finalize_timeout=PERF_FINALIZE_TIMEOUT_SECONDS,
+    ):
         if event not in ("cpu-clock:uk", "cpu-clock:u"):
             raise ValueError("Unsupported profiling event")
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("Perf timeout must be finite and positive")
+        if not math.isfinite(finalize_timeout) or finalize_timeout <= 0:
+            raise ValueError("Perf finalization timeout must be finite and positive")
         self.binary = Path(binary)
         self.pid = pid
         self.output = Path(output)
         self.evidence = evidence
         self.event = event
         self.timeout = timeout
+        self.finalize_timeout = finalize_timeout
         self.process = None
         self.log = None
         self.control_fd = None
@@ -113,6 +127,9 @@ class PerfRecorder:
             event=self.event,
             frequencyHz=99,
             callGraph="dwarf,16384",
+            controlTimeoutSeconds=self.timeout,
+            finalizeTimeoutSeconds=self.finalize_timeout,
+            buildIdMode="all-dsos",
             controls=[],
         )
         try:
@@ -151,6 +168,7 @@ class PerfRecorder:
                 "--clockid",
                 "mono",
                 "--no-buildid-cache",
+                "--buildid-all",
                 "-p",
                 str(self.pid),
                 "-D",
@@ -158,6 +176,7 @@ class PerfRecorder:
                 "--control",
                 f"fifo:{control},{ack}",
                 "--timestamp",
+                "--timestamp-boundary",
                 "--sample-cpu",
                 "-o",
                 str(self.output / "perf.data"),
@@ -198,7 +217,11 @@ class PerfRecorder:
                 raise RuntimeError("Perf must be disabled before finalization")
             self.check_target()
             self.command("stop")
-            status = self.process.wait(timeout=self.timeout)
+            self.evidence["finalizeStartedTimeSeconds"] = time.monotonic()
+            try:
+                status = self.process.wait(timeout=self.finalize_timeout)
+            finally:
+                self.evidence["finalizeEndedTimeSeconds"] = time.monotonic()
             self.evidence["returncode"] = status
             if status != 0:
                 raise RuntimeError(f"Perf exited with status {status}")
