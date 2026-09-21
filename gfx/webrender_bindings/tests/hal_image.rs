@@ -5,7 +5,7 @@
 #![cfg(target_os = "linux")]
 
 use hal::ExternalImageProvider;
-use std::{cell::RefCell, os::fd::AsRawFd, os::raw::c_void, rc::Rc};
+use std::{cell::RefCell, os::fd::AsRawFd, os::raw::c_void, rc::Rc, sync::Arc};
 use webrender::{api::units::*, api::*, hal};
 
 mod bindings {
@@ -335,6 +335,130 @@ impl hal::ExternalImageProvider for SingleLease {
     fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<hal::ExternalImageLease, String> {
         self.0.take().ok_or("Image already acquired".into())
     }
+}
+
+#[test]
+fn default_buffer_upload_releases_once_on_success_and_error() {
+    let descriptor = ImageDescriptor::new(2, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+    let pixels = Arc::new(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    for success in [true, false] {
+        let releases = Rc::new(RefCell::new(Vec::new()));
+        let callback_releases = releases.clone();
+        let lease = hal::ExternalImageLease::new(
+            descriptor,
+            TexelRect::new(0.0, 0.0, 2.0, 1.0),
+            7,
+            hal::ExternalImageSource::Buffer(pixels.clone()),
+            move |status| callback_releases.borrow_mut().push(status),
+        )
+        .unwrap();
+        let mut provider = SingleLease(Some(lease));
+        let mut calls = 0;
+        let result = provider.with_buffer(ExternalImageId(1), 0, &mut |buffer| {
+            calls += 1;
+            assert_eq!(buffer.descriptor(), descriptor);
+            assert_eq!(buffer.bytes().unwrap(), pixels.as_slice());
+            assert!(!buffer.opaque());
+            if success {
+                Ok(())
+            } else {
+                Err("injected upload failure".into())
+            }
+        });
+        assert_eq!(result.is_ok(), success);
+        assert_eq!(calls, 1);
+        assert!(matches!(
+            (success, releases.borrow().as_slice()),
+            (true, [hal::ExternalImageRelease::Complete]) | (false, [hal::ExternalImageRelease::Unused])
+        ));
+    }
+}
+
+#[test]
+#[ignore = "Requires a Linux Vulkan adapter"]
+fn buffer_direct_upload_retains_host_and_validates_layout() {
+    let (renderer, sender) = renderer();
+    let fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: (0..24).collect(),
+        video_access: Default::default(),
+    });
+    let pointer = fixture.pixels.as_ptr();
+    let mut provider = provider(&fixture, renderer.external_image_device());
+    let offer = |generation, stride, length, opaque| {
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation,
+            source: WrHalImageSource::Buffer(WrHalBuffer {
+                data: pointer,
+                length,
+                width: 2,
+                height: 2,
+                stride,
+                format: ImageFormat::RGBA8,
+                opaque,
+            }),
+        });
+    };
+
+    offer(1, 12, 20, true);
+    let mut calls = 0;
+    provider
+        .with_buffer(ExternalImageId(1), 0, &mut |buffer| {
+            calls += 1;
+            assert_eq!(buffer.descriptor().size, DeviceIntSize::new(2, 2));
+            assert_eq!(buffer.descriptor().format, ImageFormat::RGBA8);
+            assert_eq!(buffer.descriptor().stride, Some(12));
+            assert_eq!(buffer.bytes().unwrap().as_ptr(), pointer);
+            assert_eq!(buffer.bytes().unwrap(), &fixture.pixels[..20]);
+            assert!(buffer.opaque());
+            assert!(fixture.releases.borrow().is_empty());
+            assert_eq!(Rc::strong_count(&fixture), 2);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [WrHalImageRelease::Complete]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+
+    offer(2, 12, 20, false);
+    let result = provider.with_buffer(ExternalImageId(2), 0, &mut |buffer| {
+        calls += 1;
+        assert_eq!(buffer.bytes().unwrap().as_ptr(), pointer);
+        assert!(!buffer.opaque());
+        assert_eq!(fixture.releases.borrow().len(), 1);
+        assert_eq!(Rc::strong_count(&fixture), 2);
+        Err("injected direct upload failure".into())
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 2);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [WrHalImageRelease::Complete, WrHalImageRelease::Unused]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+
+    offer(3, 4, 20, true);
+    let result = provider.with_buffer(ExternalImageId(3), 0, &mut |_| {
+        calls += 1;
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 2);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [
+            WrHalImageRelease::Complete,
+            WrHalImageRelease::Unused,
+            WrHalImageRelease::Unused
+        ]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+    sender.create_api().shut_down(true);
 }
 
 #[test]

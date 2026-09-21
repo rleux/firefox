@@ -321,13 +321,26 @@ impl<A: hal::Api> SubmissionQueue<A> {
         self.uploads.upload(bytes, usage)
     }
 
+    #[cfg(test)]
     pub fn upload_recording(
         &self,
         bytes: &[u8],
         usage: wgt::BufferUses,
     ) -> Result<(RefMut<'_, Submission<A>>, Rc<super::resources::Buffer<A>>)> {
+        self.upload_recording_with(bytes.len(), usage, |destination| {
+            destination.copy_from_slice(bytes);
+            Ok(())
+        })
+    }
+
+    pub fn upload_recording_with(
+        &self,
+        length: usize,
+        usage: wgt::BufferUses,
+        write: impl FnOnce(&mut [u8]) -> Result<()>,
+    ) -> Result<(RefMut<'_, Submission<A>>, Rc<super::resources::Buffer<A>>)> {
         let recording = self.recording()?;
-        let buffer = self.uploads.upload(bytes, usage)?;
+        let buffer = self.uploads.upload_with(length, usage, write)?;
         Ok((recording, buffer))
     }
 
@@ -617,5 +630,29 @@ mod tests {
         assert_eq!(queue.poll().unwrap(), 3);
         assert_eq!(*releases.borrow(), [1, 2, 3]);
         assert!(queue.state.borrow().pending.is_empty());
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn failed_upload_fill_discards_mapping_without_submission() {
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let queue = SubmissionQueue::new(&owner, 3, false);
+        for cached in [false, true] {
+            if cached {
+                drop(queue.upload_recording_with(16, wgt::BufferUses::COPY_SRC, |bytes| {
+                    bytes.fill(17);
+                    Ok(())
+                }).unwrap());
+                assert_eq!(owner.memory.get().buffers, 1);
+            }
+            assert!(queue.upload_recording_with(16, wgt::BufferUses::COPY_SRC, |bytes| {
+                bytes[..4].fill(23);
+                Err("Injected upload fill failure".into())
+            }).is_err());
+            assert_eq!(queue.submitted(), 0);
+            assert_eq!(owner.memory.get().buffers, 0);
+            queue.discard_recording();
+            assert!(queue.state.borrow().active.is_none());
+        }
     }
 }

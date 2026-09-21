@@ -953,14 +953,16 @@ impl<A: BackendApi> FrameRenderer<A> {
                         )?;
                     }
                     TextureUpdateSource::External { id, channel_index } => {
-                        let lease = self.acquire_external(id, channel_index, false)?;
-                        let data = match &lease.source {
-                            ExternalImageSource::Buffer(data) => data,
-                            _ => return Err("External buffer update requires CPU bytes".into()),
-                        };
-                        texture.upload_recorded(&self.owner, &self.submissions, update.rect, data,
-                            update.stride, update.offset, update.format_override.or(Some(lease.descriptor.format)))?;
-                        lease.complete_cpu_copy();
+                        let owner = &self.owner;
+                        let queue = &self.submissions;
+                        drop(queue.recording()?);
+                        let provider = self.external_provider.as_mut().ok_or("No HAL external-image provider is installed")?;
+                        let (rect, stride, offset, format) = (update.rect, update.stride, update.offset, update.format_override);
+                        super::external::upload_buffer(provider.as_mut(), id, channel_index, &self.releases, owner.metrics.as_ref(),
+                            &mut |descriptor, data, opaque| {
+                                texture.upload_recorded_with_alpha(owner, queue, rect, data, stride, offset,
+                                    format.or(Some(descriptor.format)), opaque.then_some(descriptor))
+                            })?;
                     }
                 }
                 if uploaded {

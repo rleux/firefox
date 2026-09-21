@@ -364,8 +364,104 @@ impl ExternalImageLease {
     }
 }
 
+pub struct ExternalImageBuffer<'a> {
+    descriptor: ImageDescriptor,
+    bytes: Option<&'a [u8]>,
+    opaque: bool,
+    lease: Option<&'a ExternalImageLease>,
+}
+
+impl<'a> ExternalImageBuffer<'a> {
+    pub fn new(descriptor: ImageDescriptor, bytes: &'a [u8], opaque: bool) -> Self {
+        Self { descriptor, bytes: Some(bytes), opaque, lease: None }
+    }
+    pub fn descriptor(&self) -> ImageDescriptor { self.descriptor }
+    pub fn bytes(&self) -> Result<&[u8]> {
+        self.bytes.ok_or_else(|| "External buffer update requires CPU bytes".into())
+    }
+    /// Whether visible source pixels need alpha set to 255 before upload.
+    pub fn opaque(&self) -> bool { self.opaque }
+}
+
 pub trait ExternalImageProvider {
     fn acquire(&mut self, id: ExternalImageId, channel: u8, is_composited: bool) -> Result<ExternalImageLease>;
+
+    /// Invoke the upload once, synchronously, while the source bytes remain valid and immutable.
+    fn with_buffer(
+        &mut self,
+        id: ExternalImageId,
+        channel: u8,
+        upload: &mut dyn FnMut(ExternalImageBuffer<'_>) -> Result<()>,
+    ) -> Result<()> {
+        let lease = self.acquire(id, channel, false)?;
+        let bytes = match &lease.source {
+            ExternalImageSource::Buffer(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        };
+        upload(ExternalImageBuffer { descriptor: lease.descriptor, bytes, opaque: false, lease: Some(&lease) })?;
+        if bytes.is_none() { return Err("External buffer update requires CPU bytes".into()); }
+        lease.complete_cpu_copy();
+        Ok(())
+    }
+}
+
+struct CpuLeaseMetrics(Option<Arc<diagnostics::RenderMetrics>>);
+
+impl CpuLeaseMetrics {
+    fn new(metrics: Option<&Arc<diagnostics::RenderMetrics>>) -> Self {
+        if let Some(metrics) = metrics {
+            metrics.add(diagnostics::RenderCounter::ExternalLeaseAcquires, 1);
+            metrics.retain(diagnostics::RenderGauge::ExternalLeases);
+        }
+        Self(metrics.cloned())
+    }
+}
+
+impl Drop for CpuLeaseMetrics {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.0 {
+            metrics.add(diagnostics::RenderCounter::ExternalLeaseReleases, 1);
+            metrics.release(diagnostics::RenderGauge::ExternalLeases);
+        }
+    }
+}
+
+pub(super) fn upload_buffer(
+    provider: &mut dyn ExternalImageProvider,
+    id: ExternalImageId,
+    channel: u8,
+    releases: &ReleaseQueue,
+    metrics: Option<&Arc<diagnostics::RenderMetrics>>,
+    upload: &mut dyn FnMut(ImageDescriptor, &[u8], bool) -> Result<()>,
+) -> Result<()> {
+    let mut called = false;
+    let mut repeated = false;
+    let mut copied = false;
+    let mut lease_metrics = None;
+    let result = provider.with_buffer(id, channel, &mut |buffer| {
+        if called {
+            repeated = true;
+            return Err("External buffer provider repeated the upload".into());
+        }
+        called = true;
+        if let Some(lease) = buffer.lease {
+            lease.attach_releases(releases);
+            lease.attach_metrics(metrics);
+        } else {
+            lease_metrics = Some(CpuLeaseMetrics::new(metrics));
+        }
+        let bytes = buffer.bytes()?;
+        validate_buffer(buffer.descriptor, bytes)?;
+        upload(buffer.descriptor, bytes, buffer.opaque)?;
+        copied = true;
+        Ok(())
+    });
+    drop(lease_metrics);
+    result?;
+    if !copied || repeated {
+        return Err("External buffer provider did not complete exactly one upload".into());
+    }
+    Ok(())
 }
 
 pub(super) fn validate_descriptor(descriptor: ImageDescriptor) -> Result<()> {
@@ -377,7 +473,7 @@ pub(super) fn validate_descriptor(descriptor: ImageDescriptor) -> Result<()> {
     Ok(())
 }
 
-fn validate_buffer(descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
+pub(super) fn validate_buffer(descriptor: ImageDescriptor, bytes: &[u8]) -> Result<()> {
     validate_descriptor(descriptor)?;
     let row = descriptor.size.width as usize * descriptor.format.bytes_per_pixel() as usize;
     let stride = descriptor.stride.map_or(row, |stride| stride as usize);
@@ -393,6 +489,106 @@ mod tests {
     use super::*;
     use api::{ImageFormat, ImageDescriptorFlags};
     use std::cell::RefCell;
+
+    #[test]
+    fn buffer_upload_rejects_missing_repeated_or_failed_callbacks() {
+        struct Provider(usize, bool);
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease> {
+                Err("Use the synchronous buffer callback".into())
+            }
+            fn with_buffer(&mut self, _: ExternalImageId, _: u8,
+                upload: &mut dyn FnMut(ExternalImageBuffer<'_>) -> Result<()>) -> Result<()> {
+                for _ in 0..self.0 {
+                    let descriptor = ImageDescriptor::new(1, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+                    let _ = upload(ExternalImageBuffer::new(descriptor, &[1, 2, 3, 4], false));
+                }
+                if self.1 { Err("Provider failed after upload".into()) } else { Ok(()) }
+            }
+        }
+        for (calls, fail, provider_fail) in [(0, false, false), (1, false, false), (2, false, false), (1, true, false), (1, false, true)] {
+            let metrics = diagnostics::RenderMetrics::for_test(1, 0);
+            let mut writes = 0;
+            let releases = Rc::new(RefCell::new(Vec::new()));
+            let result = upload_buffer(&mut Provider(calls, provider_fail), ExternalImageId(1), 0, &releases, Some(&metrics), &mut |_, bytes, opaque| {
+                writes += 1;
+                assert_eq!(bytes, &[1, 2, 3, 4]);
+                assert!(!opaque);
+                if fail { Err("Upload failed".into()) } else { Ok(()) }
+            });
+            assert_eq!(result.is_ok(), calls == 1 && !fail && !provider_fail);
+            assert_eq!(writes, usize::from(calls > 0));
+            let snapshot = metrics.snapshot();
+            assert_eq!(snapshot.count(diagnostics::RenderCounter::ExternalLeaseAcquires), writes as u64);
+            assert_eq!(snapshot.count(diagnostics::RenderCounter::ExternalLeaseReleases), writes as u64);
+            assert_eq!(snapshot.gauge(diagnostics::RenderGauge::ExternalLeases), 0);
+        }
+    }
+
+    #[test]
+    fn default_buffer_upload_preserves_deferred_release_on_success_and_error() {
+        struct Provider(Option<ExternalImageLease>);
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease> {
+                self.0.take().ok_or_else(|| "Already acquired".into())
+            }
+        }
+        for fail in [false, true] {
+            let metrics = diagnostics::RenderMetrics::for_test(1, 0);
+            let releases = Rc::new(RefCell::new(Vec::new()));
+            let released = Rc::new(Cell::new(None));
+            let notice = released.clone();
+            let descriptor = ImageDescriptor::new(1, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+            let lease = ExternalImageLease::new(descriptor, TexelRect::new(0.0, 0.0, 1.0, 1.0), 1,
+                ExternalImageSource::Buffer(Arc::new(vec![1, 2, 3, 4])), move |status| notice.set(Some(status))).unwrap();
+            let result = upload_buffer(&mut Provider(Some(lease)), ExternalImageId(1), 0, &releases, Some(&metrics),
+                &mut |_, _, _| if fail { Err("Copy failed".into()) } else { Ok(()) });
+            assert_eq!(result.is_err(), fail);
+            assert!(released.get().is_none());
+            assert_eq!(releases.borrow().len(), 1);
+            assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseAcquires), 1);
+            assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseReleases), 0);
+            dispatch_releases(&releases);
+            assert_eq!(released.get(), Some(if fail { ExternalImageRelease::Unused } else { ExternalImageRelease::Complete }));
+            assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseReleases), 1);
+            assert_eq!(metrics.snapshot().gauge(diagnostics::RenderGauge::ExternalLeases), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn wrong_kind_buffer_upload_preserves_deferred_unused_release() {
+        struct Provider(Option<ExternalImageLease>);
+        impl ExternalImageProvider for Provider {
+            fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<ExternalImageLease> {
+                self.0.take().ok_or_else(|| "Already acquired".into())
+            }
+        }
+        let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
+        let device = ExternalImageDevice::new(&owner);
+        let descriptor = ImageDescriptor::new(1, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+        let image = device.create_image(descriptor, &[1, 2, 3, 255]).unwrap();
+        let released = Rc::new(Cell::new(None));
+        let notice = released.clone();
+        let lease = ExternalImageLease::new(descriptor, TexelRect::new(0.0, 0.0, 1.0, 1.0), 1,
+            ExternalImageSource::Native(image), move |status| notice.set(Some(status))).unwrap();
+        let metrics = diagnostics::RenderMetrics::for_test(1, 0);
+        let releases = Rc::new(RefCell::new(Vec::new()));
+        let mut copied = false;
+        let result = upload_buffer(&mut Provider(Some(lease)), ExternalImageId(1), 0, &releases, Some(&metrics),
+            &mut |_, _, _| { copied = true; Ok(()) });
+        assert!(result.unwrap_err().contains("requires CPU bytes"));
+        assert!(!copied);
+        assert!(released.get().is_none());
+        assert_eq!(releases.borrow().len(), 1);
+        assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseAcquires), 1);
+        assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseReleases), 0);
+        dispatch_releases(&releases);
+        assert_eq!(released.get(), Some(ExternalImageRelease::Unused));
+        assert_eq!(metrics.snapshot().count(diagnostics::RenderCounter::ExternalLeaseReleases), 1);
+        assert_eq!(metrics.snapshot().gauge(diagnostics::RenderGauge::ExternalLeases), 0);
+        device.finish().unwrap();
+    }
 
     #[test]
     fn lease_metrics_follow_queued_callback_for_each_terminal_status() {
