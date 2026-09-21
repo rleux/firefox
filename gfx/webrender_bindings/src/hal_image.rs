@@ -320,17 +320,16 @@ mod linux {
         }
     }
 
-    pub struct ExternalImages {
-        handler: WrExternalImageHandler,
-        device: ExternalImageDevice,
+    const SNAPSHOT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+    const SNAPSHOT_CACHE_SLOTS: usize = 4;
+
+    #[derive(Default)]
+    struct BufferSnapshots {
+        buffers: Vec<Arc<Vec<u8>>>,
     }
 
-    impl ExternalImages {
-        pub fn new(handler: WrExternalImageHandler, device: ExternalImageDevice) -> Self {
-            Self { handler, device }
-        }
-
-        fn buffer(data: WrHalBuffer, generation: u64, mut lease: Lease) -> Result<ExternalImageLease, String> {
+    impl BufferSnapshots {
+        fn copy(&mut self, data: WrHalBuffer) -> Result<(ImageDescriptor, Arc<Vec<u8>>), String> {
             if data.data.is_null() || data.width <= 0 || data.height <= 0 || data.stride <= 0 {
                 return Err("Invalid HAL external buffer".into());
             }
@@ -344,7 +343,24 @@ mod linux {
             if row > data.stride as usize || needed > data.length {
                 return Err("HAL external buffer layout exceeds its allocation".into());
             }
-            let mut bytes = unsafe { std::slice::from_raw_parts(data.data, needed) }.to_vec();
+            let source = unsafe { std::slice::from_raw_parts(data.data, needed) };
+            let reusable = self
+                .buffers
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(index, buffer)| {
+                    Arc::get_mut(buffer)
+                        .filter(|bytes| bytes.capacity() >= source.len())
+                        .map(|bytes| (index, bytes.capacity()))
+                })
+                .min_by_key(|&(_, capacity)| capacity);
+            let mut snapshot = match reusable {
+                Some((index, _)) => self.buffers.swap_remove(index),
+                None => Arc::new(Vec::with_capacity(source.len())),
+            };
+            let bytes = Arc::get_mut(&mut snapshot).expect("CPU snapshot is exclusively owned");
+            bytes.clear();
+            bytes.extend_from_slice(source);
             if data.opaque && matches!(data.format, ImageFormat::BGRA8 | ImageFormat::RGBA8) {
                 for y in 0..data.height as usize {
                     for x in 0..data.width as usize {
@@ -352,17 +368,248 @@ mod linux {
                     }
                 }
             }
+            let mut descriptor =
+                ImageDescriptor::new(data.width, data.height, data.format, ImageDescriptorFlags::empty());
+            descriptor.stride = Some(data.stride);
+            Ok((descriptor, snapshot))
+        }
+
+        fn retain(&mut self, snapshot: &Arc<Vec<u8>>) {
+            let capacity = snapshot.capacity();
+            if capacity > SNAPSHOT_CACHE_BYTES {
+                return;
+            }
+            let mut retained: usize = self.buffers.iter().map(|bytes| bytes.capacity()).sum();
+            while self.buffers.len() >= SNAPSHOT_CACHE_SLOTS || retained + capacity > SNAPSHOT_CACHE_BYTES {
+                retained -= self.buffers.pop().unwrap().capacity();
+            }
+            self.buffers.push(snapshot.clone());
+        }
+    }
+
+    #[cfg(test)]
+    mod snapshot_tests {
+        use super::*;
+
+        fn buffer(
+            bytes: &[u8],
+            width: i32,
+            height: i32,
+            stride: i32,
+            format: ImageFormat,
+            opaque: bool,
+        ) -> WrHalBuffer {
+            WrHalBuffer {
+                data: bytes.as_ptr(),
+                length: bytes.len(),
+                width,
+                height,
+                stride,
+                format,
+                opaque,
+            }
+        }
+
+        fn retained_bytes(snapshots: &BufferSnapshots) -> usize {
+            snapshots.buffers.iter().map(|bytes| bytes.capacity()).sum()
+        }
+
+        #[test]
+        fn snapshot_reuse_preserves_layout_and_alpha() {
+            let mut snapshots = BufferSnapshots::default();
+            let mut source = (0..24).collect::<Vec<u8>>();
+            let (descriptor, first) = snapshots
+                .copy(buffer(&source, 2, 2, 12, ImageFormat::RGBA8, true))
+                .unwrap();
+            let mut expected = source[..20].to_vec();
+            for index in [3, 7, 15, 19] {
+                expected[index] = 255;
+            }
+            assert_eq!(first.as_slice(), expected);
+            assert_eq!(descriptor.stride, Some(12));
+            source.fill(91);
+            assert_eq!(first.as_slice(), expected);
+            let pointer = first.as_ptr();
+            let capacity = first.capacity();
+            snapshots.retain(&first);
+            drop(first);
+
+            let (_, small) = snapshots
+                .copy(buffer(&source[..3], 3, 1, 3, ImageFormat::R8, true))
+                .unwrap();
+            assert_eq!(small.as_slice(), [91; 3]);
+            assert_eq!(small.as_ptr(), pointer);
+            assert_eq!(small.capacity(), capacity);
+            snapshots.retain(&small);
+            assert_eq!(retained_bytes(&snapshots), capacity);
+            drop(small);
+
+            let (descriptor, next) = snapshots
+                .copy(buffer(&source, 2, 2, 12, ImageFormat::BGRA8, false))
+                .unwrap();
+            assert_eq!(next.as_slice(), [91; 20]);
+            assert_eq!(next.as_ptr(), pointer);
+            assert_eq!(descriptor.format, ImageFormat::BGRA8);
+        }
+
+        #[test]
+        fn snapshot_held_leases_survive_cache_eviction() {
+            let mut snapshots = BufferSnapshots::default();
+            let mut held = Vec::new();
+            for value in 0..6 {
+                let source = [value; 8];
+                let (descriptor, bytes) = snapshots
+                    .copy(buffer(&source, 2, 1, 8, ImageFormat::RGBA8, false))
+                    .unwrap();
+                let lease = ExternalImageLease::new(
+                    descriptor,
+                    TexelRect::new(0.0, 0.0, 2.0, 1.0),
+                    1,
+                    ExternalImageSource::Buffer(bytes.clone()),
+                    |_| {},
+                )
+                .unwrap();
+                snapshots.retain(&bytes);
+                held.push((lease, bytes));
+                assert!(snapshots.buffers.len() <= SNAPSHOT_CACHE_SLOTS);
+                assert!(retained_bytes(&snapshots) <= SNAPSHOT_CACHE_BYTES);
+                for (index, (_, bytes)) in held.iter().enumerate() {
+                    assert_eq!(bytes.as_slice(), [index as u8; 8]);
+                }
+            }
+            drop(snapshots);
+            for (index, (_, bytes)) in held.iter().enumerate() {
+                assert_eq!(bytes.as_slice(), [index as u8; 8]);
+            }
+        }
+
+        #[test]
+        fn snapshot_weak_observers_prevent_reuse() {
+            let mut snapshots = BufferSnapshots::default();
+            let (_, first) = snapshots
+                .copy(buffer(&[17; 8], 2, 1, 8, ImageFormat::RGBA8, false))
+                .unwrap();
+            let weak = Arc::downgrade(&first);
+            snapshots.retain(&first);
+            drop(first);
+            let (_, next) = snapshots
+                .copy(buffer(&[23; 8], 2, 1, 8, ImageFormat::RGBA8, false))
+                .unwrap();
+            assert_eq!(weak.upgrade().unwrap().as_slice(), [17; 8]);
+            assert_eq!(next.as_slice(), [23; 8]);
+        }
+
+        #[test]
+        fn snapshot_cache_bounds_capacity_and_bypasses_oversized_storage() {
+            let mut snapshots = BufferSnapshots::default();
+            let size = SNAPSHOT_CACHE_BYTES / 2 + 1;
+            let mut source = vec![17; size];
+            let (_, first) = snapshots
+                .copy(buffer(&source, size as i32, 1, size as i32, ImageFormat::R8, false))
+                .unwrap();
+            snapshots.retain(&first);
+            source.fill(23);
+            let (_, second) = snapshots
+                .copy(buffer(&source, size as i32, 1, size as i32, ImageFormat::R8, false))
+                .unwrap();
+            snapshots.retain(&second);
+            assert!(retained_bytes(&snapshots) <= SNAPSHOT_CACHE_BYTES);
+            assert_eq!(first.as_slice(), vec![17; size]);
+            drop(first);
+            drop(second);
+            let (_, small) = snapshots.copy(buffer(&[31], 1, 1, 1, ImageFormat::R8, false)).unwrap();
+            assert_eq!(small.as_slice(), [31]);
+            assert!(small.capacity() >= size);
+            snapshots.retain(&small);
+            assert_eq!(retained_bytes(&snapshots), small.capacity());
+            drop(small);
+
+            let before = retained_bytes(&snapshots);
+            source.resize(SNAPSHOT_CACHE_BYTES + 1, 47);
+            let (_, oversized) = snapshots
+                .copy(buffer(
+                    &source,
+                    source.len() as i32,
+                    1,
+                    source.len() as i32,
+                    ImageFormat::R8,
+                    false,
+                ))
+                .unwrap();
+            snapshots.retain(&oversized);
+            assert_eq!(oversized.as_slice(), source);
+            assert_eq!(Arc::strong_count(&oversized), 1);
+            assert_eq!(retained_bytes(&snapshots), before);
+            let mut spare = Vec::with_capacity(SNAPSHOT_CACHE_BYTES + 1);
+            spare.push(59);
+            snapshots.retain(&Arc::new(spare));
+            assert_eq!(retained_bytes(&snapshots), before);
+        }
+
+        #[test]
+        fn snapshot_invalid_layout_preserves_cached_storage() {
+            let mut snapshots = BufferSnapshots::default();
+            let source = [17; 16];
+            let (_, first) = snapshots
+                .copy(buffer(&source, 2, 2, 8, ImageFormat::RGBA8, false))
+                .unwrap();
+            snapshots.retain(&first);
+            let pointer = first.as_ptr();
+            drop(first);
+            for (width, height, stride, length) in [(0, 2, 8, 16), (2, -1, 8, 16), (2, 2, 4, 16), (2, 2, 8, 15)] {
+                assert!(snapshots
+                    .copy(buffer(
+                        &source[..length],
+                        width,
+                        height,
+                        stride,
+                        ImageFormat::RGBA8,
+                        false
+                    ))
+                    .is_err());
+                assert_eq!(snapshots.buffers[0].as_slice(), source);
+                assert_eq!(snapshots.buffers[0].as_ptr(), pointer);
+            }
+            let mut null = buffer(&source, 2, 2, 8, ImageFormat::RGBA8, false);
+            null.data = std::ptr::null();
+            assert!(snapshots.copy(null).is_err());
+            assert_eq!(snapshots.buffers[0].as_ptr(), pointer);
+        }
+    }
+
+    pub struct ExternalImages {
+        handler: WrExternalImageHandler,
+        device: ExternalImageDevice,
+        snapshots: BufferSnapshots,
+    }
+
+    impl ExternalImages {
+        pub fn new(handler: WrExternalImageHandler, device: ExternalImageDevice) -> Self {
+            Self {
+                handler,
+                device,
+                snapshots: BufferSnapshots::default(),
+            }
+        }
+
+        fn buffer(
+            &mut self,
+            data: WrHalBuffer,
+            generation: u64,
+            mut lease: Lease,
+        ) -> Result<ExternalImageLease, String> {
+            let (desc, snapshot) = self.snapshots.copy(data)?;
             lease.status = WrHalImageRelease::Complete;
             drop(lease);
-            let mut desc = ImageDescriptor::new(data.width, data.height, data.format, ImageDescriptorFlags::empty());
-            desc.stride = Some(data.stride);
-            ExternalImageLease::new(
+            let image = ExternalImageLease::new(
                 desc,
-                TexelRect::new(0.0, 0.0, data.width as f32, data.height as f32),
+                TexelRect::new(0.0, 0.0, desc.size.width as f32, desc.size.height as f32),
                 generation,
-                ExternalImageSource::Buffer(Arc::new(bytes)),
+                ExternalImageSource::Buffer(snapshot.clone()),
                 |_| {},
-            )
+            )?;
+            self.snapshots.retain(&snapshot);
+            Ok(image)
         }
 
         fn foreign_rgb(
@@ -842,7 +1089,7 @@ mod linux {
             };
             let image = unsafe { image.assume_init() };
             match image.source {
-                WrHalImageSource::Buffer(data) => Self::buffer(data, image.generation, lease),
+                WrHalImageSource::Buffer(data) => self.buffer(data, image.generation, lease),
                 WrHalImageSource::VulkanDmaBuf(data) => self.dmabuf(data, image.generation, lease),
                 WrHalImageSource::ForeignRGB(data) => self.foreign_rgb(data, image.generation, lease),
                 WrHalImageSource::Video(data) => self.video(data, image.generation, channel, lease),

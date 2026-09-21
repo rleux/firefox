@@ -308,6 +308,61 @@ separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
 plan and incremental execution record are retained under
 `artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
 
+## CPU snapshot cache comparison
+
+The Vulkan CPU-image bridge reuses owned snapshot storage only when
+`Arc::get_mut` confirms that no previous consumer or weak observer can see
+mutation. It still copies the validated source span, preserves stride padding
+and opaque-alpha correction, and releases the host image after copying. The
+provider caches at most four buffers and 16 MiB of summed `Vec` capacities;
+oversized snapshots bypass the cache. Eviction drops only the cache reference,
+so an outstanding lease keeps its original pixels alive.
+
+The candidate was compared with the preserved Vulkan baseline in four Canvas
+pairs ordered AB/BA/AB/BA, two CSS control pairs, and one exploratory memory
+pair. All fourteen native Intel/X11 cases passed their runtime, route, identity
+and pixel gates without retries. Timing used fresh processes, the established
+startup settling, ten seconds of warmup, sixty seconds of work and two-second
+process sampling. The build configuration and producer policy matched the
+baseline. No Linux perf recording was active during this comparison.
+
+| Canvas pair | Baseline GPU CPU-s/s | Candidate GPU CPU-s/s | Paired change |
+| --- | ---: | ---: | ---: |
+| 1 | 0.4821 | 0.4049 | -16.02% |
+| 2 | 0.4765 | 0.4119 | -13.55% |
+| 3 | 0.4699 | 0.3906 | -16.88% |
+| 4 | 0.4831 | 0.4185 | -13.37% |
+
+The median paired GPU-process total CPU reduction was 14.78%, with lower total
+CPU in all four pairs. GPU-process system CPU fell by a median 36.10%, while
+user CPU rose by 5.71%; the latter is an observed tradeoff. Whole-Firefox CPU
+fell by a median 12.25%. Callback means remained around 16.666 ms, with p99
+between 17.20 and 17.22 ms. These callback intervals do not measure scanout.
+The CSS control had mixed GPU CPU changes (+1.11% and -0.03%) and whole-Firefox
+changes (+0.20% and -1.31%); this is inconclusive, not proof of equivalence.
+
+The separate memory pair requested the harness's fixed 250 ms sampling interval
+and produced 190 observations per run. Median GPU-process PSS increased from
+50.17 to 51.03 MiB, and private memory from 41.09 to 41.91 MiB. First-to-last
+observations and within-run ranges are retained in the report. One unbalanced
+sixty-second pair cannot establish leak freedom or long-term retention. Its
+dense collector used approximately 10.7 CPU seconds per run; memory-phase CPU
+rates are excluded from timing conclusions. Collector CPU is never subtracted.
+
+These results justify retaining the bounded snapshot cache for this workload.
+They do not prove which source or destination faults disappeared, eliminate
+the remaining copies, or establish a general Firefox speedup. Packed-upload
+changes remain separate work. Validation included five CPU snapshot tests,
+both buffer lease tests on Lavapipe and Intel with Vulkan validation, 172
+ordinary WebRender library tests, a Firefox binary build, and an Xvfb Canvas
+smoke using software Vulkan. The native comparison validated the rebuilt
+candidate on Intel separately.
+
+The frozen code diff, build and runtime manifests, all fourteen cases, paired
+calculations, memory observations and independent review are retained under
+`artifacts/stage9/a9cd39cb986/step-9.5/snapshot-reuse/`. The candidate runtime is
+`candidate-2/firefox/`; the earlier incomplete copy is rejected and preserved.
+
 ## Canvas profile findings
 
 The four native Canvas profiles collected with harness `b75e2db6e97` passed
@@ -348,14 +403,10 @@ the kernel names above come from a separate address-interval lookup against a
 hash-pinned, same-boot kallsyms snapshot. They are not native perf symbolization
 or off-CPU wait durations. Raw addresses remain in private local artifacts.
 
-The next bounded experiment is reuse of owned CPU snapshot storage in
-`ExternalImages::buffer`, retaining the existing copy, opaque-alpha handling
-and host-release contract. Storage must not be mutated while a previous lease
-holds it, and retained capacity must be bounded. This tests temporary allocation
-cost; it does not assume source faults will disappear. Any candidate still needs
-ownership/pixel checks and matched performance measurements before acceptance.
-Packed-upload changes remain a separate candidate. No production optimization
-was made as part of this profile collection.
+These profiles motivated the bounded snapshot-cache experiment reported above.
+No production optimization was made as part of profile collection itself;
+the cache was implemented and tested afterward. The profile's unresolved
+source-versus-destination fault attribution remains a limit on causal claims.
 
 The fixed plan, raw captures, CPU calculations, perf analysis and independent
 review are retained under

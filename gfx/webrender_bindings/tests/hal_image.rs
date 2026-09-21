@@ -270,6 +270,66 @@ fn buffer_acquisitions_release_once_on_success_and_error() {
     sender.create_api().shut_down(true);
 }
 
+#[test]
+#[ignore = "Requires a Linux Vulkan adapter"]
+fn buffer_snapshot_reuse_releases_hosts_once() {
+    let (renderer, sender) = renderer();
+    let mut fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: vec![17; 24],
+        video_access: Default::default(),
+    });
+    let mut provider = provider(&fixture, renderer.external_image_device());
+    let mut held = Vec::new();
+    for (index, (width, height, stride, format, opaque, valid)) in [
+        (2, 2, 12, ImageFormat::RGBA8, true, true),
+        (3, 1, 3, ImageFormat::R8, false, true),
+        (2, 2, 12, ImageFormat::BGRA8, false, true),
+        (2, 2, 4, ImageFormat::RGBA8, true, false),
+        (2, 2, 8, ImageFormat::RGBA8, false, true),
+    ]
+    .iter()
+    .copied()
+    .enumerate()
+    {
+        Rc::get_mut(&mut fixture).unwrap().pixels.fill(index as u8);
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation: index as u64 + 1,
+            source: WrHalImageSource::Buffer(WrHalBuffer {
+                data: fixture.pixels.as_ptr(),
+                length: fixture.pixels.len(),
+                width,
+                height,
+                stride,
+                format,
+                opaque,
+            }),
+        });
+        let result = provider.acquire(ExternalImageId(index as u64 + 1), 0, false);
+        assert_eq!(result.is_ok(), valid);
+        if let Ok(lease) = result {
+            assert_eq!(lease.generation(), index as u64 + 1);
+            assert_eq!(lease.descriptor().size, DeviceIntSize::new(width, height));
+            held.push(lease);
+        }
+        assert_eq!(fixture.releases.borrow().len(), index + 1);
+        assert!(matches!(
+            (valid, fixture.releases.borrow()[index]),
+            (true, WrHalImageRelease::Complete) | (false, WrHalImageRelease::Unused)
+        ));
+        assert_eq!(Rc::strong_count(&fixture), 1);
+        if index == 2 {
+            held.clear();
+        }
+    }
+    drop(provider);
+    drop(held);
+    assert_eq!(fixture.releases.borrow().len(), 5);
+    sender.create_api().shut_down(true);
+}
+
 struct SingleLease(Option<hal::ExternalImageLease>);
 impl hal::ExternalImageProvider for SingleLease {
     fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<hal::ExternalImageLease, String> {
