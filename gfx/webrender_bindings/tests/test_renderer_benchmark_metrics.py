@@ -362,8 +362,7 @@ def profile_report():
             "--timestamp",
             "--sample-cpu",
             "--no-buildid-cache",
-            "--buildid-all",
-            "--timestamp-boundary",
+            "--buildid-mmap",
             "-o",
             data_path,
         ],
@@ -390,7 +389,16 @@ def profile_report():
             },
         ],
         "returncode": 0,
-        "buildIdMode": "all-dsos",
+        "buildIdMode": "mmap-events",
+        "trackingBuildId": 1,
+        "requiredBuildIdPaths": ["/snapshot/firefox", "/snapshot/libxul.so"],
+        "buildIds": {
+            "/snapshot/firefox": "1" * 40,
+            "/snapshot/libxul.so": "2" * 40,
+        },
+        "sampleCount": 100,
+        "firstSampleTimeSeconds": 1.02,
+        "lastSampleTimeSeconds": 1.89,
         "controlTimeoutSeconds": 10,
         "finalizeTimeoutSeconds": 120,
         "finalizeStartedTimeSeconds": 2.22,
@@ -1130,13 +1138,13 @@ class TestValidateReport(unittest.TestCase):
         )
 
         report, config = profile_report()
-        report["perf"]["command"].remove("--buildid-all")
+        report["perf"]["command"].remove("--buildid-mmap")
         self.assertIn(
             "perf capture metadata is invalid", validate_report(report, config)
         )
 
         report, config = profile_report()
-        report["perf"]["command"].remove("--timestamp-boundary")
+        report["perf"]["command"].append("--buildid-all")
         self.assertIn(
             "perf capture metadata is invalid", validate_report(report, config)
         )
@@ -1163,8 +1171,51 @@ class TestValidateReport(unittest.TestCase):
             "perf event attributes are invalid", validate_report(report, config)
         )
 
+    def test_profile_build_ids_and_sample_bounds_are_validated(self):
+        report, config = profile_report()
+        report["perf"]["trackingBuildId"] = 0
+        self.assertIn(
+            "perf build-ID metadata is invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["buildIds"].pop("/snapshot/libxul.so")
+        self.assertIn(
+            "perf build-ID metadata is invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["buildIds"]["/snapshot/libxul.so"] = "0" * 40
+        self.assertIn(
+            "perf build-ID metadata is invalid", validate_report(report, config)
+        )
+
+        for key, value in [
+            ("sampleCount", 0),
+            ("firstSampleTimeSeconds", float("nan")),
+            ("lastSampleTimeSeconds", 0.5),
+        ]:
+            with self.subTest(key=key):
+                report, config = profile_report()
+                report["perf"][key] = value
+                self.assertIn(
+                    "perf sample bounds are invalid",
+                    validate_report(report, config),
+                )
+
+        report, config = profile_report()
+        report["perf"]["firstSampleTimeSeconds"] = 0.99
+        self.assertIn(
+            "perf control boundaries are invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["lastSampleTimeSeconds"] = 1.92
+        self.assertIn(
+            "perf control boundaries are invalid", validate_report(report, config)
+        )
+
         mutations = [
-            ("name", "cpu-clock:u"),
             ("type", 0),
             ("config", 1),
             ("frequencyHz", 100),
@@ -1186,6 +1237,16 @@ class TestValidateReport(unittest.TestCase):
 
         report, config = profile_report()
         report["perf"]["eventAttributes"]["sampleTypes"].remove("STACK_USER")
+        self.assertIn(
+            "perf event attributes are invalid", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        report["perf"]["eventAttributes"]["name"] = "cpu-clock:ku"
+        self.assertEqual(validate_report(report, config), [])
+
+        report, config = profile_report()
+        report["perf"]["eventAttributes"]["name"] = "cycles:uk"
         self.assertIn(
             "perf event attributes are invalid", validate_report(report, config)
         )

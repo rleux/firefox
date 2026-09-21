@@ -345,20 +345,23 @@ build-ID cache is not populated by the recorder. Report unresolved driver/kernel
 symbols explicitly. Sampling weights describe the recorded on-CPU distribution
 and do not establish isolated GPU duration or a performance improvement.
 
-Recording uses `--buildid-all --timestamp-boundary` to retain mapped-library IDs
-and sample bounds without resolving every sampled call chain during shutdown.
-Control acknowledgements have a ten-second timeout; data finalization has its
-own recorded 120-second bound, included in the outer harness budget. Both occur
-outside the primary timing methodology, and finalization follows the sampled
-workload interval.
+Recording uses `--buildid-mmap` so build IDs are embedded in MMAP2 records and
+perf does not scan sampled call chains during shutdown. After clean exit, a
+bounded symbol-free `perf script -G --show-mmap-events -F time --ns` pass retains
+the MMAP2 IDs for the required pinned Firefox/libxul paths and derives actual
+sample bounds. The IDs prove retention for those mappings; the harness does not
+recalculate ELF-note IDs. Control acknowledgements have a ten-second timeout;
+data finalization has its own recorded 120-second bound, included in the outer
+harness budget. Both occur outside the primary timing methodology, and
+finalization follows the sampled workload interval.
 
 The first native GL profile completed its workload and control acknowledgements,
 but exceeded the original ten-second shutdown bound while perf repeatedly called
-`addr2line` for `libxul`. Its incomplete data remains rejected. A subsequent
-probe mapped the preserved large `libxul` without executing it and verified the
-new build-ID path: finalization took 0.114 seconds, with valid data/sample bounds,
-retained build IDs and zero lost samples. This verifies finalization machinery;
-the Firefox profile must be retried from a fresh output directory.
+`addr2line` for `libxul`. A second attempt used `--buildid-all`; it removed those
+messages but still failed its separate 120-second finalization bound. Both data
+files have incomplete headers and remain rejected. The all-DSO mapped-libxul
+probe did not reproduce Firefox's mapping set and was insufficient evidence for
+another comparison retry.
 
 The Canvas baseline's GPU-process median user/system CPU rates were
 0.16485/0.03044 CPU seconds per second for GL and 0.24012/0.23552 for Vulkan.
@@ -367,13 +370,18 @@ user-only Rust or Mesa stacks cover only part of the observed difference.
 
 The native tooling preflight confirmed user-space capture with the supplied perf
 6.17.13 binary: the final explicit `cpu-clock:u` control produced 35 samples,
-zero lost samples and resolved Python/libc call chains. The explicit
-`cpu-clock:uk` control instead reported `cpu-clock:uku` with `exclude_kernel=1`;
-the actual-attribute check rejected it. Native policy was initially
-`perf_event_paranoid=2`, with no effective capabilities. The user subsequently
-enabled kernel access and supplied a private symbol snapshot. Both counter
-controls passed, but the first GL profile was rejected during finalization as
-described above. Four fresh Canvas profiles remain pending; they will not
-silently switch to user-only sampling. Probe evidence is retained under
-`artifacts/stage9/cff6f7717dc/step-9.5/perf-preflight/`, and the rejected browser
-attempt remains under the adjacent `canvas-investigation/` directory.
+zero lost samples and resolved Python/libc call chains. An explicit
+`cpu-clock:uk` control was initially restricted to user space and was correctly
+rejected by the actual-attribute gate. The user subsequently enabled kernel
+access and supplied a private symbol snapshot.
+
+The corrected short native GL Firefox smoke then passed in 82.146 seconds. Its
+actual event included user and kernel execution, tracking build-ID support was
+enabled, required Firefox/libxul mapping IDs were retained, and 21 bounded samples
+produced a 541,816-byte data file. Perf finalization took 0.720 seconds. This
+validates capture machinery only; it is not a GL/Vulkan profile comparison. Both
+counter controls remain valid, while four fresh Canvas profiles still require a
+new quiet-host window and will not silently switch to user-only sampling. Probe
+evidence is retained under
+`artifacts/stage9/cff6f7717dc/step-9.5/perf-preflight/`; rejected browser attempts
+remain under the adjacent Canvas investigation directories.

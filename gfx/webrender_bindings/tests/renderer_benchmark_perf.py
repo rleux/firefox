@@ -45,6 +45,50 @@ def parse_event_attributes(text):
     }
 
 
+def parse_tracking_build_id(text):
+    events = [line for line in text.splitlines() if line.startswith("dummy:")]
+    if len(events) != 1:
+        raise ValueError("Expected exactly one perf tracking event")
+    match = re.search(r"\bbuild_id: ([0-9]+)\b", events[0])
+    return int(match.group(1)) if match else 0
+
+
+def parse_perf_script(text):
+    build_ids = {}
+    sample_times = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if "PERF_RECORD_MMAP" in line:
+            match = re.search(
+                r"PERF_RECORD_MMAP2 .* <([0-9a-fA-F]+)>\]: \S+ (.+?)\s*$",
+                line,
+            )
+            if not match:
+                continue
+            build_id = match.group(1).lower()
+            if (
+                not 2 <= len(build_id) <= 40
+                or len(build_id) % 2
+                or set(build_id) == {"0"}
+            ):
+                raise ValueError(f"Invalid perf MMAP2 build ID: {line!r}")
+            path = match.group(2)
+            previous = build_ids.setdefault(path, build_id)
+            if previous != build_id:
+                raise ValueError(f"Conflicting perf build IDs for {path}")
+            continue
+        match = re.fullmatch(r"\s*([0-9]+\.[0-9]+):\s*", line)
+        if not match:
+            raise ValueError(f"Invalid perf script line: {line!r}")
+        sample_times.append(float(match.group(1)))
+    if not sample_times or any(not math.isfinite(value) for value in sample_times):
+        raise ValueError("Perf sample times are missing or invalid")
+    if any(after < before for before, after in zip(sample_times, sample_times[1:])):
+        raise ValueError("Perf sample times are not ordered")
+    return build_ids, sample_times
+
+
 class PerfRecorder:
     def __init__(
         self,
@@ -55,6 +99,7 @@ class PerfRecorder:
         event="cpu-clock:uk",
         timeout=10,
         finalize_timeout=PERF_FINALIZE_TIMEOUT_SECONDS,
+        required_build_id_paths=(),
     ):
         if event not in ("cpu-clock:uk", "cpu-clock:u"):
             raise ValueError("Unsupported profiling event")
@@ -69,6 +114,9 @@ class PerfRecorder:
         self.event = event
         self.timeout = timeout
         self.finalize_timeout = finalize_timeout
+        self.required_build_id_paths = [
+            str(Path(path).resolve()) for path in required_build_id_paths
+        ]
         self.process = None
         self.log = None
         self.control_fd = None
@@ -129,7 +177,8 @@ class PerfRecorder:
             callGraph="dwarf,16384",
             controlTimeoutSeconds=self.timeout,
             finalizeTimeoutSeconds=self.finalize_timeout,
-            buildIdMode="all-dsos",
+            buildIdMode="mmap-events",
+            requiredBuildIdPaths=self.required_build_id_paths,
             controls=[],
         )
         try:
@@ -168,7 +217,7 @@ class PerfRecorder:
                 "--clockid",
                 "mono",
                 "--no-buildid-cache",
-                "--buildid-all",
+                "--buildid-mmap",
                 "-p",
                 str(self.pid),
                 "-D",
@@ -176,7 +225,6 @@ class PerfRecorder:
                 "--control",
                 f"fifo:{control},{ack}",
                 "--timestamp",
-                "--timestamp-boundary",
                 "--sample-cpu",
                 "-o",
                 str(self.output / "perf.data"),
@@ -242,8 +290,11 @@ class PerfRecorder:
             (self.output / "perf-event-attributes.txt").write_text(result.stdout)
             attributes = parse_event_attributes(result.stdout)
             self.evidence["eventAttributes"] = attributes
+            tracking_build_id = parse_tracking_build_id(result.stdout)
+            self.evidence["trackingBuildId"] = tracking_build_id
             if (
-                attributes["type"] != 1
+                not attributes["name"].startswith("cpu-clock:")
+                or attributes["type"] != 1
                 or attributes["config"] != 0
                 or attributes["frequencyHz"] != 99
                 or attributes["frequencyMode"] != 1
@@ -254,8 +305,45 @@ class PerfRecorder:
                 or attributes["clockId"] != 1
                 or not {"IP", "TID", "TIME", "CPU", "PERIOD", "REGS_USER", "STACK_USER"}
                 <= set(attributes["sampleTypes"])
+                or tracking_build_id != 1
             ):
                 raise RuntimeError("Recorded perf event attributes differ from request")
+            script_output = self.output / "perf-mmap-samples.txt"
+            script_error = self.output / "perf-mmap-samples.stderr.txt"
+            with script_output.open("x") as stdout, script_error.open("x") as stderr:
+                subprocess.run(
+                    [
+                        str(self.binary),
+                        "script",
+                        "-G",
+                        "--show-mmap-events",
+                        "-F",
+                        "time",
+                        "--ns",
+                        "-i",
+                        str(path),
+                    ],
+                    check=True,
+                    stdout=stdout,
+                    stderr=stderr,
+                    text=True,
+                    timeout=self.timeout,
+                )
+            build_ids, sample_times = parse_perf_script(script_output.read_text())
+            self.evidence["buildIds"] = build_ids
+            if any(path not in build_ids for path in self.required_build_id_paths):
+                raise RuntimeError("Required perf MMAP2 build IDs are missing")
+            self.evidence.update(
+                sampleCount=len(sample_times),
+                firstSampleTimeSeconds=sample_times[0],
+                lastSampleTimeSeconds=sample_times[-1],
+            )
+            controls = {value["command"]: value for value in self.evidence["controls"]}
+            if (
+                sample_times[0] < controls["enable"]["requestedTimeSeconds"]
+                or sample_times[-1] > controls["disable"]["acknowledgedTimeSeconds"]
+            ):
+                raise RuntimeError("Perf sample times lie outside the control interval")
             self.evidence["passed"] = True
         except BaseException as error:
             self.evidence["error"] = str(error)
