@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from renderer_benchmark_metrics import validate_report
+from renderer_benchmark_perf import PERF_FINALIZE_TIMEOUT_SECONDS
 from renderer_benchmark_startup import STARTUP_TIMEOUT_SECONDS
 
 WORKLOADS = ("static", "css", "dirty", "scroll", "canvas", "filters")
@@ -269,6 +270,8 @@ def main():
     timeout = math.ceil(args.duration + args.warmup) + 90
     if expected["startupSettling"]:
         timeout += STARTUP_TIMEOUT_SECONDS
+    if args.phase == "profile":
+        timeout += PERF_FINALIZE_TIMEOUT_SECONDS
     command = [
         str(root / "mach"),
         "marionette-test",

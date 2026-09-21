@@ -3,10 +3,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from renderer_benchmark_perf import PerfRecorder, parse_event_attributes
 
@@ -216,6 +218,66 @@ class PerfControlTests(unittest.TestCase):
             value.close()
             self.assertEqual(value.fifos, [])
             self.assertTrue(all(not path.exists() for path in paths))
+
+
+class PerfFinalizeTests(unittest.TestCase):
+    def make_recorder(self, temporary):
+        evidence = {
+            "controls": [
+                {"command": "ping"},
+                {"command": "enable"},
+                {"command": "disable"},
+            ]
+        }
+        value = PerfRecorder(
+            "/usr/bin/perf",
+            10,
+            Path(temporary),
+            evidence,
+            timeout=10,
+            finalize_timeout=120,
+        )
+        value.process = Mock()
+        (Path(temporary) / "perf.data").write_bytes(b"perf data")
+        return value, evidence
+
+    def test_finish_uses_separate_finalization_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, evidence = self.make_recorder(temporary)
+            value.process.wait.return_value = 0
+            with patch.object(value, "check_target"), patch.object(
+                value, "command"
+            ) as command, patch.object(value, "close"), patch(
+                "renderer_benchmark_perf.time.monotonic", side_effect=[20.0, 20.5]
+            ), patch(
+                "renderer_benchmark_perf.subprocess.run",
+                return_value=SimpleNamespace(stdout=EVENT_LINE + "\n"),
+            ):
+                value.finish()
+            command.assert_called_once_with("stop")
+            value.process.wait.assert_called_once_with(timeout=120)
+            self.assertEqual(evidence["finalizeStartedTimeSeconds"], 20.0)
+            self.assertEqual(evidence["finalizeEndedTimeSeconds"], 20.5)
+            self.assertEqual(evidence["returncode"], 0)
+            self.assertTrue(evidence["passed"])
+
+    def test_finalization_timeout_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            value, evidence = self.make_recorder(temporary)
+            value.process.wait.side_effect = subprocess.TimeoutExpired(
+                ["perf", "record"], 120
+            )
+            with patch.object(value, "check_target"), patch.object(
+                value, "command"
+            ), patch.object(value, "close"), patch(
+                "renderer_benchmark_perf.time.monotonic", side_effect=[30.0, 150.0]
+            ), self.assertRaises(subprocess.TimeoutExpired):
+                value.finish()
+            value.process.wait.assert_called_once_with(timeout=120)
+            self.assertEqual(evidence["finalizeStartedTimeSeconds"], 30.0)
+            self.assertEqual(evidence["finalizeEndedTimeSeconds"], 150.0)
+            self.assertIn("timed out after 120 seconds", evidence["error"])
+            self.assertNotIn("returncode", evidence)
 
 
 if __name__ == "__main__":

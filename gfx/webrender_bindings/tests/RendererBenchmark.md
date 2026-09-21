@@ -345,6 +345,21 @@ build-ID cache is not populated by the recorder. Report unresolved driver/kernel
 symbols explicitly. Sampling weights describe the recorded on-CPU distribution
 and do not establish isolated GPU duration or a performance improvement.
 
+Recording uses `--buildid-all --timestamp-boundary` to retain mapped-library IDs
+and sample bounds without resolving every sampled call chain during shutdown.
+Control acknowledgements have a ten-second timeout; data finalization has its
+own recorded 120-second bound, included in the outer harness budget. Both occur
+outside the primary timing methodology, and finalization follows the sampled
+workload interval.
+
+The first native GL profile completed its workload and control acknowledgements,
+but exceeded the original ten-second shutdown bound while perf repeatedly called
+`addr2line` for `libxul`. Its incomplete data remains rejected. A subsequent
+probe mapped the preserved large `libxul` without executing it and verified the
+new build-ID path: finalization took 0.114 seconds, with valid data/sample bounds,
+retained build IDs and zero lost samples. This verifies finalization machinery;
+the Firefox profile must be retried from a fresh output directory.
+
 The Canvas baseline's GPU-process median user/system CPU rates were
 0.16485/0.03044 CPU seconds per second for GL and 0.24012/0.23552 for Vulkan.
 The larger system-time increase makes kernel-inclusive capture important;
@@ -354,10 +369,11 @@ The native tooling preflight confirmed user-space capture with the supplied perf
 6.17.13 binary: the final explicit `cpu-clock:u` control produced 35 samples,
 zero lost samples and resolved Python/libc call chains. The explicit
 `cpu-clock:uk` control instead reported `cpu-clock:uku` with `exclude_kernel=1`;
-the actual-attribute check rejected it. Native policy was
-`perf_event_paranoid=2`, with no effective capabilities. No host policy was
-changed. The planned two counter controls and four Canvas profiles remain
-pending kernel sampling access and a fresh quiet-host window. They will not
+the actual-attribute check rejected it. Native policy was initially
+`perf_event_paranoid=2`, with no effective capabilities. The user subsequently
+enabled kernel access and supplied a private symbol snapshot. Both counter
+controls passed, but the first GL profile was rejected during finalization as
+described above. Four fresh Canvas profiles remain pending; they will not
 silently switch to user-only sampling. Probe evidence is retained under
-`artifacts/stage9/cff6f7717dc/step-9.5/perf-preflight/`; no Firefox profile has
-been recorded by this preparation step.
+`artifacts/stage9/cff6f7717dc/step-9.5/perf-preflight/`, and the rejected browser
+attempt remains under the adjacent `canvas-investigation/` directory.
