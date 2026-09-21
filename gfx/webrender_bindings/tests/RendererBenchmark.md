@@ -307,3 +307,57 @@ starting with the software Canvas workload. Cold-start, lifecycle, memory and
 separate diagnostics remain unfinished parts of Stage 9. Raw runs, the fixed
 plan and incremental execution record are retained under
 `artifacts/stage9/4e8c88971fa/step-9.4a/full-series/`.
+
+## Linux perf investigation
+
+`--phase profile` records the identified GPU process with an explicitly supplied
+`--perf-binary`. It uses the same native hardware, preserved Firefox binary,
+startup settling, viewport and Canvas producer policy as the timing harness.
+Profiles are instrumented diagnostics and remain separate from primary timing.
+For example, the local executable can be supplied as
+`--perf-binary /usr/lib/linux-hwe-6.17-tools-6.17.0-42/perf`, with
+the required two-second process sampling interval, selected by default in this
+phase.
+
+The recorder starts disabled after warmup, acknowledges a control ping, and
+acknowledges enable/disable commands around the workload. It requests `cpu-clock:uk`
+at 99 Hz with 16 KiB DWARF user stacks, monotonic timestamps and default thread
+inheritance. `--perf-event cpu-clock:u` explicitly restricts a control capture to
+user space. Recording is disabled before screenshot validation; final data
+flushing and hashing happen after process sampling. No kernel policy or browser
+sandbox setting is changed to obtain a profile.
+
+The case directory is private, with mode-0600 control FIFOs. Evidence records the
+exact perf binary/hash/version, event, command, GPU PID/start-time identity,
+control request/acknowledgement times, exit status and data hash. A control
+timeout, early recorder exit, changed target identity or failed finalization
+rejects the capture. After flushing, the recorded event attributes must match
+the requested user/kernel exclusions, frequency, inheritance, clock and stack
+settings. Bare `cpu-clock` is not accepted because perf can silently restrict it
+to user space under the host policy. Cleanup signals only the recorder's owned
+process group.
+
+Successful capture is distinct from a useful profile. Inspect `perf.data` with
+the same perf binary after collection; retain sample counts by user/kernel mode,
+thread and DSO, build IDs, lost records and unresolved or truncated stacks.
+Preserved `libxul` and mapped-library paths support local symbol lookup; perf's
+build-ID cache is not populated by the recorder. Report unresolved driver/kernel
+symbols explicitly. Sampling weights describe the recorded on-CPU distribution
+and do not establish isolated GPU duration or a performance improvement.
+
+The Canvas baseline's GPU-process median user/system CPU rates were
+0.16485/0.03044 CPU seconds per second for GL and 0.24012/0.23552 for Vulkan.
+The larger system-time increase makes kernel-inclusive capture important;
+user-only Rust or Mesa stacks cover only part of the observed difference.
+
+The native tooling preflight confirmed user-space capture with the supplied perf
+6.17.13 binary: the final explicit `cpu-clock:u` control produced 35 samples,
+zero lost samples and resolved Python/libc call chains. The explicit
+`cpu-clock:uk` control instead reported `cpu-clock:uku` with `exclude_kernel=1`;
+the actual-attribute check rejected it. Native policy was
+`perf_event_paranoid=2`, with no effective capabilities. No host policy was
+changed. The planned two counter controls and four Canvas profiles remain
+pending kernel sampling access and a fresh quiet-host window. They will not
+silently switch to user-only sampling. Probe evidence is retained under
+`artifacts/stage9/cff6f7717dc/step-9.5/perf-preflight/`; no Firefox profile has
+been recorded by this preparation step.

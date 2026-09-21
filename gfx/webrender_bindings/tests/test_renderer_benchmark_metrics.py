@@ -265,6 +265,150 @@ def with_timing_sampling(report):
     return report
 
 
+def profile_report():
+    report = with_timing_sampling(with_collector(valid_report()))
+    report["processMetrics"] = [deepcopy(sample) for sample in report["processMetrics"]]
+    for sample in report["processMetrics"]:
+        gpu = deepcopy(sample["processes"]["10:100"])
+        gpu.update(pid=11, startTimeTicks=110)
+        sample["processes"]["11:110"] = gpu
+        for key in ["cpuSeconds", "userCpuSeconds", "systemCpuSeconds", "rssBytes"]:
+            sample["totals"][key] += gpu[key]
+        for total_key, process_key in [
+            ("fdCount", "fdCount"),
+            ("fdInfoCoverage", "fdInfoCoverage"),
+        ]:
+            if sample["totals"][total_key] is not None:
+                sample["totals"][total_key] += gpu[process_key]
+        if sample["totals"]["fdCoverage"] is not None:
+            sample["totals"]["fdCoverage"] += 1
+    report["processMetrics"][1]["processDiscovery"].update(
+        threadsVisited=2, childLinks=1
+    )
+    report["samplingIntervalSeconds"] = 2
+    report["processIds"] = {"parent": 10, "gpu": 11}
+    report["startupSettling"] = {
+        "passed": True,
+        "minimumAgeSeconds": 65,
+        "requiredStableSeconds": 5,
+        "timeoutSeconds": 120,
+        "elapsedSeconds": 70,
+        "rootAgeSeconds": 75,
+        "stableSeconds": 5,
+        "rootIdentity": "10:100",
+        "transitions": [
+            {
+                "elapsedSeconds": 0,
+                "rootAgeSeconds": 5,
+                "added": {"10:100": "firefox", "11:110": "GPU Process"},
+                "removed": {},
+            }
+        ],
+        "finalIdentities": ["10:100", "11:110"],
+    }
+    perf_binary = "/usr/lib/linux-hwe/perf"
+    data_path = "/tmp/profile/perf.data"
+    report["perf"] = {
+        "passed": True,
+        "binary": perf_binary,
+        "binarySha256": "d" * 64,
+        "event": "cpu-clock:uk",
+        "eventAttributes": {
+            "name": "cpu-clock:uk",
+            "type": 1,
+            "config": 0,
+            "frequencyHz": 99,
+            "frequencyMode": 1,
+            "excludeUser": 0,
+            "excludeKernel": 0,
+            "excludeHypervisor": 1,
+            "inherit": 1,
+            "stackBytes": 16384,
+            "clockId": 1,
+            "sampleTypes": [
+                "IP",
+                "TID",
+                "TIME",
+                "CPU",
+                "PERIOD",
+                "REGS_USER",
+                "STACK_USER",
+            ],
+        },
+        "version": "perf version 6.17.13",
+        "frequencyHz": 99,
+        "callGraph": "dwarf,16384",
+        "targetPid": 11,
+        "targetIdentity": "11:110",
+        "recorderPid": 30,
+        "command": [
+            perf_binary,
+            "record",
+            "-e",
+            "cpu-clock:uk",
+            "-F",
+            "99",
+            "--strict-freq",
+            "--call-graph",
+            "dwarf,16384",
+            "-p",
+            "11",
+            "-D",
+            "-1",
+            "--control",
+            "fifo:/tmp/profile/control,/tmp/profile/ack",
+            "--clockid",
+            "mono",
+            "--timestamp",
+            "--sample-cpu",
+            "--no-buildid-cache",
+            "-o",
+            data_path,
+        ],
+        "controls": [
+            {
+                "command": "ping",
+                "requestedTimeSeconds": 0.7,
+                "acknowledgedTimeSeconds": 0.8,
+            },
+            {
+                "command": "enable",
+                "requestedTimeSeconds": 1.0,
+                "acknowledgedTimeSeconds": 1.01,
+            },
+            {
+                "command": "disable",
+                "requestedTimeSeconds": 1.9,
+                "acknowledgedTimeSeconds": 1.91,
+            },
+            {
+                "command": "stop",
+                "requestedTimeSeconds": 2.2,
+                "acknowledgedTimeSeconds": 2.21,
+            },
+        ],
+        "returncode": 0,
+        "dataPath": data_path,
+        "dataBytes": 4096,
+        "dataSha256": "e" * 64,
+    }
+    config = {
+        **expected("profile"),
+        "collectorTelemetry": True,
+        "timingSampling": True,
+        "treeSampling": True,
+        "startupSettling": True,
+        "sampleIntervalSeconds": 2,
+        "perf": {
+            "binary": perf_binary,
+            "sha256": "d" * 64,
+            "event": "cpu-clock:uk",
+            "version": "perf version 6.17.13",
+        },
+    }
+    return report, config
+
+
 def diagnostic_record():
     return {
         "version": 1,
@@ -886,6 +1030,182 @@ class TestValidateReport(unittest.TestCase):
         legacy = valid_report()
         legacy["samplingIntervalSeconds"] = 10
         self.assertEqual(validate_report(legacy, expected()), [])
+
+    def test_valid_profile_report(self):
+        report, config = profile_report()
+        self.assertEqual(validate_report(report, config), [])
+
+        report, config = profile_report()
+        report["perf"]["event"] = "cpu-clock:u"
+        report["perf"]["command"][report["perf"]["command"].index("cpu-clock:uk")] = (
+            "cpu-clock:u"
+        )
+        report["perf"]["eventAttributes"].update(name="cpu-clock:u", excludeKernel=1)
+        config["perf"]["event"] = "cpu-clock:u"
+        self.assertEqual(validate_report(report, config), [])
+
+    def test_profile_metadata_is_required_only_for_profile_phase(self):
+        report, config = profile_report()
+        report.pop("perf")
+        self.assertIn(
+            "profile phase requires perf metadata", validate_report(report, config)
+        )
+
+        report, config = profile_report()
+        config["phase"] = "timing"
+        self.assertIn(
+            "expected perf configuration is only allowed for profile phase",
+            validate_report(report, config),
+        )
+        self.assertIn(
+            "perf metadata is only allowed for profile phase",
+            validate_report(report, config),
+        )
+
+        report, config = profile_report()
+        config["sampleIntervalSeconds"] = 0.25
+        self.assertIn(
+            "profile phase requires settled native GPU timing sampling",
+            validate_report(report, config),
+        )
+
+    def test_profile_target_and_recorder_identity_are_validated(self):
+        report, config = profile_report()
+        report["perf"]["targetPid"] = 12
+        self.assertIn(
+            "perf target does not match the sampled GPU process",
+            validate_report(report, config),
+        )
+
+        report, config = profile_report()
+        report["perf"]["targetIdentity"] = "11:111"
+        self.assertIn(
+            "perf target does not match the sampled GPU process",
+            validate_report(report, config),
+        )
+
+        report, config = profile_report()
+        report["perf"]["recorderPid"] = 10
+        self.assertIn(
+            "perf recorder overlaps the Firefox process tree",
+            validate_report(report, config),
+        )
+
+    def test_profile_capture_metadata_is_validated(self):
+        mutations = [
+            ("binarySha256", "bad"),
+            ("event", "cycles"),
+            ("version", "wrong"),
+            ("frequencyHz", 100),
+            ("callGraph", "fp"),
+            ("returncode", 1),
+            ("dataBytes", 0),
+            ("dataSha256", "bad"),
+            ("passed", False),
+        ]
+        for key, value in mutations:
+            with self.subTest(key=key):
+                report, config = profile_report()
+                report["perf"][key] = value
+                self.assertIn(
+                    "perf capture metadata is invalid",
+                    validate_report(report, config),
+                )
+
+        report, config = profile_report()
+        report["perf"]["command"].remove("--strict-freq")
+        self.assertIn(
+            "perf capture metadata is invalid", validate_report(report, config)
+        )
+
+        for forbidden in ["-a", "--all-cpus", "-t", "--tid"]:
+            with self.subTest(forbidden=forbidden):
+                report, config = profile_report()
+                report["perf"]["command"].append(forbidden)
+                self.assertIn(
+                    "perf capture metadata is invalid",
+                    validate_report(report, config),
+                )
+
+        report, config = profile_report()
+        config["perf"]["sha256"] = "bad"
+        self.assertIn(
+            "expected perf configuration is invalid", validate_report(report, config)
+        )
+
+    def test_profile_actual_event_attributes_are_validated(self):
+        report, config = profile_report()
+        report["perf"].pop("eventAttributes")
+        self.assertIn(
+            "perf event attributes are invalid", validate_report(report, config)
+        )
+
+        mutations = [
+            ("name", "cpu-clock:u"),
+            ("type", 0),
+            ("config", 1),
+            ("frequencyHz", 100),
+            ("frequencyMode", 0),
+            ("excludeUser", 1),
+            ("excludeKernel", 1),
+            ("inherit", 0),
+            ("stackBytes", 8192),
+            ("clockId", 0),
+        ]
+        for key, value in mutations:
+            with self.subTest(key=key):
+                report, config = profile_report()
+                report["perf"]["eventAttributes"][key] = value
+                self.assertIn(
+                    "perf event attributes are invalid",
+                    validate_report(report, config),
+                )
+
+        report, config = profile_report()
+        report["perf"]["eventAttributes"]["sampleTypes"].remove("STACK_USER")
+        self.assertIn(
+            "perf event attributes are invalid", validate_report(report, config)
+        )
+
+    def test_profile_control_acknowledgements_and_boundaries_are_validated(self):
+        report, config = profile_report()
+        report["perf"]["controls"][1]["command"] = "disable"
+        self.assertIn(
+            "perf control acknowledgement 1 is invalid",
+            validate_report(report, config),
+        )
+
+        report, config = profile_report()
+        report["perf"]["controls"][2]["acknowledgedTimeSeconds"] = float("nan")
+        self.assertIn(
+            "perf control acknowledgement 2 is invalid",
+            validate_report(report, config),
+        )
+
+        for index, key, value in [
+            (0, "acknowledgedTimeSeconds", 1.0),
+            (1, "requestedTimeSeconds", 0.8),
+            (2, "acknowledgedTimeSeconds", 2.2),
+            (3, "requestedTimeSeconds", 2.0),
+        ]:
+            with self.subTest(index=index, key=key):
+                report, config = profile_report()
+                report["perf"]["controls"][index][key] = value
+                self.assertIn(
+                    "perf control boundaries are invalid",
+                    validate_report(report, config),
+                )
+
+    def test_profile_validation_preserves_errors_for_malformed_process_samples(self):
+        report, config = profile_report()
+        report["processMetrics"][1]["processes"] = []
+        errors = validate_report(report, config)
+        self.assertIn("processMetrics[1].processes is missing", errors)
+
+        report, config = profile_report()
+        report["processMetrics"][1]["processes"]["11:110"]["pid"] = []
+        errors = validate_report(report, config)
+        self.assertIn("process 11:110 identity is invalid", errors)
 
     def test_startup_settling_gate(self):
         report = valid_report()

@@ -649,9 +649,15 @@ def validate_environment(report, expected):
             errors.append("presentation.mode must be native or xvfb")
         if mode == "native" and presentation.get("wsiDebug") is not None:
             errors.append("native presentation cannot use software WSI debug")
-        if expected.get("phase") == "timing" and mode != "native":
-            errors.append("timing phase requires native presentation")
-    if expected.get("phase") not in ["smoke", "timing", "diagnostic", "memory"]:
+        if expected.get("phase") in ["timing", "profile"] and mode != "native":
+            errors.append("timing/profile phase requires native presentation")
+    if expected.get("phase") not in [
+        "smoke",
+        "timing",
+        "profile",
+        "diagnostic",
+        "memory",
+    ]:
         errors.append("expected.phase is invalid")
 
     geometry = report.get("geometryBefore")
@@ -757,6 +763,29 @@ def validate_report(report, expected):
         errors.append("processMetrics must be a list")
         process_metrics = []
     phase = expected.get("phase")
+    expected_perf = expected.get("perf")
+    if phase == "profile":
+        if (
+            expected.get("process") != "GPU"
+            or expected.get("allowSoftware") is not False
+            or expected.get("timingSampling") is not True
+            or expected.get("treeSampling") is not True
+            or expected.get("startupSettling") is not True
+            or expected.get("sampleIntervalSeconds") != 2
+        ):
+            errors.append("profile phase requires settled native GPU timing sampling")
+        if (
+            not isinstance(expected_perf, dict)
+            or not isinstance(expected_perf.get("binary"), str)
+            or not Path(expected_perf.get("binary", "")).is_absolute()
+            or not _sha256(expected_perf.get("sha256"))
+            or expected_perf.get("event") not in ["cpu-clock:uk", "cpu-clock:u"]
+            or not isinstance(expected_perf.get("version"), str)
+            or not expected_perf.get("version")
+        ):
+            errors.append("expected perf configuration is invalid")
+    elif expected_perf is not None:
+        errors.append("expected perf configuration is only allowed for profile phase")
     interval_required = "sampleIntervalSeconds" in expected
     expected_interval = expected.get("sampleIntervalSeconds")
     actual_interval = report.get("samplingIntervalSeconds")
@@ -861,8 +890,8 @@ def validate_report(report, expected):
             sample.get("detailLevel") if isinstance(sample, dict) else None
             for sample in process_metrics
         ]
-        if phase != "timing":
-            errors.append("timing sampling requires timing phase")
+        if phase not in ["timing", "profile"]:
+            errors.append("timing sampling requires timing or profile phase")
         if (
             len(detail_levels) < 2
             or detail_levels[0] != "full"
@@ -897,7 +926,7 @@ def validate_report(report, expected):
         or interval_end < interval_start
     ):
         errors.append("host sampling interval is invalid")
-    if phase in ["timing", "memory"] and len(process_metrics) < 2:
+    if phase in ["timing", "profile", "memory"] and len(process_metrics) < 2:
         errors.append(f"{phase} phase requires at least two process samples")
     identities = []
     process_cpu_samples = []
@@ -1335,7 +1364,11 @@ def validate_report(report, expected):
                 ]
             ):
                 errors.append("total CPU counters decreased")
-    if phase in ["timing", "memory"] and identities and not stable_identities:
+    if (
+        phase in ["timing", "profile", "memory"]
+        and identities
+        and not stable_identities
+    ):
         lifecycle = "lifecycle" in str(expected.get("workload", "")).lower()
         documented = isinstance(events, list) and any(
             isinstance(event, dict)
@@ -1343,8 +1376,213 @@ def validate_report(report, expected):
             and event.get("cpuAttribution") == "lower-bound"
             for event in events
         )
-        if not lifecycle or not documented:
+        if phase == "profile" or not lifecycle or not documented:
             errors.append(f"{phase} process identities changed")
+
+    perf = report.get("perf")
+    if phase != "profile":
+        if perf is not None:
+            errors.append("perf metadata is only allowed for profile phase")
+    elif not isinstance(perf, dict):
+        errors.append("profile phase requires perf metadata")
+    else:
+        process_ids = report.get("processIds")
+        gpu_pid = process_ids.get("gpu") if isinstance(process_ids, dict) else None
+        target_pid = perf.get("targetPid")
+        target_identity = perf.get("targetIdentity")
+        recorder_pid = perf.get("recorderPid")
+        all_process_pids = set()
+        target_identities = set()
+        for sample in process_metrics:
+            processes = sample.get("processes") if isinstance(sample, dict) else None
+            if not isinstance(processes, dict):
+                continue
+            for identity, process in processes.items():
+                if not isinstance(process, dict):
+                    continue
+                pid = process.get("pid")
+                if isinstance(pid, int) and not isinstance(pid, bool):
+                    all_process_pids.add(pid)
+                if pid == gpu_pid:
+                    target_identities.add(identity)
+        if (
+            not isinstance(process_ids, dict)
+            or not isinstance(gpu_pid, int)
+            or isinstance(gpu_pid, bool)
+            or gpu_pid <= 0
+            or target_pid != gpu_pid
+            or not isinstance(target_identity, str)
+            or target_identities != {target_identity}
+        ):
+            errors.append("perf target does not match the sampled GPU process")
+        if (
+            not isinstance(recorder_pid, int)
+            or isinstance(recorder_pid, bool)
+            or recorder_pid <= 0
+            or recorder_pid in all_process_pids
+        ):
+            errors.append("perf recorder overlaps the Firefox process tree")
+
+        command = perf.get("command")
+
+        def command_option(*names):
+            if not isinstance(command, list):
+                return None
+            for name in names:
+                try:
+                    return command[command.index(name) + 1]
+                except (ValueError, IndexError):
+                    pass
+            return None
+
+        expected_event = (
+            expected_perf.get("event") if isinstance(expected_perf, dict) else None
+        )
+        data_path = perf.get("dataPath")
+        event_attributes = perf.get("eventAttributes")
+        required_sample_types = {
+            "IP",
+            "TID",
+            "TIME",
+            "CPU",
+            "PERIOD",
+            "REGS_USER",
+            "STACK_USER",
+        }
+        if (
+            not isinstance(event_attributes, dict)
+            or event_attributes.get("name") != expected_event
+            or type(event_attributes.get("type")) is not int
+            or event_attributes.get("type") != 1
+            or type(event_attributes.get("config")) is not int
+            or event_attributes.get("config") != 0
+            or type(event_attributes.get("frequencyHz")) is not int
+            or event_attributes.get("frequencyHz") != 99
+            or type(event_attributes.get("frequencyMode")) is not int
+            or event_attributes.get("frequencyMode") != 1
+            or type(event_attributes.get("excludeUser")) is not int
+            or event_attributes.get("excludeUser") != 0
+            or type(event_attributes.get("excludeKernel")) is not int
+            or event_attributes.get("excludeKernel")
+            != (1 if expected_event == "cpu-clock:u" else 0)
+            or type(event_attributes.get("excludeHypervisor")) is not int
+            or event_attributes.get("excludeHypervisor") not in [0, 1]
+            or type(event_attributes.get("inherit")) is not int
+            or event_attributes.get("inherit") != 1
+            or type(event_attributes.get("stackBytes")) is not int
+            or event_attributes.get("stackBytes") != 16384
+            or type(event_attributes.get("clockId")) is not int
+            or event_attributes.get("clockId") != 1
+            or not isinstance(event_attributes.get("sampleTypes"), list)
+            or any(
+                not isinstance(value, str)
+                for value in event_attributes.get("sampleTypes", [])
+            )
+            or not required_sample_types.issubset(
+                event_attributes.get("sampleTypes", [])
+            )
+        ):
+            errors.append("perf event attributes are invalid")
+        delay_value = command_option("-D", "--delay")
+        delayed_disabled = delay_value == "-1" or "--delay=-1" in (
+            command if isinstance(command, list) else []
+        )
+        if (
+            perf.get("passed") is not True
+            or not isinstance(command, list)
+            or not command
+            or any(not isinstance(value, str) for value in command)
+            or command[0]
+            != (
+                expected_perf.get("binary") if isinstance(expected_perf, dict) else None
+            )
+            or perf.get("binary") != command[0]
+            or perf.get("binarySha256")
+            != (
+                expected_perf.get("sha256") if isinstance(expected_perf, dict) else None
+            )
+            or perf.get("version")
+            != (
+                expected_perf.get("version")
+                if isinstance(expected_perf, dict)
+                else None
+            )
+            or perf.get("event") != expected_event
+            or command_option("-e", "--event") != expected_event
+            or type(perf.get("frequencyHz")) is not int
+            or perf.get("frequencyHz") != 99
+            or command_option("-F", "--freq") != "99"
+            or perf.get("callGraph") != "dwarf,16384"
+            or command_option("--call-graph") != "dwarf,16384"
+            or command_option("-p", "--pid") != str(target_pid)
+            or command_option("-o", "--output") != data_path
+            or command_option("--control") is None
+            or not command_option("--control").startswith("fifo:")
+            or not delayed_disabled
+            or "--strict-freq" not in command
+            or command_option("--clockid") != "mono"
+            or "--no-buildid-cache" not in command
+            or "--timestamp" not in command
+            or "--sample-cpu" not in command
+            or "-i" in command
+            or "--no-inherit" in command
+            or "-a" in command
+            or "--all-cpus" in command
+            or "-t" in command
+            or "--tid" in command
+            or type(perf.get("returncode")) is not int
+            or perf.get("returncode") != 0
+            or not isinstance(data_path, str)
+            or not Path(data_path).is_absolute()
+            or not isinstance(perf.get("dataBytes"), int)
+            or isinstance(perf.get("dataBytes"), bool)
+            or perf.get("dataBytes", 0) <= 0
+            or not _sha256(perf.get("dataSha256"))
+        ):
+            errors.append("perf capture metadata is invalid")
+
+        controls = perf.get("controls")
+        control_names = ["ping", "enable", "disable", "stop"]
+        control_times = []
+        if not isinstance(controls, list) or len(controls) != len(control_names):
+            errors.append("perf control acknowledgements are invalid")
+        else:
+            for index, (control, name) in enumerate(zip(controls, control_names)):
+                requested_time = (
+                    control.get("requestedTimeSeconds")
+                    if isinstance(control, dict)
+                    else None
+                )
+                acknowledged_time = (
+                    control.get("acknowledgedTimeSeconds")
+                    if isinstance(control, dict)
+                    else None
+                )
+                if (
+                    not isinstance(control, dict)
+                    or control.get("command") != name
+                    or not _finite_number(requested_time)
+                    or not _finite_number(acknowledged_time)
+                    or acknowledged_time < requested_time
+                ):
+                    errors.append(f"perf control acknowledgement {index} is invalid")
+                control_times.append((requested_time, acknowledged_time))
+            if all(_finite_number(value) for times in control_times for value in times):
+                ordered = all(
+                    control_times[index][1] <= control_times[index + 1][0]
+                    for index in range(len(control_times) - 1)
+                )
+                ping, enable, disable, stop_control = control_times
+                if (
+                    not ordered
+                    or not _finite_number(interval_start)
+                    or not _finite_number(interval_end)
+                    or ping[1] > interval_start
+                    or not interval_start <= enable[0] <= enable[1] <= interval_end
+                    or not interval_start <= disable[0] <= disable[1] <= interval_end
+                    or stop_control[0] < interval_end
+                ):
+                    errors.append("perf control boundaries are invalid")
     if phase == "memory" and process_metrics:
         if any(
             sample.get("totals", {}).get("memoryCoverage", 0)
