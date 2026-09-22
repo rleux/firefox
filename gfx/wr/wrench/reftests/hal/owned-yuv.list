@@ -1,0 +1,2 @@
+platform(linux,mac) fuzzy(1,6200) == ../image/yuv-owned.yaml ../image/yuv.png
+platform(linux,mac) fuzzy(1,6200) fuzzy-if(platform(swgl),1,205000) == ../image/yuv-clip-owned.yaml ../image/yuv.png

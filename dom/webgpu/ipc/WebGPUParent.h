@@ -118,6 +118,11 @@ class WebGPUParent final : public PWebGPUParent, public SupportsWeakPtr {
                          const layers::RemoteTextureId aRemoteTextureId,
                          const layers::RemoteTextureOwnerId aOwnerId);
 
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  void CollectVulkanTextures(PresentationData* aData,
+                             const layers::RemoteTextureOwnerId& aOwnerId);
+#endif
+
   ffi::WGPUGlobal* GetContext() const { return mContext.get(); }
 
   RefPtr<gfx::FileHandleWrapper> GetDeviceFenceHandle(const RawId aDeviceId);

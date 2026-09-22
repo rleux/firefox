@@ -4,11 +4,16 @@
 
 #include "FFmpegVideoFramePool.h"
 
+#include <algorithm>
+
 #include "FFmpegLog.h"
 #include "PlatformDecoderModule.h"
 #include "libavutil/pixfmt.h"
+#include "mozilla/Atomics.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/StaticPrefs_media.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/layers/LayersSurfaces.h"
 #include "mozilla/widget/DMABufDevice.h"
 #include "mozilla/widget/va_drmcommon.h"
 
@@ -35,6 +40,13 @@ extern mozilla::LazyLogModule gDmabufLog;
 constexpr static VASurfaceID sInvalidFFMPEGSurfaceID = -1;
 
 namespace mozilla {
+
+static uint64_t NextVAAPIPublicationId() {
+  static Atomic<uint64_t> next(1);
+  const uint64_t id = next++;
+  MOZ_RELEASE_ASSERT(id && id != UINT64_MAX);
+  return id;
+}
 
 RefPtr<layers::Image> VideoFrameSurface<LIBAV_VER>::GetAsImage() {
   return new layers::DMABUFSurfaceImage(mSurface);
@@ -143,9 +155,12 @@ void VideoFrameSurface<LIBAV_VER>::ReleaseVAAPIData(bool aForFrameRecycle) {
 #endif
 }
 
-VideoFramePool<LIBAV_VER>::VideoFramePool(int aFFMPEGPoolSize)
+VideoFramePool<LIBAV_VER>::VideoFramePool(int aFFMPEGPoolSize,
+                                          bool aNativeVAAPI)
     : mSurfaceLock("VideoFramePoolSurfaceLock"),
-      mMaxFFMPEGPoolSize(aFFMPEGPoolSize) {
+      mMaxFFMPEGPoolSize(aFFMPEGPoolSize),
+      mNativeVAAPI(aNativeVAAPI),
+      mNativeEpoch(aNativeVAAPI ? NextVAAPIPublicationId() : 0) {
   DMABUF_LOG("VideoFramePool::VideoFramePool() pool size {}",
              mMaxFFMPEGPoolSize);
 }
@@ -192,6 +207,10 @@ bool VideoFramePool<LIBAV_VER>::IsVulkanFrameSlotInUseByRenderer(
 
 void VideoFramePool<LIBAV_VER>::ReleaseUnusedVAAPIFrames() {
   MutexAutoLock lock(mSurfaceLock);
+  if (mNativeVAAPI) {
+    RetireNativeFramesLocked(lock);
+    return;
+  }
   UpdateRendererUsageLocked();
   for (const auto& surface : mDMABufSurfaces) {
     if (!surface->mHoldByFFmpeg && surface->IsUsedByRenderer()) {
@@ -210,6 +229,11 @@ void VideoFramePool<LIBAV_VER>::ReleaseUnusedVAAPIFrames() {
 // before seek for instance.
 void VideoFramePool<LIBAV_VER>::FlushFFmpegFrames() {
   MutexAutoLock lock(mSurfaceLock);
+  if (mNativeVAAPI) {
+    mNativeEpoch = NextVAAPIPublicationId();
+    RetireNativeFramesLocked(lock);
+    return;
+  }
   for (const auto& surface : mDMABufSurfaces) {
     surface->mFFMPEGSurfaceID = sInvalidFFMPEGSurfaceID;
   }
@@ -257,6 +281,77 @@ VideoFramePool<LIBAV_VER>::GetFreeVideoFrameSurfaceLocked() {
     return surface;
   }
   return nullptr;
+}
+
+void VideoFramePool<LIBAV_VER>::RetireNativeFramesLocked(
+    const MutexAutoLock& aProofOfLock) {
+  MOZ_ASSERT(mNativeVAAPI);
+  if (mNativeFailed) return;
+  for (size_t i = mDMABufSurfaces.Length(); i > 0; --i) {
+    const auto& frame = mDMABufSurfaces[i - 1];
+    auto* surface = frame->mSurface->GetAsDMABufSurfaceYUV();
+    if (surface->VAAPIImageAbandoned()) {
+      mNativeFailed = true;
+      return;
+    }
+    if (frame->mRefCnt == 1 && surface->TryRetireVAAPIImage()) {
+      frame->ReleaseVAAPIData(/* aForFrameRecycle */ false);
+      mDMABufSurfaces.RemoveElementAt(i - 1);
+    }
+  }
+}
+
+RefPtr<VideoFrameSurface<LIBAV_VER>>
+VideoFramePool<LIBAV_VER>::GetNativeVAAPIFrame(
+    RefPtr<DMABufSurfaceYUV> aSurface, const VADRMPRIMESurfaceDescriptor& aDesc,
+    AVFrame* aFrame, const FFmpegLibWrapper* aLib, uint64_t aDRMMajor,
+    uint64_t aDRMMinor) {
+  MutexAutoLock lock(mSurfaceLock);
+  MOZ_ASSERT(mNativeVAAPI);
+  if (!mNativeVAAPI) return nullptr;
+  RetireNativeFramesLocked(lock);
+  if (mNativeFailed) return nullptr;
+  auto failed = MakeScopeExit([&] { mNativeFailed = true; });
+  if (!aSurface || aDesc.num_objects != 1 || aDesc.num_layers != 2 ||
+      !aFrame->hw_frames_ctx || !aFrame->buf[0])
+    return nullptr;
+
+  for (const auto& frame : mDMABufSurfaces) {
+    auto* existing = frame->mSurface->GetAsDMABufSurfaceYUV();
+    if (existing->SameVAAPIAllocation(*aSurface)) {
+      const auto& state =
+          existing->GetVAAPIDescriptor()->vaapiImageState().ref();
+      if (!existing->SameVAAPIImage(*aSurface) ||
+          state.objects()[0].size() != aDesc.objects[0].size ||
+          state.drmRenderMajor() != aDRMMajor ||
+          state.drmRenderMinor() != aDRMMinor) {
+        return nullptr;
+      }
+      failed.release();
+      return frame;
+    }
+  }
+  const uint64_t limit =
+      mMaxFFMPEGPoolSize > 0
+          ? std::clamp<uint64_t>(uint64_t(mMaxFFMPEGPoolSize) * 3 / 4, 1, 32)
+          : 32;
+  if (mDMABufSurfaces.Length() >= limit) return nullptr;
+
+  auto frame = MakeRefPtr<VideoFrameSurface<LIBAV_VER>>(
+      aSurface, sInvalidFFMPEGSurfaceID);
+  frame->mAVHWFrameContext = aLib->av_buffer_ref(aFrame->hw_frames_ctx);
+  frame->mHWAVBuffer = aLib->av_buffer_ref(aFrame->buf[0]);
+  frame->mLib = aLib;
+  frame->mHoldByFFmpeg = true;
+  frame->DisableRecycle();
+  if (!frame->mAVHWFrameContext || !frame->mHWAVBuffer ||
+      !aSurface->PublishVAAPIImage(aDesc, NextVAAPIPublicationId(),
+                                   mNativeEpoch, aDRMMajor, aDRMMinor)) {
+    return nullptr;
+  }
+  mDMABufSurfaces.AppendElement(frame);
+  failed.release();
+  return frame;
 }
 
 bool VideoFramePool<LIBAV_VER>::ShouldCopySurfaceLocked() {

@@ -23,8 +23,18 @@ mod blob;
 #[cfg(target_os = "windows")]
 mod composite;
 mod egl;
+mod hal;
+#[cfg(feature = "hal")]
+mod hal_compositor;
+#[cfg(feature = "hal")]
+mod hal_surface;
+#[cfg(feature = "hal")]
+mod hal_platform;
+#[cfg(feature = "hal")]
+mod hal_window;
 mod parse_function;
 mod perf;
+mod measure;
 mod png;
 mod premultiply;
 mod rawtest;
@@ -170,9 +180,10 @@ mod swgl {
 
 pub enum WindowWrapper {
     Windowed {
-        window: Window,
-        gl_surface: Surface<WindowSurface>,
+        // The native window must outlive its GL context and drawable.
         gl_context: PossiblyCurrentContext,
+        gl_surface: Surface<WindowSurface>,
+        window: Window,
         is_gles: bool,
         gl: Rc<dyn gl::Gl>,
         sw_ctx: Option<swgl::Context>,
@@ -610,8 +621,13 @@ fn create_notifier() -> (Box<dyn RenderNotifier>, Receiver<NotifierEvent>) {
     (Box::new(Notifier { tx }), rx)
 }
 
-fn rawtest(mut wrench: Wrench, window: &mut WindowWrapper, rx: Receiver<NotifierEvent>) {
-    RawtestHarness::new(&mut wrench, window, &rx).run();
+fn rawtest(mut wrench: Wrench, window: &mut WindowWrapper, rx: Receiver<NotifierEvent>, filter: Option<&str>) {
+    let harness = RawtestHarness::new(&mut wrench, window, &rx);
+    if filter.is_some() {
+        harness.run_selected(filter).expect("Raw tests failed");
+    } else {
+        harness.run();
+    }
     wrench.shut_down(rx);
 }
 
@@ -698,6 +714,7 @@ struct WrenchApp {
     // Reftest
     reftest_specific: Option<PathBuf>,
     reftest_fuzz: Option<f64>,
+    rawtest_specific: Option<String>,
 
     // Show
     thing_to_build: Option<ThingToBuild>,
@@ -715,6 +732,7 @@ struct WrenchApp {
     perf_as_csv: bool,
     perf_warmup_frames: Option<usize>,
     perf_sample_count: Option<usize>,
+    measurement: Option<measure::Options>,
 
     // ComparePerf
     compare_first: String,
@@ -741,6 +759,7 @@ impl ApplicationHandler for WrenchApp {
             return;
         }
 
+        let initialization_start = std::time::Instant::now();
         // Create window / GL context.
         let mut window = if self.headless {
             let sw_ctx = if self.software { Some(make_software_context()) } else { None };
@@ -812,10 +831,10 @@ impl ApplicationHandler for WrenchApp {
 
         let needs_frame_notifier = matches!(
             self.subcommand.as_str(),
-            "perf" | "reftest" | "png" | "rawtest" | "test_invalidation"
+            "perf" | "measure" | "reftest" | "png" | "rawtest" | "test_invalidation"
         );
         let (notifier, rx) = if needs_frame_notifier {
-            let (n, r) = create_notifier();
+            let (n, r) = if self.subcommand == "measure" { measure::notifier() } else { create_notifier() };
             (Some(n), Some(r))
         } else {
             (None, None)
@@ -846,6 +865,7 @@ impl ApplicationHandler for WrenchApp {
             layer_compositor,
             self.compositor_clips,
         );
+        let initialization = initialization_start.elapsed();
 
         if let Some(ui_str) = &self.profiler_ui {
             wrench.renderer.set_profiler_ui(ui_str);
@@ -940,7 +960,18 @@ impl ApplicationHandler for WrenchApp {
                 event_loop.exit();
             }
             "rawtest" => {
-                rawtest(wrench, &mut window, rx.unwrap());
+                rawtest(wrench, &mut window, rx.unwrap(), self.rawtest_specific.as_deref());
+                event_loop.exit();
+            }
+            "measure" => {
+                let rx = rx.unwrap();
+                let info = wrench.renderer.get_graphics_api_info();
+                let backend = serde_json::json!({"api": "gl", "renderer": info.renderer, "version": info.version, "target": "GL backbuffer without swap"});
+                if let Err(error) = measure::run(&mut wrench, &rx, dim, self.measurement.as_ref().unwrap(), backend, initialization) {
+                    eprintln!("Measurement failed: {error}");
+                    self.exit_code = 1;
+                }
+                wrench.shut_down(rx);
                 event_loop.exit();
             }
             "perf" => {
@@ -1304,10 +1335,12 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
         size, vsync, angle, software, using_compositor, gl_request, headless,
         res_path, use_optimized_shaders, rebuild, no_subpixel_aa, verbose,
         no_scissor, no_batch_global, color_target_init, precache, dump_shader_source, profiler_ui,
+        rawtest_specific: args.subcommand_matches("rawtest").and_then(|m| m.value_of("TEST")).map(str::to_owned),
         subcommand, compositor_clips, reftest_specific, reftest_fuzz,
         thing_to_build, show_no_block, show_no_batch,
         png_reader, png_surface, png_output_path,
         perf_benchmark, perf_filename, perf_as_csv, perf_warmup_frames, perf_sample_count,
+        measurement: args.subcommand_matches("measure").map(|_| measure::Options::from_args(&args).expect("Invalid measurement arguments")),
         compare_first, compare_second,
         proxy,
         window: None, wrench: None, rx: None, show_state: None, exit_code: 0,
@@ -1366,6 +1399,7 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
     assert!(app.headless, "run_headless called without --headless");
     assert!(app.subcommand != "show", "`wrench show` is not supported in headless mode");
 
+    let initialization_start = std::time::Instant::now();
     let sw_ctx = if app.software { Some(make_software_context()) } else { None };
     #[cfg_attr(not(feature = "software"), allow(unused_variables))]
     let gl: Rc<dyn gl::Gl> = if let Some(ref sw_ctx) = sw_ctx {
@@ -1396,10 +1430,10 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
 
     let needs_frame_notifier = matches!(
         app.subcommand.as_str(),
-        "perf" | "reftest" | "png" | "rawtest" | "test_invalidation"
+        "perf" | "measure" | "reftest" | "png" | "rawtest" | "test_invalidation"
     );
     let (notifier, rx) = if needs_frame_notifier {
-        let (n, r) = create_notifier();
+        let (n, r) = if app.subcommand == "measure" { measure::notifier() } else { create_notifier() };
         (Some(n), Some(r))
     } else {
         (None, None)
@@ -1424,6 +1458,7 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
         None,
         app.compositor_clips,
     );
+    let initialization = initialization_start.elapsed();
 
     if let Some(ui_str) = &app.profiler_ui {
         wrench.renderer.set_profiler_ui(ui_str);
@@ -1437,6 +1472,14 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
     println!("hidpi factor: {}", window.hidpi_factor());
 
     match app.subcommand.as_str() {
+        "measure" => {
+            let rx = rx.unwrap();
+            let info = wrench.renderer.get_graphics_api_info();
+            let backend = serde_json::json!({"api": "gl", "renderer": info.renderer, "version": info.version, "target": "GL headless buffer"});
+            let result = measure::run(&mut wrench, &rx, dim, app.measurement.as_ref().unwrap(), backend, initialization);
+            wrench.shut_down(rx);
+            if let Err(error) = result { eprintln!("Measurement failed: {error}"); 1 } else { 0 }
+        }
         "png" => {
             let reader = app.png_reader.take().unwrap();
             let rx = rx.unwrap();
@@ -1458,7 +1501,7 @@ fn run_headless(args: clap::ArgMatches) -> i32 {
         }
         "rawtest" => {
             // rawtest() calls wrench.shut_down() which calls deinit().
-            rawtest(wrench, &mut window, rx.unwrap());
+            rawtest(wrench, &mut window, rx.unwrap(), app.rawtest_specific.as_deref());
             0
         }
         "perf" => {
@@ -1519,6 +1562,12 @@ pub fn main() {
     }
 
     let args = parse_args();
+    if let Some(exit_code) = hal::dispatch(&args) {
+        if exit_code != 0 {
+            process::exit(exit_code);
+        }
+        return;
+    }
     let exit_code = if args.is_present("headless") {
         run_headless(args)
     } else {
@@ -1577,13 +1626,20 @@ fn android_main(app: AndroidApp) {
         });
     }
 
+    let args = parse_args();
+    if let Some(exit_code) = hal::dispatch(&args) {
+        if exit_code != 0 {
+            process::exit(exit_code);
+        }
+        return;
+    }
+
     use winit::platform::android::EventLoopBuilderExtAndroid;
     let event_loop = EventLoop::builder()
         .with_android_app(app)
         .build()
         .expect("failed to create event loop");
 
-    let args = parse_args();
     let exit_code = run(event_loop, args);
     process::exit(exit_code);
 }

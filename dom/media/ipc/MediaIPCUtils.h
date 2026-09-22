@@ -21,6 +21,13 @@
 
 namespace IPC {
 template <>
+struct ParamTraits<mozilla::VideoInfo::ChromaLocation>
+    : public ContiguousEnumSerializerInclusive<
+          mozilla::VideoInfo::ChromaLocation,
+          mozilla::VideoInfo::ChromaLocation::Unspecified,
+          mozilla::VideoInfo::ChromaLocation::Unsupported> {};
+
+template <>
 struct ParamTraits<mozilla::VideoInfo> {
   typedef mozilla::VideoInfo paramType;
 
@@ -42,6 +49,7 @@ struct ParamTraits<mozilla::VideoInfo> {
     WriteParam(aWriter, aParam.mTransferFunction);
     WriteParam(aWriter, aParam.mHDRMetadata);
     WriteParam(aWriter, aParam.mColorRange);
+    WriteParam(aWriter, aParam.mChromaLocation);
     WriteParam(aWriter, aParam.mAlphaPresent);
     WriteParam(aWriter, aParam.mCrypto);
   }
@@ -61,6 +69,7 @@ struct ParamTraits<mozilla::VideoInfo> {
            ReadParam(aReader, &aResult->mTransferFunction) &&
            ReadParam(aReader, &aResult->mHDRMetadata) &&
            ReadParam(aReader, &aResult->mColorRange) &&
+           ReadParam(aReader, &aResult->mChromaLocation) &&
            ReadParam(aReader, &aResult->mAlphaPresent) &&
            ReadParam(aReader, &aResult->mCrypto);
   }

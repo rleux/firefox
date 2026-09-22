@@ -16,7 +16,7 @@ namespaces = ["mozilla", "wr"]
 
 [export]
 item_types = ["globals", "enums", "structs", "unions", "typedefs", "opaque", "functions", "constants"]
-include = ["POLYGON_CLIP_VERTEX_MAX"]
+include = ["POLYGON_CLIP_VERTEX_MAX", "WrHalImage", "WrHalImageLease", "WrHalImageRelease"]
 
 [parse]
 parse_deps = true
@@ -41,6 +41,7 @@ derive_ostream = true
 bitflags = true
 
 [defines]
+"target_os = linux" = "XP_LINUX"
 "target_os = windows" = "XP_WIN"
 "target_os = macos" = "XP_MACOSX"
 "target_os = android" = "ANDROID"

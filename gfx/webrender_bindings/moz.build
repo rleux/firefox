@@ -100,6 +100,12 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     SOURCES += [
         "RenderDMABUFTextureHost.cpp",
     ]
+    if CONFIG["OS_TARGET"] == "Linux":
+        EXPORTS.mozilla.webrender += ["RenderCompositorVulkan.h"]
+        SOURCES += ["RenderCompositorVulkan.cpp"]
+        if CONFIG["MOZ_X11"]:
+            EXPORTS.mozilla.webrender += ["X11WindowVisibility.h"]
+            SOURCES += ["X11WindowVisibility.cpp"]
 
 if CONFIG["MOZ_WAYLAND"]:
     EXPORTS.mozilla.webrender += [

@@ -78,6 +78,43 @@ namespace layers {
   CompositeProcessFencesHolderId? fencesHolderId;
 };
 
+[Comparable] struct VulkanImageState {
+  uint8_t[] deviceUUID;
+  uint8_t[] driverUUID;
+  uint64_t generation;
+  FileHandleWrapper accessLock;
+};
+
+[Comparable] struct ForeignRGBImageState {
+  uint64_t generation;
+  FileHandleWrapper accessLock;
+};
+
+[Comparable] struct DMABufVideoObject {
+  FileHandleWrapper fd;
+  uint64_t size;
+  uint64_t modifier;
+};
+
+[Comparable] struct DMABufVideoPlane {
+  uint32_t objectIndex;
+  uint64_t offset;
+  uint64_t stride;
+};
+
+// NV12 or P010 with separate Y/UV layers, one memory plane per layer.
+[Comparable] struct VAAPIImageState {
+  DMABufVideoObject[] objects;
+  DMABufVideoPlane[] planes;
+  uint64_t allocationId;
+  uint64_t generation;
+  uint64_t producerEpoch;
+  bool producerComplete;
+  uint64_t drmRenderMajor;
+  uint64_t drmRenderMinor;
+  FileHandleWrapper accessLock;
+};
+
 [Comparable] struct SurfaceDescriptorDMABuf {
   uint32_t bufferType;
   uint32_t fourccFormat;
@@ -103,6 +140,9 @@ namespace layers {
   nullable FileHandleWrapper semaphoreFd;
   bool semaphoreFdIsSyncFd;
   HDRMetadata hdrMetadata;
+  VulkanImageState? vulkanImageState;
+  ForeignRGBImageState? foreignRGBImageState;
+  VAAPIImageState? vaapiImageState;
 };
 
 [Comparable] struct SurfaceTextureDescriptor {

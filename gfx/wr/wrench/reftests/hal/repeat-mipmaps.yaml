@@ -1,0 +1,17 @@
+root:
+  items:
+    - image: ../image/firefox.png
+      bounds: [8, 8, 280, 64]
+      color: blue
+      stretch-size: [130, 33]
+      tile-spacing: [3, 5]
+    - type: stacking-context
+      bounds: [8, 128, 280, 80]
+      transform-origin: [0, 0]
+      transform: rotate(10)
+      items:
+        - image: ../image/firefox.png
+          bounds: [0, 0, 280, 80]
+          color: blue
+          stretch-size: [65, 16.5]
+          tile-spacing: [2, 2]

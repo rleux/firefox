@@ -6,7 +6,10 @@ import pytest
 from mozunit import main
 
 from gecko_taskgraph.test.conftest import FakeParameters
-from gecko_taskgraph.transforms.build import collapse_unified_builds
+from gecko_taskgraph.transforms.build import (
+    collapse_unified_builds,
+    fetch_webrender_shader_tools,
+)
 
 
 def unified_build():
@@ -73,6 +76,32 @@ def test_collapse_unified_build(run_transform):
 def test_unified_build_left_alone(run_transform, use_artifact, package_tests):
     job = run(run_transform, use_artifact, package_tests)
     assert job == unified_build()
+
+
+@pytest.mark.parametrize(
+    "name,artifact,expected",
+    [
+        ("linux64/opt", False, True),
+        ("linux/opt", False, True),
+        ("linux64-aarch64/opt", False, True),
+        ("linux64-base-toolchains/opt", False, True),
+        ("linux64/opt", True, False),
+        ("android-aarch64/opt", False, False),
+        ("macosx64-x64/opt", False, False),
+        ("win64/opt", False, False),
+    ],
+)
+@pytest.mark.parametrize("kind", ["build", "instrumented-build"])
+def test_fetch_webrender_shader_tools(run_transform, name, artifact, expected, kind):
+    job = {
+        "name": name,
+        "attributes": {"artifact-build": artifact},
+        "fetches": {"toolchain": ["linux64-clang"]},
+    }
+    result = list(run_transform(fetch_webrender_shader_tools, [job], kind=kind))[0]
+    assert result["fetches"]["toolchain"] == ["linux64-clang"] + (
+        ["linux64-shader-tools"] if expected else []
+    )
 
 
 if __name__ == "__main__":

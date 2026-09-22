@@ -235,6 +235,10 @@ pub fn prepare_image_quads(
                 RenderTask::new_image(size, request, false)
             );
 
+            if let Some(&producer) = frame_state.image_dependencies.get(&image_data.key) {
+                frame_state.rg_builder.add_dependency(src_task_id, producer);
+            }
+
             if let Some(external_image) = image_properties.external_image {
                 // On some devices we cannot render from an ImageBufferKind::TextureExternal
                 // source using most shaders, so must perform a copy to a regular texture first.

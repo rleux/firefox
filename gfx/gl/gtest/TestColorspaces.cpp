@@ -6,7 +6,12 @@
 #include <limits>
 
 #include "Colorspaces.h"
+#include "GLBlitHelper.h"
 #include "gtest/gtest.h"
+#include "mozilla/gfx/2D.h"
+#include "mozilla/layers/ImageDataSerializer.h"
+#include "mozilla/layers/LayersSurfaces.h"
+#include "mozilla/layers/TextureHost.h"
 
 namespace mozilla::color {
 mat4 YuvFromYcbcr(const YcbcrDesc&);
@@ -16,6 +21,206 @@ mat3 XyzFromLinearRgb(const Chromaticities&);
 }  // namespace mozilla::color
 
 using namespace mozilla::color;
+
+TEST(Colorspaces, YCbCrDescriptorReadbackHonorsRange)
+{
+  using namespace mozilla;
+  layers::YCbCrDescriptor descriptor;
+  descriptor.display() = gfx::IntRect(0, 0, 2, 2);
+  descriptor.ySize() = gfx::IntSize(2, 2);
+  descriptor.cbCrSize() = gfx::IntSize(1, 1);
+  descriptor.yStride() = 2;
+  descriptor.cbCrStride() = 1;
+  descriptor.yOffset() = 0;
+  descriptor.cbOffset() = 4;
+  descriptor.crOffset() = 5;
+  descriptor.yUVColorSpace() = gfx::YUVColorSpace::BT709;
+  descriptor.colorDepth() = gfx::ColorDepth::COLOR_8;
+  descriptor.chromaSubsampling() =
+      gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
+  std::array<uint8_t, 6> data = {16, 16, 235, 235, 128, 128};
+  for (const auto range : {gfx::ColorRange::LIMITED, gfx::ColorRange::FULL}) {
+    descriptor.colorRange() = range;
+    RefPtr<gfx::DataSourceSurface> surface =
+        layers::ImageDataSerializer::DataSourceSurfaceFromYCbCrDescriptor(
+            data.data(), descriptor);
+    ASSERT_TRUE(surface);
+    gfx::DataSourceSurface::ScopedMap map(surface,
+                                          gfx::DataSourceSurface::READ);
+    ASSERT_TRUE(map.IsMapped());
+    for (int y = 0; y < 2; ++y) {
+      const int expected =
+          range == gfx::ColorRange::FULL ? (y ? 235 : 16) : (y ? 255 : 0);
+      for (int x = 0; x < 2; ++x) {
+        for (int channel = 0; channel < 3; ++channel) {
+          EXPECT_NEAR(map.GetData()[y * map.GetStride() + x * 4 + channel],
+                      expected, 1);
+        }
+      }
+    }
+  }
+}
+
+TEST(Colorspaces, MemoryTextureHostHighBitDepthYCbCrReadback)
+{
+  using namespace mozilla;
+  for (const auto depth :
+       {gfx::ColorDepth::COLOR_12, gfx::ColorDepth::COLOR_16}) {
+    SCOPED_TRACE(int(depth));
+    const int shift = depth == gfx::ColorDepth::COLOR_12 ? 4 : 8;
+    auto buffer = MakeUnique<uint8_t[]>(6 * sizeof(uint16_t));
+    auto* samples = reinterpret_cast<uint16_t*>(buffer.get());
+    samples[0] = samples[1] = 16 << shift;
+    samples[2] = samples[3] = 235 << shift;
+    samples[4] = samples[5] = 128 << shift;
+
+    layers::YCbCrDescriptor ycbcr;
+    ycbcr.display() = gfx::IntRect(0, 0, 2, 2);
+    ycbcr.ySize() = gfx::IntSize(2, 2);
+    ycbcr.cbCrSize() = gfx::IntSize(1, 1);
+    ycbcr.yStride() = 2 * sizeof(uint16_t);
+    ycbcr.cbCrStride() = sizeof(uint16_t);
+    ycbcr.yOffset() = 0;
+    ycbcr.cbOffset() = 4 * sizeof(uint16_t);
+    ycbcr.crOffset() = 5 * sizeof(uint16_t);
+    ycbcr.yUVColorSpace() = gfx::YUVColorSpace::BT709;
+    ycbcr.colorDepth() = depth;
+    ycbcr.colorRange() = gfx::ColorRange::LIMITED;
+    ycbcr.chromaSubsampling() = gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
+    layers::BufferDescriptor descriptor(ycbcr);
+    RefPtr<layers::MemoryTextureHost> host = new layers::MemoryTextureHost(
+        buffer.get(), descriptor, layers::TextureFlags::DEALLOCATE_CLIENT);
+    RefPtr<gfx::DataSourceSurface> surface = host->GetAsSurface(nullptr);
+    ASSERT_TRUE(surface);
+    gfx::DataSourceSurface::ScopedMap map(surface,
+                                          gfx::DataSourceSurface::READ);
+    ASSERT_TRUE(map.IsMapped());
+    for (int y = 0; y < 2; ++y) {
+      const int expected = y ? 255 : 0;
+      for (int x = 0; x < 2; ++x) {
+        const auto* pixel = map.GetData() + y * map.GetStride() + x * 4;
+        EXPECT_NEAR(pixel[0], expected, 1);
+        EXPECT_NEAR(pixel[1], expected, 1);
+        EXPECT_NEAR(pixel[2], expected, 1);
+        EXPECT_EQ(pixel[3], 255);
+      }
+    }
+  }
+}
+
+TEST(Colorspaces, GLBlitYUVMatrixHonorsRange)
+{
+  using namespace mozilla;
+  const struct {
+    gfx::YUVColorSpace space;
+    double kr;
+    double kb;
+  } cases[] = {{gfx::YUVColorSpace::BT601, 0.299, 0.114},
+               {gfx::YUVColorSpace::BT709, 0.2126, 0.0722},
+               {gfx::YUVColorSpace::BT2020, 0.2627, 0.0593}};
+  const std::array<std::array<double, 3>, 7> samples = {{{0, 128, 128},
+                                                         {16, 128, 128},
+                                                         {128, 128, 128},
+                                                         {235, 128, 128},
+                                                         {255, 128, 128},
+                                                         {100, 180, 70},
+                                                         {200, 32, 240}}};
+  for (const auto& test : cases) {
+    for (auto range : {gfx::ColorRange::LIMITED, gfx::ColorRange::FULL}) {
+      SCOPED_TRACE(int(test.space));
+      SCOPED_TRACE(int(range));
+      gl::DrawBlitProg::YUVArgs args;
+      args.colorSpaceForMatrix = Some(test.space);
+      args.colorRange = range;
+      const auto matrix = args.ColorMatrix();
+      for (const auto& sample : samples) {
+        const bool full = range == gfx::ColorRange::FULL;
+        const double y = full ? sample[0] : (sample[0] - 16) * 255 / 219;
+        const double u = (sample[1] - 128) * (full ? 1 : 255.0 / 224);
+        const double v = (sample[2] - 128) * (full ? 1 : 255.0 / 224);
+        const double kg = 1 - test.kr - test.kb;
+        const std::array<double, 3> expected = {
+            y + 2 * (1 - test.kr) * v,
+            y - 2 * test.kb * (1 - test.kb) / kg * u -
+                2 * test.kr * (1 - test.kr) / kg * v,
+            y + 2 * (1 - test.kb) * u};
+        for (size_t row = 0; row < 3; ++row) {
+          const double actual =
+              matrix[row] * sample[0] + matrix[4 + row] * sample[1] +
+              matrix[8 + row] * sample[2] + matrix[12 + row] * 255;
+          EXPECT_NEAR(actual, expected[row], 0.01);
+        }
+      }
+    }
+  }
+}
+
+TEST(Colorspaces, GLBlitIdentityDoesNotExpandRange)
+{
+  mozilla::gl::DrawBlitProg::YUVArgs args;
+  args.colorSpaceForMatrix =
+      mozilla::Some(mozilla::gfx::YUVColorSpace::Identity);
+  const auto limited = args.ColorMatrix();
+  args.colorRange = mozilla::gfx::ColorRange::FULL;
+  const auto full = args.ColorMatrix();
+  EXPECT_EQ(full, limited);
+  EXPECT_EQ(full[8], 1.0f);
+  EXPECT_EQ(full[1], 1.0f);
+  EXPECT_EQ(full[6], 1.0f);
+  EXPECT_EQ(full[12], 0.0f);
+  EXPECT_EQ(full[13], 0.0f);
+  EXPECT_EQ(full[14], 0.0f);
+}
+
+TEST(Colorspaces, GLBlitP010MatrixHonorsPackingAndRange)
+{
+  using namespace mozilla;
+  const struct {
+    gfx::YUVColorSpace space;
+    double kr;
+    double kb;
+  } cases[] = {{gfx::YUVColorSpace::BT601, 0.299, 0.114},
+               {gfx::YUVColorSpace::BT709, 0.2126, 0.0722}};
+  const std::array<std::array<double, 3>, 8> samples = {{{0, 512, 512},
+                                                         {64, 512, 512},
+                                                         {512, 512, 512},
+                                                         {940, 512, 512},
+                                                         {1023, 512, 512},
+                                                         {257, 513, 719},
+                                                         {321, 719, 257},
+                                                         {801, 129, 961}}};
+  for (const auto& test : cases) {
+    for (auto range : {gfx::ColorRange::LIMITED, gfx::ColorRange::FULL}) {
+      SCOPED_TRACE(int(test.space));
+      SCOPED_TRACE(int(range));
+      gl::DrawBlitProg::YUVArgs args;
+      args.colorSpaceForMatrix = Some(test.space);
+      args.colorRange = range;
+      args.p010 = true;
+      const auto matrix = args.ColorMatrix();
+      for (const auto& sample : samples) {
+        const bool full = range == gfx::ColorRange::FULL;
+        const double y = full ? sample[0] / 1023 : (sample[0] - 64) / 876;
+        const double u = (sample[1] - 512) / (full ? 1023 : 896);
+        const double v = (sample[2] - 512) / (full ? 1023 : 896);
+        const double kg = 1 - test.kr - test.kb;
+        const std::array<double, 3> expected = {
+            y + 2 * (1 - test.kr) * v,
+            y - 2 * test.kb * (1 - test.kb) / kg * u -
+                2 * test.kr * (1 - test.kr) / kg * v,
+            y + 2 * (1 - test.kb) * u};
+        for (size_t row = 0; row < 3; ++row) {
+          const double actual =
+              (matrix[row] * sample[0] + matrix[4 + row] * sample[1] +
+               matrix[8 + row] * sample[2]) *
+                  64 / 65535 +
+              matrix[12 + row];
+          EXPECT_NEAR(actual * 255, expected[row] * 255, 0.02);
+        }
+      }
+    }
+  }
+}
 
 auto Calc8From8(const ColorspaceTransform& ct, const ivec3 in8) {
   const auto in = vec3(in8) / vec3(255);

@@ -559,6 +559,39 @@ DrawBlitProg::~DrawBlitProg() {
   gl->fDeleteProgram(mProg);
 }
 
+std::array<float, 16> DrawBlitProg::YUVArgs::ColorMatrix() const {
+  const auto* narrow =
+      gfxUtils::YuvToRgbMatrix4x4ColumnMajor(*colorSpaceForMatrix);
+  std::array<float, 16> matrix;
+  std::copy_n(narrow, matrix.size(), matrix.begin());
+  if (colorRange == gfx::ColorRange::FULL &&
+      *colorSpaceForMatrix != gfx::YUVColorSpace::Identity) {
+    for (size_t row = 0; row < 3; ++row) {
+      matrix[row] = 1.0f;
+      matrix[4 + row] *= 224.0f / 255.0f;
+      matrix[8 + row] *= 224.0f / 255.0f;
+      matrix[12 + row] =
+          -(matrix[4 + row] + matrix[8 + row]) * (128.0f / 255.0f);
+    }
+  }
+  if (p010) {
+    const bool identity = *colorSpaceForMatrix == gfx::YUVColorSpace::Identity;
+    const bool full = colorRange == gfx::ColorRange::FULL || identity;
+    const float scale =
+        full ? 65535.0f / (1023.0f * 64.0f) : 65535.0f / (255.0f * 256.0f);
+    for (size_t row = 0; row < 3; ++row) {
+      for (size_t column = 0; column < 3; ++column) {
+        matrix[column * 4 + row] *= scale;
+      }
+      if (full && !identity) {
+        matrix[12 + row] =
+            -(matrix[4 + row] + matrix[8 + row]) * (32768.0f / 65535.0f);
+      }
+    }
+  }
+  return matrix;
+}
+
 void DrawBlitProg::Draw(const BaseArgs& args,
                         const YUVArgs* const argsYUV) const {
   const auto& gl = mParent.mGL;
@@ -614,12 +647,12 @@ void DrawBlitProg::Draw(const BaseArgs& args,
     gl->fUniformMatrix3fv(mLoc_uTexMatrix1, 1, false, texMatrix1.m);
 
     if (mLoc_uColorMatrix != -1) {
-      const auto& colorMatrix =
-          gfxUtils::YuvToRgbMatrix4x4ColumnMajor(*argsYUV->colorSpaceForMatrix);
+      const auto colorMatrix = argsYUV->ColorMatrix();
       float mat4x3[4 * 3];
       switch (mType_uColorMatrix) {
         case LOCAL_GL_FLOAT_MAT4:
-          gl->fUniformMatrix4fv(mLoc_uColorMatrix, 1, false, colorMatrix);
+          gl->fUniformMatrix4fv(mLoc_uColorMatrix, 1, false,
+                                colorMatrix.data());
           break;
         case LOCAL_GL_FLOAT_MAT4x3:
           for (int x = 0; x < 4; x++) {
@@ -1372,7 +1405,8 @@ bool GLBlitHelper::BlitPlanarYCbCr(const PlanarYCbCrData& yuvData,
                                            yFlip, fbSize, destRect,
                                            clipRect.Size()};
   const DrawBlitProg::YUVArgs yuvArgs = {
-      SubRectMat3(clipRect, uvTexSize, divisors), Some(yuvData.mYUVColorSpace)};
+      SubRectMat3(clipRect, uvTexSize, divisors), Some(yuvData.mYUVColorSpace),
+      yuvData.mColorRange};
   prog.Draw(baseArgs, &yuvArgs);
   return true;
 }
@@ -1644,6 +1678,32 @@ void GLBlitHelper::BlitTextureToTexture(GLuint srcTex, GLuint destTex,
 bool GLBlitHelper::Blit(DMABufSurface* surface, const gfx::IntRect& destRect,
                         OriginPos destOrigin, const gfx::IntSize& fbSize,
                         Maybe<gfxAlphaType> convertAlpha) const {
+  const auto* yuv = surface->GetAsDMABufSurfaceYUV();
+  if (!yuv || !yuv->GetVAAPIDescriptor()) {
+    return BlitDMABuf(surface, destRect, destOrigin, fbSize, convertAlpha);
+  }
+  if (!surface->WaitForAccess(5000)) return false;
+  bool completed = true;
+  auto release = MakeScopeExit([&] { surface->UnlockAccess(!completed); });
+  if (!mGL->MakeCurrent() || !mGL->IsSupported(GLFeature::sync)) return false;
+  completed = false;
+  const bool result =
+      BlitDMABuf(surface, destRect, destOrigin, fbSize, convertAlpha);
+  const auto fence = mGL->fFenceSync(LOCAL_GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!fence) return false;
+  auto deleteFence = MakeScopeExit([&] { mGL->fDeleteSync(fence); });
+  const auto status =
+      mGL->fClientWaitSync(fence, LOCAL_GL_SYNC_FLUSH_COMMANDS_BIT, 5000000000);
+  completed = (status == LOCAL_GL_ALREADY_SIGNALED ||
+               status == LOCAL_GL_CONDITION_SATISFIED) &&
+              !mGL->fGetGraphicsResetStatus();
+  return result && completed;
+}
+
+bool GLBlitHelper::BlitDMABuf(DMABufSurface* surface,
+                              const gfx::IntRect& destRect,
+                              OriginPos destOrigin, const gfx::IntSize& fbSize,
+                              Maybe<gfxAlphaType> convertAlpha) const {
   const auto& srcOrigin = OriginPos::BottomLeft;
 
   DrawBlitProg::BaseArgs baseArgs;
@@ -1651,10 +1711,13 @@ bool GLBlitHelper::Blit(DMABufSurface* surface, const gfx::IntRect& destRect,
   baseArgs.fbSize = fbSize;
   baseArgs.destRect = destRect;
 
-  // TODO: The colorspace is known by the DMABUFSurface, why override it?
-  // See GetYUVColorSpace/GetFullRange()
   DrawBlitProg::YUVArgs yuvArgs;
   yuvArgs.colorSpaceForMatrix = Some(surface->GetYUVColorSpace());
+  yuvArgs.p010 = surface->GetFOURCCFormat() == VA_FOURCC_P010;
+  if (surface->GetFOURCCFormat() == VA_FOURCC_NV12 || yuvArgs.p010) {
+    yuvArgs.colorRange = surface->IsFullRange() ? gfx::ColorRange::FULL
+                                                : gfx::ColorRange::LIMITED;
+  }
 
   const DrawBlitProg::YUVArgs* pYuvArgs = nullptr;
   const auto planes = surface->GetTextureCount();

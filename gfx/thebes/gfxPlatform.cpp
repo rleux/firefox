@@ -80,6 +80,10 @@
 #elif defined(MOZ_WIDGET_GTK)
 #  include "DMABufFormats.h"
 #  include "gfxPlatformGtk.h"
+#  include "mozilla/WidgetUtilsGtk.h"
+#  ifdef XP_LINUX
+#    include "mozilla/webrender/RenderCompositorVulkan.h"
+#  endif
 #elif defined(ANDROID)
 #  include "gfxAndroidPlatform.h"
 #endif
@@ -2649,6 +2653,12 @@ void gfxPlatform::InitWebRenderConfig() {
 
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
 
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX) && defined(MOZ_X11)
+  gfxVars::SetUseWebRenderVulkan(
+      hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
+      widget::GdkIsX11Display());
+#endif
+
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");
 
@@ -3022,6 +3032,14 @@ void gfxPlatform::InitHardwareVideoConfig() {
                                   "Force disabled by gfxInfo", failureId);
   }
 
+#  ifdef XP_LINUX
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    featureVulkanDec.ForceDisable(
+        FeatureStatus::Unavailable,
+        "Vulkan WebRender does not support decoder DMA-BUFs",
+        "FEATURE_FAILURE_WEBRENDER_VIDEO_SHARING"_ns);
+  }
+#  endif
   gfxVars::SetCanUseVulkanHardwareVideoDecoding(featureVulkanDec.IsEnabled());
 #endif
 
@@ -3152,6 +3170,23 @@ void gfxPlatform::InitHardwareVideoConfig() {
 
   InitPlatformHardwareVideoConfig();
   InitPlatformHardwareDRMConfig();
+
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+  gfxVars::SetWebRenderVulkanVideoCapabilities(
+      wr::RenderCompositorVulkan::ProbeVideoCapabilities());
+  const bool nativeVideoSupported =
+      !gfxVars::WebRenderVulkanVideoCapabilities().formats().IsEmpty() &&
+      gfxConfig::IsEnabled(Feature::HW_DECODED_VIDEO_ZERO_COPY);
+  if (wr::RenderCompositorVulkan::IsRequested() && !nativeVideoSupported) {
+    featureDec.ForceDisable(
+        FeatureStatus::Unavailable,
+        "Vulkan WebRender has no supported zero-copy VA-API transport",
+        "FEATURE_FAILURE_WEBRENDER_VIDEO_SHARING"_ns);
+  }
+  gfxVars::SetUseWebRenderVulkanVideo(
+      wr::RenderCompositorVulkan::IsRequested() && nativeVideoSupported &&
+      featureDec.IsEnabled());
+#endif
 
   nsCString message;
   gfxVars::SetCanUseHardwareVideoDecoding(featureDec.IsEnabled());
@@ -3353,6 +3388,14 @@ void gfxPlatform::InitWebGLConfig() {
       feature.Disable(FeatureStatus::Blocked, "Blocklisted by gfxInfo",
                       discardFailureId);
     }
+#  ifdef XP_LINUX
+    if (wr::RenderCompositorVulkan::IsRequested() &&
+        !wr::RenderCompositorVulkan::SupportsWebGL()) {
+      feature.Disable(FeatureStatus::Unavailable,
+                      "Vulkan WebRender cannot share native WebGL surfaces",
+                      "FEATURE_FAILURE_WEBGL_VULKAN_SHARING"_ns);
+    }
+#  endif
     gfxVars::SetUseDMABufWebGL(feature.IsEnabled());
   }
 #endif

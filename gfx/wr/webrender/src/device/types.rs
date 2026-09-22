@@ -663,6 +663,10 @@ pub enum VertexUsageHint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphicsApi {
     OpenGL,
+    #[cfg(feature = "hal")]
+    Vulkan,
+    #[cfg(feature = "hal")]
+    Metal,
 }
 
 /// How a draw is blended with the contents of the bound draw target.
@@ -760,7 +764,7 @@ pub struct DeviceOptions {
     pub panic_on_gl_error: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Capabilities {
     /// Whether multisampled render targets are supported.
     pub supports_multisampling: bool,

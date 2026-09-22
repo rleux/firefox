@@ -109,8 +109,11 @@ void DMABUFTextureHostOGL::PushResourceUpdates(
       if (NS_WARN_IF(!format)) {
         return;
       }
-      wr::ImageDescriptor descriptor(GetSize(), *format,
-                                     wr::ToOpacityType(mSurface->GetFormat()));
+      wr::ImageDescriptor descriptor(
+          GetSize(), *format,
+          (GetFlags() & TextureFlags::IS_OPAQUE)
+              ? wr::OpacityType::Opaque
+              : wr::ToOpacityType(mSurface->GetFormat()));
       (aResources.*method)(aImageKeys[0], descriptor, aExtID, imageType, 0,
                            /* aNormalizedUvs */ false);
       break;

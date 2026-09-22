@@ -39,6 +39,10 @@ class MOZ_STACK_CLASS gfxVarsCollectUpdates;
   _(DXP010Blocked, bool, false)                                    \
   _(DXP016Blocked, bool, false)                                    \
   _(UseWebRenderANGLE, bool, false)                                \
+  _(UseWebRenderVulkan, bool, false)                               \
+  _(UseWebRenderVulkanVideo, bool, false)                          \
+  _(WebRenderVulkanVideoCapabilities, VulkanVideoCapabilities,     \
+    VulkanVideoCapabilities())                                     \
   _(UseWebRenderFlipSequentialWin, bool, false)                    \
   _(UseWebRenderDCompWin, bool, false)                             \
   _(UseWebRenderDCompVideoHwOverlayWin, bool, false)               \

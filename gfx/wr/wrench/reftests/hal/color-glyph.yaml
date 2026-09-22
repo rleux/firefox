@@ -1,0 +1,19 @@
+root:
+  items:
+    - text: "\U0001F642\U0001F60A"
+      origin: [12, 64]
+      size: 40
+      family: "Noto Color Emoji"
+      embedded-bitmaps: true
+    - type: clip
+      id: 10
+      bounds: [112, 10, 85, 80]
+    - type: clip-chain
+      id: 11
+      clips: [10]
+    - text: "\U0001F642"
+      origin: [102, 88]
+      size: 64
+      family: "Noto Color Emoji"
+      embedded-bitmaps: true
+      clip-chain: 11

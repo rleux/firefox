@@ -317,6 +317,7 @@ class WebRenderAPI final {
   void AccumulateMemoryReport(wr::MemoryReport*);
 
   wr::WrIdNamespace GetNamespace();
+  const nsCString& GetBackendInfo() const { return mBackendInfo; }
   const WebRenderCapabilities& GetCapabilities() const { return mCapabilities; }
   layers::SyncHandle GetSyncHandle() const { return mSyncHandle; }
 
@@ -494,6 +495,7 @@ class WebRenderAPI final {
   wr::DocumentHandle* mDocHandle;
   wr::WindowId mId;
   const WebRenderCapabilities mCapabilities;
+  nsCString mBackendInfo;
   bool mCaptureSequence;
   layers::SyncHandle mSyncHandle;
   bool mRendererDestroyed;

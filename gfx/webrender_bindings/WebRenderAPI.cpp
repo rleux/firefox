@@ -7,6 +7,7 @@
 #include "GLContext.h"
 #include "TextDrawTarget.h"
 #include "malloc_decls.h"
+#include "mozilla/JSONStringWriteFuncs.h"
 #include "mozilla/Logging.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_webgl.h"
@@ -250,11 +251,14 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         auto* const swgl = compositor->swgl();
         auto* const gl =
             (compositor->gl() && !swgl) ? compositor->gl() : nullptr;
+        WrHalSurface halSurface{};
+        const bool useHal = compositor->GetHalSurface(&halSurface);
         RenderThread* const renderThread = RenderThread::Get();
-        auto* const progCache = (renderThread->GetProgramCache() && !swgl)
-                                    ? renderThread->GetProgramCache()->Raw()
-                                    : nullptr;
-        auto* const shaders = (renderThread->GetShaders() && !swgl)
+        auto* const progCache =
+            (renderThread->GetProgramCache() && !swgl && !useHal)
+                ? renderThread->GetProgramCache()->Raw()
+                : nullptr;
+        auto* const shaders = (renderThread->GetShaders() && !swgl && !useHal)
                                   ? renderThread->GetShaders()->RawShaders()
                                   : nullptr;
 
@@ -284,6 +288,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
                 supportLowPriorityThreadpool, gfx::gfxVars::UseGLSwizzle(),
                 gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl,
+                useHal ? &halSurface : nullptr,
                 compositor->SurfaceOriginIsTopLeft(), progCache, shaders,
                 renderThread->ThreadPool().Raw(),
                 renderThread->ThreadPoolLP().Raw(),
@@ -312,6 +317,30 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         }
         MOZ_ASSERT(wrRenderer);
         MOZ_ASSERT(docHandle);
+        compositor->SetRenderer(wrRenderer);
+
+        nsAutoCString backendName, adapter, driver;
+        wr_renderer_get_backend_info(wrRenderer, &backendName, &adapter,
+                                     &driver);
+        if (swgl) {
+          backendName.AssignLiteral("SWGL");
+          driver.AssignLiteral("SWGL");
+        } else if (gl && gl->IsGLES()) {
+          backendName.AssignLiteral("OpenGL ES");
+        }
+        JSONStringWriteFunc<nsCString> backendInfo;
+        JSONWriter json(backendInfo);
+        json.Start();
+        json.StringProperty("backend", backendName);
+        json.StringProperty("renderer", adapter);
+        json.StringProperty("driver", driver);
+        json.IntProperty("maxTextureSize", maxTextureSize);
+        if (XRE_IsGPUProcess()) {
+          json.StringProperty("process", "GPU");
+        } else {
+          json.StringProperty("process", "Parent");
+        }
+        json.End();
 
         const WebRenderBackend backend = compositor->BackendType();
         const WebRenderCompositor compositorType = compositor->CompositorType();
@@ -368,6 +397,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         };
         RefPtr<WebRenderAPI> api =
             new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle);
+        api->mBackendInfo = backendInfo.StringCRef();
         return CreatePromise::CreateAndResolve(std::move(api), __func__);
       });
 }
@@ -378,6 +408,7 @@ already_AddRefed<WebRenderAPI> WebRenderAPI::Clone() {
 
   RefPtr<WebRenderAPI> renderApi =
       new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle, this, this);
+  renderApi->mBackendInfo = mBackendInfo;
 
   return renderApi.forget();
 }

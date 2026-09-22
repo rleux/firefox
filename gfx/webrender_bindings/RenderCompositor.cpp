@@ -3,6 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RenderCompositor.h"
+#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
+#  include "RenderCompositorVulkan.h"
+#endif
 
 #include "GLContext.h"
 #include "gfxConfig.h"
@@ -228,6 +231,12 @@ UniquePtr<RenderCompositor> RenderCompositor::Create(
 #endif
     return RenderCompositorSWGL::Create(aWidget, aError);
   }
+
+#if defined(XP_LINUX) && defined(MOZ_WIDGET_GTK)
+  if (RenderCompositorVulkan::IsRequested()) {
+    return RenderCompositorVulkan::Create(aWidget, aError);
+  }
+#endif
 
 #ifdef XP_WIN
   if (gfx::gfxVars::UseWebRenderANGLE()) {

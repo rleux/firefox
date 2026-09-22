@@ -22,6 +22,15 @@ bitflags! {
 
 pub type ShaderFeatures = HashMap<&'static str, Vec<String>>;
 
+pub fn get_hal_shader_features() -> ShaderFeatures {
+    let mut shaders = get_shader_features(ShaderFeatureFlags::DUAL_SOURCE_BLENDING);
+    shaders.get_mut("ps_quad_gradient").unwrap().push("DITHERING".into());
+    for features in shaders.values_mut() {
+        features.retain(|features| !features.split(',').any(|feature| feature == "DEBUG_OVERDRAW"));
+    }
+    shaders
+}
+
 /// Builder for a list of features.
 #[derive(Clone)]
 struct FeatureList<'a> {

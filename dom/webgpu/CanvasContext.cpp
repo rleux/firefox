@@ -25,6 +25,9 @@
 #include "mozilla/layers/RenderRootStateManager.h"
 #include "mozilla/layers/WebRenderCanvasRenderer.h"
 #include "nsDisplayList.h"
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
+#endif
 
 namespace mozilla {
 
@@ -129,9 +132,19 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
   if (mUseSharedTextureInSwapChain) {
     bool client_can_use = wgpu_client_use_shared_texture_in_swapChain(
         ConvertTextureFormat(aConfig.mFormat));
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (wr::RenderCompositorVulkan::IsRequested() &&
+        aConfig.mFormat == dom::GPUTextureFormat::Rgba8unorm) {
+      client_can_use = true;
+    }
+    if (!wr::RenderCompositorVulkan::IsRequested() &&
+        !aConfig.mViewFormats.IsEmpty()) {
+      client_can_use = false;
+    }
+#endif
     if (!client_can_use) {
       gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
-                         "canvas configuration format not supported";
+                         "canvas configuration format or views not supported";
       mUseSharedTextureInSwapChain = false;
     }
   }
@@ -153,7 +166,7 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
 #elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
   // When DMABufDevice is not enabled, disable shared texture in swap chain.
   const auto& modifiers = gfx::gfxVars::DMABufModifiersARGB();
-  if (modifiers.IsEmpty()) {
+  if (!wr::RenderCompositorVulkan::IsRequested() && modifiers.IsEmpty()) {
     gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
                        "missing GBM_FORMAT_ARGB8888 dmabuf format";
     mUseSharedTextureInSwapChain = false;
@@ -192,6 +205,7 @@ void CanvasContext::Unconfigure() {
         mChild->GetClient(), mRemoteTextureOwnerId->mId, txn_type, txn_id);
   }
   mRemoteTextureOwnerId = Nothing();
+  mLastRemoteTextureId = Nothing();
   mFwdTransactionTracker = nullptr;
   mChild = nullptr;
   mConfiguration = nullptr;
@@ -322,7 +336,8 @@ bool CanvasContext::InitializeCanvasRenderer(
   layers::CanvasRendererData data;
   data.mContext = this;
   data.mSize = mCanvasSize;
-  data.mIsOpaque = false;
+  data.mIsOpaque = gfx::gfxVars::UseWebRenderVulkan() &&
+                   !gfx::gfxVars::UseSoftwareWebRender() && GetIsOpaque();
   data.mRemoteTextureOwnerId = mRemoteTextureOwnerId;
 
   aRenderer->Initialize(data);
@@ -472,6 +487,11 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::GetFrontBuffer(
     MOZ_ASSERT(!mPendingSwapChainPresent);
     return desc;
   }
+  if (mChild && mChild->CanSend() && mLastRemoteTextureId &&
+      mRemoteTextureOwnerId) {
+    return Some(layers::SurfaceDescriptorRemoteTexture(*mLastRemoteTextureId,
+                                                       *mRemoteTextureOwnerId));
+  }
   return Nothing();
 }
 
@@ -494,7 +514,8 @@ void CanvasContext::ForceNewFrame() {
   } else if (mOffscreenCanvas) {
     dom::OffscreenCanvasDisplayData data;
     data.mSize = mCanvasSize;
-    data.mIsOpaque = false;
+    data.mIsOpaque = gfx::gfxVars::UseWebRenderVulkan() &&
+                     !gfx::gfxVars::UseSoftwareWebRender() && GetIsOpaque();
     mOffscreenCanvas->UpdateDisplayData(data);
   }
 }

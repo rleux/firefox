@@ -5,11 +5,62 @@
 #include "RenderTextureHostSWGL.h"
 
 #include "RenderThread.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/layers/TextureHost.h"
 
 namespace mozilla {
 namespace wr {
+
+bool RenderTextureHostSWGL::LockMappedHalBuffer(uint8_t aChannelIndex,
+                                                WrHalBuffer* aBuffer) {
+  if (aChannelIndex >= GetPlaneCount()) {
+    return false;
+  }
+  ImageFormat format;
+  bool opaque = false;
+  switch (GetFormat()) {
+    case gfx::SurfaceFormat::B8G8R8X8:
+      opaque = true;
+      [[fallthrough]];
+    case gfx::SurfaceFormat::B8G8R8A8:
+      format = ImageFormat::BGRA8;
+      break;
+    case gfx::SurfaceFormat::R8G8B8X8:
+      opaque = true;
+      [[fallthrough]];
+    case gfx::SurfaceFormat::R8G8B8A8:
+      format = ImageFormat::RGBA8;
+      break;
+    case gfx::SurfaceFormat::A8:
+      format = ImageFormat::R8;
+      break;
+    case gfx::SurfaceFormat::YUV420:
+      format = GetColorDepth() == gfx::ColorDepth::COLOR_8 ? ImageFormat::R8
+                                                           : ImageFormat::R16;
+      break;
+    default:
+      return false;
+  }
+  PlaneInfo plane(0);
+  if (!MapPlane(nullptr, aChannelIndex, plane)) {
+    return false;
+  }
+  const auto length = CheckedInt<size_t>(plane.mStride) * plane.mSize.height;
+  if (!plane.mData || plane.mSize.width <= 0 || plane.mSize.height <= 0 ||
+      plane.mStride <= 0 || !length.isValid()) {
+    UnmapPlanes();
+    return false;
+  }
+  *aBuffer = WrHalBuffer{static_cast<const uint8_t*>(plane.mData),
+                         length.value(),
+                         plane.mSize.width,
+                         plane.mSize.height,
+                         plane.mStride,
+                         format,
+                         opaque};
+  return true;
+}
 
 bool RenderTextureHostSWGL::UpdatePlanes(RenderCompositor* aCompositor) {
   wr_swgl_make_current(mContext);

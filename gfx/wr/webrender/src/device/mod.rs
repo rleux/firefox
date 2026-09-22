@@ -9,6 +9,8 @@
 //! everything else on it is reached through `Deref` to the backend.
 
 mod gl;
+#[cfg(feature = "hal")]
+pub mod hal;
 pub mod query;
 mod types;
 mod upload;
@@ -42,6 +44,8 @@ pub enum GpuBackendConfig {
     /// OpenGL or OpenGL ES through the given context, which must be current
     /// on the render thread.
     Gl(Rc<dyn gleam::gl::Gl>),
+    #[cfg(feature = "hal")]
+    Hal(Box<dyn GpuBackend>),
 }
 
 /// A graphics API backend. Resources are created and destroyed through it,
@@ -49,7 +53,7 @@ pub enum GpuBackendConfig {
 ///
 /// Vertex, instance and texel data are passed as bytes; `Device` offers the
 /// typed versions.
-pub trait GpuBackend {
+pub trait GpuBackend: std::any::Any {
     /// Number of textures created since the last `begin_frame`.
     fn textures_created(&self) -> u32;
 
@@ -488,9 +492,21 @@ impl DerefMut for Device {
 }
 
 impl Device {
+    #[cfg(feature = "hal")]
+    pub(crate) fn backend<T: GpuBackend>(&self) -> &T {
+        (&*self.backend as &dyn std::any::Any).downcast_ref().unwrap()
+    }
+
+    #[cfg(feature = "hal")]
+    pub(crate) fn backend_mut<T: GpuBackend>(&mut self) -> &mut T {
+        (&mut *self.backend as &mut dyn std::any::Any).downcast_mut().unwrap()
+    }
+
     pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Device {
         let backend: Box<dyn GpuBackend> = match config {
             GpuBackendConfig::Gl(gl) => Box::new(GlDevice::new(gl, options)),
+            #[cfg(feature = "hal")]
+            GpuBackendConfig::Hal(backend) => backend,
         };
         Device {
             backend,

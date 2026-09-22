@@ -24,6 +24,16 @@ pub struct AsyncScreenshotHandle(usize);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecordedFrameHandle(usize);
 
+impl AsyncScreenshotHandle {
+    pub fn from_raw(value: usize) -> Self { Self(value) }
+    pub fn into_raw(self) -> usize { self.0 }
+}
+
+impl RecordedFrameHandle {
+    pub fn from_raw(value: usize) -> Self { Self(value) }
+    pub fn into_raw(self) -> usize { self.0 }
+}
+
 /// An asynchronously captured screenshot bound to a PBO which has not yet been mapped for copying.
 struct AsyncScreenshot {
     /// The PBO that will contain the screenshot data.

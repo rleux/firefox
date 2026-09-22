@@ -9,6 +9,8 @@ use image::GenericImageView;
 use crate::parse_function::parse_function;
 use crate::premultiply::premultiply;
 use std::collections::HashMap;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
@@ -18,7 +20,7 @@ use webrender::api::*;
 use webrender::render_api::*;
 use webrender::api::units::*;
 use webrender::api::FillRule;
-use crate::wrench::{FontDescriptor, FontInstanceDescriptor, Wrench, WrenchThing, DisplayList};
+use crate::wrench::{FontDescriptor, FontInstanceDescriptor, Wrench, WrenchThing, DisplayList, SceneRenderer};
 use crate::yaml_helper::{StringEnum, YamlHelper, make_perspective};
 use yaml_rust::{Yaml, YamlLoader};
 use crate::PLATFORM_DEFAULT_FACE_NAME;
@@ -94,14 +96,15 @@ fn gl_target(target: ImageBufferKind) -> gl::GLenum {
     }
 }
 
+#[derive(Clone)]
 struct LocalExternalImageHandler {
-    texture_ids: Vec<(gl::GLuint, ImageDescriptor)>,
+    texture_ids: Rc<RefCell<Vec<(gl::GLuint, ImageDescriptor)>>>,
 }
 
 impl LocalExternalImageHandler {
     pub fn new() -> LocalExternalImageHandler {
         LocalExternalImageHandler {
-            texture_ids: Vec::new(),
+            texture_ids: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -162,8 +165,9 @@ impl LocalExternalImageHandler {
                     data,
                     gl,
                 );
-                self.texture_ids.push((texture_ids[0], desc));
-                (ExternalImageId((self.texture_ids.len() - 1) as u64), 0)
+                let mut images = self.texture_ids.borrow_mut();
+                images.push((texture_ids[0], desc));
+                (ExternalImageId((images.len() - 1) as u64), 0)
             },
             _ => panic!("unsupported!"),
         };
@@ -186,13 +190,136 @@ impl ExternalImageHandler for LocalExternalImageHandler {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let (id, desc) = self.texture_ids[key.0 as usize];
+        let (id, desc) = self.texture_ids.borrow()[key.0 as usize];
         ExternalImage {
             uv: TexelRect::new(0.0, 0.0, desc.size.width as f32, desc.size.height as f32),
             source: ExternalImageSource::NativeTexture(ExternalTextureHandle(id as u64)),
         }
     }
     fn unlock(&mut self, _key: ExternalImageId, _channel_index: u8) {}
+}
+
+#[cfg(feature = "hal")]
+#[derive(Clone)]
+struct LocalHalImageProvider {
+    device: webrender::hal::ExternalImageDevice,
+    images: Rc<RefCell<Vec<Rc<webrender::hal::NativeImage>>>>,
+    registry: Rc<RefCell<HalImageRegistry>>,
+}
+
+#[cfg(feature = "hal")]
+#[derive(Default)]
+struct HalImageRegistry {
+    next_id: u64,
+    images: HashMap<ExternalImageId, std::rc::Weak<webrender::hal::NativeImage>>,
+}
+
+// Share IDs across readers without retaining their images.
+#[cfg(feature = "hal")]
+thread_local! {
+    static HAL_IMAGE_REGISTRIES: RefCell<HashMap<u64, std::rc::Weak<RefCell<HalImageRegistry>>>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(feature = "hal")]
+impl LocalHalImageProvider {
+    fn new(device: webrender::hal::ExternalImageDevice) -> Self {
+        let registry = HAL_IMAGE_REGISTRIES.with(|registries| {
+            let mut registries = registries.borrow_mut();
+            registries.retain(|_, registry| registry.strong_count() != 0);
+            if let Some(registry) = registries
+                .get(&device.device_id())
+                .and_then(|registry| registry.upgrade())
+            {
+                return registry;
+            }
+            let registry = Rc::new(RefCell::new(HalImageRegistry::default()));
+            registries.insert(device.device_id(), Rc::downgrade(&registry));
+            registry
+        });
+        Self {
+            device,
+            images: Rc::new(RefCell::new(Vec::new())),
+            registry,
+        }
+    }
+}
+
+#[cfg(feature = "hal")]
+impl webrender::hal::ExternalImageProvider for LocalHalImageProvider {
+    fn acquire(
+        &mut self,
+        id: ExternalImageId,
+        channel: u8,
+        _: bool,
+    ) -> Result<webrender::hal::ExternalImageLease, String> {
+        if channel != 0 {
+            return Err("Invalid Wrench native image channel".into());
+        }
+        let image = self
+            .registry
+            .borrow()
+            .images
+            .get(&id)
+            .and_then(|image| image.upgrade())
+            .ok_or("Unknown Wrench native image")?;
+        let image = image.as_ref().clone();
+        let descriptor = image.descriptor();
+        webrender::hal::ExternalImageLease::new(
+            descriptor,
+            TexelRect::new(
+                0.0,
+                0.0,
+                descriptor.size.width as f32,
+                descriptor.size.height as f32,
+            ),
+            image.generation(),
+            webrender::hal::ExternalImageSource::Native(image),
+            |_| {},
+        )
+    }
+}
+
+enum LocalExternalImages {
+    Gl(LocalExternalImageHandler),
+    #[cfg(feature = "hal")]
+    Hal(LocalHalImageProvider),
+}
+
+impl LocalExternalImages {
+    fn add_image<R: SceneRenderer>(&mut self, renderer: &R, gl: Option<&dyn gl::Gl>, descriptor: ImageDescriptor, target: ImageBufferKind, data: ImageData) -> ImageData {
+        #[cfg(feature = "hal")]
+        if matches!(self, Self::Gl(_)) && renderer.gl_device().is_none() {
+            let device = renderer.hal_image_device().expect("No native image device available");
+            *self = Self::Hal(LocalHalImageProvider::new(device));
+        }
+        match self {
+            Self::Gl(handler) => handler.add_image(gl.expect("No GL context"), descriptor, target, data),
+            #[cfg(feature = "hal")]
+            Self::Hal(handler) => {
+                let data = match data { ImageData::Raw(data) => data, _ => panic!("Native external image requires pixel data") };
+                let image = handler.device.create_image(descriptor, &data).expect("Creating native external image failed");
+                let image = Rc::new(image);
+                let mut registry = handler.registry.borrow_mut();
+                registry.images.retain(|_, image| image.strong_count() != 0);
+                let id = ExternalImageId(registry.next_id);
+                registry.next_id = registry.next_id.checked_add(1).expect("Wrench image ID overflow");
+                registry.images.insert(id, Rc::downgrade(&image));
+                handler.images.borrow_mut().push(image);
+                ImageData::External(ExternalImageData { id, channel_index: 0,
+                    image_type: ExternalImageType::TextureHandle(target), normalized_uvs: false })
+            }
+        }
+    }
+
+    fn install<R: SceneRenderer>(&self, renderer: &mut R) -> Result<(), String> {
+        match self {
+            Self::Gl(handler) if renderer.gl_device().is_some() || !handler.texture_ids.borrow().is_empty() =>
+                renderer.install_external_images(Box::new(handler.clone())),
+            Self::Gl(_) => Ok(()),
+            #[cfg(feature = "hal")]
+            Self::Hal(handler) => renderer.install_hal_external_images(Box::new(handler.clone())),
+        }
+    }
 }
 
 fn broadcast<T: Clone>(base_vals: &[T], num_items: usize) -> Vec<T> {
@@ -401,7 +528,7 @@ pub struct YamlFrameReader {
     yaml_string: String,
     keyframes: Option<Yaml>,
 
-    external_image_handler: Option<Box<LocalExternalImageHandler>>,
+    external_image_handler: LocalExternalImages,
 }
 
 impl YamlFrameReader {
@@ -430,7 +557,7 @@ impl YamlFrameReader {
             requested_frame: 0,
             built_frame: usize::MAX,
             keyframes: None,
-            external_image_handler: Some(Box::new(LocalExternalImageHandler::new())),
+            external_image_handler: LocalExternalImages::Gl(LocalExternalImageHandler::new()),
             next_external_scroll_id: 1000,      // arbitrary to easily see in logs which are implicit
         }
     }
@@ -438,7 +565,7 @@ impl YamlFrameReader {
     // Fonts are not torn down here: they live on `Wrench` so that an identical
     // font keeps its instance key across yaml files, which is what lets content
     // interning dedup a run that two files share.
-    pub fn deinit(self, _wrench: &mut Wrench) {
+    pub fn deinit<R: SceneRenderer>(self, _wrench: &mut Wrench<R>) {
     }
 
     fn top_space(&self) -> SpatialId {
@@ -492,7 +619,7 @@ impl YamlFrameReader {
         }
     }
 
-    fn build(&mut self, wrench: &mut Wrench) {
+    fn build<R: SceneRenderer>(&mut self, wrench: &mut Wrench<R>) {
         let yaml = YamlLoader::load_from_str(&self.yaml_string)
             .map(|mut yaml| {
                 assert_eq!(yaml.len(), 1);
@@ -541,16 +668,13 @@ impl YamlFrameReader {
 
         wrench.put_dl_builder(root_pipeline_id, builder);
 
-        // If replaying the same frame during interactive use, the frame gets rebuilt,
-        // but the external image handler has already been consumed by the renderer.
-        if let Some(external_image_handler) = self.external_image_handler.take() {
-            wrench.renderer.set_external_image_handler(external_image_handler);
-        }
+        self.external_image_handler.install(&mut wrench.renderer)
+            .expect("External images are unavailable for the selected backend");
     }
 
-    fn build_pipeline(
+    fn build_pipeline<R: SceneRenderer>(
         &mut self,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         builder: &mut DisplayListBuilder,
         pipeline_id: PipelineId,
         send_transaction: bool,
@@ -711,12 +835,12 @@ impl YamlFrameReader {
 
     }
 
-    fn add_or_get_image(
+    fn add_or_get_image<R: SceneRenderer>(
         &mut self,
         file: &Path,
         tiling: Option<i64>,
         item: &Yaml,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
     ) -> (ImageKey, LayoutSize) {
         let key = (file.to_owned(), tiling);
         if let Some(k) = self.image_map.get(&key) {
@@ -867,8 +991,9 @@ impl YamlFrameReader {
             };
 
             let external_image_data =
-                self.external_image_handler.as_mut().unwrap().add_image(
-                    wrench.gl(),
+                self.external_image_handler.add_image(
+                    &wrench.renderer,
+                    wrench.gl_context(),
                     descriptor,
                     external_target,
                     image_data
@@ -887,7 +1012,7 @@ impl YamlFrameReader {
         val
     }
 
-    fn get_or_create_font(&mut self, desc: FontDescriptor, wrench: &mut Wrench) -> FontKey {
+    fn get_or_create_font<R: SceneRenderer>(&mut self, desc: FontDescriptor, wrench: &mut Wrench<R>) -> FontKey {
         let list_resources = self.list_resources;
         wrench.get_or_create_font(desc, |wrench, desc| match *desc {
             FontDescriptor::Path {
@@ -923,13 +1048,13 @@ impl YamlFrameReader {
         self.font_render_mode = render_mode;
     }
 
-    fn get_or_create_font_instance(
+    fn get_or_create_font_instance<R: SceneRenderer>(
         &mut self,
         font_key: FontKey,
         size: f32,
         flags: FontInstanceFlags,
         synthetic_italics: SyntheticItalics,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
     ) -> FontInstanceKey {
         wrench.get_or_create_font_instance(FontInstanceDescriptor {
             font_key,
@@ -940,7 +1065,7 @@ impl YamlFrameReader {
         })
     }
 
-    fn as_image_mask(&mut self, item: &Yaml, wrench: &mut Wrench) -> Option<ImageMask> {
+    fn as_image_mask<R: SceneRenderer>(&mut self, item: &Yaml, wrench: &mut Wrench<R>) -> Option<ImageMask> {
         item.as_hash()?;
 
         let tiling = item["tile-size"].as_i64();
@@ -1156,10 +1281,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_border(
+    fn handle_border<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1401,10 +1526,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_yuv_image(
+    fn handle_yuv_image<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1498,10 +1623,10 @@ impl YamlFrameReader {
         );
     }
 
-    fn handle_image(
+    fn handle_image<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1575,10 +1700,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_text(
+    fn handle_text<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         item: &Yaml,
         info: &mut CommonItemProperties,
     ) {
@@ -1736,10 +1861,10 @@ impl YamlFrameReader {
         item["type"].as_str().unwrap_or("unknown")
     }
 
-    fn add_display_list_items_from_yaml(
+    fn add_display_list_items_from_yaml<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml_items: &[Yaml],
     ) {
         // A very large number (but safely far away from finite limits of f32)
@@ -1816,10 +1941,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_scroll_frame(
+    fn handle_scroll_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let clip_rect = yaml["bounds"]
@@ -1893,10 +2018,10 @@ impl YamlFrameReader {
         }
     }
 
-    fn handle_sticky_frame(
+    fn handle_sticky_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let bounds = yaml["bounds"].as_rect().expect("sticky frame must have a bounds");
@@ -2011,7 +2136,7 @@ impl YamlFrameReader {
         self.add_clip_chain_id_mapping(numeric_id as u64, real_id);
     }
 
-    fn handle_clip(&mut self, dl: &mut DisplayListBuilder, wrench: &mut Wrench, yaml: &Yaml) {
+    fn handle_clip<R: SceneRenderer>(&mut self, dl: &mut DisplayListBuilder, wrench: &mut Wrench<R>, yaml: &Yaml) {
         let numeric_id = yaml["id"].as_i64();
         let spatial_id = self.top_space();
         let complex_clips = yaml["complex"].as_complex_clip_regions();
@@ -2138,10 +2263,10 @@ impl YamlFrameReader {
         reference_frame_id
     }
 
-    fn handle_reference_frame(
+    fn handle_reference_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let default_bounds = || LayoutRect::from_size(wrench.window_size_f32());
@@ -2184,10 +2309,10 @@ impl YamlFrameReader {
         reference_frame_id
     }
 
-    fn handle_computed_frame(
+    fn handle_computed_frame<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
     ) {
         let default_bounds = || LayoutRect::from_size(wrench.window_size_f32());
@@ -2202,10 +2327,10 @@ impl YamlFrameReader {
         dl.pop_reference_frame();
     }
 
-    fn add_stacking_context_from_yaml(
+    fn add_stacking_context_from_yaml<R: SceneRenderer>(
         &mut self,
         dl: &mut DisplayListBuilder,
-        wrench: &mut Wrench,
+        wrench: &mut Wrench<R>,
         yaml: &Yaml,
         IsRoot(is_root): IsRoot,
         info: &mut CommonItemProperties,
@@ -2349,8 +2474,8 @@ impl YamlFrameReader {
     }
 }
 
-impl WrenchThing for YamlFrameReader {
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+impl YamlFrameReader {
+    pub fn build_frame<R: SceneRenderer>(&mut self, wrench: &mut Wrench<R>) -> u32 {
         let mut should_build_yaml = false;
 
         // If YAML isn't read yet, or watching source file, reload from disk.
@@ -2385,6 +2510,18 @@ impl WrenchThing for YamlFrameReader {
         }
 
         self.frame_count
+    }
+
+ }
+
+impl<R: SceneRenderer> WrenchThing<R> for YamlFrameReader {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, scale: f32) {
+        self.set_device_pixel_scale(scale);
+        self.built_frame = usize::MAX;
+    }
+
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
+        YamlFrameReader::build_frame(self, wrench)
     }
 
     fn next_frame(&mut self) {

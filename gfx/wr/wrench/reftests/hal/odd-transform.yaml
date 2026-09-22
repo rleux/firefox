@@ -1,0 +1,16 @@
+root:
+  items:
+    - type: clip
+      id: 2
+      bounds: [13, 11, 229, 107]
+    - type: stacking-context
+      clip-chain: [2]
+      bounds: [17.25, 13.5, 200, 100]
+      transform: scale(1.1, 0.9)
+      items:
+        - image: xy-gradient(17,13)
+          bounds: [0, 0, 97, 83]
+          rendering: pixelated
+        - image: xy-gradient(17,13)
+          bounds: [104, 3, 97, 83]
+          rendering: auto

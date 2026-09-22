@@ -6,6 +6,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use gleam::gl;
+use crate::renderer::{Renderer, WrHalSurface};
 use std::cell::RefCell;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 use std::ffi::OsString;
@@ -45,7 +46,7 @@ use webrender::{
     LayerCompositor,
     MappableCompositor, MappedTileInfo, NativeSurfaceHandle, NativeSurfaceId, NativeSurfaceInfo, NativeTileId,
     PartialPresentCompositor,
-    PendingShadersToPrecache, PipelineInfo, ProfilerHooks, RecordedFrameHandle, RenderBackendHooks, Renderer,
+    PendingShadersToPrecache, PipelineInfo, ProfilerHooks, RecordedFrameHandle, RenderBackendHooks,
     RendererStats, SWGLCompositeSurfaceInfo, SceneBuilderHooks, ShaderPrecacheFlags, Shaders, SharedShaders,
     TextureCacheConfig, UploadMethod, WebRenderOptions, WindowProperties, WindowVisibility, ONE_TIME_USAGE_HINT,
 };
@@ -431,6 +432,11 @@ pub struct WrExternalImageHandler {
     external_image_obj: *mut c_void,
 }
 
+impl WrExternalImageHandler {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn object(self) -> *mut c_void { self.external_image_obj }
+}
+
 impl ExternalImageHandler for WrExternalImageHandler {
     fn lock(&mut self, id: ExternalImageId, channel_index: u8, is_composited: bool) -> ExternalImage {
         let image =
@@ -628,7 +634,7 @@ pub extern "C" fn wr_renderer_set_external_image_handler(
     renderer: &mut Renderer,
     external_image_handler: &mut WrExternalImageHandler,
 ) {
-    renderer.set_external_image_handler(Box::new(*external_image_handler));
+    renderer.set_external_image_handler(*external_image_handler);
 }
 
 #[no_mangle]
@@ -677,8 +683,61 @@ pub extern "C" fn wr_renderer_render(
 }
 
 #[no_mangle]
+pub extern "C" fn wr_renderer_service_hidden_frame(renderer: &mut Renderer) -> bool {
+    renderer
+        .service_hidden_frame()
+        .map_err(|error| error!("Hidden Vulkan frame: {}", error))
+        .is_ok()
+}
+
+#[no_mangle]
 pub extern "C" fn wr_renderer_force_redraw(renderer: &mut Renderer) {
     renderer.force_redraw();
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_begin(renderer: &mut Renderer, width: u32, height: u32) -> bool {
+    renderer.begin_vulkan_frame(width, height).unwrap_or_else(|e| { error!("Vulkan begin: {}", e); false })
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_end(renderer: &mut Renderer, frame: u64) -> bool {
+    renderer.end_vulkan_frame(frame).unwrap_or_else(|e| { error!("Vulkan present: {}", e); false })
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_poll(renderer: &mut Renderer, completed: &mut u64, notify: bool) -> bool {
+    match renderer.poll_vulkan(notify) {
+        Ok(frame) => {
+            *completed = frame;
+            true
+        },
+        Err(e) => {
+            error!("Vulkan poll: {}", e);
+            false
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_cancel(renderer: &mut Renderer) -> bool {
+    renderer.cancel_vulkan_frame().is_ok()
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_pause(renderer: &mut Renderer) -> bool {
+    renderer.pause_vulkan().is_ok()
+}
+
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub extern "C" fn wr_renderer_vulkan_failed(renderer: &Renderer) -> bool {
+    renderer.vulkan_failed()
 }
 
 #[no_mangle]
@@ -789,11 +848,11 @@ pub unsafe extern "C" fn wr_renderer_readback(
     format: ImageFormat,
     dst_buffer: *mut u8,
     buffer_size: usize,
-) {
+) -> bool {
     assert!(is_in_render_thread());
 
     let mut slice = make_slice_mut(dst_buffer, buffer_size);
-    renderer.read_pixels_into(FramebufferIntSize::new(width, height).into(), format, &mut slice);
+    renderer.read_pixels_into(FramebufferIntSize::new(width, height).into(), format, &mut slice)
 }
 
 #[no_mangle]
@@ -2134,6 +2193,7 @@ pub extern "C" fn wr_window_new(
     allow_scissored_cache_clears: bool,
     swgl_context: *mut c_void,
     gl_context: *mut c_void,
+    hal_surface: *const WrHalSurface,
     surface_origin_is_top_left: bool,
     program_cache: Option<&mut WrProgramCache>,
     shaders: Option<&mut WrShaders>,
@@ -2169,11 +2229,14 @@ pub extern "C" fn wr_window_new(
     // Ensure the WR profiler callbacks are hooked up to the Gecko profiler.
     set_profiler_hooks(Some(&PROFILER_HOOKS));
 
+    let use_hal = !hal_surface.is_null();
     let software = !swgl_context.is_null();
-    let (gl, sw_gl) = if software {
+    let (gl, sw_gl) = if use_hal {
+        (None, None)
+    } else if software {
         let ctx = swgl::Context::from(swgl_context);
         ctx.make_current();
-        (Rc::new(ctx) as Rc<dyn gl::Gl>, Some(ctx))
+        (Some(Rc::new(ctx) as Rc<dyn gl::Gl>), Some(ctx))
     } else {
         let gl = unsafe {
             if gl_context.is_null() {
@@ -2184,12 +2247,12 @@ pub extern "C" fn wr_window_new(
                 gl::GlFns::load_with(|symbol| get_proc_address(gl_context, symbol))
             }
         };
-        (gl, None)
+        (Some(gl), None)
     };
 
-    let version = gl.get_string(gl::VERSION);
-
-    info!("WebRender - OpenGL version new {}", version);
+    if let Some(gl) = &gl {
+        info!("WebRender - OpenGL version new {}", gl.get_string(gl::VERSION));
+    }
 
     let workers = unsafe { Arc::clone(&(*thread_pool).workers) };
     let workers_low_priority = unsafe {
@@ -2351,7 +2414,17 @@ pub extern "C" fn wr_window_new(
 
     let window_size = DeviceIntSize::new(window_width, window_height);
     let notifier = Box::new(CppNotifier { window_id });
-    let (renderer, sender) = match create_webrender_instance(GpuBackendConfig::Gl(gl), notifier, opts, shaders.map(|sh| &sh.shaders)) {
+    let result = if use_hal {
+        #[cfg(target_os = "linux")]
+        { Renderer::new_vulkan(unsafe { *hal_surface }, window_size, opts, notifier) }
+        #[cfg(not(target_os = "linux"))]
+        { Err("HAL browser rendering is currently supported on Linux only".into()) }
+    } else {
+        create_webrender_instance(GpuBackendConfig::Gl(gl.unwrap()), notifier, opts, shaders.map(|sh| &sh.shaders))
+            .map(|(renderer, sender)| (Renderer::Gl(renderer), sender))
+            .map_err(|e| format!("{:?}", e))
+    };
+    let (mut renderer, sender) = match result {
         Ok((renderer, sender)) => (renderer, sender),
         Err(e) => {
             warn!(" Failed to create a Renderer: {:?}", e);
@@ -2367,12 +2440,14 @@ pub extern "C" fn wr_window_new(
     unsafe {
         *out_max_texture_size = renderer.get_max_texture_size();
     }
-    *out_handle = Box::into_raw(Box::new(DocumentHandle::new(
+    let handle = DocumentHandle::new(
         sender.create_api_by_client(next_namespace_id()),
         None,
         window_size,
         document_id,
-    )));
+    );
+    renderer.set_document(handle.document_id);
+    *out_handle = Box::into_raw(Box::new(handle));
     *out_renderer = Box::into_raw(Box::new(renderer));
 
     true

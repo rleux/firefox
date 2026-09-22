@@ -191,7 +191,12 @@ fn write_optimized_shaders(
 
             let [vert_file_path, frag_file_path] = [
                 (glslopt::ShaderType::Vertex, vert_src, vert_src_map, "vert"),
-                (glslopt::ShaderType::Fragment, frag_src, frag_src_map, "frag"),
+                (
+                    glslopt::ShaderType::Fragment,
+                    frag_src,
+                    frag_src_map,
+                    "frag",
+                ),
             ]
             .map(|(shader_type, shader_src, shader_src_map, extension)| {
                 let output = glslopt_ctx.optimize(shader_type, shader_src.clone());
@@ -264,8 +269,15 @@ fn write_optimized_shaders(
         }
         Err(err) => match err {
             build_parallel::Error::BuildError(err) => {
-                let ShaderOptimizationInput { shader_name, config, gl_version } = &err.shader;
-                panic!("Error optimizing shader '{}', features=[{}], gl_version={:?}:\n\n{}", shader_name, config, gl_version, err.message)
+                let ShaderOptimizationInput {
+                    shader_name,
+                    config,
+                    gl_version,
+                } = &err.shader;
+                panic!(
+                    "Error optimizing shader '{}', features=[{}], gl_version={:?}:\n\n{}",
+                    shader_name, config, gl_version, err.message
+                )
             }
             _ => panic!("Error optimizing shaders."),
         },
@@ -304,6 +316,55 @@ fn write_optimized_shader_file(
 
 fn main() -> Result<(), std::io::Error> {
     let out_dir = env::var("OUT_DIR").unwrap_or("out".to_owned());
+
+    if env::var_os("CARGO_FEATURE_HAL").is_some() {
+        fn inputs(root: &Path, files: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+            for entry in read_dir(root)? {
+                let path = entry?.path();
+                if path.is_dir() { inputs(&path, files)?; }
+                else if path.extension().and_then(|value| value.to_str()) == Some("rs") { files.push(path); }
+            }
+            Ok(())
+        }
+        let mut files = vec![Path::new("build.rs").to_owned(), Path::new("Cargo.toml").to_owned(),
+            Path::new("../Cargo.toml").to_owned(), Path::new("../Cargo.lock").to_owned(), Path::new("../../../Cargo.lock").to_owned()];
+        inputs(Path::new("src"), &mut files)?;
+        inputs(Path::new("../webrender_api/src"), &mut files)?;
+        inputs(Path::new("../webrender_build/src"), &mut files)?;
+        let vendor = Path::new("../../../third_party/rust/wgpu-hal");
+        println!("cargo:rerun-if-changed={}", vendor.display());
+        if vendor.is_dir() {
+            files.push(vendor.join("Cargo.toml"));
+            files.push(vendor.join("build.rs"));
+            inputs(&vendor.join("src"), &mut files)?;
+        }
+        files.sort();
+        let mut identity = std::collections::hash_map::DefaultHasher::new();
+        for path in files {
+            println!("cargo:rerun-if-changed={}", path.display());
+            identity.write(path.to_str().unwrap().as_bytes());
+            identity.write(&std::fs::read(path)?);
+        }
+        println!("cargo:rustc-env=WR_HAL_CAPTURE_SOURCE={:016x}", identity.finish());
+    }
+    let (vulkan, metal) = webrender_build::hal::configure_backends();
+    if vulkan || metal {
+        webrender_build::hal::build(Path::new("res"), Path::new(&out_dir), |source, vertex| {
+            let optimizer = glslopt::Context::new(glslopt::Target::OpenGl);
+            let output = optimizer.optimize(
+                if vertex {
+                    glslopt::ShaderType::Vertex
+                } else {
+                    glslopt::ShaderType::Fragment
+                },
+                source,
+            );
+            if !output.get_status() {
+                return Err(std::io::Error::other(output.get_log()));
+            }
+            Ok(output.get_output().unwrap().to_owned())
+        })?;
+    }
 
     let shaders_file_path = Path::new(&out_dir).join("shaders.rs");
     let mut glsl_files = vec![];

@@ -65,6 +65,7 @@ class RenderTextureHostSWGL : public RenderTextureHost {
   }
 
  protected:
+  bool LockMappedHalBuffer(uint8_t aChannelIndex, WrHalBuffer* aBuffer);
   bool mLockedSWGL = false;
   bool mLockedSWGLCompositeSurface = false;
 

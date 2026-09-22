@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8">
+<title>HAL hidden visibility</title>
+<style>
+  html, body { margin: 0; inline-size: 100%; block-size: 100%; overflow: hidden; }
+  body { animation: colors 800ms steps(1, end) infinite; }
+  main { inline-size: 100%; block-size: 100%; }
+  @keyframes colors {
+    from { background-color: rgb(220, 40, 60); }
+    50% { background-color: rgb(20, 180, 80); }
+    to { background-color: rgb(220, 40, 60); }
+  }
+</style>
+<main aria-label="Animated visibility test"></main>
+<script>
+  const parameters = new URLSearchParams(location.search);
+  document.title = parameters.get("title") || "HAL hidden visibility";
+  const animation = document.body.getAnimations()[0];
+  const frame = () => new Promise(requestAnimationFrame);
+  window.hiddenVisibility = {
+    async ready() {
+      await frame();
+      await frame();
+      return { color: getComputedStyle(document.body).backgroundColor };
+    },
+    state() {
+      return {
+        color: getComputedStyle(document.body).backgroundColor,
+        time: animation.currentTime,
+      };
+    },
+    async pause() {
+      animation.pause();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return this.state();
+    },
+    resume() {
+      animation.play();
+      return this.state();
+    },
+  };
+</script>

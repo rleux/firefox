@@ -134,16 +134,17 @@ impl RenderNotifier for Notifier {
     }
 }
 
-pub trait WrenchThing {
+pub trait WrenchThing<R = webrender::Renderer> {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, _scale: f32) {}
     fn next_frame(&mut self);
     fn prev_frame(&mut self);
-    fn do_frame(&mut self, _: &mut Wrench) -> u32;
+    fn do_frame(&mut self, _: &mut Wrench<R>) -> u32;
 }
 
-impl WrenchThing for CapturedDocument {
+impl<R> WrenchThing<R> for CapturedDocument {
     fn next_frame(&mut self) {}
     fn prev_frame(&mut self) {}
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         if let Some(root_pipeline_id) = self.root_pipeline_id.take() {
             // skip the first frame - to not overwrite the loaded one
             let mut txn = Transaction::new();
@@ -197,7 +198,7 @@ impl CapturedSequence {
     }
 }
 
-impl WrenchThing for CapturedSequence {
+impl<R> WrenchThing<R> for CapturedSequence {
     fn next_frame(&mut self) {
         if self.frame + 1 < self.frame_set.len() {
             self.frame += 1;
@@ -210,7 +211,7 @@ impl WrenchThing for CapturedSequence {
         }
     }
 
-    fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
+    fn do_frame(&mut self, wrench: &mut Wrench<R>) -> u32 {
         let mut documents = wrench.api.load_capture(self.root.clone(), Some(self.frame_set[self.frame]));
         println!("loaded {:?} from {:?}",
             documents.iter().map(|cd| cd.document_id).collect::<Vec<_>>(),
@@ -221,13 +222,64 @@ impl WrenchThing for CapturedSequence {
     }
 }
 
-pub struct Wrench {
+pub trait TestWindow {
+    fn get_inner_size(&self) -> DeviceIntSize;
+    fn swap_buffers(&self);
+}
+
+impl TestWindow for WindowWrapper {
+    fn get_inner_size(&self) -> DeviceIntSize { self.get_inner_size() }
+    fn swap_buffers(&self) { self.swap_buffers(); }
+}
+
+#[cfg(feature = "hal")]
+pub struct HeadlessTestWindow(pub DeviceIntSize);
+
+#[cfg(feature = "hal")]
+impl TestWindow for HeadlessTestWindow {
+    fn get_inner_size(&self) -> DeviceIntSize { self.0 }
+    fn swap_buffers(&self) {}
+}
+
+pub trait SceneRenderer {
+    fn gl_device(&self) -> Option<&webrender::Device>;
+    fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String>;
+    #[cfg(feature = "hal")]
+    fn hal_image_device(&self) -> Option<webrender::hal::ExternalImageDevice> { None }
+    #[cfg(feature = "hal")]
+    fn install_hal_external_images(&mut self, _: Box<dyn webrender::hal::ExternalImageProvider>) -> Result<(), String> {
+        Err("HAL external images are unavailable on this renderer".into())
+    }
+}
+
+impl SceneRenderer for webrender::Renderer {
+    fn gl_device(&self) -> Option<&webrender::Device> { Some(&self.device) }
+    fn install_external_images(&mut self, handler: Box<dyn ExternalImageHandler>) -> Result<(), String> {
+        self.set_external_image_handler(handler);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "hal")]
+impl SceneRenderer for webrender::hal::SelectedRenderer {
+    fn gl_device(&self) -> Option<&webrender::Device> { None }
+    fn install_external_images(&mut self, _: Box<dyn ExternalImageHandler>) -> Result<(), String> {
+        Err("GL external images are unavailable on HAL".into())
+    }
+    fn hal_image_device(&self) -> Option<webrender::hal::ExternalImageDevice> { Some(self.external_image_device()) }
+    fn install_hal_external_images(&mut self, provider: Box<dyn webrender::hal::ExternalImageProvider>) -> Result<(), String> {
+        self.set_external_image_provider(provider)
+    }
+}
+
+pub struct Wrench<R = webrender::Renderer> {
     window_size: DeviceIntSize,
+    record_frame_start: bool,
 
     /// The GL context the renderer draws with, shared so that wrench can
     /// create GL textures to hand to the renderer as external images.
-    gl: Rc<dyn gl::Gl>,
-    pub renderer: webrender::Renderer,
+    gl: Option<Rc<dyn gl::Gl>>,
+    pub renderer: R,
     pub api: RenderApi,
     pub document_id: DocumentId,
     pub root_pipeline_id: PipelineId,
@@ -253,7 +305,7 @@ pub struct Wrench {
 
     window_title_to_set: Option<String>,
 
-    graphics_api: webrender::GraphicsApiInfo,
+    renderer_description: String,
 
     pub rebuild_display_lists: bool,
 
@@ -271,10 +323,6 @@ pub struct Wrench {
 }
 
 impl Wrench {
-    pub fn gl(&self) -> &dyn gl::Gl {
-        &*self.gl
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         window: &mut WindowWrapper,
@@ -365,7 +413,8 @@ impl Wrench {
 
         let mut wrench = Wrench {
             window_size: size,
-            gl,
+            gl: Some(gl),
+            record_frame_start: true,
 
             renderer,
             api,
@@ -379,7 +428,7 @@ impl Wrench {
             font_instances: HashMap::new(),
             dl_builders: HashMap::new(),
 
-            graphics_api,
+            renderer_description: format!("{} - {}", graphics_api.renderer, graphics_api.version),
             frame_start_sender: timing_sender,
 
             callbacks,
@@ -388,12 +437,86 @@ impl Wrench {
             compositor_clips_override,
         };
 
+        if let Some(enabled) = compositor_clips_override {
+            wrench.set_compositor_clips_enabled(enabled);
+        }
         wrench.set_title("start");
         let mut txn = Transaction::new();
         txn.set_root_pipeline(wrench.root_pipeline_id);
         wrench.api.send_transaction(wrench.document_id, txn);
 
         wrench
+    }
+
+    pub fn get_frame_profiles(
+        &mut self,
+    ) -> (Vec<webrender::CpuProfile>, Vec<webrender::GpuProfile>) {
+        self.renderer.get_frame_profiles()
+    }
+
+    pub fn render(&mut self) -> RenderResults {
+        self.renderer.update();
+        let _ = self.renderer.flush_pipeline_info();
+        self.renderer
+            .render(self.window_size, 0)
+            .expect("errors encountered during render!")
+    }
+
+    pub fn show_onscreen_help(&mut self) {
+        let help_lines = [
+            "Esc - Quit",
+            "H - Toggle help",
+            "R - Toggle recreating display items each frame",
+            "P - Toggle profiler",
+            "O - Toggle showing intermediate targets",
+            "I - Toggle showing texture caches",
+            "B - Toggle showing alpha primitive rects",
+            "V - Toggle showing overdraw",
+            "G - Toggle showing gpu cache updates",
+            "S - Toggle compact profiler",
+            "Q - Toggle GPU queries for time and samples",
+            "M - Trigger memory pressure event",
+            "T - Save CPU profile to a file",
+            "C - Save a capture to captures/wrench/",
+            "X - Do a hit test at the current cursor position",
+            "Y - Clear all caches",
+        ];
+
+        let color_and_offset = [(ColorF::BLACK, 2.0), (ColorF::WHITE, 0.0)];
+        self.renderer.device.begin_frame(); // next line might compile shaders:
+        let dr = self.renderer.debug_renderer().unwrap();
+
+        for co in &color_and_offset {
+            let x = 15.0 + co.1;
+            let mut y = 15.0 + co.1 + dr.line_height();
+            for line in &help_lines {
+                dr.add_text(x, y, line, co.0.into(), None);
+                y += dr.line_height();
+            }
+        }
+        self.renderer.device.end_frame();
+    }
+
+    pub fn shut_down(self, rx: Receiver<NotifierEvent>) {
+        self.api.shut_down(true);
+
+        loop {
+            match rx.recv() {
+                Ok(NotifierEvent::ShutDown) => { break; }
+                Ok(_) => {}
+                Err(e) => { panic!("Did not shut down properly: {:?}.", e); }
+            }
+        }
+
+        self.renderer.deinit();
+    }
+}
+
+impl<R> Wrench<R> {
+    pub(crate) fn gl_context(&self) -> Option<&dyn gl::Gl> { self.gl.as_deref() }
+
+    pub fn gl(&self) -> &dyn gl::Gl {
+        self.gl.as_deref().expect("GL context is unavailable for the selected backend")
     }
 
     pub fn set_quality_settings(&mut self, settings: QualitySettings) {
@@ -415,6 +538,11 @@ impl Wrench {
         let mut flags = self.debug_flags;
         flags.set(DebugFlags::DISABLE_COMPOSITOR_CLIPS, !enabled);
         self.api.set_debug_flags(flags);
+    }
+
+    pub fn set_compositor_clips_override(&mut self, enabled: bool) {
+        self.compositor_clips_override = Some(enabled);
+        self.set_compositor_clips_enabled(enabled);
     }
 
     pub fn layout_simple_ascii(
@@ -537,10 +665,9 @@ impl Wrench {
 
     pub fn set_title(&mut self, extra: &str) {
         self.window_title_to_set = Some(format!(
-            "Wrench: {} - {} - {}",
+            "Wrench: {} - {}",
             extra,
-            self.graphics_api.renderer,
-            self.graphics_api.version
+            self.renderer_description
         ));
     }
 
@@ -696,7 +823,12 @@ impl Wrench {
     }
 
     pub fn begin_frame(&mut self) {
-        self.frame_start_sender.push(Instant::now());
+        if self.record_frame_start { self.frame_start_sender.push(Instant::now()); }
+    }
+
+    pub(crate) fn configure_measurement(&mut self) {
+        self.record_frame_start = false;
+        self.rebuild_display_lists = true;
     }
 
     pub fn send_lists(
@@ -744,20 +876,6 @@ impl Wrench {
         assert!(txn.is_empty());
     }
 
-    pub fn get_frame_profiles(
-        &mut self,
-    ) -> (Vec<webrender::CpuProfile>, Vec<webrender::GpuProfile>) {
-        self.renderer.get_frame_profiles()
-    }
-
-    pub fn render(&mut self) -> RenderResults {
-        self.renderer.update();
-        let _ = self.renderer.flush_pipeline_info();
-        self.renderer
-            .render(self.window_size, 0)
-            .expect("errors encountered during render!")
-    }
-
     pub fn refresh(&mut self) {
         self.begin_frame();
         let mut txn = Transaction::new();
@@ -767,52 +885,84 @@ impl Wrench {
         self.api.send_transaction(self.document_id, txn);
     }
 
-    pub fn show_onscreen_help(&mut self) {
-        let help_lines = [
-            "Esc - Quit",
-            "H - Toggle help",
-            "R - Toggle recreating display items each frame",
-            "P - Toggle profiler",
-            "O - Toggle showing intermediate targets",
-            "I - Toggle showing texture caches",
-            "B - Toggle showing alpha primitive rects",
-            "V - Toggle showing overdraw",
-            "G - Toggle showing gpu cache updates",
-            "S - Toggle compact profiler",
-            "Q - Toggle GPU queries for time and samples",
-            "M - Trigger memory pressure event",
-            "T - Save CPU profile to a file",
-            "C - Save a capture to captures/wrench/",
-            "X - Do a hit test at the current cursor position",
-            "Y - Clear all caches",
-        ];
+}
 
-        let color_and_offset = [(ColorF::BLACK, 2.0), (ColorF::WHITE, 0.0)];
-        self.renderer.device.begin_frame(); // next line might compile shaders:
-        let dr = self.renderer.debug_renderer().unwrap();
-
-        for co in &color_and_offset {
-            let x = 15.0 + co.1;
-            let mut y = 15.0 + co.1 + dr.line_height();
-            for line in &help_lines {
-                dr.add_text(x, y, line, co.0.into(), None);
-                y += dr.line_height();
-            }
-        }
-        self.renderer.device.end_frame();
+#[cfg(feature = "hal")]
+impl Wrench<webrender::hal::SelectedRenderer> {
+    #[cfg(test)]
+    pub fn new_hal(hal_options: &webrender::hal::Options, size: DeviceIntSize) -> Result<Self, String> {
+        Self::new_hal_with_subpixel(hal_options, size, true)
     }
 
-    pub fn shut_down(self, rx: Receiver<NotifierEvent>) {
-        self.api.shut_down(true);
+    pub fn new_hal_with_subpixel(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool) -> Result<Self, String> {
+        Self::new_hal_with_notifier(hal_options, size, enable_subpixel_aa, None)
+    }
 
-        loop {
-            match rx.recv() {
-                Ok(NotifierEvent::ShutDown) => { break; }
-                Ok(_) => {}
-                Err(e) => { panic!("Did not shut down properly: {:?}.", e); }
-            }
-        }
+    pub fn new_hal_with_notifier(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>) -> Result<Self, String> {
+        Self::new_hal_with_compositor(hal_options, size, enable_subpixel_aa, notifier, webrender::hal::CompositorConfig::Draw)
+    }
 
-        self.renderer.deinit();
+    pub fn new_hal_with_compositor(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig) -> Result<Self, String> {
+        Self::new_hal_target(hal_options, size, enable_subpixel_aa, notifier, compositor, None)
+    }
+
+    pub fn new_hal_for_window(hal_options: &webrender::hal::Options, size: DeviceIntSize,
+        window: std::rc::Rc<dyn webrender::hal::SurfaceWindow>, surface_options: webrender::hal::SurfaceOptions) -> Result<Self, String>
+    {
+        Self::new_hal_target(hal_options, size, true, None, webrender::hal::CompositorConfig::Draw, Some((window, surface_options)))
+    }
+
+    pub fn new_hal_window(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool,
+        notifier: Box<dyn RenderNotifier>, compositor: webrender::hal::CompositorConfig,
+        window: std::rc::Rc<dyn webrender::hal::SurfaceWindow>, surface_options: webrender::hal::SurfaceOptions) -> Result<Self, String>
+    {
+        Self::new_hal_target(hal_options, size, enable_subpixel_aa, Some(notifier), compositor, Some((window, surface_options)))
+    }
+
+    fn new_hal_target(hal_options: &webrender::hal::Options, size: DeviceIntSize, enable_subpixel_aa: bool,
+        notifier: Option<Box<dyn RenderNotifier>>, compositor: webrender::hal::CompositorConfig,
+        window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
+    {
+        Self::new_hal_backend(webrender::hal::BackendKind::Vulkan, hal_options, size, enable_subpixel_aa, notifier, compositor, window)
+    }
+
+    pub fn new_hal_backend(backend: webrender::hal::BackendKind, hal_options: &webrender::hal::Options,
+        size: DeviceIntSize, enable_subpixel_aa: bool, notifier: Option<Box<dyn RenderNotifier>>,
+        compositor: webrender::hal::CompositorConfig,
+        window: Option<(std::rc::Rc<dyn webrender::hal::SurfaceWindow>, webrender::hal::SurfaceOptions)>) -> Result<Self, String>
+    {
+        if size.width <= 0 || size.height <= 0 { return Err("Invalid HAL window dimensions".into()); }
+        let callbacks = Arc::new(Mutex::new(blob::BlobCallbacks::new()));
+        let debug_flags = DebugFlags::ECHO_DRIVER_MESSAGES | DebugFlags::MISSING_SNAPSHOT_PINK;
+        let options = webrender::WebRenderOptions {
+            blob_image_handler: Some(Box::new(blob::CheckerboardRenderer::new(callbacks.clone()))),
+            testing: true,
+            debug_flags,
+            max_internal_texture_size: Some(8196),
+            enable_subpixel_aa,
+            enable_debugger: false,
+            ..Default::default()
+        };
+        let (timing_sender, timing_receiver) = chase_lev::deque();
+        let record_frame_start = notifier.is_none();
+        let notifier = notifier.unwrap_or_else(|| Box::new(Notifier(Arc::new(Mutex::new(NotifierData::new(None, timing_receiver, false))))));
+        let (renderer, sender) = webrender::hal::create_renderer_for_backend(backend, hal_options, options, notifier, compositor,
+            window.map(|(window, options)| (window, [size.width as u32, size.height as u32], options)))?;
+        println!("HAL capabilities: {:?}", renderer.capabilities());
+        let info = renderer.info();
+        let renderer_description = format!("{} - {:?} {}", info.name, info.backend, info.driver_info);
+        let api = sender.create_api();
+        let document_id = api.add_document(size);
+        let mut wrench = Self {
+            window_size: size, record_frame_start, gl: None, renderer, api, document_id,
+            root_pipeline_id: PipelineId(0, 0), fonts: HashMap::new(),
+            font_instances: HashMap::new(), dl_builders: HashMap::new(),
+            window_title_to_set: None, renderer_description, rebuild_display_lists: true,
+            frame_start_sender: timing_sender, callbacks, debug_flags, compositor_clips_override: None,
+        };
+        let mut transaction = Transaction::new();
+        transaction.set_root_pipeline(wrench.root_pipeline_id);
+        wrench.api.send_transaction(document_id, transaction);
+        Ok(wrench)
     }
 }

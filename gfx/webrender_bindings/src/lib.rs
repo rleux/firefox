@@ -20,6 +20,8 @@ extern crate tracy_rs;
 extern crate uuid;
 extern crate webrender;
 extern crate wr_malloc_size_of;
+#[cfg(target_os = "linux")]
+extern crate raw_window_handle;
 
 #[macro_use]
 extern crate log;
@@ -36,7 +38,9 @@ extern crate core_graphics;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 extern crate foreign_types;
 
+pub mod hal_image;
 mod program_cache;
+mod renderer;
 
 #[allow(non_snake_case)]
 pub mod bindings;

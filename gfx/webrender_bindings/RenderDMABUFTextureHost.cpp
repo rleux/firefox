@@ -4,9 +4,16 @@
 
 #include "RenderDMABUFTextureHost.h"
 
+#include <algorithm>
+
 #include "GLContextEGL.h"
 #include "ScopedGLHelpers.h"
+#include "mozilla/gfx/FileHandleWrapper.h"
 #include "mozilla/gfx/Logging.h"
+#ifdef XP_LINUX
+#  include "RenderCompositorVulkan.h"
+#  include "mozilla/gfx/gfxVars.h"
+#endif
 
 namespace mozilla::wr {
 
@@ -22,6 +29,10 @@ RenderDMABUFTextureHost::~RenderDMABUFTextureHost() {
 
 wr::WrExternalImage RenderDMABUFTextureHost::Lock(uint8_t aChannelIndex,
                                                   gl::GLContext* aGL) {
+  if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV();
+      yuv && yuv->GetVAAPIDescriptor()) {
+    return InvalidToWrExternalImage();
+  }
   const gfx::IntSize size(mSurface->GetWidth(aChannelIndex),
                           mSurface->GetHeight(aChannelIndex));
 
@@ -78,6 +89,132 @@ gfx::IntSize RenderDMABUFTextureHost::GetSize(uint8_t aChannelIndex) const {
 }
 
 void RenderDMABUFTextureHost::Unlock() {}
+
+bool RenderDMABUFTextureHost::GetVAAPIImage(const DMABufSurfaceYUV& aSurface,
+                                            uint8_t aChannelIndex,
+                                            WrHalImage* aImage) {
+  const auto* desc = aSurface.GetVAAPIDescriptor();
+  if (!desc || aChannelIndex > 1 || !aSurface.AccessLockUsable()) {
+    return false;
+  }
+  const auto& state = desc->vaapiImageState().ref();
+  if (state.objects().Length() != 1) {
+    return false;
+  }
+  const auto& object = state.objects()[0];
+  WrHalVideo image{};
+  image.fd = object.fd()->GetHandle();
+  image.access_lock_fd = state.accessLock()->GetHandle();
+  image.fourcc = desc->fourccFormat();
+  image.width = desc->width()[0];
+  image.height = desc->height()[0];
+  image.allocation_width = desc->widthAligned()[0];
+  image.allocation_height = desc->heightAligned()[0];
+  image.allocation_size = object.size();
+  image.modifier = object.modifier();
+  for (size_t i = 0; i < 2; ++i) {
+    image.strides[i] = state.planes()[i].stride();
+    image.offsets[i] = state.planes()[i].offset();
+  }
+  image.allocation_id = state.allocationId();
+  image.producer_epoch = state.producerEpoch();
+  image.drm_node[0] = state.drmRenderMajor();
+  image.drm_node[1] = state.drmRenderMinor();
+  *aImage = WrHalImage{state.generation(), WrHalImageSource::Video(image)};
+  return true;
+}
+
+bool RenderDMABUFTextureHost::LockHalImage(uint8_t aChannelIndex,
+                                           WrHalImage* aImage) {
+  if (mVulkanFailed) {
+    gfxCriticalNote << "HAL DMA-BUF previously abandoned: "
+                    << mSurface->GetUID();
+    return false;
+  }
+  if (auto* yuv = mSurface->GetAsDMABufSurfaceYUV()) {
+#ifdef XP_LINUX
+    if (gfx::gfxVars::UseWebRenderVulkanVideo()) {
+      const bool device = RenderCompositorVulkan::SupportsVideo();
+      const bool image = yuv->SupportsVAAPIImage(
+          gfx::gfxVars::WebRenderVulkanVideoCapabilities());
+      if (!device || !image) {
+        gfxCriticalNote << "HAL video admission rejected: "
+                        << mSurface->GetUID() << " device=" << device
+                        << " image=" << image
+                        << " publication=" << !!yuv->GetVAAPIDescriptor()
+                        << " access=" << mSurface->AccessLockUsable()
+                        << " abandoned=" << yuv->VAAPIImageAbandoned();
+        return false;
+      }
+    } else if (!RenderCompositorVulkan::SupportsRetainedVideo(*yuv)) {
+      return false;
+    }
+#endif
+    return GetVAAPIImage(*yuv, aChannelIndex, aImage);
+  }
+  if (aChannelIndex) {
+    return false;
+  }
+  if (const auto* foreign = mSurface->GetForeignRGBDescriptor()) {
+    WrHalForeignRGB image{};
+    image.fd = foreign->fds()[0]->GetHandle();
+    image.ready_fd = foreign->fence()[0]->GetHandle();
+    image.width = foreign->width()[0];
+    image.height = foreign->height()[0];
+    image.fourcc = foreign->fourccFormat();
+    image.stride = foreign->strides()[0];
+    image.offset = foreign->offsets()[0];
+    *aImage = WrHalImage{foreign->foreignRGBImageState()->generation(),
+                         WrHalImageSource::ForeignRGB(image)};
+    return true;
+  }
+  const auto* desc = mSurface->GetVulkanDescriptor();
+  if (mVulkanFailed || aChannelIndex || !desc || !desc->vulkanImageState() ||
+      desc->fds().Length() != 1 || !desc->semaphoreFdIsSyncFd()) {
+    return false;
+  }
+  const auto& state = desc->vulkanImageState().ref();
+  ImageFormat format;
+  switch (mSurface->GetFormat()) {
+    case gfx::SurfaceFormat::B8G8R8A8:
+      format = ImageFormat::BGRA8;
+      break;
+    case gfx::SurfaceFormat::R8G8B8A8:
+      format = ImageFormat::RGBA8;
+      break;
+    default:
+      return false;
+  }
+  if (!mSurface->AccessLockUsable()) {
+    return false;
+  }
+  WrHalDmaBuf image{};
+  image.fd = desc->fds()[0]->GetHandle();
+  image.ready_fd = desc->semaphoreFd() ? desc->semaphoreFd()->GetHandle() : -1;
+  image.access_lock_fd = state.accessLock()->GetHandle();
+  image.width = desc->width()[0];
+  image.height = desc->height()[0];
+  image.format = format;
+  image.modifier = desc->modifier()[0];
+  image.stride = desc->strides()[0];
+  image.offset = desc->offsets()[0];
+  std::copy_n(state.deviceUUID().Elements(), 16, image.device_uuid);
+  std::copy_n(state.driverUUID().Elements(), 16, image.driver_uuid);
+  *aImage =
+      WrHalImage{state.generation(), WrHalImageSource::VulkanDmaBuf(image)};
+  return true;
+}
+
+void RenderDMABUFTextureHost::UnlockHalImage(WrHalImageRelease aStatus) {
+  if (aStatus == WrHalImageRelease::Abandoned) {
+    auto* yuv = mSurface->GetAsDMABufSurfaceYUV();
+    if (!mVulkanFailed &&
+        (mSurface->IsForeignRGB() || (yuv && yuv->GetVAAPIDescriptor()))) {
+      mSurface->GlobalRefAdd();
+    }
+    mVulkanFailed = true;
+  }
+}
 
 void RenderDMABUFTextureHost::DeleteTextureHandle() {
   mSurface->ReleaseTextures();

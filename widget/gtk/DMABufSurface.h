@@ -13,6 +13,7 @@
 #include "ImageContainer.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/Span.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/Types.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
 #include "mozilla/widget/BufferSurface.h"
@@ -29,6 +30,7 @@ namespace mozilla {
 namespace gfx {
 class DataSourceSurface;
 class FileHandleWrapper;
+class VulkanVideoCapabilities;
 }  // namespace gfx
 namespace layers {
 class MemoryOrShmem;
@@ -107,6 +109,26 @@ class DMABufSurface : public BufferSurface {
       mozilla::layers::Image::BuildSdbFlags aFlags,
       const std::function<mozilla::layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
+  bool EnableForeignRGB();
+  bool CreateAccessLock();
+  bool AccessLockUsable() const;
+  bool TryLockAccess();
+  bool TryRetireAccess();
+  bool WaitForAccess(uint32_t aTimeoutMs);
+  bool LockAccess();
+  void UnlockAccess(bool aAbandon = false);
+  RefPtr<mozilla::gfx::FileHandleWrapper> GetAccessLockFd() const {
+    return mAccessLockFd;
+  }
+  bool IsForeignRGB() const { return mForeignRGB; }
+  bool ForeignRGBUsable() const;
+  bool LockForeignRGB();
+  void UnlockForeignRGB(bool aAbandon = false);
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetForeignRGBDescriptor()
+      const {
+    return mForeignRGBDescriptor.get();
+  }
+
   void FenceSet();
   void FenceWait(mozilla::gl::GLContext* aGLContext = nullptr);
   static void FenceWaitFd(RefPtr<mozilla::gl::GLContext> aGL,
@@ -114,6 +136,9 @@ class DMABufSurface : public BufferSurface {
 
   void MaybeSemaphoreWait(GLuint aGlTexture);
   void SetSemaphoreFd(int aDuppedRawFd, bool aIsSyncFd = false);
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetVulkanDescriptor() const {
+    return mVulkanDescriptor.get();
+  }
 
   // Set and get a global surface UID. The UID is shared across process
   // and it's used to track surface lifetime in various parts of rendering
@@ -238,6 +263,16 @@ class DMABufSurface : public BufferSurface {
   RefPtr<mozilla::gfx::FileHandleWrapper> mSyncFd;
   RefPtr<mozilla::gfx::FileHandleWrapper> mSemaphoreFd;
   bool mSemaphoreFdIsSyncFd = false;
+  bool mForeignRGB = false;
+  uint64_t mForeignRGBGeneration = 0;
+  RefPtr<mozilla::gfx::FileHandleWrapper> mAccessLockFd;
+  // The FD retains this shared mapping until ReleaseDMABuf unmaps it.
+  uint32_t* mAccessLock = nullptr;
+  bool MapAccessLock();
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
+      mForeignRGBDescriptor;
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
+      mVulkanDescriptor;
 
   // Inter process properties, used to share DMABuf among various processes
   // like RDD/Main.
@@ -361,6 +396,21 @@ class DMABufSurfaceYUV final : public DMABufSurface {
 
   DMABufSurfaceYUV* GetAsDMABufSurfaceYUV() override { return this; };
 
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetVAAPIDescriptor() const {
+    return mVAAPIDescriptor.get();
+  }
+  // The caller retains the completed decoder frame until retirement or
+  // shutdown.
+  bool PublishVAAPIImage(const VADRMPRIMESurfaceDescriptor& aDesc,
+                         uint64_t aPublicationId, uint64_t aProducerEpoch,
+                         uint64_t aDRMMajor, uint64_t aDRMMinor);
+  bool SupportsVAAPIImage(
+      const mozilla::gfx::VulkanVideoCapabilities& aCapabilities) const;
+  bool SameVAAPIAllocation(const DMABufSurfaceYUV& aOther) const;
+  bool SameVAAPIImage(const DMABufSurfaceYUV& aOther) const;
+  bool TryRetireVAAPIImage();
+  bool VAAPIImageAbandoned() const;
+
   nsresult BuildSurfaceDescriptorBuffer(
       mozilla::layers::SurfaceDescriptorBuffer& aSdBuffer,
       mozilla::layers::Image::BuildSdbFlags aFlags,
@@ -456,6 +506,8 @@ class DMABufSurfaceYUV final : public DMABufSurface {
   // Chroma location in wp_color_representation_surface_v1_chroma_location
   // format.
   uint32_t mWPChromaLocation = 0;
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf> mVAAPIDescriptor;
+  bool mVAAPIProducer = false;
 };
 
 #endif

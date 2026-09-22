@@ -643,16 +643,18 @@ TEST_F(TestMediaFormatReader, VideoSkipDoesNotReenterAcrossErrorRecovery) {
 
 class RecreateOnNthDecodeDecoder final : public MockVideoDataDecoder {
  public:
-  RecreateOnNthDecodeDecoder(const CreateDecoderParams& aParams,
-                             uint32_t aDecodeNumber)
-      : MockVideoDataDecoder(aParams), mDecodeNumber(aDecodeNumber) {
+  RecreateOnNthDecodeDecoder(
+      const CreateDecoderParams& aParams, uint32_t aDecodeNumber,
+      nsresult aError = NS_ERROR_DOM_MEDIA_NEED_NEW_DECODER)
+      : MockVideoDataDecoder(aParams),
+        mDecodeNumber(aDecodeNumber),
+        mError(aError) {
     MOZ_ASSERT(aDecodeNumber > 0);
   }
 
   RefPtr<DecodePromise> Decode(MediaRawData* aSample) override {
     if (++mDecodeCount == mDecodeNumber) {
-      return DecodePromise::CreateAndReject(NS_ERROR_DOM_MEDIA_NEED_NEW_DECODER,
-                                            __func__);
+      return DecodePromise::CreateAndReject(mError, __func__);
     }
     return DummyMediaDataDecoder::Decode(aSample);
   }
@@ -660,8 +662,119 @@ class RecreateOnNthDecodeDecoder final : public MockVideoDataDecoder {
  private:
   ~RecreateOnNthDecodeDecoder() override = default;
   const uint32_t mDecodeNumber;
+  const nsresult mError;
   uint32_t mDecodeCount = 0;
 };
+
+#ifdef XP_LINUX
+class HardwareDecodeRecoveryTest : public TestMediaFormatReader {
+ protected:
+  enum class Failure { None, Seek, Software, Unseekable };
+
+  void CheckRecovery(Failure aFailure,
+                     nsresult aError = NS_ERROR_DOM_MEDIA_DECODE_ERR) {
+    PDMFactory::AutoForcePDM autoForcePDM(mPdm);
+    uint32_t created = 0;
+    uint32_t nextSample = 0;
+    ON_CALL(*mDataDemuxer, IsSeekable)
+        .WillByDefault(Return(aFailure != Failure::Unseekable));
+    ON_CALL(*mTrackDemuxer, GetNextRandomAccessPoint)
+        .WillByDefault([](TimeUnit* aTime) {
+          *aTime = TimeUnit::FromInfinity();
+          return NS_OK;
+        });
+    EXPECT_CALL(*mTrackDemuxer, SkipToNextRandomAccessPoint).Times(0);
+    EXPECT_CALL(*mTrackDemuxer, MockGetSamples).WillRepeatedly([&] {
+      if (nextSample == 4) {
+        return SamplesPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_END_OF_STREAM,
+                                               __func__);
+      }
+      const uint32_t index = nextSample++;
+      return ResolveOneSample(
+          MakeRawSample(TimeUnit(index, 30), TimeUnit(1, 30), index == 0));
+    });
+    EXPECT_CALL(*mPdm, CreateVideoDecoder)
+        .WillRepeatedly([&](const CreateDecoderParams& aParams) {
+          const bool hardware = ++created == 1;
+          EXPECT_LE(created, 2u);
+          EXPECT_EQ(aParams.mOptions.contains(
+                        CreateDecoderParams::Option::HardwareDecoderNotAllowed),
+                    !hardware);
+          RefPtr<MockVideoDataDecoder> decoder;
+          if (hardware || aFailure == Failure::Software) {
+            decoder = new RecreateOnNthDecodeDecoder(
+                aParams, 3, hardware ? aError : NS_ERROR_DOM_MEDIA_DECODE_ERR);
+          } else {
+            decoder = new MockVideoDataDecoder(aParams);
+          }
+          ON_CALL(*decoder, IsHardwareAccelerated)
+              .WillByDefault(Return(hardware));
+          return do_AddRef(decoder);
+        });
+    if (aFailure == Failure::Unseekable) {
+      EXPECT_CALL(*mTrackDemuxer, Seek).Times(0);
+    } else {
+      EXPECT_CALL(*mTrackDemuxer, Seek).WillOnce([&](const TimeUnit& aTime) {
+        EXPECT_EQ(aTime, TimeUnit(1, 30));
+        if (aFailure == Failure::Seek) {
+          return SeekPromise::CreateAndReject(NS_ERROR_DOM_MEDIA_FATAL_ERR,
+                                              __func__);
+        }
+        nextSample = 0;
+        return SeekPromise::CreateAndResolve(TimeUnit::Zero(), __func__);
+      });
+    }
+    (void)WaitForResolve(mProxy->ReadMetadata());
+    for (int i = 0; i < 2; ++i) {
+      RefPtr<VideoData> frame =
+          WaitForResolve(mProxy->RequestVideoData(TimeUnit(), false));
+      EXPECT_EQ(frame->mTime, TimeUnit(i, 30));
+    }
+    if (aFailure == Failure::None) {
+      for (int i = 2; i < 4; ++i) {
+        RefPtr<VideoData> frame =
+            WaitForResolve(mProxy->RequestVideoData(TimeUnit(), false));
+        EXPECT_EQ(frame->mTime, TimeUnit(i, 30));
+      }
+    }
+    MediaResult result =
+        WaitForReject(mProxy->RequestVideoData(TimeUnit(), false));
+    if (aFailure == Failure::Software) {
+      EXPECT_TRUE(result.Code() == NS_ERROR_DOM_MEDIA_DECODE_ERR ||
+                  result.Code() == NS_ERROR_DOM_MEDIA_FATAL_ERR);
+    } else {
+      EXPECT_EQ(result.Code(), aFailure == Failure::None
+                                   ? NS_ERROR_DOM_MEDIA_END_OF_STREAM
+                                   : NS_ERROR_DOM_MEDIA_FATAL_ERR);
+    }
+    EXPECT_EQ(
+        created,
+        aFailure == Failure::Seek || aFailure == Failure::Unseekable ? 1u : 2u);
+    FinishShutdown();
+  }
+};
+
+TEST_F(HardwareDecodeRecoveryTest, ReplaysLastKeyframeWithSoftwareDecoder) {
+  CheckRecovery(Failure::None);
+}
+
+TEST_F(HardwareDecodeRecoveryTest, RemoteDecoderCrashReplaysLastKeyframe) {
+  CheckRecovery(Failure::None,
+                NS_ERROR_DOM_MEDIA_REMOTE_CRASHED_RDD_OR_GPU_ERR);
+}
+
+TEST_F(HardwareDecodeRecoveryTest, FailedRecoverySeekIsReported) {
+  CheckRecovery(Failure::Seek);
+}
+
+TEST_F(HardwareDecodeRecoveryTest, SoftwareFailureDoesNotRepeatRecoverySeek) {
+  CheckRecovery(Failure::Software);
+}
+
+TEST_F(HardwareDecodeRecoveryTest, UnseekableSourceDoesNotAttemptReplay) {
+  CheckRecovery(Failure::Unseekable);
+}
+#endif
 
 class VideoRateTest : public TestMediaFormatReader {
  protected:
