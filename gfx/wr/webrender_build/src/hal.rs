@@ -34,6 +34,14 @@ pub struct TextureBinding {
 }
 
 #[derive(Debug)]
+pub struct StorageBinding {
+    pub name: &'static str,
+    pub binding: u32,
+    pub scalar: ScalarType,
+    pub stages: u32,
+}
+
+#[derive(Debug)]
 pub struct VertexInput {
     pub name: &'static str,
     pub location: u32,
@@ -44,12 +52,50 @@ pub struct VertexInput {
 pub struct ShaderArtifact {
     pub name: &'static str,
     pub features: &'static str,
+    pub buffer_tables: bool,
     pub vertex: &'static [u8],
     pub fragment: &'static [u8],
     pub inputs: &'static [VertexInput],
     pub textures: &'static [TextureBinding],
+    pub storage_buffers: &'static [StorageBinding],
     pub projection_stages: u32,
     pub digest: u64,
+}
+
+const DATA_TABLES: [&str; 6] = [
+    "sPrimitiveHeadersF", "sPrimitiveHeadersI", "sGpuBufferF", "sGpuBufferI",
+    "sTransformPalette", "sRenderTasks",
+];
+
+fn storage_fetches(source: &str) -> String {
+    let mut source = source.to_owned();
+    for name in DATA_TABLES {
+        for (operation, helper) in [("texelFetchOffset", "wr_data_offset"), ("texelFetch", "wr_data_fetch")] {
+            source = Regex::new(&format!(r"\b{operation}\s*\(\s*{name}\s*,")).unwrap()
+                .replace_all(&source, format!("{helper}_{name}(")).into_owned();
+        }
+    }
+    source
+}
+
+fn storage_declaration(name: &str, binding: u32, ty: &str) -> String {
+    let element = match ty {
+        "sampler2D" => "vec4",
+        "isampler2D" => "ivec4",
+        _ => panic!("Unsupported HAL storage table {} {}", ty, name),
+    };
+    let width = crate::MAX_VERTEX_TEXTURE_WIDTH;
+    format!(r#"
+layout(set = 0, binding = {binding}, std430) readonly buffer WrData_{name} {{ {element} values[]; }} b_{name};
+{element} wr_data_fetch_{name}(ivec2 position, int lod) {{
+    if (lod != 0 || any(lessThan(position, ivec2(0))) || position.x >= {width}
+        || uint(position.y) >= uint(b_{name}.values.length()) / {width}u) {{ return {element}(0); }}
+    return b_{name}.values[uint(position.y) * {width}u + uint(position.x)];
+}}
+{element} wr_data_offset_{name}(ivec2 position, int lod, ivec2 offset) {{
+    return wr_data_fetch_{name}(position + offset, lod);
+}}
+"#)
 }
 
 fn run(command: &mut Command) -> io::Result<String> {
@@ -220,7 +266,12 @@ pub fn build(
                 }
                 stages.push((path, source));
             }
-            sources.push((name, features, stages));
+            let buffer_stages = stages.iter().map(|(path, source)| {
+                let stage = path.extension().unwrap().to_str().unwrap();
+                (directory.join(format!("{stem}_buffers.{stage}")), source.clone())
+            }).collect();
+            sources.push((name, features.clone(), false, stages));
+            sources.push((name, features, true, buffer_stages));
         }
     }
     let bindings: BTreeMap<_, _> = textures
@@ -229,10 +280,10 @@ pub fn build(
         .map(|(index, (name, ty))| (name.as_str(), (1 + index as u32 * 2, ty.as_str())))
         .collect();
     let mut generated = String::from(
-        "use webrender_build::hal::{ScalarType, TextureBinding, VertexInput, ShaderArtifact};\n",
+        "use webrender_build::hal::{ScalarType, TextureBinding, StorageBinding, VertexInput, ShaderArtifact};\n",
     );
     generated.push_str("pub static SHADERS: &[ShaderArtifact] = &[\n");
-    for (name, features, stages) in sources {
+    for (name, features, buffer_tables, stages) in sources {
         let mut varying_locations = BTreeMap::new();
         for (index, (_, source)) in stages.iter().enumerate() {
             for declaration in interface.captures_iter(source) {
@@ -283,19 +334,23 @@ pub fn build(
         let mut binaries = Vec::new();
         let mut linked_sources = Vec::new();
         let mut digest = DefaultHasher::new();
-        (name, &features, "vulkan1.1", &textures).hash(&mut digest);
+        (name, &features, buffer_tables, "vulkan1.1", &textures).hash(&mut digest);
         for (index, (path, source)) in stages.into_iter().enumerate() {
             let legacy = index == 1 && features.split(',').any(|feature| feature == "HAL_LEGACY_BRILINEAR");
             let source = if legacy {
                 Regex::new(r"\btexture\s*\(\s*sColor0\s*,").unwrap()
                     .replace_all(&source, "wr_legacy_sample(").into_owned()
             } else { source };
+            let source = if buffer_tables { storage_fetches(&source) } else { source };
             let source = uniforms.replace_all(&source, |declaration: &regex::Captures| {
                 let name = &declaration[2];
                 if name == "uTransform" {
                     return "\nlayout(set = 0, binding = 0, std140) uniform Projection { mat4 uTransform; };\n".to_owned();
                 }
                 let (binding, ty) = bindings[name];
+                if buffer_tables && DATA_TABLES.contains(&name) {
+                    return storage_declaration(name, binding, ty);
+                }
                 let texture_type = ty.replace("sampler", "texture");
                 let mut declaration = format!("\nlayout(set = 0, binding = {binding}) uniform {texture_type} t_{name};\nlayout(set = 0, binding = {}) uniform sampler p_{name};\n#define {name} {ty}(t_{name}, p_{name})\n", binding + 1);
                 if legacy && name == "sColor0" {
@@ -316,6 +371,13 @@ vec4 wr_legacy_sample(vec2 uv) {
                 }
                 declaration
             });
+            if buffer_tables {
+                for table in DATA_TABLES {
+                    if Regex::new(&format!(r"\b{table}\b")).unwrap().is_match(&source) {
+                        return Err(io::Error::other(format!("Unsupported HAL storage table operation: {table}")));
+                    }
+                }
+            }
             let source = interface.replace_all(&source, |declaration: &regex::Captures| {
                 let direction = &declaration[2];
                 let ty = &declaration[3];
@@ -355,6 +417,7 @@ vec4 wr_legacy_sample(vec2 uv) {
             .args(&linked_sources))?;
         fs::remove_file(linked)?;
         let mut active_textures = BTreeMap::new();
+        let mut active_buffers = BTreeMap::new();
         let mut projection_stages = 0;
         for (index, stage) in reflected.iter().enumerate() {
             if stage.projection {
@@ -370,6 +433,13 @@ vec4 wr_legacy_sample(vec2 uv) {
                 if stage.samplers.contains(&(binding + 1)) {
                     entry.3 |= 1 << index;
                 }
+            }
+            for (&binding, (name, scalar)) in &stage.storage_buffers {
+                assert!(buffer_tables && DATA_TABLES.contains(&name.as_str()));
+                assert_eq!(bindings[name.as_str()].0, binding);
+                let entry = active_buffers.entry(binding).or_insert((name, *scalar, 0));
+                assert_eq!(entry.1, *scalar);
+                entry.2 |= 1 << index;
             }
             for binding in &stage.samplers {
                 assert!(stage.textures.contains_key(&(binding - 1)));
@@ -415,9 +485,11 @@ vec4 wr_legacy_sample(vec2 uv) {
         if projection_stages != 0 {
             native_bindings.insert(0, 0);
         }
-        for (&binding, (_, _, _, sampler_stages)) in &active_textures {
+        let active_bindings: std::collections::BTreeSet<_> = active_textures.keys()
+            .chain(active_buffers.keys()).copied().collect();
+        for binding in active_bindings {
             native_bindings.insert(binding, native_bindings.len() as u32);
-            if *sampler_stages != 0 {
+            if active_textures.get(&binding).map_or(false, |entry| entry.3 != 0) {
                 native_bindings.insert(binding + 1, native_bindings.len() as u32);
             }
         }
@@ -437,6 +509,10 @@ vec4 wr_legacy_sample(vec2 uv) {
                 .map(|(binding, value)| (native_bindings[binding], value.clone()))
                 .collect();
             assert_eq!(native.textures, expected);
+            let expected_buffers: BTreeMap<_, _> = reflected[index].storage_buffers.iter()
+                .map(|(binding, value)| (native_bindings[binding], value.clone())).collect();
+            assert_eq!(native.storage_buffers, expected_buffers);
+            assert_eq!(native.projection, reflected[index].projection);
             assert_eq!(native.inputs, reflected[index].inputs);
             assert_eq!(native.outputs, reflected[index].outputs);
             let mut samplers: Vec<_> = reflected[index]
@@ -453,8 +529,12 @@ vec4 wr_legacy_sample(vec2 uv) {
             let binding = native_bindings[binding];
             format!("TextureBinding {{ name: {name:?}, binding: {binding}, scalar: ScalarType::{scalar}, stages: {stages}, sampler_stages: {sampler_stages} }}")
         }).collect();
-        generated.push_str(&format!("ShaderArtifact {{ name: {name:?}, features: {features:?}, vertex: include_bytes!({:?}), fragment: include_bytes!({:?}), inputs: &[{}], textures: &[{}], projection_stages: {projection_stages}, digest: {} }},\n",
-            binaries[0].to_str().unwrap(), binaries[1].to_str().unwrap(), active_inputs.join(","), texture_entries.join(","), digest.finish()));
+        let buffer_entries: Vec<_> = active_buffers.iter().map(|(binding, (name, scalar, stages))| {
+            let binding = native_bindings[binding];
+            format!("StorageBinding {{ name: {name:?}, binding: {binding}, scalar: ScalarType::{scalar}, stages: {stages} }}")
+        }).collect();
+        generated.push_str(&format!("ShaderArtifact {{ name: {name:?}, features: {features:?}, buffer_tables: {buffer_tables}, vertex: include_bytes!({:?}), fragment: include_bytes!({:?}), inputs: &[{}], textures: &[{}], storage_buffers: &[{}], projection_stages: {projection_stages}, digest: {} }},\n",
+            binaries[0].to_str().unwrap(), binaries[1].to_str().unwrap(), active_inputs.join(","), texture_entries.join(","), buffer_entries.join(","), digest.finish()));
     }
     generated.push_str("];\n");
     build_presentation(out)?;
@@ -479,7 +559,7 @@ fn build_presentation(out: &Path) -> io::Result<()> {
         binaries.push(binary);
     }
     fs::write(out.join("hal_present.rs"), format!(
-        "pub static PRESENT: ShaderArtifact = ShaderArtifact {{ name: \"hal_present\", features: \"\", vertex: include_bytes!({:?}), fragment: include_bytes!({:?}), inputs: &[], textures: &[], projection_stages: 0, digest: {} }};\n",
+        "pub static PRESENT: ShaderArtifact = ShaderArtifact {{ name: \"hal_present\", features: \"\", buffer_tables: false, vertex: include_bytes!({:?}), fragment: include_bytes!({:?}), inputs: &[], textures: &[], storage_buffers: &[], projection_stages: 0, digest: {} }};\n",
         binaries[0].to_str().unwrap(), binaries[1].to_str().unwrap(), digest.finish()))
 }
 
@@ -499,6 +579,19 @@ fn build_native_conversion(out: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_table_fetches_leave_image_samplers_unchanged() {
+        let source = "texelFetch(sGpuBufferF, uv + delta, 0); texelFetchOffset(sPrimitiveHeadersI, uv, 0, ivec2(1, 0)); texelFetch(sColor0, uv, 0);";
+        let transformed = storage_fetches(source);
+        assert!(transformed.contains("wr_data_fetch_sGpuBufferF( uv + delta, 0)"));
+        assert!(transformed.contains("wr_data_offset_sPrimitiveHeadersI( uv, 0, ivec2(1, 0))"));
+        assert!(transformed.contains("texelFetch(sColor0, uv, 0)"));
+        let declaration = storage_declaration("sGpuBufferI", 7, "isampler2D");
+        assert!(declaration.contains("readonly buffer WrData_sGpuBufferI { ivec4 values[]; }"));
+        assert!(declaration.contains(&format!("position.x >= {}", crate::MAX_VERTEX_TEXTURE_WIDTH)));
+        assert!(declaration.contains("lod != 0") && declaration.contains("lessThan(position, ivec2(0))"));
+    }
 
     #[test]
     fn specializes_only_declared_sampler_arguments() {

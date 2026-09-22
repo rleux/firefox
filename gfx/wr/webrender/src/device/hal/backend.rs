@@ -150,6 +150,7 @@ mod tests {
             let collision = ShaderArtifact {
                 name: artifact.name, features: artifact.features, vertex: artifact.vertex,
                 fragment: artifact.fragment, inputs: artifact.inputs, textures: artifact.textures,
+                buffer_tables: artifact.buffer_tables, storage_buffers: artifact.storage_buffers,
                 projection_stages: artifact.projection_stages, digest: 0,
             };
             let module = cache.create_module::<hal::api::Vulkan>(&owner.open.device,

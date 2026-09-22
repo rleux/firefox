@@ -48,7 +48,7 @@ mod composite;
 mod present;
 mod present_history;
 
-const PIPELINE_ABI: u32 = 1;
+const PIPELINE_ABI: u32 = 2;
 
 #[cfg(all(test, wr_hal_vulkan, feature = "hal-translate"))]
 pub(super) fn shader_catalog_for_test() -> &'static [ShaderArtifact] { shaders::SHADERS }
@@ -201,6 +201,7 @@ struct PipelineKey {
     dual_source: bool,
     shader_input: ShaderInputMode,
     shader: Shader,
+    buffer_tables: bool,
     blend: u8,
     depth: u8,
     format: wgt::TextureFormat,
@@ -220,6 +221,8 @@ pub struct DrawStats {
     pub composite_tiles: usize,
     pub color_targets: usize,
     pub alpha_targets: usize,
+    pub data_table_uploads: usize,
+    pub data_table_copies: usize,
 }
 
 pub struct FrameOutput {
@@ -306,6 +309,33 @@ fn instance_layout(sizes: impl IntoIterator<Item = usize>, limit: usize) -> Resu
     Ok((ranges, buffers))
 }
 
+fn storage_table_size(bytes: usize) -> Option<usize> {
+    let row = MAX_VERTEX_TEXTURE_WIDTH.checked_mul(16)?;
+    bytes.div_ceil(row).max(1).checked_mul(row)
+}
+
+fn storage_tables_supported(limits: &wgt::Limits, flags: wgt::DownlevelFlags, sizes: impl IntoIterator<Item = usize>) -> bool {
+    let required = wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
+    let vertex = shaders::SHADERS.iter().filter(|artifact| artifact.buffer_tables)
+        .map(|artifact| artifact.storage_buffers.iter().filter(|binding| binding.stages & 1 != 0).count() as u32).max().unwrap_or(0);
+    let fragment = shaders::SHADERS.iter().filter(|artifact| artifact.buffer_tables)
+        .map(|artifact| artifact.storage_buffers.iter().filter(|binding| binding.stages & 2 != 0).count() as u32).max().unwrap_or(0);
+    vertex > 0 && flags.contains(required)
+        && vertex.max(fragment) <= limits.max_storage_buffers_per_shader_stage
+        && vertex <= limits.max_storage_buffers_in_vertex_stage
+        && fragment <= limits.max_storage_buffers_in_fragment_stage
+        && storage_table_sizes_supported(limits, sizes)
+}
+
+fn storage_table_sizes_supported(limits: &wgt::Limits, sizes: impl IntoIterator<Item = usize>) -> bool {
+    sizes.into_iter().all(|bytes| storage_table_size(bytes).map_or(false, |size| {
+        size <= isize::MAX as usize && size as u64 <= limits.max_storage_buffer_binding_size
+            && size.checked_next_power_of_two().map_or(false, |allocation| {
+                allocation <= isize::MAX as usize && allocation as u64 <= limits.max_buffer_size
+            })
+    }))
+}
+
 struct Pipeline<A: hal::Api> {
     raw: Owned<A, A::RenderPipeline>,
     layout: Owned<A, A::PipelineLayout>,
@@ -317,19 +347,21 @@ struct DescriptorKey {
     pipeline: PipelineKey,
     uniform: u64,
     textures: SmallVec<[(u64, u32, u32, wgt::TextureFormat, u8); 16]>,
+    buffers: SmallVec<[(u64, u64); 6]>,
 }
 
 struct Descriptor<A: hal::Api> {
     raw: Owned<A, A::BindGroup>,
     _uniform: Rc<Buffer<A>>,
     _textures: Vec<Rc<Texture<A>>>,
+    _buffers: Vec<Rc<Buffer<A>>>,
     _pipeline: Rc<Pipeline<A>>,
 }
 
 pub(crate) struct FrameRenderer<A: BackendApi> {
     shader_input: ShaderInputMode,
     shader_cache: RefCell<ShaderCache>,
-    shader_metadata: RefCell<HashMap<Shader, Rc<ShaderMetadata>>>,
+    shader_metadata: RefCell<HashMap<(Shader, bool), Rc<ShaderMetadata>>>,
     pub(crate) filtering: Filtering,
     #[cfg(test)]
     projection_override: Option<[f32; 16]>,
@@ -337,6 +369,10 @@ pub(crate) struct FrameRenderer<A: BackendApi> {
     textures: HashMap<CacheTextureId, Rc<Texture<A>>>,
     pipelines: HashMap<PipelineKey, Rc<Pipeline<A>>>,
     descriptors: RefCell<HashMap<DescriptorKey, Rc<Descriptor<A>>>>,
+    frame_descriptors: RefCell<HashMap<DescriptorKey, Rc<Descriptor<A>>>>,
+    data_buffers: HashMap<&'static str, Rc<Buffer<A>>>,
+    buffer_tables: bool,
+    allow_buffer_tables: bool,
     samplers: [Owned<A, A::Sampler>; 3],
     quad: Rc<Buffer<A>>,
     submissions: Rc<SubmissionQueue<A>>,
@@ -380,6 +416,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         self.external_images.clear();
         self.native_targets.clear();
         self.layer_targets.clear();
+        self.clear_frame_data();
         dispatch_releases(&self.releases);
     }
 
@@ -455,6 +492,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         let submissions = Rc::new(submissions);
         let releases = Rc::new(RefCell::new(Vec::new()));
         let external_device = ExternalImageDevice::for_renderer(&owner, &submissions, &releases);
+        let allow_buffer_tables = owner.info.backend == wgt::Backend::Vulkan
+            && std::env::var("WR_HAL_FORCE_DATA_TEXTURES").as_deref() != Ok("1")
+            && storage_tables_supported(&owner.capabilities.limits, owner.capabilities.downlevel.flags, std::iter::empty());
         Ok(Self {
             shader_input,
             shader_cache: RefCell::new(ShaderCache::default()),
@@ -466,6 +506,10 @@ impl<A: BackendApi> FrameRenderer<A> {
             textures: HashMap::new(),
             pipelines: HashMap::new(),
             descriptors: RefCell::new(HashMap::new()),
+            frame_descriptors: RefCell::new(HashMap::new()),
+            data_buffers: HashMap::new(),
+            buffer_tables: false,
+            allow_buffer_tables,
             samplers,
             quad,
             submissions,
@@ -545,6 +589,7 @@ impl<A: BackendApi> FrameRenderer<A> {
     pub fn trim_transient_resources(&mut self, uploads: bool) -> Result<()> {
         self.submissions.trim(uploads)?;
         self.descriptors.borrow_mut().clear();
+        self.clear_frame_data();
         self.depths.clear();
         self.texture_pool.clear();
         self.capture_pool.clear();
@@ -1340,13 +1385,43 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok(())
     }
 
-    fn data_texture<T: GpuData>(
+    fn clear_frame_data(&mut self) {
+        self.buffer_tables = false;
+        self.frame_descriptors.borrow_mut().clear();
+        self.data_buffers.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_buffer_tables_for_test(&mut self, enabled: bool) -> bool {
+        if enabled && (self.owner.info.backend != wgt::Backend::Vulkan
+            || !storage_tables_supported(&self.owner.capabilities.limits, self.owner.capabilities.downlevel.flags, std::iter::empty())) {
+            return false;
+        }
+        self.allow_buffer_tables = enabled;
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frame_data_cleared_for_test(&self) -> bool {
+        !self.buffer_tables && self.data_buffers.is_empty() && self.frame_descriptors.borrow().is_empty()
+    }
+
+    fn data_buffer(&self, source: &[u8]) -> Result<Rc<Buffer<A>>> {
+        let size = storage_table_size(source.len()).ok_or("HAL storage table size overflow")?;
+        let (_, buffer) = self.submissions.upload_recording_with(size, wgt::BufferUses::STORAGE_READ_ONLY, |destination| {
+            destination[..source.len()].copy_from_slice(source);
+            destination[source.len()..].fill(0);
+            Ok(())
+        })?;
+        Ok(buffer)
+    }
+
+    fn data_texture(
         &self,
         name: &'static str,
-        values: &[T],
+        source: &[u8],
         format: wgt::TextureFormat,
     ) -> Result<Rc<Texture<A>>> {
-        let source = bytes(values);
         let width = MAX_VERTEX_TEXTURE_WIDTH;
         let height = source.len().div_ceil(width * 16).max(1);
         let height_u32 = u32::try_from(height).map_err(|_| "HAL data texture height overflow")?;
@@ -1394,6 +1469,10 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     fn artifact(shader: Shader) -> &'static ShaderArtifact {
+        Self::artifact_for(shader, false)
+    }
+
+    fn artifact_for(shader: Shader, buffer_tables: bool) -> &'static ShaderArtifact {
         let (name, features) = match shader {
             Shader::Quad => ("ps_quad_textured", "TEXTURE_2D"),
             Shader::Composite => ("composite", "TEXTURE_2D"),
@@ -1403,7 +1482,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         };
         shaders::SHADERS
             .iter()
-            .find(|entry| entry.name == name && if matches!(shader, Shader::LegacyBrilinear(..)) {
+            .find(|entry| entry.buffer_tables == buffer_tables && entry.name == name && if matches!(shader, Shader::LegacyBrilinear(..)) {
                 (features.is_empty() && entry.features == "HAL_LEGACY_BRILINEAR")
                     || entry.features.strip_suffix(",HAL_LEGACY_BRILINEAR") == Some(features)
             } else { entry.features == features })
@@ -1426,11 +1505,15 @@ impl<A: BackendApi> FrameRenderer<A> {
     }
 
     fn shader_metadata(&self, shader: Shader) -> Result<Rc<ShaderMetadata>> {
-        if let Some(metadata) = self.shader_metadata.borrow().get(&shader) {
+        self.shader_metadata_for(shader, self.buffer_tables)
+    }
+
+    fn shader_metadata_for(&self, shader: Shader, buffer_tables: bool) -> Result<Rc<ShaderMetadata>> {
+        if let Some(metadata) = self.shader_metadata.borrow().get(&(shader, buffer_tables)) {
             return Ok(metadata.clone());
         }
         use std::hash::{Hash, Hasher};
-        let artifact = Self::artifact(shader);
+        let artifact = Self::artifact_for(shader, buffer_tables);
         let layouts = vertex_layouts(Self::descriptor(shader), artifact)?;
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         layouts.hash(&mut hash);
@@ -1441,7 +1524,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             stride: layouts.2,
             layout_digest: hash.finish(),
         });
-        self.shader_metadata.borrow_mut().insert(shader, metadata.clone());
+        self.shader_metadata.borrow_mut().insert((shader, buffer_tables), metadata.clone());
         Ok(metadata)
     }
 
@@ -1473,6 +1556,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             dual_source: self.owner.supports_dual_source_blending(),
             shader_input: self.shader_input,
             shader,
+            buffer_tables: metadata.artifact.buffer_tables,
             blend,
             depth,
             format,
@@ -1537,6 +1621,19 @@ impl<A: BackendApi> FrameRenderer<A> {
                 });
             }
         }
+        for binding in artifact.storage_buffers {
+            entries.push(wgt::BindGroupLayoutEntry {
+                binding: binding.binding,
+                visibility: wgt::ShaderStages::from_bits_retain(binding.stages),
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: std::num::NonZeroU64::new(16),
+                },
+                count: None,
+            });
+        }
+        entries.sort_by_key(|entry| entry.binding);
         let bindings = Owned::new(
             owner,
             unsafe {
@@ -1575,8 +1672,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         if self.pipelines.len() >= 128 {
             self.pipelines.clear();
             self.descriptors.borrow_mut().clear();
+            self.frame_descriptors.borrow_mut().clear();
         }
-        let metadata = self.shader_metadata(key.shader)?;
+        let metadata = self.shader_metadata_for(key.shader, key.buffer_tables)?;
         let artifact = metadata.artifact;
         if artifact.features.contains("DUAL_SOURCE_BLENDING")
             && !self
@@ -1892,8 +1990,13 @@ impl<A: BackendApi> FrameRenderer<A> {
                 pipeline: key,
                 uniform: uniform.allocation_id,
                 textures: identities,
+                buffers: artifact.storage_buffers.iter().map(|binding| {
+                    self.data_buffers.get(binding.name).map(|buffer| (buffer.allocation_id, buffer.binding_size()))
+                        .ok_or_else(|| format!("Missing HAL storage table {}", binding.name))
+                }).collect::<Result<_>>()?,
             };
-            let cached = self.descriptors.borrow().get(&descriptor_key).cloned();
+            let cache = if artifact.storage_buffers.is_empty() { &self.descriptors } else { &self.frame_descriptors };
+            let cached = cache.borrow().get(&descriptor_key).cloned();
             let group = if let Some(group) = cached {
                 group
             } else {
@@ -1901,8 +2004,17 @@ impl<A: BackendApi> FrameRenderer<A> {
                 let mut textures = Vec::new();
                 let mut texture_owners = Vec::new();
                 let mut samplers = Vec::new();
+                let mut buffers = Vec::new();
+                let mut buffer_owners = Vec::new();
                 if artifact.projection_stages != 0 {
                     entries.push(hal::BindGroupEntry { binding: 0, resource_index: 0, count: 1 });
+                    buffers.push(uniform.binding());
+                }
+                for binding in artifact.storage_buffers {
+                    let buffer = &self.data_buffers[binding.name];
+                    entries.push(hal::BindGroupEntry { binding: binding.binding, resource_index: buffers.len() as u32, count: 1 });
+                    buffers.push(buffer.binding());
+                    buffer_owners.push(buffer.clone());
                 }
                 for (binding, &(texture, filter)) in artifact.textures.iter().zip(&resolved) {
                     entries.push(hal::BindGroupEntry {
@@ -1917,6 +2029,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                         samplers.push(&*self.samplers[filter]);
                     }
                 }
+                entries.sort_by_key(|entry| entry.binding);
                 let raw = unsafe {
                     self.owner
                         .open
@@ -1924,7 +2037,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                         .create_bind_group(&hal::BindGroupDescriptor {
                             label: Some("WR draw"),
                             layout: &pipeline.bindings,
-                            buffers: &[uniform.binding()],
+                            buffers: &buffers,
                             samplers: &samplers,
                             textures: &textures,
                             entries: &entries,
@@ -1940,10 +2053,11 @@ impl<A: BackendApi> FrameRenderer<A> {
                     raw: Owned::new(&self.owner, raw, A::Device::destroy_bind_group),
                     _uniform: uniform.clone(),
                     _textures: texture_owners,
+                    _buffers: buffer_owners,
                     _pipeline: pipeline.clone(),
                 });
                 if cacheable {
-                    let mut cache = self.descriptors.borrow_mut();
+                    let mut cache = cache.borrow_mut();
                     if cache.len() >= 256 {
                         cache.clear();
                     }
@@ -2578,12 +2692,14 @@ impl<A: BackendApi> FrameRenderer<A> {
         composite: bool,
         retained: Option<(&RenderedFrame<A>, DeviceIntRect)>,
     ) -> Result<RenderedFrame<A>> {
+        self.clear_frame_data();
         if self.is_failed() {
             return Err("HAL renderer must be recreated after an execution failure".into());
         }
         self.poll()?;
         self.failed.set(true);
         let result = self.render_inner(frame, updates, clear, composite, retained);
+        self.clear_frame_data();
         if result.is_err() { self.abort(); }
         self.external_images.clear();
         self.native_targets.clear();
@@ -2619,60 +2735,36 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         self.resolve_external_images(frame)?;
         let query = self.queries.borrow_mut().begin(&self.submissions)?;
-        let mut data = HashMap::from([
-            (
-                "sPrimitiveHeadersF",
-                self.data_texture(
-                    "sPrimitiveHeadersF",
-                    &frame.prim_headers.headers_float,
-                    wgt::TextureFormat::Rgba32Float,
-                )?,
-            ),
-            (
-                "sPrimitiveHeadersI",
-                self.data_texture(
-                    "sPrimitiveHeadersI",
-                    &frame.prim_headers.headers_int,
-                    wgt::TextureFormat::Rgba32Sint,
-                )?,
-            ),
-            (
-                "sGpuBufferF",
-                self.data_texture(
-                    "sGpuBufferF",
-                    &frame.gpu_buffer_f.data,
-                    wgt::TextureFormat::Rgba32Float,
-                )?,
-            ),
-            (
-                "sGpuBufferI",
-                self.data_texture(
-                    "sGpuBufferI",
-                    &frame.gpu_buffer_i.data,
-                    wgt::TextureFormat::Rgba32Sint,
-                )?,
-            ),
-            (
-                "sTransformPalette",
-                self.data_texture(
-                    "sTransformPalette",
-                    &frame.transform_palette,
-                    wgt::TextureFormat::Rgba32Float,
-                )?,
-            ),
-            (
-                "sRenderTasks",
-                self.data_texture(
-                    "sRenderTasks",
-                    &frame.render_tasks.task_data,
-                    wgt::TextureFormat::Rgba32Float,
-                )?,
-            ),
-        ]);
+        let tables = [
+            ("sPrimitiveHeadersF", bytes(&frame.prim_headers.headers_float), wgt::TextureFormat::Rgba32Float),
+            ("sPrimitiveHeadersI", bytes(&frame.prim_headers.headers_int), wgt::TextureFormat::Rgba32Sint),
+            ("sGpuBufferF", bytes(&frame.gpu_buffer_f.data), wgt::TextureFormat::Rgba32Float),
+            ("sGpuBufferI", bytes(&frame.gpu_buffer_i.data), wgt::TextureFormat::Rgba32Sint),
+            ("sTransformPalette", bytes(&frame.transform_palette), wgt::TextureFormat::Rgba32Float),
+            ("sRenderTasks", bytes(&frame.render_tasks.task_data), wgt::TextureFormat::Rgba32Float),
+        ];
+        self.buffer_tables = self.allow_buffer_tables
+            && storage_table_sizes_supported(&self.owner.capabilities.limits, tables.iter().map(|(_, data, _)| data.len()));
+        let mut data = HashMap::new();
+        let mut stats = DrawStats::default();
+        for (name, source, format) in tables {
+            stats.data_table_uploads += 1;
+            if self.buffer_tables {
+                let buffer = self.data_buffer(source)?;
+                self.data_buffers.insert(name, buffer);
+            } else {
+                data.insert(name, self.data_texture(name, source, format)?);
+                stats.data_table_copies += 1;
+            }
+        }
+        if self.buffer_tables {
+            let mut commands = self.submissions.recording()?;
+            Buffer::transition_many(&mut commands, self.data_buffers.values()
+                .map(|buffer| (buffer, wgt::BufferUses::STORAGE_READ_ONLY)));
+        }
         if let Some(dither) = &self.dither {
             data.insert("sDither", dither.clone());
         }
-        let mut stats = DrawStats::default();
         for pass in &frame.passes {
             if !frame.has_been_rendered {
                 for target in pass.texture_cache.values() {
@@ -3133,6 +3225,29 @@ mod shader_tests {
     use super::*;
 
     #[test]
+    fn storage_table_capability_and_size_fallback() {
+        let mut limits = wgt::Limits::default();
+        let flags = wgt::DownlevelFlags::VERTEX_STORAGE | wgt::DownlevelFlags::FRAGMENT_STORAGE;
+        let row = MAX_VERTEX_TEXTURE_WIDTH * 16;
+        assert!(storage_tables_supported(&limits, flags, [0, 16, row, row + 16]));
+        assert!(!storage_tables_supported(&limits, wgt::DownlevelFlags::VERTEX_STORAGE, [16]));
+        limits.max_storage_buffers_in_vertex_stage = 0;
+        assert!(!storage_tables_supported(&limits, flags, [16]));
+        limits = wgt::Limits::default();
+        limits.max_storage_buffers_in_fragment_stage = 0;
+        assert!(!storage_tables_supported(&limits, flags, [16]));
+        limits = wgt::Limits::default();
+        limits.max_storage_buffer_binding_size = row as u64;
+        assert!(storage_tables_supported(&limits, flags, [0, row]));
+        assert!(!storage_tables_supported(&limits, flags, [row + 1]));
+        limits.max_buffer_size = row as u64 - 1;
+        assert!(!storage_tables_supported(&limits, flags, [16]));
+        assert_eq!(storage_table_size(0), Some(row));
+        assert_eq!(storage_table_size(row + 1), Some(row * 2));
+        assert!(storage_table_size(usize::MAX).is_none());
+    }
+
+    #[test]
     fn instance_slabs_bound_chunks_and_align_ranges() {
         let (ranges, sizes) = instance_layout([0, 5, 12, 80, 4], 32).unwrap();
         assert_eq!(sizes, [24, 80, 4]);
@@ -3244,13 +3359,19 @@ mod shader_tests {
             {
                 continue;
             }
+            if artifact.buffer_tables && !storage_tables_supported(&renderer.owner.capabilities.limits,
+                renderer.owner.capabilities.downlevel.flags, std::iter::empty()) {
+                continue;
+            }
             let shader = Shader::Other(artifact.name, artifact.features);
             let format = if artifact.name == "ps_quad_mask" || artifact.features == "ALPHA_TARGET" {
                 wgt::TextureFormat::R8Unorm
             } else {
                 wgt::TextureFormat::Rgba8Unorm
             };
-            let key = renderer.key(shader, 0, 0, format).unwrap();
+            let metadata = renderer.shader_metadata_for(shader, artifact.buffer_tables).unwrap();
+            assert!(std::ptr::eq(metadata.artifact, artifact));
+            let key = renderer.key_with_metadata(shader, &metadata, 0, 0, format);
             renderer.pipeline(key).unwrap();
             count += 1;
         }

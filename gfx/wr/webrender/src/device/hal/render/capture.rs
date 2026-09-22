@@ -128,6 +128,8 @@ impl<A: BackendApi> FrameRenderer<A> {
         for artifact in shaders::SHADERS.iter().chain(shaders::presentation().ok()) {
             artifact.name.hash(&mut shaders);
             artifact.features.hash(&mut shaders);
+            artifact.buffer_tables.hash(&mut shaders);
+            artifact.digest.hash(&mut shaders);
             artifact.vertex.hash(&mut shaders);
             artifact.fragment.hash(&mut shaders);
         }
