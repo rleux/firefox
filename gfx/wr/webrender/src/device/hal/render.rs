@@ -279,6 +279,33 @@ struct Draw<'a, A: hal::Api> {
     scissor: DeviceIntRect,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct InstanceRange {
+    buffer: usize,
+    offset: usize,
+    size: usize,
+}
+
+fn instance_layout(sizes: impl IntoIterator<Item = usize>, limit: usize) -> Result<(Vec<InstanceRange>, Vec<usize>)> {
+    let mut ranges = Vec::new();
+    let mut buffers: Vec<usize> = Vec::new();
+    for size in sizes {
+        let length = size.max(4);
+        let offset = buffers.last().copied().unwrap_or(0).checked_add(3)
+            .ok_or("HAL instance offset overflow")? & !3;
+        let end = offset.checked_add(length).ok_or("HAL instance size overflow")?;
+        let offset = if buffers.is_empty() || end > limit {
+            buffers.push(length);
+            0
+        } else {
+            *buffers.last_mut().unwrap() = end;
+            offset
+        };
+        ranges.push(InstanceRange { buffer: buffers.len() - 1, offset, size });
+    }
+    Ok((ranges, buffers))
+}
+
 struct Pipeline<A: hal::Api> {
     raw: Owned<A, A::RenderPipeline>,
     layout: Owned<A, A::PipelineLayout>,
@@ -1678,6 +1705,37 @@ impl<A: BackendApi> FrameRenderer<A> {
         Ok(pipeline)
     }
 
+    fn upload_instances(
+        &self,
+        commands: &super::submission::Submission<A>,
+        draws: &[Draw<'_, A>],
+    ) -> Result<(Vec<Rc<Buffer<A>>>, Vec<InstanceRange>)> {
+        let sizes = draws.iter().map(|draw| packed_instance_size(draw.shader, draw.instances.bytes()))
+            .collect::<Result<Vec<_>>>()?;
+        let limit = self.owner.capabilities.limits.max_buffer_size.min(1024 * 1024) as usize;
+        let (ranges, sizes) = instance_layout(sizes, limit)?;
+        let mut buffers = Vec::with_capacity(sizes.len());
+        let mut first = 0;
+        for (index, size) in sizes.into_iter().enumerate() {
+            let mut last = first;
+            while last < ranges.len() && ranges[last].buffer == index { last += 1; }
+            let buffer = self.submissions.upload_in_recording(commands, size, wgt::BufferUses::VERTEX, |destination| {
+                let mut end = 0;
+                for (draw, range) in draws[first..last].iter().zip(&ranges[first..last]) {
+                    destination[end..range.offset].fill(0);
+                    if range.size == 0 { destination[range.offset..range.offset + 4].fill(0); }
+                    pack_instances(draw.shader, draw.instances.bytes(),
+                        &mut destination[range.offset..range.offset + range.size]);
+                    end = range.offset + range.size.max(4);
+                }
+                Ok(())
+            })?;
+            buffers.push(buffer);
+            first = last;
+        }
+        Ok((buffers, ranges))
+    }
+
     fn draw_pass(
         &mut self,
         target: &Rc<Texture<A>>,
@@ -1770,9 +1828,10 @@ impl<A: BackendApi> FrameRenderer<A> {
         };
         let submissions = self.submissions.clone();
         let mut commands = submissions.recording()?;
+        let (instance_buffers, instance_ranges) = self.upload_instances(&commands, draws)?;
         let mut resources = Vec::new();
         let mut sampled = Vec::new();
-        for draw in draws {
+        for (draw, instance_range) in draws.iter().zip(instance_ranges) {
             let depth_mode = if has_depth && draw.depth == 0 {
                 3
             } else {
@@ -1800,13 +1859,6 @@ impl<A: BackendApi> FrameRenderer<A> {
                 target.format,
             );
             let pipeline = self.pipeline(key)?;
-            let input = draw.instances.bytes();
-            let buffer = submissions.upload_in_recording(
-                &commands, packed_instance_size(shader, input)?, wgt::BufferUses::VERTEX, |destination| {
-                    pack_instances(shader, input, destination);
-                    Ok(())
-                },
-            )?;
             let artifact = metadata.artifact;
             let mut identities = SmallVec::new();
             let mut resolved: SmallVec<[(&Rc<Texture<A>>, usize); 16]> = SmallVec::new();
@@ -1899,7 +1951,7 @@ impl<A: BackendApi> FrameRenderer<A> {
                 }
                 group
             };
-            resources.push((pipeline, buffer, group));
+            resources.push((pipeline, instance_range, group));
         }
         let initialized = target.initialized() && load_clear.is_none();
         let clear = load_clear.unwrap_or(ColorF::TRANSPARENT);
@@ -1927,11 +1979,10 @@ impl<A: BackendApi> FrameRenderer<A> {
             }
             texture.transition(&mut commands, wgt::TextureUses::RESOURCE);
         }
-        self.quad.transition(&mut commands, wgt::BufferUses::VERTEX);
-        uniform.transition(&mut commands, wgt::BufferUses::UNIFORM);
-        for (_, buffer, _) in &resources {
-            buffer.transition(&mut commands, wgt::BufferUses::VERTEX);
-        }
+        Buffer::transition_many(&mut commands,
+            std::iter::once((&self.quad, wgt::BufferUses::VERTEX))
+                .chain(std::iter::once((&uniform, wgt::BufferUses::UNIFORM)))
+                .chain(instance_buffers.iter().map(|buffer| (buffer, wgt::BufferUses::VERTEX))));
         target.transition(&mut commands, wgt::TextureUses::COLOR_TARGET);
         if let Some(depth) = &depth {
             depth.transition(&mut commands, wgt::TextureUses::DEPTH_WRITE);
@@ -2001,7 +2052,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             let mut last_scissor = None;
             let mut last_pipeline: Option<&Rc<Pipeline<A>>> = None;
             let mut last_group: Option<&Rc<Descriptor<A>>> = None;
-            for (draw, (pipeline, buffer, group)) in draws.iter().zip(&resources) {
+            for (draw, (pipeline, instance_range, group)) in draws.iter().zip(&resources) {
                 let full = full_rect;
                 let Some(rect) = draw.scissor.intersection(&full) else {
                     continue;
@@ -2024,7 +2075,8 @@ impl<A: BackendApi> FrameRenderer<A> {
                     commands.encoder().set_bind_group(&pipeline.layout, 0, &group.raw, &[]);
                     last_group = Some(group);
                 }
-                commands.encoder().set_vertex_buffer(1, buffer.binding());
+                commands.encoder().set_vertex_buffer(1, instance_buffers[instance_range.buffer]
+                    .vertex_binding(instance_range.offset as u64, instance_range.size.max(4) as u64)?);
                 commands.encoder().draw(0, 4, 0, draw.count);
                 stats.draw_calls += 1;
                 stats.wr_draw_calls += usize::from(draw.count_in_stats);
@@ -3081,6 +3133,21 @@ mod shader_tests {
     use super::*;
 
     #[test]
+    fn instance_slabs_bound_chunks_and_align_ranges() {
+        let (ranges, sizes) = instance_layout([0, 5, 12, 80, 4], 32).unwrap();
+        assert_eq!(sizes, [24, 80, 4]);
+        assert_eq!(ranges, [
+            InstanceRange { buffer: 0, offset: 0, size: 0 },
+            InstanceRange { buffer: 0, offset: 4, size: 5 },
+            InstanceRange { buffer: 0, offset: 12, size: 12 },
+            InstanceRange { buffer: 1, offset: 0, size: 80 },
+            InstanceRange { buffer: 2, offset: 0, size: 4 },
+        ]);
+        assert!(instance_layout([usize::MAX, 1], 32).is_err());
+        assert!(instance_layout([], 32).unwrap().0.is_empty());
+    }
+
+    #[test]
     fn staged_quad_instances_preserve_aa_join_order() {
         for part in [0u32, 1, 2, 3] {
             for edges in [0u32, 2, 8, 10] {
@@ -3332,6 +3399,23 @@ mod shader_tests {
         }
         assert_eq!(results[0].0, results[1].0);
         assert!(results[1].1 < results[0].1);
+    }
+
+    #[test]
+    #[ignore = "Requires Vulkan"]
+    fn shared_instance_ranges_preserve_draw_pixels() {
+        let owner = create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap();
+        let mut renderer = FrameRenderer::new(owner).unwrap();
+        let target = Texture::new(&renderer.owner, 4, 4, wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Nearest, true).unwrap();
+        let left = DeviceIntRect::from_size(DeviceIntSize::new(2, 4));
+        let right = left.translate(DeviceIntVector2D::new(2, 0));
+        let draws = [renderer.clear(left, ColorF::new(1.0, 0.0, 0.0, 1.0)),
+            renderer.clear(right, ColorF::new(0.0, 0.0, 1.0, 1.0))];
+        renderer.draw_pass(&target, &draws, &HashMap::new(), &mut DrawStats::default()).unwrap();
+        for (index, pixel) in pixels(&renderer, &target).chunks_exact(4).enumerate() {
+            assert_eq!(pixel, if index % 4 < 2 { &[255, 0, 0, 255] } else { &[0, 0, 255, 255] });
+        }
     }
 
     #[test]
