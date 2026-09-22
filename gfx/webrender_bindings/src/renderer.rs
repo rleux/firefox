@@ -58,6 +58,7 @@ pub struct VulkanRenderer {
     next_capture: usize,
     frames: std::collections::VecDeque<PendingVulkanFrame>,
     completed_frame: u64,
+    present_requested: bool,
     max_texture_size: i32,
     notifier: Box<dyn RenderNotifier>,
 }
@@ -175,6 +176,7 @@ impl Renderer {
                 next_capture: 1,
                 frames: Default::default(),
                 completed_frame: 1,
+                present_requested: false,
                 max_texture_size,
                 notifier: retry_notifier,
             }),
@@ -514,24 +516,15 @@ impl Renderer {
             return Err("Not a Vulkan renderer".into());
         };
         let result = (|| {
+            if r.present_requested || r.renderer.has_acquired_surface() {
+                return Err("A Vulkan frame is already begun".into());
+            }
             r.renderer.poll()?;
             if r.renderer.surface_info().map(|s| s.size) != Some([width, height]) {
                 r.renderer.resize_surface([width, height])?;
             }
-            use webrender::hal::PresentationStatus;
-            for _ in 0..2 {
-                match r.renderer.acquire_surface()? {
-                    PresentationStatus::Acquired => return Ok(true),
-                    PresentationStatus::Outdated | PresentationStatus::Lost => r.renderer.force_redraw(),
-                    PresentationStatus::Timeout => {
-                        r.notifier.wake_up(true);
-                        return Ok(false);
-                    },
-                    _ => return Ok(false),
-                }
-            }
-            r.notifier.wake_up(true);
-            Ok(false)
+            r.present_requested = width != 0 && height != 0;
+            Ok(r.present_requested)
         })();
         result.map_err(|e: String| {
             r.error = Some(e.clone());
@@ -544,6 +537,7 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
+        let present_requested = std::mem::take(&mut r.present_requested);
         let result = (|| {
             r.poll_frames()?;
             if r.frames.len() >= 3 {
@@ -553,7 +547,7 @@ impl Renderer {
                     r.poll_frames()?;
                 }
             }
-            if r.renderer.has_acquired_surface() {
+            if present_requested {
                 if r.renderer.has_presentable_output() {
                     let status = r.renderer.present()?;
                     if !matches!(
@@ -563,7 +557,7 @@ impl Renderer {
                         r.renderer.force_redraw();
                         r.notifier.wake_up(true);
                     }
-                } else {
+                } else if r.renderer.has_acquired_surface() {
                     r.renderer.discard_surface()?;
                 }
             }
@@ -613,6 +607,7 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
+        r.present_requested = false;
         r.renderer.discard_surface()
     }
 
@@ -621,6 +616,7 @@ impl Renderer {
         let Self::Vulkan(r) = self else {
             return Err("Not a Vulkan renderer".into());
         };
+        r.present_requested = false;
         r.renderer.discard_surface()?;
         r.renderer.resize_surface([0, 0])
     }
