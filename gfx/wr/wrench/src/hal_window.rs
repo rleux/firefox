@@ -11,6 +11,8 @@ use webrender::render_api::{CaptureBits, ClearCache, DebugCommand, Transaction};
 use winit::{application::ApplicationHandler, dpi::PhysicalSize, event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy}, keyboard::{Key, NamedKey}, window::{Window, WindowId}};
 
+mod benchmark;
+
 #[derive(Clone)]
 struct Wake { window: WindowId, generation: u64, composite: bool }
 
@@ -47,6 +49,7 @@ struct Pane {
     cursor: WorldPoint,
     screenshots: Vec<Screenshot>,
     gpu_timing: bool,
+    benchmark: Option<benchmark::Benchmark>,
 }
 
 impl Pane {
@@ -119,31 +122,60 @@ impl Pane {
             self.pending_frame = true;
         }
         if self.redraw && !self.pending_frame && self.wrench.renderer.has_frame() && Instant::now() >= self.retry_at {
+            let early = self.benchmark.as_ref().map_or(false, |benchmark| benchmark.early);
+            let mut acquire_ns = 0;
+            if early && self.present {
+                let start = Instant::now();
+                let status = self.wrench.renderer.acquire_surface()?;
+                acquire_ns = start.elapsed().as_nanos();
+                if status != PresentationStatus::Acquired {
+                    return Err(format!("Window acquisition benchmark failed: {status:?}"));
+                }
+            }
+            let render_start = self.benchmark.as_ref().map(|_| Instant::now());
             let rendered = if limit.is_some() || no_block {
                 self.wrench.renderer.render()?;
                 true
             } else {
                 matches!(self.wrench.renderer.render_if_needed()?, RenderOutcome::Rendered(_))
             };
+            let render_ns = render_start.map_or(0, |start| start.elapsed().as_nanos());
             if !self.present || (!rendered && !self.expose) || !self.wrench.renderer.has_presentable_output() {
+                if self.benchmark.is_some() { return Err("Window benchmark requires presented frames".into()); }
                 self.expose = false;
                 self.redraw = false;
                 self.advance(limit, no_block, watch, true);
                 return Ok(false);
             }
-            let status = self.wrench.renderer.acquire_surface()?;
+            let status = if early {
+                PresentationStatus::Acquired
+            } else {
+                let start = self.benchmark.as_ref().map(|_| Instant::now());
+                let status = self.wrench.renderer.acquire_surface()?;
+                acquire_ns = start.map_or(0, |start| start.elapsed().as_nanos());
+                status
+            };
+            let present_start = self.benchmark.as_ref().map(|_| Instant::now());
             let status = if status == PresentationStatus::Acquired {
                 self.window.pre_present_notify();
                 self.wrench.renderer.present()?
             } else { status };
+            let present_ns = present_start.map_or(0, |start| start.elapsed().as_nanos());
             if let PresentationStatus::Presented { .. } = status {
                 self.redraw = false;
                 self.expose = false;
                 self.frames += 1;
                 if self.frames == 1 || verbose { eprintln!("HAL WINDOW presented number={} frame={}", self.number, self.frames); }
-                if limit.map_or(false, |limit| self.frames >= limit) { return Ok(true); }
+                if let Some(benchmark) = &mut self.benchmark {
+                    benchmark.record(self.frames, render_ns, acquire_ns, present_ns);
+                }
+                if limit.map_or(false, |limit| self.frames >= limit) {
+                    if let Some(benchmark) = &self.benchmark { benchmark.finish(self)?; }
+                    return Ok(true);
+                }
                 self.advance(limit, no_block, watch, false);
             } else {
+                if self.benchmark.is_some() { return Err(format!("Window benchmark present failed: {status:?}")); }
                 self.retry_at = Instant::now() + Duration::from_millis(50);
             }
         }
@@ -221,6 +253,7 @@ impl App<'_> {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
         if cfg!(target_os = "android") && !self.panes.is_empty() { return Err("Android supports one activity window".into()); }
         if self.panes.len() >= 16 { return Err("At most 16 HAL windows are supported".into()); }
+        let benchmark = benchmark::Benchmark::new(self.limit, self.initial_windows)?;
         let number = self.next_number;
         self.next_number += 1;
         let window = Rc::new(event_loop.create_window(Window::default_attributes().with_title(format!("Wrench {:?} {number}", crate::hal::selected_backend(self.args)?))
@@ -255,7 +288,7 @@ impl App<'_> {
         self.panes.insert(window.id(), Pane { window, wrench, thing, number, size, scale,
             pending_size: Some(initial_size), pending_scale: None,
             occluded: false, minimized: false, suspended: false, needs_update: true, do_frame: false, pending_frame: true,
-            redraw: false, expose: false, present: true, looping: false, frames: 0, retry_at: Instant::now(), cursor: WorldPoint::zero(), screenshots: Vec::new(), gpu_timing: false });
+            redraw: false, expose: false, present: true, looping: false, frames: 0, retry_at: Instant::now(), cursor: WorldPoint::zero(), screenshots: Vec::new(), gpu_timing: false, benchmark });
         Ok(())
     }
 
