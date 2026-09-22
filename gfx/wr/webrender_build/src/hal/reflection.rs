@@ -5,6 +5,9 @@
 use std::collections::BTreeMap;
 use std::convert::TryInto;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn remap_bindings(bytes: &[u8], bindings: &BTreeMap<u32, u32>) -> Vec<u8> {
     assert_eq!(bytes.len() % 4, 0);
     let mut words: Vec<_> = bytes
@@ -42,6 +45,7 @@ pub(super) struct Reflection {
     pub inputs: BTreeMap<String, Interface>,
     pub outputs: BTreeMap<String, Interface>,
     pub textures: BTreeMap<u32, (String, &'static str)>,
+    pub storage_buffers: BTreeMap<u32, (String, &'static str)>,
     pub samplers: Vec<u32>,
     pub projection: bool,
 }
@@ -151,6 +155,22 @@ pub(super) fn reflect(source: &str) -> Reflection {
             let binding = binding.parse::<u32>().unwrap();
             let (kind, args) = &types[ty];
             match *kind {
+                "Struct" if storage == "StorageBuffer" => {
+                    assert_eq!(args.len(), 1);
+                    assert!(decorations[ty].contains_key("Block"));
+                    let layout = &members[&(ty, "0")];
+                    assert_eq!(layout.get("Offset"), Some(&"0"));
+                    assert!(layout.contains_key("NonWritable") || decoration.contains_key("NonWritable"));
+                    let (kind, element) = &types[args[0]];
+                    assert_eq!((*kind, element.len()), ("RuntimeArray", 1));
+                    assert_eq!(decorations[args[0]].get("ArrayStride"), Some(&"16"));
+                    let (scalar, components, locations) = shape(element[0], &types, &constants);
+                    assert_eq!((components, locations), (4, 1));
+                    assert!(matches!(scalar, "Float" | "Sint"));
+                    result.storage_buffers.insert(binding, (
+                        names[id].strip_prefix("b_").unwrap().to_owned(), scalar,
+                    ));
+                }
                 "Struct" => {
                     assert_eq!((binding, storage, args.len()), (0, "Uniform", 1));
                     assert!(decorations[ty].contains_key("Block"));

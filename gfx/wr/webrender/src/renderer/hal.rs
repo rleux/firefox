@@ -1379,6 +1379,76 @@ mod tests {
         api.delete_document(document);
     }
 
+    #[test]
+    #[ignore = "Requires Vulkan and validation"]
+    fn storage_tables_match_texture_pixels_and_retire() {
+        use api::units::*;
+        use api::*;
+        use crate::render_api::Transaction;
+        let (mut renderer, sender) = create_vulkan_renderer(&Options { validation: true, ..Default::default() },
+            WebRenderOptions::default(), Box::new(ShutdownNotice(Arc::new(AtomicBool::new(false))))).unwrap();
+        let mut api = sender.create_api();
+        let count = webrender_build::MAX_VERTEX_TEXTURE_WIDTH + 32;
+        let height = count.div_ceil(32) as i32 * 2;
+        let document = api.add_document(DeviceIntSize::new(64, height));
+        let pipeline = PipelineId(0, 0);
+        let info = CommonItemProperties {
+            clip_rect: LayoutRect::from_size(LayoutSize::new(64.0, height as f32)),
+            clip_chain_id: ClipChainId::INVALID,
+            spatial_id: SpatialId::root_scroll_node(pipeline),
+            flags: PrimitiveFlags::default(),
+        };
+        let mut warm_buffer_bytes = None;
+        let mut serial = 0;
+        for phase in 0..4 {
+            let mut expected = None;
+            let mut builder = DisplayListBuilder::new(pipeline);
+            builder.begin(60.0);
+            for index in 0..count {
+                let rect = LayoutRect::from_origin_and_size(
+                    LayoutPoint::new((index % 32 * 2) as f32, (index / 32 * 2) as f32),
+                    LayoutSize::new(2.0, 2.0),
+                );
+                builder.push_rect(&info, rect, ColorF::new(
+                    ((index + phase) % 251) as f32 / 250.0,
+                    ((index + phase) % 233) as f32 / 232.0, 0.3, 0.75,
+                ));
+            }
+            serial += 1;
+            let mut transaction = Transaction::new();
+            transaction.set_root_pipeline(pipeline);
+            transaction.set_display_list(Epoch(serial), api.get_namespace_id(), builder.end());
+            transaction.generate_frame(u64::from(serial), true, false, RenderReasons::TESTING);
+            api.send_transaction(document, transaction);
+            renderer.prepare_frame(document).unwrap();
+            assert!(renderer.core.document.as_ref().unwrap().frame.gpu_buffer_f.data.len()
+                > webrender_build::MAX_VERTEX_TEXTURE_WIDTH);
+            for use_buffers in [true, false] {
+                assert!(renderer.core.gpu.set_buffer_tables_for_test(use_buffers));
+                renderer.core.document.as_mut().unwrap().frame.has_been_rendered = false;
+                renderer.core.force_redraw = true;
+                let output = renderer.render_frame().unwrap();
+                assert!(output.stats.draw_calls > 0);
+                assert_eq!(output.stats.data_table_uploads, 6);
+                assert_eq!(output.stats.data_table_copies, if use_buffers { 0 } else { 6 });
+                assert!(renderer.core.gpu.frame_data_cleared_for_test());
+                if let Some(expected) = &expected {
+                    assert_eq!(&output.pixels, expected);
+                } else {
+                    assert!(output.pixels.chunks_exact(4).any(|pixel| pixel[0] != pixel[1]));
+                    expected = Some(output.pixels);
+                }
+                renderer.poll().unwrap();
+                let bytes = renderer.memory_stats().buffer_bytes;
+                if let Some(warm) = warm_buffer_bytes {
+                    assert!(bytes <= warm + 65536, "Frame buffers did not retire: {} > {}", bytes, warm);
+                }
+                if serial == 2 && !use_buffers { warm_buffer_bytes = Some(bytes); }
+            }
+        }
+        api.delete_document(document);
+    }
+
     struct Checkpoints(Arc<Mutex<Vec<Checkpoint>>>);
     impl api::NotificationHandler for Checkpoints {
         fn notify(&self, checkpoint: Checkpoint) {
@@ -1452,6 +1522,7 @@ mod tests {
                 if fault == Some(FailurePoint::Record) { assert_eq!(releases.borrow().last(), Some(&ExternalImageRelease::Unused)); }
             }
             assert!(renderer.is_failed());
+            assert!(renderer.core.gpu.frame_data_cleared_for_test());
             assert!(renderer.poll().is_err());
             assert!(renderer.wait_readback(second).is_err());
             assert!(renderer.core.readbacks.borrow().is_empty());

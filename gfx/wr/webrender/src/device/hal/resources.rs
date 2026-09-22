@@ -222,6 +222,8 @@ impl<A: hal::Api> Buffer<A> {
             std::num::NonZeroU64::new(self.used_size.get()),
         )
     }
+
+    pub fn binding_size(&self) -> u64 { self.used_size.get() }
 }
 
 impl<A: hal::Api> Drop for Buffer<A> {
