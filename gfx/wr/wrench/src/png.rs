@@ -86,6 +86,7 @@ pub fn png(
     out_path: Option<PathBuf>,
 ) {
     reader.do_frame(wrench);
+    wrench.api.flush_scene_builder();
 
     // wait for the frame
     rx.recv().unwrap();

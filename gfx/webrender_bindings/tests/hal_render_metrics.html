@@ -1,0 +1,91 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8">
+<title>HAL render metrics test</title>
+<style>
+  html, body { margin: 0; inline-size: 100%; block-size: 100%; overflow: hidden; }
+  body { background: rgb(24, 40, 72); }
+  #moving { position: absolute; inset: 64px auto auto 64px; inline-size: 96px;
+            block-size: 96px; background: rgb(220, 40, 60); }
+  #paint { position: absolute; inset: 220px auto auto 64px; inline-size: 32px;
+           block-size: 32px; background: rgb(20, 220, 80); }
+  #paint.green { background: rgb(20, 220, 80); }
+  #paint.blue { background: rgb(40, 80, 230); }
+  #gpu { position: absolute; inset: 300px auto auto 64px; }
+  .transform-animation { animation: move 1.5s linear; }
+  @keyframes move {
+    from { transform: translateX(0); }
+    to { transform: translateX(120px); }
+  }
+  body.boundary-a { outline: 1px solid rgb(0, 255, 0); }
+  body.boundary-b { outline: 2px solid rgb(255, 255, 0); }
+</style>
+<main id="focus" tabindex="0">
+  <div id="moving"></div>
+  <div id="paint"></div>
+  <canvas id="gpu" width="128" height="128"></canvas>
+</main>
+<script>
+  const moving = document.querySelector("#moving");
+  const paint = document.querySelector("#paint");
+  const gpu = document.querySelector("#gpu");
+  const raf = () => new Promise(requestAnimationFrame);
+  async function frames(count, update) {
+    for (let frame = 0; frame < count; ++frame) {
+      await raf();
+      update?.(frame);
+    }
+    await raf();
+  }
+  window.halMetrics = {
+    async settle() {
+      document.querySelector("#focus").focus();
+      await frames(3);
+    },
+    async idle(milliseconds) {
+      await new Promise(resolve => setTimeout(resolve, milliseconds));
+    },
+    async raf(count) {
+      await frames(count);
+    },
+    async noop(count) {
+      moving.style.opacity = "1";
+      await frames(count, () => moving.style.opacity = "1");
+    },
+    async transform() {
+      moving.classList.remove("transform-animation");
+      await frames(2);
+      moving.classList.add("transform-animation");
+      await moving.getAnimations()[0].finished;
+      await frames(2);
+    },
+    async paint(count) {
+      await frames(count, frame => paint.className = frame % 2 ? "green" : "blue");
+    },
+    async webgpu(count) {
+      const adapter = await navigator.gpu.requestAdapter();
+      const device = await adapter.requestDevice();
+      const context = gpu.getContext("webgpu");
+      context.configure({ device, format: "rgba8unorm", alphaMode: "opaque" });
+      for (let frame = 0; frame < count; ++frame) {
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({ colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: frame % 2 ? [0, 0, 1, 1] : [1, 1, 0, 1],
+          loadOp: "clear",
+          storeOp: "store",
+        }] });
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+        await raf();
+      }
+      await device.queue.onSubmittedWorkDone();
+    },
+    async boundary(index) {
+      document.body.className = index % 2 ? "boundary-b" : "boundary-a";
+      await frames(3);
+    },
+  };
+</script>

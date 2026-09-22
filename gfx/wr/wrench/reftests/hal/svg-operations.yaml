@@ -1,0 +1,3249 @@
+root:
+  items:
+    - type: stacking-context
+      bounds: [0, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: identity
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: opacity
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: toalpha
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendcolor
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendcolorburn
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendcolordodge
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blenddarken
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 0, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blenddifference
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendexclusion
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendhardlight
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendhue
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendlighten
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendluminosity
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendmultiply
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendnormal
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 72, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendoverlay
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendsaturation
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendscreen
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: blendsoftlight
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: colormatrix
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: componenttransfer
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      filter-datas:
+        - - [Linear, Gamma, Table, Identity]
+          - [0.5, 0.25]
+          - [1.0, 2.0, 0.0]
+          - [0.0, 0.5, 1.0]
+          - []
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositearithmetic
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositeatop
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 144, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositein
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositelighter
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositeout
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositeover
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: compositexor
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: convolvematrixedgemodeduplicate
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: convolvematrixedgemodenone
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: convolvematrixedgemodewrap
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 216, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: diffuselightingdistant
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: diffuselightingpoint
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: diffuselightingspot
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: displacementmap
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          in2: 2
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: dropshadow
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: flood
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: gaussianblur
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: image
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [1, 0, 0, 1, 4, 2]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 288, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: morphologydilate
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: morphologyerode
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: offset
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: sourcealpha
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: sourcegraphic
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [288, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: specularlightingdistant
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [360, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: specularlightingpoint
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [432, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: specularlightingspot
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [504, 360, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: tile
+          linear: false
+          subregion: [0, 0, 64, 64]
+          in: 0
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [0, 432, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: turbulencewithfractalnoisewithnostitching
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [72, 432, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: turbulencewithfractalnoisewithstitching
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [144, 432, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: turbulencewithturbulencenoisewithnostitching
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]
+    - type: stacking-context
+      bounds: [216, 432, 64, 64]
+      filters:
+        - svgfe: SourceGraphic
+        - svgfe: SourceAlpha
+        - svgfe: flood
+          color: [32, 96, 192, 0.5]
+          subregion: [0, 0, 64, 64]
+        - svgfe: turbulencewithturbulencenoisewithstitching
+          linear: false
+          subregion: [0, 0, 64, 64]
+          value: 0.6
+          k: [0.2, 0.4, 0.3, 0.1]
+          order_x: 3
+          order_y: 3
+          kernel: [0, 1, 0, 1, 2, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+          divisor: 6
+          bias: 0.1
+          target_x: 1
+          target_y: 1
+          kernel_unit_length_x: 1
+          kernel_unit_length_y: 1
+          preserve_alpha: false
+          surface_scale: 2
+          diffuse_constant: 1
+          specular_constant: 0.8
+          specular_exponent: 4
+          azimuth: 45
+          elevation: 45
+          x: 16
+          y: 16
+          z: 32
+          points_at_x: 32
+          points_at_y: 32
+          points_at_z: 0
+          cone_exponent: 1
+          limiting_cone_angle: 45
+          scale: 8
+          x_channel_selector: 0
+          y_channel_selector: 1
+          color: [32, 96, 192, 0.5]
+          dx: 4
+          dy: 3
+          std_deviation_x: 2
+          std_deviation_y: 2
+          sampling_filter: "LINEAR"
+          radius_x: 2
+          radius_y: 1
+          offset: [3, -2]
+          base_frequency_x: 0.125
+          base_frequency_y: 0.09375
+          num_octaves: 2
+          seed: 3
+          matrix: [0.5, 0, 0, 0, 0, 0.8, 0, 0, 0, 0, 0.6, 0, 0, 0, 0, 1, 0.1, 0.05, 0, 0]
+      items:
+        - type: rect
+          bounds: [8, 8, 24, 24]
+          color: [192, 64, 32, 0.75]
+        - type: rect
+          bounds: [24, 24, 28, 28]
+          color: [32, 160, 224, 0.5]

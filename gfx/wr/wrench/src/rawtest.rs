@@ -10,21 +10,21 @@ use std::sync::mpsc::Receiver;
 use webrender::api::*;
 use webrender::render_api::*;
 use webrender::api::units::*;
-use crate::{WindowWrapper, NotifierEvent};
+use crate::NotifierEvent;
 use crate::blob;
-use crate::reftest::{ReftestImage, ReftestImageComparison};
-use crate::wrench::Wrench;
+use crate::reftest::{ReftestImage, ReftestImageComparison, ReftestRenderer};
+use crate::wrench::{TestWindow, Wrench};
 
-pub struct RawtestHarness<'a> {
-    pub wrench: &'a mut Wrench,
+pub struct RawtestHarness<'a, R = webrender::Renderer> {
+    pub wrench: &'a mut Wrench<R>,
     pub rx: &'a Receiver<NotifierEvent>,
-    pub window: &'a mut WindowWrapper,
+    pub window: &'a mut dyn TestWindow,
 }
 
 
-impl<'a> RawtestHarness<'a> {
-    pub fn new(wrench: &'a mut Wrench,
-               window: &'a mut WindowWrapper,
+impl<'a, R: ReftestRenderer> RawtestHarness<'a, R> {
+    pub fn new(wrench: &'a mut Wrench<R>,
+               window: &'a mut dyn TestWindow,
                rx: &'a Receiver<NotifierEvent>) -> Self {
         RawtestHarness {
             wrench,
@@ -33,24 +33,39 @@ impl<'a> RawtestHarness<'a> {
         }
     }
 
-    pub fn run(mut self) {
-        self.test_snapping();
-        self.test_hit_testing();
-        self.test_resize_image();
-        self.test_retained_blob_images_test();
-        self.test_blob_update_test();
-        self.test_blob_update_epoch_test();
-        self.test_tile_decomposition();
-        self.test_very_large_blob();
-        self.test_blob_visible_area();
-        self.test_blob_set_visible_area();
-        self.test_offscreen_blob();
-        self.test_save_restore();
-        self.test_blur_cache();
-        self.test_capture();
-        self.test_zero_height_window();
-        self.test_trim_transient_resources();
-        self.test_clear_cache();
+    pub fn run(self) {
+        self.run_selected(None).expect("Raw tests failed");
+    }
+
+    pub fn run_selected(mut self, filter: Option<&str>) -> Result<(), String> {
+        let tests: &[(&str, fn(&mut Self))] = &[
+            ("test_snapping", Self::test_snapping),
+            ("test_hit_testing", Self::test_hit_testing),
+            ("test_resize_image", Self::test_resize_image),
+            ("test_retained_blob_images_test", Self::test_retained_blob_images_test),
+            ("test_blob_update_test", Self::test_blob_update_test),
+            ("test_blob_update_epoch_test", Self::test_blob_update_epoch_test),
+            ("test_tile_decomposition", Self::test_tile_decomposition),
+            ("test_very_large_blob", Self::test_very_large_blob),
+            ("test_blob_visible_area", Self::test_blob_visible_area),
+            ("test_blob_set_visible_area", Self::test_blob_set_visible_area),
+            ("test_offscreen_blob", Self::test_offscreen_blob),
+            ("test_save_restore", Self::test_save_restore),
+            ("test_blur_cache", Self::test_blur_cache),
+            ("test_capture", Self::test_capture),
+            ("test_zero_height_window", Self::test_zero_height_window),
+            ("test_trim_transient_resources", Self::test_trim_transient_resources),
+            ("test_clear_cache", Self::test_clear_cache),
+        ];
+        let mut executed = 0;
+        for &(name, test) in tests {
+            if filter.map_or(false, |filter| name != filter) { continue; }
+            println!("RAWTEST {name}");
+            test(&mut self);
+            executed += 1;
+        }
+        if executed == 0 { return Err(format!("Unknown raw test {filter:?}")); }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -71,8 +86,8 @@ impl<'a> RawtestHarness<'a> {
 
     pub fn render_and_get_pixels(&mut self, window_rect: FramebufferIntRect) -> Vec<u8> {
         self.rx.recv().unwrap();
-        self.wrench.render();
-        self.wrench.renderer.read_pixels_rgba8(window_rect)
+        R::render_test(self.wrench);
+        self.wrench.renderer.read_test_pixels(window_rect)
     }
 
     fn compare_pixels(&self, data1: Vec<u8>, data2: Vec<u8>, size: FramebufferIntSize) {
@@ -179,7 +194,7 @@ impl<'a> RawtestHarness<'a> {
 
         self.submit_dl(&mut epoch, builder, txn);
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
 
         let mut txn = Transaction::new();
         // Resize the image to something bigger than the max texture size (8196) to force tiling.
@@ -205,7 +220,7 @@ impl<'a> RawtestHarness<'a> {
 
         self.submit_dl(&mut epoch, builder, txn);
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
 
         let mut txn = Transaction::new();
         // Resize back to something doesn't require tiling.
@@ -231,7 +246,7 @@ impl<'a> RawtestHarness<'a> {
 
         self.submit_dl(&mut epoch, builder, txn);
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
 
         txn = Transaction::new();
         txn.delete_image(img);
@@ -274,7 +289,7 @@ impl<'a> RawtestHarness<'a> {
         self.submit_dl(&mut epoch, builder, txn);
 
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
 
         // Leaving a tiled blob image in the resource cache
         // confuses the `test_capture`. TODO: remove this
@@ -1219,7 +1234,7 @@ impl<'a> RawtestHarness<'a> {
 
     fn test_capture(&mut self) {
         println!("\tcapture...");
-        let path = "../captures/test";
+        let path = std::path::PathBuf::from(std::env::var("WR_CAPTURE_PATH").unwrap_or_else(|_| "../captures/test".into()));
         let layout_size = LayoutSize::new(400., 400.);
         let dim = self.window.get_inner_size();
         let window_rect = FramebufferIntRect::from_origin_and_size(
@@ -1251,8 +1266,6 @@ impl<'a> RawtestHarness<'a> {
             ColorF::WHITE,
         );
 
-        let mut txn = Transaction::new();
-
         txn.set_display_list(
             Epoch(0),
             self.wrench.api.get_namespace_id(),
@@ -1263,9 +1276,20 @@ impl<'a> RawtestHarness<'a> {
         self.wrench.api.send_transaction(self.wrench.document_id, txn);
 
         let pixels0 = self.render_and_get_pixels(window_rect);
+        assert!(pixels0.chunks_exact(4).any(|pixel| pixel == [0, 0, 255, 255]));
 
         // 2. capture it
-        self.wrench.api.save_capture(path.into(), CaptureBits::all());
+        self.wrench.api.save_capture(path.clone(), CaptureBits::all());
+        let (reply, complete) = webrender::api::channel::unbounded_channel();
+        self.wrench.api.send_debug_cmd(DebugCommand::GetDebugFlags(reply));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            self.wrench.renderer.update_test_renderer();
+            if complete.try_recv().is_ok() { break; }
+            assert!(std::time::Instant::now() < deadline, "Capture did not complete");
+            std::thread::yield_now();
+        }
+        while self.rx.try_recv().is_ok() {}
 
         // 3. set a different scene
 
@@ -1282,7 +1306,7 @@ impl<'a> RawtestHarness<'a> {
 
         // 4. load the first one
 
-        let mut documents = self.wrench.api.load_capture(path.into(), None);
+        let mut documents = self.wrench.api.load_capture(path, None);
         let captured = documents.swap_remove(0);
 
         // 5. render the built frame and compare
@@ -1406,7 +1430,7 @@ impl<'a> RawtestHarness<'a> {
 
         // We render to ensure that the hit tester is up to date with the current scene.
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
 
         let hit_test = |point: WorldPoint| -> HitTestResult {
             self.wrench.api.hit_test(
@@ -1459,7 +1483,7 @@ impl<'a> RawtestHarness<'a> {
     fn test_trim_transient_resources(&mut self) {
         println!("\ttrim transient resources...");
         self.wrench.api.flush_scene_builder();
-        self.wrench.render();
+        R::render_test(self.wrench);
         while self.rx.try_recv().is_ok() {}
 
         let window_size = self.window.get_inner_size();
@@ -1553,7 +1577,7 @@ impl<'a> RawtestHarness<'a> {
             }
         );
 
-        self.wrench.renderer.trim_transient_resources(true);
+        self.wrench.renderer.trim_test_resources(true).expect("Trimming resources failed");
 
         // Match WebRenderBridgeParent::ScheduleForcedGenerateFrame(): Resume
         // sends invalidation and GenerateFrame as separate fast transactions.
@@ -1584,8 +1608,8 @@ impl<'a> RawtestHarness<'a> {
 
         // This is the first renderer update since the queued frame, trim and
         // forced frame. It must end up with the post-trim PublishDocument.
-        self.wrench.render();
-        let actual = self.wrench.renderer.read_pixels_rgba8(sample_rect);
+        R::render_test(self.wrench);
+        let actual = self.wrench.renderer.read_test_pixels(sample_rect);
         self.compare_pixels(expected, actual, sample_rect.size());
     }
 
@@ -1605,6 +1629,6 @@ impl<'a> RawtestHarness<'a> {
         self.submit_dl(&mut epoch, builder, txn);
 
         self.rx.recv().unwrap();
-        self.wrench.render();
+        R::render_test(self.wrench);
     }
 }

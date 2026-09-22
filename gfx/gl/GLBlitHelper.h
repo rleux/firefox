@@ -164,6 +164,10 @@ class DrawBlitProg final {
   struct YUVArgs final {
     Mat3 texMatrix1;
     Maybe<gfx::YUVColorSpace> colorSpaceForMatrix;
+    gfx::ColorRange colorRange = gfx::ColorRange::LIMITED;
+    bool p010 = false;
+
+    std::array<float, 16> ColorMatrix() const;
   };
 
   void Draw(const BaseArgs& args, const YUVArgs* argsYUV = nullptr) const;
@@ -316,6 +320,11 @@ class GLBlitHelper final {
                            Maybe<gfxAlphaType> convertAlpha = {});
 
  private:
+#ifdef MOZ_WIDGET_GTK
+  bool BlitDMABuf(DMABufSurface* surface, const gfx::IntRect& destRect,
+                  OriginPos destOrigin, const gfx::IntSize& fbSize,
+                  Maybe<gfxAlphaType> convertAlpha) const;
+#endif
 #ifdef XP_MACOSX
   bool BlitImage(MacIOSurface* const iosurf, const gfx::IntRect& destRect,
                  OriginPos destOrigin,

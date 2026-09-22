@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <getopt.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -22,6 +23,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <chrono>
+#include <iterator>
+#ifdef XP_LINUX
+#  include <linux/futex.h>
+#  include <sys/syscall.h>
+
+#  include "base/linux_memfd_defs.h"
+#endif
 #include <sys/time.h>
 #include <unistd.h>
 #ifdef HAVE_EVENTFD
@@ -53,6 +65,7 @@
 #include "GLReadTexImageHelper.h"
 #include "ImageContainer.h"
 #include "ScopedGLHelpers.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
@@ -260,8 +273,8 @@ void DMABufSurface::ReleaseSnapshotGLContext() {
 }
 
 bool DMABufSurface::UseDmaBufGL(GLContext* aGLContext) {
-  if (!aGLContext) {
-    LOGDMABUFS("DMABufSurface::UseDmaBufGL(): Missing GLContext!");
+  if (!aGLContext || aGLContext->GetContextType() != GLContextType::EGL) {
+    LOGDMABUFS("DMABufSurface::UseDmaBufGL(): Missing EGL context!");
     return false;
   }
 
@@ -471,6 +484,13 @@ void DMABufSurface::GlobalRefCountDelete() {
 }
 
 bool DMABufSurface::ReleaseDMABuf() {
+  mVulkanDescriptor = nullptr;
+  mForeignRGBDescriptor = nullptr;
+  if (mAccessLock) {
+    munmap(mAccessLock, sizeof(uint32_t));
+    mAccessLock = nullptr;
+  }
+  mAccessLockFd = nullptr;
   LOGDMABUF("DMABufSurface::ReleaseDMABuf() UID %d", mUID);
 #ifdef MOZ_LOGGING
   for (int i = 0; i < mBufferPlaneCount; i++) {
@@ -507,6 +527,10 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
   const SurfaceDescriptorDMABuf& desc = aDesc.get_SurfaceDescriptorDMABuf();
   RefPtr<DMABufSurface> surf;
 
+  if (desc.vaapiImageState() && desc.bufferType() != SURFACE_YUV) {
+    return nullptr;
+  }
+
   switch (desc.bufferType()) {
     case SURFACE_RGBA:
       surf = new DMABufSurfaceRGBA();
@@ -524,34 +548,201 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
   return surf.forget();
 }
 
+bool DMABufSurface::MapAccessLock() {
+#ifdef XP_LINUX
+  struct stat info;
+  if (!mAccessLockFd || fstat(mAccessLockFd->GetHandle(), &info) ||
+      info.st_size != sizeof(uint32_t)) {
+    return false;
+  }
+  const int seals = fcntl(mAccessLockFd->GetHandle(), F_GET_SEALS);
+  if (seals < 0 || (seals & (F_SEAL_SHRINK | F_SEAL_GROW)) !=
+                       (F_SEAL_SHRINK | F_SEAL_GROW)) {
+    return false;
+  }
+  auto* memory = mmap(nullptr, sizeof(uint32_t), PROT_READ | PROT_WRITE,
+                      MAP_SHARED, mAccessLockFd->GetHandle(), 0);
+  if (memory == MAP_FAILED) {
+    return false;
+  }
+  mAccessLock = static_cast<uint32_t*>(memory);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::ForeignRGBUsable() const {
+  return !mForeignRGB || AccessLockUsable();
+}
+
+bool DMABufSurface::LockForeignRGB() { return mForeignRGB && LockAccess(); }
+
+void DMABufSurface::UnlockForeignRGB(bool aAbandon) { UnlockAccess(aAbandon); }
+
+bool DMABufSurface::AccessLockUsable() const {
+  return mAccessLock && __atomic_load_n(mAccessLock, __ATOMIC_ACQUIRE) <= 1;
+}
+
+bool DMABufSurface::TryLockAccess() {
+  uint32_t expected = 0;
+  return mAccessLock &&
+         __atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
+}
+
+bool DMABufSurface::TryRetireAccess() {
+  uint32_t expected = 0;
+  if (!mAccessLock ||
+      !__atomic_compare_exchange_n(mAccessLock, &expected, 3, false,
+                                   __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+    return false;
+  }
+#ifdef XP_LINUX
+  syscall(SYS_futex, mAccessLock, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+#endif
+  return true;
+}
+
+bool DMABufSurface::WaitForAccess(uint32_t aTimeoutMs) {
+#ifdef XP_LINUX
+  if (!mAccessLock) return false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(aTimeoutMs);
+  for (;;) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return true;
+    }
+    if (expected != 1) return false;
+    const auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               deadline - std::chrono::steady_clock::now())
+                               .count();
+    if (remaining <= 0) return false;
+    const timespec timeout = {static_cast<time_t>(remaining / 1000000000),
+                              static_cast<long>(remaining % 1000000000)};
+    if (syscall(SYS_futex, mAccessLock, FUTEX_WAIT, 1, &timeout, nullptr, 0) <
+            0 &&
+        errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+      return false;
+    }
+  }
+#else
+  return TryLockAccess();
+#endif
+}
+
+bool DMABufSurface::LockAccess() {
+#ifdef XP_LINUX
+  if (!mAccessLock) {
+    return false;
+  }
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    uint32_t expected = 0;
+    if (__atomic_compare_exchange_n(mAccessLock, &expected, 1, false,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      return true;
+    }
+    if (expected != 1) {
+      return false;
+    }
+    const struct timespec timeout = {0, 100000000};
+    if (syscall(SYS_futex, mAccessLock, FUTEX_WAIT, 1, &timeout, nullptr, 0) <
+            0 &&
+        errno != EAGAIN && errno != EINTR && errno != ETIMEDOUT) {
+      break;
+    }
+  }
+  UnlockAccess(true);
+#endif
+  return false;
+}
+
+void DMABufSurface::UnlockAccess(bool aAbandon) {
+#ifdef XP_LINUX
+  if (!mAccessLock) {
+    return;
+  }
+  if (aAbandon) {
+    __atomic_store_n(mAccessLock, 2, __ATOMIC_RELEASE);
+  } else {
+    uint32_t expected = 1;
+    __atomic_compare_exchange_n(mAccessLock, &expected, 0, false,
+                                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+  }
+  syscall(SYS_futex, mAccessLock, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0);
+#endif
+}
+
+bool DMABufSurface::CreateAccessLock() {
+  if (mAccessLockFd) {
+    return AccessLockUsable();
+  }
+#ifdef XP_LINUX
+  int fd = syscall(SYS_memfd_create, "wr-dmabuf-access",
+                   MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  if (fd < 0) {
+    return false;
+  }
+  mAccessLockFd = new gfx::FileHandleWrapper(UniqueFileHandle(fd));
+  if (ftruncate(fd, sizeof(uint32_t)) ||
+      fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) ||
+      !MapAccessLock()) {
+    return false;
+  }
+  __atomic_store_n(mAccessLock, 0, __ATOMIC_RELEASE);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::EnableForeignRGB() {
+  auto* rgba = GetAsDMABufSurfaceRGBA();
+  if (!rgba || mBufferPlaneCount != 1) {
+    return false;
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor) ||
+      descriptor.get_SurfaceDescriptorDMABuf().modifier()[0] != 0 ||
+      !CreateAccessLock()) {
+    return false;
+  }
+  GlobalRefCountCreate();
+  if (!mGlobalRefCountFd) {
+    return false;
+  }
+  mForeignRGB = true;
+  return true;
+}
+
 void DMABufSurface::FenceSet() {
   MutexAutoLock lock(mSurfaceLock);
-
-  if (!mGL) {
+  mSyncFd = nullptr;
+  if (!mGL || !mGL->MakeCurrent()) {
     gfxCriticalNoteOnce
         << "DMABufSurface::FenceSet() failed: missing GL context";
     return;
   }
-
-  mGL->MakeCurrent();
-
-  const auto& gle = gl::GLContextEGL::Cast(mGL);
-  const auto& egl = gle->mEgl;
-
-  LOGDMABUF("DMABufSurface::FenceSet() UID %d", mUID);
-
+  if (mForeignRGB) {
+    MOZ_RELEASE_ASSERT(mForeignRGBGeneration != UINT64_MAX);
+    ++mForeignRGBGeneration;
+  }
+  const auto& egl = gl::GLContextEGL::Cast(mGL)->mEgl;
   if (egl->IsExtensionSupported(EGLExtension::KHR_fence_sync) &&
       egl->IsExtensionSupported(EGLExtension::ANDROID_native_fence_sync)) {
     if (EGLSyncKHR sync =
             egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr)) {
       auto rawFd = egl->fDupNativeFenceFDANDROID(sync);
-      mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
       egl->fDestroySync(sync);
-      mGL->fFlush();
-      return;
+      if (rawFd >= 0) {
+        mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
+        mGL->fFlush();
+        return;
+      }
     }
   }
-
   mGL->fFinish();
 }
 
@@ -710,17 +901,20 @@ nsresult DMABufSurface::ReadIntoBuffer(mozilla::gl::GLContext* aGLContext,
   LOGDMABUF("DMABufSurface::ReadIntoBuffer UID %d", mUID);
 
   // We're empty, nothing to copy
-  if (!GetTextureCount()) {
+  if (!GetTextureCount() || !aGLContext) {
     return NS_ERROR_FAILURE;
   }
 
   MOZ_ASSERT(aSize.width == GetWidth());
   MOZ_ASSERT(aSize.height == GetHeight());
 
-  for (int i = 0; i < GetTextureCount(); i++) {
-    if (!GetTexture(i) && !CreateTexture(aGLContext, i)) {
-      LOGDMABUF("ReadIntoBuffer: Failed to create DMABuf textures.");
-      return NS_ERROR_FAILURE;
+  const auto* yuv = GetAsDMABufSurfaceYUV();
+  if (!yuv || !yuv->GetVAAPIDescriptor()) {
+    for (int i = 0; i < GetTextureCount(); i++) {
+      if (!GetTexture(i) && !CreateTexture(aGLContext, i)) {
+        LOGDMABUF("ReadIntoBuffer: Failed to create DMABuf textures.");
+        return NS_ERROR_FAILURE;
+      }
     }
   }
 
@@ -754,6 +948,15 @@ nsresult DMABufSurface::ReadIntoBuffer(mozilla::gl::GLContext* aGLContext,
 
 already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
   LOGDMABUF("DMABufSurface::GetAsSourceSurface UID %d", mUID);
+  const auto* yuv = GetAsDMABufSurfaceYUV();
+  const bool native = yuv && yuv->GetVAAPIDescriptor();
+  const bool lockAccess = mAccessLockFd && !native;
+  if (lockAccess && !LockAccess()) {
+    return nullptr;
+  }
+  auto unlockAccess = MakeScopeExit([&] {
+    if (lockAccess) UnlockAccess();
+  });
 
   gfx::IntSize size(GetWidth(), GetHeight());
   const auto format = gfx::SurfaceFormat::B8G8R8A8;
@@ -771,7 +974,7 @@ already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
     return nullptr;
   }
 
-  if (mGL) {
+  if (!native && mGL) {
     if (NS_WARN_IF(NS_FAILED(ReadIntoBuffer(mGL, map.GetData(), map.GetStride(),
                                             size, format)))) {
       LOGDMABUF("GetAsSourceSurface: Reading into buffer failed.");
@@ -782,7 +985,7 @@ already_AddRefed<gfx::DataSourceSurface> DMABufSurface::GetAsSourceSurface() {
     StaticMutexAutoLock lock(sSnapshotContextMutex);
     RefPtr<GLContext> context = ClaimSnapshotGLContext();
     auto releaseTextures = mozilla::MakeScopeExit([&] {
-      ReleaseTextures();
+      if (!native) ReleaseTextures();
       ReturnSnapshotGLContext(context);
     });
     if (NS_WARN_IF(NS_FAILED(ReadIntoBuffer(context, map.GetData(),
@@ -1095,8 +1298,8 @@ bool DMABufSurfaceRGBA::Create(
   mHeight = aHeight;
   mBufferModifier = aDMABufInfo.modifier;
 
-  // TODO: Read Vulkan modifiers from DMABufFormats?
-  mFOURCCFormat = GBM_FORMAT_ARGB8888;
+  mFOURCCFormat =
+      aDMABufInfo.is_rgba ? GBM_FORMAT_ABGR8888 : GBM_FORMAT_ARGB8888;
   mBufferPlaneCount = aDMABufInfo.plane_count;
 
   RefPtr<gfx::FileHandleWrapper> fd = std::move(aFd);
@@ -1125,6 +1328,38 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     return false;
   }
 
+  if (desc.foreignRGBImageState()) {
+    if (desc.vulkanImageState() || mBufferPlaneCount != 1 ||
+        desc.modifier()[0] != 0 || desc.fence().Length() != 1 ||
+        desc.fence()[0]->GetHandle() < 0 ||
+        !desc.foreignRGBImageState()->generation() ||
+        desc.refCount().Length() != 1 ||
+        (desc.fourccFormat() != GBM_FORMAT_ARGB8888 &&
+         desc.fourccFormat() != GBM_FORMAT_ABGR8888)) {
+      return false;
+    }
+    mAccessLockFd = desc.foreignRGBImageState()->accessLock();
+    if (!MapAccessLock()) {
+      return false;
+    }
+    mForeignRGB = true;
+    mForeignRGBDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(desc);
+  }
+
+  if (desc.vulkanImageState()) {
+    const auto& state = desc.vulkanImageState().ref();
+    if (mBufferPlaneCount != 1 || !desc.semaphoreFdIsSyncFd() ||
+        state.deviceUUID().Length() != 16 ||
+        state.driverUUID().Length() != 16 || !state.generation()) {
+      return false;
+    }
+    mAccessLockFd = state.accessLock();
+    if (!MapAccessLock()) {
+      return false;
+    }
+    mVulkanDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(desc);
+  }
+
   mFOURCCFormat = desc.fourccFormat();
   mWidth = desc.width()[0];
   mHeight = desc.height()[0];
@@ -1148,9 +1383,9 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     mSyncFd = desc.fence()[0];
   }
 
+  mSemaphoreFdIsSyncFd = desc.semaphoreFdIsSyncFd();
   if (desc.semaphoreFd()) {
     mSemaphoreFd = desc.semaphoreFd();
-    mSemaphoreFdIsSyncFd = desc.semaphoreFdIsSyncFd();
   }
 
   if (desc.refCount().Length() > 0) {
@@ -1170,6 +1405,18 @@ bool DMABufSurfaceRGBA::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceRGBA::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mVulkanDescriptor) {
+    aOutDescriptor = *mVulkanDescriptor;
+    return true;
+  }
+  if (mForeignRGBDescriptor) {
+    aOutDescriptor = *mForeignRGBDescriptor;
+    return true;
+  }
+  if (mForeignRGB && mForeignRGBGeneration &&
+      (!mSyncFd || mSyncFd->GetHandle() < 0)) {
+    return false;
+  }
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> width;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> height;
   AutoTArray<NotNull<RefPtr<gfx::FileHandleWrapper>>, DMABUF_BUFFER_PLANES> fds;
@@ -1207,7 +1454,13 @@ bool DMABufSurfaceRGBA::Serialize(
       mColorRange, mozilla::gfx::ColorSpace2::UNKNOWN,
       mozilla::gfx::TransferFunction::Default, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
-      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata);
+      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata,
+      Nothing(),
+      mForeignRGBGeneration
+          ? Some(layers::ForeignRGBImageState(mForeignRGBGeneration,
+                                              WrapNotNull(mAccessLockFd)))
+          : Nothing(),
+      Nothing());
   return true;
 }
 
@@ -1653,14 +1906,15 @@ bool DMABufSurfaceYUV::ImportPRIMESurfaceDescriptor(
 
 void DMABufSurfaceYUV::ReleaseVADRMPRIMESurfaceDescriptor(
     VADRMPRIMESurfaceDescriptor& aDesc) {
-  for (unsigned int i = 0; i < aDesc.num_layers; i++) {
-    unsigned int object = aDesc.layers[i].object_index[0];
-    if (object >= aDesc.num_objects) {
-      continue;
-    }
-    if (aDesc.objects[object].fd != -1) {
-      close(aDesc.objects[object].fd);
-      aDesc.objects[object].fd = -1;
+  const size_t count =
+      std::min<size_t>(aDesc.num_objects, std::size(aDesc.objects));
+  for (size_t i = 0; i < count; ++i) {
+    const int fd = aDesc.objects[i].fd;
+    if (fd >= 0) {
+      for (size_t j = i; j < count; ++j) {
+        if (aDesc.objects[j].fd == fd) aDesc.objects[j].fd = -1;
+      }
+      close(fd);
     }
   }
 }
@@ -1956,8 +2210,253 @@ bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
   return ImportSurfaceDescriptor(aDesc);
 }
 
+static bool ValidateVAAPIImageState(const SurfaceDescriptorDMABuf& aDesc) {
+#ifdef XP_LINUX
+  const auto& state = aDesc.vaapiImageState().ref();
+  const bool p010 = aDesc.fourccFormat() == VA_FOURCC_P010;
+  const uint32_t sampleBytes = p010 ? 2 : 1;
+  if (aDesc.vulkanImageState() || aDesc.foreignRGBImageState() ||
+      (!p010 && aDesc.fourccFormat() != VA_FOURCC_NV12) ||
+      !state.allocationId() || !state.generation() || !state.producerEpoch() ||
+      !state.drmRenderMajor() || state.drmRenderMajor() > UINT32_MAX ||
+      state.drmRenderMinor() > UINT32_MAX || !state.producerComplete() ||
+      aDesc.semaphoreFd() || aDesc.semaphoreFdIsSyncFd() ||
+      !aDesc.fence().IsEmpty() || aDesc.refCount().Length() != 1 ||
+      !aDesc.refCount()[0].IsValid() || state.objects().IsEmpty() ||
+      state.objects().Length() > 2 || state.planes().Length() != 2 ||
+      aDesc.fds().Length() != 2 || aDesc.width().Length() != 2 ||
+      aDesc.height().Length() != 2 || aDesc.widthAligned().Length() != 2 ||
+      aDesc.heightAligned().Length() != 2 || aDesc.format().Length() != 2 ||
+      aDesc.strides().Length() != 2 || aDesc.offsets().Length() != 2 ||
+      aDesc.modifier().Length() != 2 ||
+      aDesc.format()[0] != (p010 ? DRM_FORMAT_R16 : DRM_FORMAT_R8) ||
+      aDesc.format()[1] != (p010 ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88)) {
+    return false;
+  }
+  const uint32_t width = aDesc.width()[0];
+  const uint32_t height = aDesc.height()[0];
+  const uint32_t alignedWidth = aDesc.widthAligned()[0];
+  const uint32_t alignedHeight = aDesc.heightAligned()[0];
+  const uint64_t rowBytes = uint64_t(alignedWidth) * sampleBytes;
+  if (!width || !height || width > alignedWidth || height > alignedHeight ||
+      alignedWidth > INT_MAX || alignedHeight > INT_MAX ||
+      ((width | height | alignedWidth | alignedHeight) & 1) ||
+      aDesc.width()[1] != width / 2 || aDesc.height()[1] != height / 2 ||
+      aDesc.widthAligned()[1] != alignedWidth / 2 ||
+      aDesc.heightAligned()[1] != alignedHeight / 2) {
+    return false;
+  }
+
+  struct stat objects[2]{};
+  bool used[2]{};
+  for (size_t i = 0; i < state.objects().Length(); ++i) {
+    const auto& object = state.objects()[i];
+    if (fstat(object.fd()->GetHandle(), &objects[i]) ||
+        objects[i].st_size <= 0 || !object.size() ||
+        object.size() > uint64_t(objects[i].st_size) ||
+        (object.modifier() != DRM_FORMAT_MOD_LINEAR &&
+         object.modifier() != I915_FORMAT_MOD_Y_TILED)) {
+      return false;
+    }
+    if (i && objects[0].st_dev == objects[i].st_dev &&
+        objects[0].st_ino == objects[i].st_ino) {
+      return false;
+    }
+  }
+  uint64_t ends[2]{};
+  for (size_t i = 0; i < 2; ++i) {
+    const auto& plane = state.planes()[i];
+    if (plane.objectIndex() >= state.objects().Length()) {
+      return false;
+    }
+    const auto& object = state.objects()[plane.objectIndex()];
+    const auto& identity = objects[plane.objectIndex()];
+    struct stat legacy{};
+    if (fstat(aDesc.fds()[i]->GetHandle(), &legacy) ||
+        legacy.st_dev != identity.st_dev || legacy.st_ino != identity.st_ino ||
+        aDesc.modifier()[i] != object.modifier() ||
+        aDesc.strides()[i] != plane.stride() ||
+        aDesc.offsets()[i] != plane.offset() ||
+        plane.offset() >= object.size() || plane.stride() < rowBytes ||
+        plane.offset() % sampleBytes || plane.stride() % sampleBytes) {
+      return false;
+    }
+    used[plane.objectIndex()] = true;
+    if (object.modifier() == DRM_FORMAT_MOD_LINEAR) {
+      const auto end = CheckedInt<uint64_t>(plane.offset()) +
+                       CheckedInt<uint64_t>(plane.stride()) *
+                           (aDesc.heightAligned()[i] - 1) +
+                       rowBytes;
+      if (!end.isValid() || end.value() > object.size()) {
+        return false;
+      }
+      ends[i] = end.value();
+    }
+  }
+  for (size_t i = 0; i < state.objects().Length(); ++i) {
+    if (!used[i]) {
+      return false;
+    }
+  }
+  if (state.planes()[0].objectIndex() == state.planes()[1].objectIndex()) {
+    const auto yOffset = state.planes()[0].offset();
+    const auto uvOffset = state.planes()[1].offset();
+    if (yOffset == uvOffset ||
+        (ends[0] && !(ends[0] <= uvOffset || ends[1] <= yOffset))) {
+      return false;
+    }
+  }
+  // Tiled allocation bounds and modifier memory planes need Vulkan validation.
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurfaceYUV::PublishVAAPIImage(
+    const VADRMPRIMESurfaceDescriptor& aDesc, uint64_t aPublicationId,
+    uint64_t aProducerEpoch, uint64_t aDRMMajor, uint64_t aDRMMinor) {
+  const bool p010 = aDesc.fourcc == VA_FOURCC_P010;
+  if (mVAAPIDescriptor || !mGlobalRefCountFd || IsGlobalRefSet() ||
+      aDesc.fourcc != uint32_t(mFOURCCFormat) ||
+      (!p010 && aDesc.fourcc != VA_FOURCC_NV12) || aDesc.num_objects != 1 ||
+      aDesc.num_layers != 2 || aDesc.layers[0].num_planes != 1 ||
+      aDesc.layers[1].num_planes != 1 || aDesc.layers[0].object_index[0] != 0 ||
+      aDesc.layers[1].object_index[0] != 0 ||
+      aDesc.layers[0].drm_format != (p010 ? DRM_FORMAT_R16 : DRM_FORMAT_R8) ||
+      aDesc.layers[1].drm_format !=
+          (p010 ? DRM_FORMAT_GR1616 : DRM_FORMAT_GR88) ||
+      aDesc.width != uint32_t(mWidthAligned[0]) ||
+      aDesc.height != uint32_t(mHeightAligned[0]) || !CreateAccessLock()) {
+    return false;
+  }
+  const int fd = dup(aDesc.objects[0].fd);
+  if (fd < 0) return false;
+  RefPtr<FileHandleWrapper> objectFd =
+      new FileHandleWrapper(UniqueFileHandle(fd));
+  AutoTArray<DMABufVideoObject, 1> objects;
+  objects.AppendElement(
+      DMABufVideoObject(WrapNotNull(objectFd), aDesc.objects[0].size,
+                        aDesc.objects[0].drm_format_modifier));
+  AutoTArray<DMABufVideoPlane, 2> planes;
+  for (size_t i = 0; i < 2; ++i) {
+    planes.AppendElement(DMABufVideoPlane(0, aDesc.layers[i].offset[0],
+                                          aDesc.layers[i].pitch[0]));
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor)) return false;
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  image.vaapiImageState() = Some(VAAPIImageState(
+      objects, planes, aPublicationId, aPublicationId, aProducerEpoch, true,
+      aDRMMajor, aDRMMinor, WrapNotNull(mAccessLockFd)));
+  if (!ValidateVAAPIImageState(image)) return false;
+  mVAAPIDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(image);
+  mVAAPIProducer = true;
+  return true;
+}
+
+bool DMABufSurfaceYUV::SupportsVAAPIImage(
+    const mozilla::gfx::VulkanVideoCapabilities& aCapabilities) const {
+  using namespace mozilla::gfx;
+  if (!mVAAPIDescriptor || !AccessLockUsable() ||
+      aCapabilities.deviceUUID().Length() != 16 ||
+      aCapabilities.driverUUID().Length() != 16) {
+    return false;
+  }
+  const auto& image = *mVAAPIDescriptor;
+  const auto& state = image.vaapiImageState().ref();
+  if (state.objects().Length() != 1 ||
+      state.drmRenderMajor() != aCapabilities.drmMajor() ||
+      state.drmRenderMinor() != aCapabilities.drmMinor() ||
+      (image.yUVColorSpace() != YUVColorSpace::BT601 &&
+       image.yUVColorSpace() != YUVColorSpace::BT709) ||
+      (image.colorPrimaries() != ColorSpace2::UNKNOWN &&
+       image.colorPrimaries() != ColorSpace2::SRGB &&
+       image.colorPrimaries() != ColorSpace2::BT601_525 &&
+       image.colorPrimaries() != ColorSpace2::BT709) ||
+      image.transferFunction() != TransferFunction::BT709 ||
+      (image.chromaLocation() != 0 && image.chromaLocation() != 2) ||
+      !(image.hdrMetadata() == HDRMetadata())) {
+    return false;
+  }
+  const auto& object = state.objects()[0];
+  for (const auto& format : aCapabilities.formats()) {
+    if (format.fourcc() == image.fourccFormat() &&
+        format.modifier() == object.modifier() &&
+        image.widthAligned()[0] <= format.maxWidth() &&
+        image.heightAligned()[0] <= format.maxHeight() &&
+        object.size() <= format.maxAllocationSize()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool DMABufSurfaceYUV::SameVAAPIAllocation(
+    const DMABufSurfaceYUV& aOther) const {
+  if (mBufferPlaneCount != 2 || aOther.mBufferPlaneCount != 2) return false;
+  for (size_t i = 0; i < 2; ++i) {
+    if (!mDmabufFds[i] || !aOther.mDmabufFds[i]) return false;
+    struct stat first{}, second{};
+    if (fstat(mDmabufFds[i]->GetHandle(), &first) ||
+        fstat(aOther.mDmabufFds[i]->GetHandle(), &second) ||
+        first.st_dev != second.st_dev || first.st_ino != second.st_ino) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool DMABufSurfaceYUV::SameVAAPIImage(const DMABufSurfaceYUV& aOther) const {
+  if (mBufferPlaneCount != 2 || aOther.mBufferPlaneCount != 2 ||
+      mFOURCCFormat != aOther.mFOURCCFormat ||
+      mColorSpace != aOther.mColorSpace || mColorRange != aOther.mColorRange ||
+      mColorPrimaries != aOther.mColorPrimaries ||
+      mTransferFunction != aOther.mTransferFunction ||
+      mWPChromaLocation != aOther.mWPChromaLocation ||
+      !(mHDRMetadata == aOther.mHDRMetadata)) {
+    return false;
+  }
+  for (size_t i = 0; i < 2; ++i) {
+    if (mWidth[i] != aOther.mWidth[i] || mHeight[i] != aOther.mHeight[i] ||
+        mWidthAligned[i] != aOther.mWidthAligned[i] ||
+        mHeightAligned[i] != aOther.mHeightAligned[i] ||
+        mDrmFormats[i] != aOther.mDrmFormats[i] ||
+        mBufferModifiers[i] != aOther.mBufferModifiers[i] ||
+        mStrides[i] != aOther.mStrides[i] ||
+        mOffsets[i] != aOther.mOffsets[i]) {
+      return false;
+    }
+  }
+  return SameVAAPIAllocation(aOther);
+}
+
+bool DMABufSurfaceYUV::TryRetireVAAPIImage() {
+  if (!mVAAPIProducer || !mAccessLock || IsGlobalRefSet()) return false;
+  uint32_t expected = 0;
+  // Retirement closes the publication to consumers arriving after the ref
+  // check.
+  return __atomic_compare_exchange_n(mAccessLock, &expected, 3, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+bool DMABufSurfaceYUV::VAAPIImageAbandoned() const {
+  return mVAAPIDescriptor && mAccessLock &&
+         __atomic_load_n(mAccessLock, __ATOMIC_ACQUIRE) == 2;
+}
+
 bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
     const SurfaceDescriptorDMABuf& aDesc) {
+  if (aDesc.vaapiImageState()) {
+    if (!ValidateVAAPIImageState(aDesc)) {
+      return false;
+    }
+    mAccessLockFd = aDesc.vaapiImageState()->accessLock();
+    if (!MapAccessLock() || !AccessLockUsable()) {
+      return false;
+    }
+    mVAAPIDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(aDesc);
+  }
   mBufferPlaneCount = aDesc.fds().Length();
   MOZ_RELEASE_ASSERT(mBufferPlaneCount <= DMABUF_BUFFER_PLANES);
   if (mBufferPlaneCount <= 0 ||
@@ -2019,6 +2518,13 @@ bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
 
 bool DMABufSurfaceYUV::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mVAAPIDescriptor) {
+    if (!AccessLockUsable()) {
+      return false;
+    }
+    aOutDescriptor = *mVAAPIDescriptor;
+    return true;
+  }
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> width;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> height;
   AutoTArray<uint32_t, DMABUF_BUFFER_PLANES> widthBytes;
@@ -2058,7 +2564,8 @@ bool DMABufSurfaceYUV::Serialize(
       height, widthBytes, heightBytes, format, strides, offsets,
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
-      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata);
+      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing(),
+      Nothing(), Nothing());
   return true;
 }
 
@@ -2090,7 +2597,7 @@ bool DMABufSurfaceYUV::CreateTexture(GLContext* aGLContext, int aPlane) {
   const auto& gle = gl::GLContextEGL::Cast(aGLContext);
   const auto& egl = gle->mEgl;
 
-  if ((aPlane == 1) &&
+  if (!mVAAPIDescriptor && (aPlane == 1) &&
       ((GetFOURCCFormat() == VA_FOURCC_NV12) ||
        (GetFOURCCFormat() == VA_FOURCC_P010) ||
        (GetFOURCCFormat() == VA_FOURCC_P016)) &&
@@ -2357,6 +2864,8 @@ int DMABufSurfaceYUV::GetTextureCount() { return mBufferPlaneCount; }
 
 void DMABufSurfaceYUV::ReleaseSurface() {
   LOGDMABUF("DMABufSurfaceYUV::ReleaseSurface() UID %d", mUID);
+  mVAAPIDescriptor = nullptr;
+  mVAAPIProducer = false;
   ReleaseTextures();
   if (ReleaseDMABuf()) {
     LogMemorySubYUV(GetUID(), GetUsedMemory(mWidth[0], mHeight[0]));
@@ -2367,6 +2876,12 @@ nsresult DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer(
     SurfaceDescriptorBuffer& aSdBuffer, Image::BuildSdbFlags aFlags,
     const std::function<MemoryOrShmem(uint32_t)>& aAllocate) {
   LOGDMABUF("DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer UID %d", mUID);
+  const bool native = !!mVAAPIDescriptor;
+  const bool lockAccess = mAccessLockFd && !native;
+  if (lockAccess && !TryLockAccess()) return NS_ERROR_NOT_AVAILABLE;
+  auto unlockAccess = MakeScopeExit([&] {
+    if (lockAccess) UnlockAccess();
+  });
 
   gfx::IntSize size(GetWidth(), GetHeight());
   const auto format = gfx::SurfaceFormat::B8G8R8A8;
@@ -2380,14 +2895,14 @@ nsresult DMABufSurfaceYUV::BuildSurfaceDescriptorBuffer(
     return rv;
   }
 
-  if (mGL) {
+  if (!native && mGL) {
     return ReadIntoBuffer(mGL, buffer, stride, size, format);
   } else {
     // We're missing active GL context - take a snapshot one.
     StaticMutexAutoLock lock(sSnapshotContextMutex);
     RefPtr<GLContext> context = ClaimSnapshotGLContext();
     auto releaseTextures = mozilla::MakeScopeExit([&] {
-      ReleaseTextures();
+      if (!native) ReleaseTextures();
       ReturnSnapshotGLContext(context);
     });
     return ReadIntoBuffer(context, buffer, stride, size, format);

@@ -17,6 +17,8 @@ vendoring:
   url: https://github.com/mozilla/nestegg
   source-hosting: github
   vendor-directory: media/libnestegg
+  patches:
+    - chroma-siting.patch
   skip-vendoring-steps:
     - update-moz-build
   exclude:
@@ -41,4 +43,3 @@ updatebot:
     - type: vendoring
       enabled: True
       frequency: every
-

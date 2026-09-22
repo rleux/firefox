@@ -2,6 +2,7 @@
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use ash::{khr, vk};
 use wgpu_sync::{Mutex, MutexGuard};
@@ -29,6 +30,7 @@ pub(crate) struct NativeSurface {
     /// Set only through
     /// [`Surface::set_next_swapchain_create_chain()`](crate::vulkan::Surface::set_next_swapchain_create_chain).
     next_swapchain_create_chain: Mutex<Option<PnextChain>>,
+    clipped: AtomicBool,
 }
 
 impl NativeSurface {
@@ -47,7 +49,12 @@ impl NativeSurface {
             #[cfg(windows)]
             hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
             next_swapchain_create_chain: Mutex::new(None),
+            clipped: AtomicBool::new(true),
         }
+    }
+
+    pub fn set_clipped(&self, clipped: bool) {
+        self.clipped.store(clipped, Ordering::Relaxed);
     }
 
     pub fn as_raw(&self) -> vk::SurfaceKHR {
@@ -238,7 +245,7 @@ impl Surface for NativeSurface {
             .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
             .composite_alpha(conv::map_composite_alpha_mode(config.composite_alpha_mode))
             .present_mode(conv::map_present_mode(config.present_mode))
-            .clipped(true)
+            .clipped(self.clipped.load(Ordering::Relaxed))
             .old_swapchain(old_swapchain);
 
         let mut format_list_info = vk::ImageFormatListCreateInfo::default();

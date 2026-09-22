@@ -67,6 +67,12 @@ varying highp vec2 vLocalPos;
 #define PART_RIGHT      3
 #define PART_BOTTOM     4
 #define PART_ALL        5
+#ifdef WR_FEATURE_HAL_AA_GRID
+#define PART_LEFT_TOP   6
+#define PART_LEFT_BOTTOM 7
+#define PART_RIGHT_TOP  8
+#define PART_RIGHT_BOTTOM 9
+#endif
 
 #define QF_IS_OPAQUE            1
 #define QF_APPLY_DEVICE_CLIP    2
@@ -274,6 +280,10 @@ PrimitiveInfo quad_primive_info(void) {
     float aa_bottom = (qi.edge_flags & EDGE_AA_BOTTOM) != 0 ? 1.0 : 0.0;
 
     switch (qi.part_index) {
+#ifdef WR_FEATURE_HAL_AA_GRID
+        case PART_LEFT_TOP:
+        case PART_LEFT_BOTTOM:
+#endif
         case PART_LEFT:
             local_coverage_rect.p1.x = local_coverage_rect.p0.x + AA_PIXEL_RADIUS;
 #ifdef SWGL_ANTIALIAS
@@ -282,8 +292,21 @@ PrimitiveInfo quad_primive_info(void) {
             swgl_antiAlias(EDGE_AA_LEFT | (qi.edge_flags & (EDGE_AA_TOP | EDGE_AA_BOTTOM)));
 #else
             local_coverage_rect.p0.x -= AA_PIXEL_RADIUS;
+#ifdef WR_FEATURE_HAL_AA_GRID
+            if (qi.part_index == PART_LEFT_TOP) {
+                local_coverage_rect.p1.y = local_coverage_rect.p0.y + aa_top * AA_PIXEL_RADIUS;
+                local_coverage_rect.p0.y -= aa_top * AA_PIXEL_RADIUS;
+            } else if (qi.part_index == PART_LEFT_BOTTOM) {
+                local_coverage_rect.p0.y = local_coverage_rect.p1.y - aa_bottom * AA_PIXEL_RADIUS;
+                local_coverage_rect.p1.y += aa_bottom * AA_PIXEL_RADIUS;
+            } else {
+                local_coverage_rect.p0.y += aa_top * AA_PIXEL_RADIUS;
+                local_coverage_rect.p1.y -= aa_bottom * AA_PIXEL_RADIUS;
+            }
+#else
             local_coverage_rect.p0.y -= aa_top * AA_PIXEL_RADIUS;
             local_coverage_rect.p1.y += aa_bottom * AA_PIXEL_RADIUS;
+#endif
 #endif
             break;
         case PART_TOP:
@@ -296,6 +319,10 @@ PrimitiveInfo quad_primive_info(void) {
             local_coverage_rect.p0.y -= AA_PIXEL_RADIUS;
 #endif
             break;
+#ifdef WR_FEATURE_HAL_AA_GRID
+        case PART_RIGHT_TOP:
+        case PART_RIGHT_BOTTOM:
+#endif
         case PART_RIGHT:
             local_coverage_rect.p0.x = local_coverage_rect.p1.x - AA_PIXEL_RADIUS;
 #ifdef SWGL_ANTIALIAS
@@ -304,8 +331,21 @@ PrimitiveInfo quad_primive_info(void) {
             swgl_antiAlias(EDGE_AA_RIGHT | (qi.edge_flags & (EDGE_AA_TOP | EDGE_AA_BOTTOM)));
 #else
             local_coverage_rect.p1.x += AA_PIXEL_RADIUS;
+#ifdef WR_FEATURE_HAL_AA_GRID
+            if (qi.part_index == PART_RIGHT_TOP) {
+                local_coverage_rect.p1.y = local_coverage_rect.p0.y + aa_top * AA_PIXEL_RADIUS;
+                local_coverage_rect.p0.y -= aa_top * AA_PIXEL_RADIUS;
+            } else if (qi.part_index == PART_RIGHT_BOTTOM) {
+                local_coverage_rect.p0.y = local_coverage_rect.p1.y - aa_bottom * AA_PIXEL_RADIUS;
+                local_coverage_rect.p1.y += aa_bottom * AA_PIXEL_RADIUS;
+            } else {
+                local_coverage_rect.p0.y += aa_top * AA_PIXEL_RADIUS;
+                local_coverage_rect.p1.y -= aa_bottom * AA_PIXEL_RADIUS;
+            }
+#else
             local_coverage_rect.p0.y -= aa_top * AA_PIXEL_RADIUS;
             local_coverage_rect.p1.y += aa_bottom * AA_PIXEL_RADIUS;
+#endif
 #endif
             break;
         case PART_BOTTOM:

@@ -1,0 +1,198 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8"><title>WebGPU compositor test</title>
+<style>
+html, body { margin: 0; block-size: 100%; background: white; }
+canvas { display: block; inline-size: 100vw; block-size: 100vh; }
+body.dimmed canvas { opacity: 0.5; transform: scale(0.75) rotate(3deg); }
+body.multiple canvas { inline-size: 256px; block-size: 128px; }
+</style><canvas width="256" height="128"></canvas>
+<script>
+window.gpuErrors = [];
+window.gpuLosses = [];
+const expectedLosses = new WeakSet();
+const createDevice = async () => {
+  if (!navigator.gpu) throw new Error("WebGPU unavailable");
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error("No WebGPU adapter");
+  const features = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+  const device = await adapter.requestDevice({requiredFeatures: features});
+  window.adapterInfo = {vendor: adapter.info.vendor, architecture: adapter.info.architecture, description: adapter.info.description};
+  device.addEventListener("uncapturederror", event => window.gpuErrors.push(event.error.message));
+  device.lost.then(info => {
+    window.gpuLosses.push({reason: info.reason, message: info.message});
+    if (!expectedLosses.has(device)) window.gpuErrors.push("device lost: " + info.message);
+  });
+  return device;
+};
+window.ready = createDevice();
+window.renderCase = async (format, alphaMode, discard, phase) => {
+  const device = await window.ready;
+  const canvas = window.canvasSource || document.querySelector("canvas");
+  const context = canvas.getContext("webgpu");
+  const configuration = format + "/" + alphaMode;
+  if (window.configuration !== configuration) {
+    context.unconfigure();
+    context.configure({device, format, alphaMode});
+    window.configuration = configuration;
+  }
+  const alpha = alphaMode === "premultiplied" || phase >= 8 ? 0.5 : 1.0;
+  const module = device.createShaderModule({code: `
+    @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+      let positions = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      return vec4(positions[index], 0.0, 1.0);
+    }
+    @fragment fn fragmentMain(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+      if ((position.y < ${(canvas.height / 2).toFixed(1)}) != ${phase % 2 === 1}) { return vec4(${alpha}, 0.0, 0.0, ${alpha}); }
+      return vec4(0.0, 0.0, ${alpha}, ${alpha});
+    }`});
+  const pipeline = device.createRenderPipeline({layout: "auto",
+    vertex: {module, entryPoint: "vertexMain"},
+    fragment: {module, entryPoint: "fragmentMain", targets: [{format}]}});
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginRenderPass({colorAttachments: [{
+    view: context.getCurrentTexture().createView(), clearValue: [1, 0, 1, 1],
+    loadOp: "clear", storeOp: discard ? "discard" : "store"}]});
+  pass.setPipeline(pipeline);
+  pass.draw(3);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  return [...window.gpuErrors];
+};
+window.benchmark = async count => {
+  const device = await window.ready;
+  const canvas = document.querySelector("canvas");
+  canvas.width = 1920; canvas.height = 1080;
+  const context = canvas.getContext("webgpu");
+  context.unconfigure();
+  context.configure({device, format: "bgra8unorm", alphaMode: "premultiplied"});
+  window.configuration = "bgra8unorm/premultiplied";
+  const gpuTiming = device.features.has("timestamp-query");
+  const queries = gpuTiming ? device.createQuerySet({type: "timestamp", count: 2}) : null;
+  const resolved = gpuTiming ? device.createBuffer({size: 256, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC}) : null;
+  const mapped = gpuTiming ? device.createBuffer({size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ}) : null;
+  const samples = [];
+  for (let frame = 0; frame < count + 15; ++frame) {
+    const tick = await new Promise(requestAnimationFrame);
+    const started = performance.now();
+    const measure = queries && frame === count + 14;
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{view: context.getCurrentTexture().createView(),
+        clearValue: [frame % 2, 0, (frame + 1) % 2, 1], loadOp: "clear", storeOp: "store"}],
+      ...(measure ? {timestampWrites: {querySet: queries, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1}} : {}),
+    });
+    pass.end();
+    if (measure) {
+      encoder.resolveQuerySet(queries, 0, 2, resolved, 0);
+      encoder.copyBufferToBuffer(resolved, 0, mapped, 0, 16);
+    }
+    device.queue.submit([encoder.finish()]);
+    const submitCpuMs = performance.now() - started;
+    let producerGpuMs = null;
+    if (measure) {
+      await mapped.mapAsync(GPUMapMode.READ);
+      const values = new BigUint64Array(mapped.getMappedRange());
+      producerGpuMs = Number(values[1] - values[0]) / 1e6;
+      mapped.unmap();
+    }
+    if (frame >= 15) samples.push({tick, submitCpuMs, producerGpuMs,
+      completionMs: measure ? performance.now() - started : null});
+  }
+  await device.queue.onSubmittedWorkDone();
+  queries?.destroy(); resolved?.destroy(); mapped?.destroy();
+  return {width: canvas.width, height: canvas.height, samples};
+};
+window.snapshotPixels = () => {
+  const source = document.querySelector("canvas");
+  const copy = document.createElement("canvas");
+  copy.width = source.width; copy.height = source.height;
+  const context = copy.getContext("2d", {willReadFrequently: true});
+  context.fillStyle = "white";
+  context.fillRect(0, 0, copy.width, copy.height);
+  context.drawImage(source, 0, 0);
+  return [0.25, 0.75].map(y => [...context.getImageData(
+    Math.floor(copy.width / 2), Math.floor(copy.height * y), 1, 1).data]);
+};
+window.setDimmed = async enabled => {
+  document.body.classList.toggle("dimmed", enabled);
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  return {enabled};
+};
+window.resizeAndRender = async (width, height) => {
+  const canvas = document.querySelector("canvas");
+  canvas.width = width; canvas.height = height;
+  window.configuration = undefined;
+  return window.renderCase("bgra8unorm", "opaque", false, 0);
+};
+window.expectDeviceLoss = async () => {
+  expectedLosses.add(await window.ready);
+  return {expected: true};
+};
+window.destroyDevice = async () => {
+  const device = await window.ready;
+  expectedLosses.add(device);
+  device.destroy();
+  const info = await device.lost;
+  return {reason: info.reason};
+};
+window.recreateDevice = async () => {
+  document.querySelector("canvas").getContext("webgpu").unconfigure();
+  window.configuration = undefined;
+  window.ready = createDevice();
+  await window.ready;
+  return {recreated: true};
+};
+window.multipleCanvases = async () => {
+  const device = await window.ready;
+  document.body.classList.add("multiple");
+  const primary = document.querySelector("canvas");
+  const canvases = [primary];
+  for (let index = 0; index < 2; ++index) {
+    const canvas = document.createElement("canvas");
+    document.body.appendChild(canvas);
+    canvases.push(canvas);
+  }
+  for (const [index, canvas] of canvases.entries()) {
+    canvas.width = 256; canvas.height = 128;
+    const context = canvas.getContext("webgpu");
+    context.unconfigure();
+    context.configure({device, format: index % 2 ? "rgba8unorm" : "bgra8unorm", alphaMode: "opaque"});
+    const encoder = device.createCommandEncoder();
+    const color = [Number(index === 0), Number(index === 1), Number(index === 2), 1];
+    const pass = encoder.beginRenderPass({colorAttachments: [{view: context.getCurrentTexture().createView(),
+      clearValue: color, loadOp: "clear", storeOp: "store"}]});
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  return canvases.map(canvas => {
+    const rect = canvas.getBoundingClientRect();
+    return [(rect.x + rect.width / 2) * devicePixelRatio, (rect.y + rect.height / 2) * devicePixelRatio];
+  });
+};
+window.clearExtraCanvases = () => {
+  for (const canvas of [...document.querySelectorAll("canvas")].slice(1)) {
+    canvas.getContext("webgpu").unconfigure();
+    canvas.remove();
+  }
+  document.body.classList.remove("multiple");
+  window.configuration = undefined;
+  return {remaining: document.querySelectorAll("canvas").length};
+};
+window.useOffscreenCanvas = () => {
+  const previous = document.querySelector("canvas");
+  previous.getContext("webgpu").unconfigure();
+  const visible = document.createElement("canvas");
+  visible.width = 256; visible.height = 128;
+  previous.replaceWith(visible);
+  window.canvasSource = visible.transferControlToOffscreen();
+  window.configuration = undefined;
+  return {offscreen: true};
+};
+</script>

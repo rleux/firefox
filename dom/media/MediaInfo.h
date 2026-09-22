@@ -342,6 +342,15 @@ enum class VideoRotation {
 // Stores info relevant to presenting media frames.
 class VideoInfo : public TrackInfo {
  public:
+  enum class ChromaLocation : uint8_t {
+    Unspecified,
+    Left,
+    Center,
+    TopLeft,
+    Top,
+    Unsupported,
+  };
+
   VideoInfo() : VideoInfo(-1, -1) {}
 
   VideoInfo(int32_t aWidth, int32_t aHeight)
@@ -379,6 +388,7 @@ class VideoInfo : public TrackInfo {
     mTransferFunction = aOther.mTransferFunction;
     mHDRMetadata = aOther.mHDRMetadata;
     mColorRange = aOther.mColorRange;
+    mChromaLocation = aOther.mChromaLocation;
     mImageRect = aOther.mImageRect;
     mAlphaPresent = aOther.mAlphaPresent;
     mFrameRate = aOther.mFrameRate;
@@ -490,6 +500,8 @@ class VideoInfo : public TrackInfo {
 
   // Color primaries are independent from the coefficients.
   Maybe<gfx::ColorSpace2> mColorPrimaries;
+
+  ChromaLocation mChromaLocation = ChromaLocation::Unspecified;
 
   // Transfer functions get their own member, which may not be strongly
   // correlated to the colorspace.

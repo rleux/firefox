@@ -377,6 +377,7 @@ already_AddRefed<DataSourceSurface> DataSourceSurfaceFromYCbCrDescriptor(
   ycbcrData.mCbCrStride = aDescriptor.cbCrStride();
   ycbcrData.mPictureRect = aDescriptor.display();
   ycbcrData.mYUVColorSpace = aDescriptor.yUVColorSpace();
+  ycbcrData.mColorRange = aDescriptor.colorRange();
   ycbcrData.mColorDepth = aDescriptor.colorDepth();
   ycbcrData.mChromaSubsampling = aDescriptor.chromaSubsampling();
 

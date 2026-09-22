@@ -304,6 +304,9 @@ class FFmpegVideoDecoder<LIBAV_VER>
   bool mUploadSWDecodeToDMABuf = false;
   VADisplay mDisplay = nullptr;
   UniquePtr<VideoFramePool<LIBAV_VER>> mVideoFramePool;
+  UniquePtr<VideoFramePool<LIBAV_VER>> mNativeVAAPIFramePool;
+  uint64_t mVAAPIDRMMajor = 0;
+  uint64_t mVAAPIDRMMinor = 0;
   static nsTArray<AVCodecID> mAcceleratedFormats;
 #endif
 

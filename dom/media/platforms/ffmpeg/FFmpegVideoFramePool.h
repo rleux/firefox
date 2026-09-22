@@ -137,7 +137,7 @@ class VideoFrameSurface<LIBAV_VER> {
 template <>
 class VideoFramePool<LIBAV_VER> {
  public:
-  explicit VideoFramePool(int aFFMPEGPoolSize);
+  explicit VideoFramePool(int aFFMPEGPoolSize, bool aNativeVAAPI = false);
   ~VideoFramePool();
 
   RefPtr<VideoFrameSurface<LIBAV_VER>> GetVideoFrameSurface(
@@ -150,6 +150,11 @@ class VideoFramePool<LIBAV_VER> {
       const FFmpegLibWrapper* aLib);
   RefPtr<VideoFrameSurface<LIBAV_VER>> GetVideoFrameSurface(
       const layers::PlanarYCbCrData& aData, AVCodecContext* aAVCodecContext);
+
+  RefPtr<VideoFrameSurface<LIBAV_VER>> GetNativeVAAPIFrame(
+      RefPtr<DMABufSurfaceYUV> aSurface,
+      const VADRMPRIMESurfaceDescriptor& aDesc, AVFrame* aFrame,
+      const FFmpegLibWrapper* aLib, uint64_t aDRMMajor, uint64_t aDRMMinor);
 
   void ReleaseUnusedVAAPIFrames();
   void FlushFFmpegFrames();
@@ -168,6 +173,8 @@ class VideoFramePool<LIBAV_VER> {
   RefPtr<VideoFrameSurface<LIBAV_VER>> GetFreeVideoFrameSurfaceLocked()
       MOZ_REQUIRES(mSurfaceLock);
   bool ShouldCopySurfaceLocked() MOZ_REQUIRES(mSurfaceLock);
+  void RetireNativeFramesLocked(const MutexAutoLock& aProofOfLock)
+      MOZ_REQUIRES(mSurfaceLock);
 
  private:
   // Protect mDMABufSurfaces pool access
@@ -183,6 +190,9 @@ class VideoFramePool<LIBAV_VER> {
   Maybe<bool> mTextureCreationWorks MOZ_GUARDED_BY(mSurfaceLock);
   // We may fail to copy DMABuf memory on NVIDIA drivers.
   bool mTextureCopyWorks MOZ_GUARDED_BY(mSurfaceLock) = true;
+  const bool mNativeVAAPI;
+  uint64_t mNativeEpoch;
+  bool mNativeFailed = false;
 };
 
 }  // namespace mozilla

@@ -3,12 +3,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use crate::NotifierEvent;
-use crate::WindowWrapper;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use crate::wrench::{Wrench, WrenchThing};
+use crate::wrench::{TestWindow, Wrench, WrenchThing};
+use crate::reftest::ReftestRenderer;
 use crate::yaml_frame_reader::YamlFrameReader;
 use webrender::{PictureCacheDebugInfo, TileDebugInfo};
 use webrender::api::units::*;
@@ -92,9 +92,9 @@ fn parse_manifest(path: &Path) -> Vec<InvalidationTest> {
     tests
 }
 
-pub struct TestHarness<'a> {
-    wrench: &'a mut Wrench,
-    window: &'a mut WindowWrapper,
+pub struct TestHarness<'a, R = webrender::Renderer> {
+    wrench: &'a mut Wrench<R>,
+    window: &'a mut dyn TestWindow,
     rx: &'a Receiver<NotifierEvent>,
 }
 
@@ -111,10 +111,10 @@ fn pr(x: f32, y: f32, w: f32, h: f32) -> PictureRect {
     )
 }
 
-impl<'a> TestHarness<'a> {
+impl<'a, R: ReftestRenderer> TestHarness<'a, R> {
     pub fn new(
-        wrench: &'a mut Wrench,
-        window: &'a mut WindowWrapper,
+        wrench: &'a mut Wrench<R>,
+        window: &'a mut dyn TestWindow,
         rx: &'a Receiver<NotifierEvent>
     ) -> Self {
         TestHarness {
@@ -416,7 +416,7 @@ impl<'a> TestHarness<'a> {
             NotifierEvent::WakeUp { composite_needed } => composite_needed,
             NotifierEvent::ShutDown => unreachable!(),
         };
-        let results = self.wrench.render();
+        let results = R::render_test(self.wrench);
         self.window.swap_buffers();
 
         RenderResult {

@@ -1,0 +1,777 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#![cfg(target_os = "linux")]
+
+use hal::ExternalImageProvider;
+use std::{cell::RefCell, os::fd::AsRawFd, os::raw::c_void, rc::Rc, sync::Arc};
+use webrender::{api::units::*, api::*, hal};
+
+mod bindings {
+    #[derive(Clone, Copy)]
+    pub struct WrExternalImageHandler(pub *mut std::os::raw::c_void);
+    impl WrExternalImageHandler {
+        pub fn object(self) -> *mut std::os::raw::c_void {
+            self.0
+        }
+    }
+}
+
+#[path = "../src/hal_image.rs"]
+mod hal_image;
+use hal_image::*;
+
+#[path = "hal_video.rs"]
+mod video;
+
+extern "C" {
+    fn wr_snapshot_vulkan_dmabuf(data: &WrHalDmaBuf, destination: *mut u8, length: usize, stride: usize) -> bool;
+}
+
+#[test]
+#[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
+fn native_snapshots_preserve_format_and_validate_destination() {
+    init_log();
+    let producer = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
+        let desc = ImageDescriptor::new(4, 4, format, ImageDescriptorFlags::empty());
+        let pixels = [23, 47, 89, 128].repeat(16);
+        let original = producer.create_image(desc, &pixels).unwrap();
+        assert_eq!(producer.read_image(&original).unwrap(), pixels);
+        let export = producer.export_dmabuf_image(&original, 0).unwrap();
+        let layout = export.plane().layout();
+        let data = WrHalDmaBuf {
+            fd: export.plane().as_fd().as_raw_fd(),
+            ready_fd: export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd()),
+            access_lock_fd: -1,
+            width: 4,
+            height: 4,
+            format,
+            modifier: layout.modifier(),
+            stride: layout.stride(),
+            offset: layout.offset(),
+            device_uuid: layout.device_uuid(),
+            driver_uuid: layout.driver_uuid(),
+        };
+        let mut destination = [0xa5; 80];
+        for (length, stride) in [(79, 20), (80, 15)] {
+            assert!(!unsafe { wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), length, stride) });
+            assert_eq!(destination, [0xa5; 80]);
+        }
+        assert!(unsafe { wr_snapshot_vulkan_dmabuf(&data, destination.as_mut_ptr(), destination.len(), 20) });
+        for (src, dst) in pixels.chunks_exact(16).zip(destination.chunks_exact(20)) {
+            assert_eq!(src, &dst[..16]);
+            assert_eq!(&dst[16..], &[0; 4]);
+        }
+    }
+}
+
+struct Fixture {
+    image: RefCell<Option<WrHalImage>>,
+    export: RefCell<Option<hal::DmaBufExport>>,
+    releases: Rc<RefCell<Vec<WrHalImageRelease>>>,
+    pixels: Vec<u8>,
+    video_access: RefCell<VideoAccess>,
+}
+
+#[derive(Default)]
+struct VideoAccess {
+    locked: bool,
+    poisoned: bool,
+    locks: usize,
+    unlocks: usize,
+}
+
+struct Token {
+    fixture: Rc<Fixture>,
+    _export: Option<hal::DmaBufExport>,
+    video_locked: bool,
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_acquire_hal_image(
+    obj: *mut c_void,
+    _: ExternalImageId,
+    _: u8,
+    image: *mut WrHalImage,
+) -> *mut WrHalImageLease {
+    let fixture = &*(obj as *const Rc<Fixture>);
+    let Some(value) = fixture.image.borrow_mut().take() else {
+        return std::ptr::null_mut();
+    };
+    image.write(value);
+    Box::into_raw(Box::new(Token {
+        fixture: fixture.clone(),
+        _export: fixture.export.borrow_mut().take(),
+        video_locked: false,
+    })) as *mut WrHalImageLease
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_lock_foreign_rgb(raw: *mut WrHalImageLease) -> bool {
+    wr_renderer_lock_vaapi_image(raw)
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_lock_vulkan_dmabuf(raw: *mut WrHalImageLease) -> bool {
+    wr_renderer_lock_vaapi_image(raw)
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_lock_vaapi_image(raw: *mut WrHalImageLease) -> bool {
+    let token = &mut *(raw as *mut Token);
+    let mut access = token.fixture.video_access.borrow_mut();
+    if access.locked || access.poisoned { return false; }
+    access.locked = true;
+    access.locks += 1;
+    token.video_locked = true;
+    true
+}
+
+#[no_mangle]
+unsafe extern "C" fn wr_renderer_release_hal_image(raw: *mut WrHalImageLease, status: WrHalImageRelease) {
+    let token = Box::from_raw(raw as *mut Token);
+    if token.video_locked {
+        let mut access = token.fixture.video_access.borrow_mut();
+        access.locked = false;
+        access.unlocks += 1;
+        access.poisoned |= matches!(status, WrHalImageRelease::Abandoned);
+    }
+    token.fixture.releases.borrow_mut().push(status);
+}
+
+fn provider(fixture: &Rc<Fixture>, device: hal::ExternalImageDevice) -> ExternalImages {
+    ExternalImages::new(
+        bindings::WrExternalImageHandler(fixture as *const Rc<Fixture> as *mut c_void),
+        device,
+    )
+}
+
+struct Notifier;
+impl RenderNotifier for Notifier {
+    fn clone(&self) -> Box<dyn RenderNotifier> {
+        Box::new(Self)
+    }
+    fn wake_up(&self, _: bool) {}
+    fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {}
+}
+
+fn init_log() {
+    struct Logger;
+    impl log::Log for Logger {
+        fn enabled(&self, metadata: &log::Metadata) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+        fn log(&self, record: &log::Record) {
+            if self.enabled(record.metadata()) {
+                eprintln!("{}: {}", record.target(), record.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: Logger = Logger;
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+}
+
+fn renderer() -> (hal::Renderer, webrender::render_api::RenderApiSender) {
+    init_log();
+    hal::create_vulkan_renderer(
+        &hal::Options {
+            validation: true,
+            ..Default::default()
+        },
+        webrender::WebRenderOptions::default(),
+        Box::new(Notifier),
+    )
+    .unwrap()
+}
+
+#[test]
+#[ignore = "Requires a Linux Vulkan adapter"]
+fn buffer_acquisitions_release_once_on_success_and_error() {
+    let (renderer, sender) = renderer();
+    for valid in [false, true] {
+        let fixture = Rc::new(Fixture {
+            image: RefCell::new(None),
+            export: RefCell::new(None),
+            releases: Default::default(),
+            pixels: vec![17; 16],
+            video_access: Default::default(),
+        });
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation: 19,
+            source: WrHalImageSource::Buffer(WrHalBuffer {
+                data: fixture.pixels.as_ptr(),
+                length: 16,
+                width: 2,
+                height: 2,
+                stride: if valid { 8 } else { 4 },
+                format: ImageFormat::RGBA8,
+                opaque: true,
+            }),
+        });
+        let mut provider = provider(&fixture, renderer.external_image_device());
+        let result = provider.acquire(ExternalImageId(1), 0, false);
+        assert_eq!(result.is_ok(), valid);
+        if let Ok(lease) = result {
+            assert_eq!(lease.generation(), 19);
+            assert_eq!(lease.descriptor().size, DeviceIntSize::new(2, 2));
+            drop(lease);
+        }
+        assert_eq!(fixture.releases.borrow().len(), 1);
+        assert!(matches!(
+            (valid, fixture.releases.borrow()[0]),
+            (true, WrHalImageRelease::Complete) | (false, WrHalImageRelease::Unused)
+        ));
+        assert!(provider.acquire(ExternalImageId(1), 0, false).is_err());
+        assert_eq!(fixture.releases.borrow().len(), 1);
+        assert_eq!(Rc::strong_count(&fixture), 1);
+    }
+    for (fd, generation) in [(-2, 1), (0, 0)] {
+        let fixture = Rc::new(Fixture {
+            image: RefCell::new(Some(WrHalImage {
+                generation,
+                source: WrHalImageSource::VulkanDmaBuf(WrHalDmaBuf {
+                    fd,
+                    ready_fd: -1,
+                    access_lock_fd: -1,
+                    width: 4,
+                    height: 4,
+                    format: ImageFormat::RGBA8,
+                    modifier: 0,
+                    stride: 16,
+                    offset: 0,
+                    device_uuid: [0; 16],
+                    driver_uuid: [0; 16],
+                }),
+            })),
+            export: RefCell::new(None),
+            releases: Default::default(),
+            pixels: Vec::new(),
+            video_access: Default::default(),
+        });
+        assert!(provider(&fixture, renderer.external_image_device())
+            .acquire(ExternalImageId(1), 0, false)
+            .is_err());
+        assert!(matches!(
+            fixture.releases.borrow().as_slice(),
+            [WrHalImageRelease::Unused]
+        ));
+    }
+    sender.create_api().shut_down(true);
+}
+
+#[test]
+#[ignore = "Requires a Linux Vulkan adapter"]
+fn buffer_snapshot_reuse_releases_hosts_once() {
+    let (renderer, sender) = renderer();
+    let mut fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: vec![17; 24],
+        video_access: Default::default(),
+    });
+    let mut provider = provider(&fixture, renderer.external_image_device());
+    let mut held = Vec::new();
+    for (index, (width, height, stride, format, opaque, valid)) in [
+        (2, 2, 12, ImageFormat::RGBA8, true, true),
+        (3, 1, 3, ImageFormat::R8, false, true),
+        (2, 2, 12, ImageFormat::BGRA8, false, true),
+        (2, 2, 4, ImageFormat::RGBA8, true, false),
+        (2, 2, 8, ImageFormat::RGBA8, false, true),
+    ]
+    .iter()
+    .copied()
+    .enumerate()
+    {
+        Rc::get_mut(&mut fixture).unwrap().pixels.fill(index as u8);
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation: index as u64 + 1,
+            source: WrHalImageSource::Buffer(WrHalBuffer {
+                data: fixture.pixels.as_ptr(),
+                length: fixture.pixels.len(),
+                width,
+                height,
+                stride,
+                format,
+                opaque,
+            }),
+        });
+        let result = provider.acquire(ExternalImageId(index as u64 + 1), 0, false);
+        assert_eq!(result.is_ok(), valid);
+        if let Ok(lease) = result {
+            assert_eq!(lease.generation(), index as u64 + 1);
+            assert_eq!(lease.descriptor().size, DeviceIntSize::new(width, height));
+            held.push(lease);
+        }
+        assert_eq!(fixture.releases.borrow().len(), index + 1);
+        assert!(matches!(
+            (valid, fixture.releases.borrow()[index]),
+            (true, WrHalImageRelease::Complete) | (false, WrHalImageRelease::Unused)
+        ));
+        assert_eq!(Rc::strong_count(&fixture), 1);
+        if index == 2 {
+            held.clear();
+        }
+    }
+    drop(provider);
+    drop(held);
+    assert_eq!(fixture.releases.borrow().len(), 5);
+    sender.create_api().shut_down(true);
+}
+
+struct SingleLease(Option<hal::ExternalImageLease>);
+impl hal::ExternalImageProvider for SingleLease {
+    fn acquire(&mut self, _: ExternalImageId, _: u8, _: bool) -> Result<hal::ExternalImageLease, String> {
+        self.0.take().ok_or("Image already acquired".into())
+    }
+}
+
+#[test]
+fn default_buffer_upload_releases_once_on_success_and_error() {
+    let descriptor = ImageDescriptor::new(2, 1, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+    let pixels = Arc::new(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    for success in [true, false] {
+        let releases = Rc::new(RefCell::new(Vec::new()));
+        let callback_releases = releases.clone();
+        let lease = hal::ExternalImageLease::new(
+            descriptor,
+            TexelRect::new(0.0, 0.0, 2.0, 1.0),
+            7,
+            hal::ExternalImageSource::Buffer(pixels.clone()),
+            move |status| callback_releases.borrow_mut().push(status),
+        )
+        .unwrap();
+        let mut provider = SingleLease(Some(lease));
+        let mut calls = 0;
+        let result = provider.with_buffer(ExternalImageId(1), 0, &mut |buffer| {
+            calls += 1;
+            assert_eq!(buffer.descriptor(), descriptor);
+            assert_eq!(buffer.bytes().unwrap(), pixels.as_slice());
+            assert!(!buffer.opaque());
+            if success {
+                Ok(())
+            } else {
+                Err("injected upload failure".into())
+            }
+        });
+        assert_eq!(result.is_ok(), success);
+        assert_eq!(calls, 1);
+        assert!(matches!(
+            (success, releases.borrow().as_slice()),
+            (true, [hal::ExternalImageRelease::Complete]) | (false, [hal::ExternalImageRelease::Unused])
+        ));
+    }
+}
+
+#[test]
+#[ignore = "Requires a Linux Vulkan adapter"]
+fn buffer_direct_upload_retains_host_and_validates_layout() {
+    let (renderer, sender) = renderer();
+    let fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: (0..24).collect(),
+        video_access: Default::default(),
+    });
+    let pointer = fixture.pixels.as_ptr();
+    let mut provider = provider(&fixture, renderer.external_image_device());
+    let offer = |generation, stride, length, opaque| {
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation,
+            source: WrHalImageSource::Buffer(WrHalBuffer {
+                data: pointer,
+                length,
+                width: 2,
+                height: 2,
+                stride,
+                format: ImageFormat::RGBA8,
+                opaque,
+            }),
+        });
+    };
+
+    offer(1, 12, 20, true);
+    let mut calls = 0;
+    provider
+        .with_buffer(ExternalImageId(1), 0, &mut |buffer| {
+            calls += 1;
+            assert_eq!(buffer.descriptor().size, DeviceIntSize::new(2, 2));
+            assert_eq!(buffer.descriptor().format, ImageFormat::RGBA8);
+            assert_eq!(buffer.descriptor().stride, Some(12));
+            assert_eq!(buffer.bytes().unwrap().as_ptr(), pointer);
+            assert_eq!(buffer.bytes().unwrap(), &fixture.pixels[..20]);
+            assert!(buffer.opaque());
+            assert!(fixture.releases.borrow().is_empty());
+            assert_eq!(Rc::strong_count(&fixture), 2);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [WrHalImageRelease::Complete]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+
+    offer(2, 12, 20, false);
+    let result = provider.with_buffer(ExternalImageId(2), 0, &mut |buffer| {
+        calls += 1;
+        assert_eq!(buffer.bytes().unwrap().as_ptr(), pointer);
+        assert!(!buffer.opaque());
+        assert_eq!(fixture.releases.borrow().len(), 1);
+        assert_eq!(Rc::strong_count(&fixture), 2);
+        Err("injected direct upload failure".into())
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 2);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [WrHalImageRelease::Complete, WrHalImageRelease::Unused]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+
+    offer(3, 4, 20, true);
+    let result = provider.with_buffer(ExternalImageId(3), 0, &mut |_| {
+        calls += 1;
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert_eq!(calls, 2);
+    assert!(matches!(
+        fixture.releases.borrow().as_slice(),
+        [
+            WrHalImageRelease::Complete,
+            WrHalImageRelease::Unused,
+            WrHalImageRelease::Unused
+        ]
+    ));
+    assert_eq!(Rc::strong_count(&fixture), 1);
+    sender.create_api().shut_down(true);
+}
+
+#[test]
+#[ignore = "Requires GL producer FDs from test_foreign_webgl.py and Intel Vulkan validation"]
+fn foreign_cache_defers_release_and_rejects_stale_metadata() {
+    init_log();
+    let number = |name: &str| std::env::var(name).unwrap().parse::<u64>().unwrap();
+    let fd = number("WR_FOREIGN_RGB_FD") as i32;
+    let ready_fd = number("WR_FOREIGN_RGB_FENCE") as i32;
+    let fourcc = number("WR_FOREIGN_RGB_FOURCC") as u32;
+    let stride = number("WR_FOREIGN_RGB_PITCH");
+    let consumer = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let other = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let fixture = Rc::new(Fixture {
+        image: RefCell::new(None),
+        export: RefCell::new(None),
+        releases: Default::default(),
+        pixels: Vec::new(),
+        video_access: Default::default(),
+    });
+    let offer = |generation| {
+        *fixture.image.borrow_mut() = Some(WrHalImage {
+            generation,
+            source: WrHalImageSource::ForeignRGB(WrHalForeignRGB {
+                fd,
+                ready_fd,
+                width: 17,
+                height: 9,
+                fourcc,
+                stride,
+                offset: 0,
+            }),
+        });
+    };
+    let generation = number("WR_FOREIGN_RGB_GENERATION");
+    offer(generation);
+    let first = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(1), 0, false)
+        .unwrap();
+    offer(generation);
+    let second = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(2), 0, false)
+        .unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    drop(first);
+    drop(second);
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+    let before = fixture.releases.borrow().len();
+
+    offer(generation + 1);
+    assert!(provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(3), 0, false)
+        .is_err());
+    offer(generation);
+    assert!(provider(&fixture, other)
+        .acquire(ExternalImageId(3), 0, false)
+        .is_err());
+    assert_eq!(fixture.releases.borrow().len(), before + 2);
+    assert!(fixture.video_access.borrow().locked);
+
+    offer(generation);
+    let resumed = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 2);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    assert_eq!(fixture.releases.borrow().len(), before + 3);
+    drop(resumed);
+    assert!(fixture.video_access.borrow().locked);
+    consumer.finish().unwrap();
+    assert_eq!(fixture.video_access.borrow().unlocks, 2);
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.releases.borrow().len(), before + 4);
+    assert!(matches!(
+        fixture.releases.borrow().last(),
+        Some(WrHalImageRelease::Unused)
+    ));
+}
+
+#[test]
+#[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
+fn native_cache_shares_publications_and_rejects_stale_metadata() {
+    init_log();
+    let options = hal::Options { validation: true, ..Default::default() };
+    let producer = hal::create_vulkan_image_device(&options).unwrap();
+    let consumer = hal::create_vulkan_image_device(&options).unwrap();
+    let other = hal::create_vulkan_image_device(&options).unwrap();
+    let original = producer.create_image(
+        ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::empty()),
+        &[31, 67, 89, 255].repeat(16),
+    ).unwrap();
+    let export = producer.export_dmabuf_image(&original, 0).unwrap();
+    let layout = export.plane().layout();
+    let data = WrHalDmaBuf {
+        fd: export.plane().as_fd().as_raw_fd(),
+        ready_fd: export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd()),
+        access_lock_fd: export.plane().as_fd().as_raw_fd(),
+        width: 4, height: 4, format: layout.format(), modifier: layout.modifier(),
+        stride: layout.stride(), offset: layout.offset(),
+        device_uuid: layout.device_uuid(), driver_uuid: layout.driver_uuid(),
+    };
+    let fixture = Rc::new(Fixture { image: RefCell::new(None), export: RefCell::new(None),
+        releases: Default::default(), pixels: Vec::new(), video_access: Default::default() });
+    let offer = |generation, data| {
+        *fixture.image.borrow_mut() = Some(WrHalImage { generation, source: WrHalImageSource::VulkanDmaBuf(data) });
+    };
+    offer(81, data);
+    let first = provider(&fixture, consumer.clone()).acquire(ExternalImageId(1), 0, false).unwrap();
+    offer(81, data);
+    let second = provider(&fixture, consumer.clone()).acquire(ExternalImageId(2), 0, false).unwrap();
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    for generation in [80, 82] {
+        offer(generation, data);
+        assert!(provider(&fixture, consumer.clone()).acquire(ExternalImageId(3), 0, false).is_err());
+    }
+    let foreign_lock = std::fs::File::open("/dev/null").unwrap();
+    offer(81, WrHalDmaBuf { access_lock_fd: foreign_lock.as_raw_fd(), ..data });
+    assert!(provider(&fixture, consumer.clone()).acquire(ExternalImageId(3), 0, false).is_err());
+    offer(81, data);
+    assert!(provider(&fixture, other.clone()).acquire(ExternalImageId(3), 0, false).is_err());
+    assert_eq!(fixture.video_access.borrow().locks, 1);
+    assert!(fixture.video_access.borrow().locked);
+    consumer.poll().unwrap();
+    assert!(fixture.video_access.borrow().locked);
+    drop(first);
+    assert!(fixture.video_access.borrow().locked);
+    drop(second);
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+    let releases_before_pending_retry = fixture.releases.borrow().len();
+    for generation in [80, 82] {
+        offer(generation, data);
+        assert!(provider(&fixture, consumer.clone())
+            .acquire(ExternalImageId(4), 0, false)
+            .is_err());
+    }
+    offer(81, WrHalDmaBuf { access_lock_fd: foreign_lock.as_raw_fd(), ..data });
+    assert!(provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .is_err());
+    offer(81, data);
+    assert!(provider(&fixture, other)
+        .acquire(ExternalImageId(4), 0, false)
+        .is_err());
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 4
+    );
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 0);
+
+    offer(81, data);
+    let resumed = provider(&fixture, consumer.clone())
+        .acquire(ExternalImageId(4), 0, false)
+        .unwrap();
+    assert!(fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().locks, 2);
+    assert_eq!(fixture.video_access.borrow().unlocks, 1);
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 5
+    );
+    drop(resumed);
+    assert!(fixture.video_access.borrow().locked);
+    consumer.finish().unwrap();
+    assert!(!fixture.video_access.borrow().locked);
+    assert_eq!(fixture.video_access.borrow().unlocks, 2);
+    assert_eq!(
+        fixture.releases.borrow().len(),
+        releases_before_pending_retry + 6
+    );
+    assert!(matches!(
+        fixture.releases.borrow().last(),
+        Some(WrHalImageRelease::Unused)
+    ));
+}
+
+#[test]
+#[ignore = "Requires Linux Vulkan DMA-BUF and sync-file sharing"]
+fn native_descriptor_sampling_retains_producer_until_completion() {
+    let (mut renderer, sender) = renderer();
+    let device = renderer.external_image_device();
+    assert!(device.dmabuf_capabilities().unwrap().supported());
+    let producer = hal::create_vulkan_image_device(&hal::Options {
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let desc = ImageDescriptor::new(4, 4, ImageFormat::RGBA8, ImageDescriptorFlags::IS_OPAQUE);
+    let expected_pixels = [23, 47, 89, 255].repeat(16);
+    let original = producer.create_image(desc, &expected_pixels).unwrap();
+    let export = producer.export_dmabuf_image(&original, 0).unwrap();
+    let layout = export.plane().layout();
+    let fd = export.plane().as_fd().as_raw_fd();
+    let ready_fd = export.ready().as_fd().map_or(-1, |fd| fd.as_raw_fd());
+    let fixture = Rc::new(Fixture {
+        image: RefCell::new(Some(WrHalImage {
+            generation: 71,
+            source: WrHalImageSource::VulkanDmaBuf(WrHalDmaBuf {
+                fd,
+                ready_fd,
+                access_lock_fd: fd,
+                width: 4,
+                height: 4,
+                format: layout.format(),
+                modifier: layout.modifier(),
+                stride: layout.stride(),
+                offset: layout.offset(),
+                device_uuid: layout.device_uuid(),
+                driver_uuid: layout.driver_uuid(),
+            }),
+        })),
+        export: RefCell::new(Some(export)),
+        releases: Default::default(),
+        pixels: Vec::new(),
+        video_access: Default::default(),
+    });
+    let lease = provider(&fixture, device.clone())
+        .acquire(ExternalImageId(1), 0, false)
+        .unwrap();
+    assert_eq!(lease.generation(), 71);
+    assert!(fixture.releases.borrow().is_empty());
+    assert!(fixture.video_access.borrow().locked);
+    assert!(fixture.export.borrow().is_none());
+    assert!(std::path::Path::new(&format!("/proc/self/fd/{fd}")).exists());
+    let releases = fixture.releases.clone();
+    let weak = Rc::downgrade(&fixture);
+    drop(fixture);
+    drop(original);
+    drop(producer);
+
+    renderer
+        .set_external_image_provider(Box::new(SingleLease(Some(lease))))
+        .unwrap();
+    let mut api = sender.create_api();
+    let document = api.add_document(DeviceIntSize::new(4, 4));
+    let pipeline = PipelineId(0, 0);
+    let key = api.generate_image_key();
+    let mut transaction = webrender::render_api::Transaction::new();
+    transaction.add_image(
+        key,
+        desc,
+        ImageData::External(ExternalImageData {
+            id: ExternalImageId(1),
+            channel_index: 0,
+            image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+            normalized_uvs: false,
+        }),
+        None,
+    );
+    let mut builder = DisplayListBuilder::new(pipeline);
+    builder.begin(60.0);
+    let info = CommonItemProperties {
+        clip_rect: LayoutRect::from_size(LayoutSize::new(4.0, 4.0)),
+        clip_chain_id: ClipChainId::INVALID,
+        spatial_id: SpatialId::root_scroll_node(pipeline),
+        flags: PrimitiveFlags::default(),
+    };
+    builder.push_stacking_context(
+        info.spatial_id,
+        info.flags,
+        None,
+        TransformStyle::Flat,
+        MixBlendMode::Normal,
+        &[],
+        &[],
+        RasterSpace::Screen,
+        StackingContextFlags::empty(),
+        None,
+    );
+    builder.push_image(
+        &info,
+        info.clip_rect,
+        ImageRendering::Pixelated,
+        AlphaType::PremultipliedAlpha,
+        key,
+        ColorF::WHITE,
+    );
+    builder.pop_stacking_context();
+    transaction.set_root_pipeline(pipeline);
+    transaction.set_display_list(Epoch(0), api.get_namespace_id(), builder.end());
+    transaction.generate_frame(1, true, false, RenderReasons::TESTING);
+    api.send_transaction(document, transaction);
+    renderer.prepare_frame(document).unwrap();
+    renderer.render().unwrap();
+    let completion = renderer.submit_work().unwrap();
+    assert!(releases.borrow().is_empty());
+    let mut completed = false;
+    for _ in 0..100_000 {
+        renderer.poll().unwrap();
+        let draw_complete = renderer.poll_completion(completion).unwrap();
+        device.poll().unwrap();
+        if draw_complete && !releases.borrow().is_empty() {
+            completed = true;
+            break;
+        }
+        std::hint::spin_loop();
+    }
+    assert!(completed);
+    assert!(matches!(releases.borrow().as_slice(), [WrHalImageRelease::Complete]));
+    assert!(weak.upgrade().is_none());
+    let rendered = renderer
+        .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(4, 4)))
+        .unwrap();
+    assert_eq!(rendered, expected_pixels);
+    api.shut_down(true);
+}

@@ -9,9 +9,17 @@ edition = "2018"
 
 [features]
 serialize_program = ["serde"]
+hal-translate = ["dep:naga"]
+hal-translate-probe = ["hal-translate", "dep:serde_json"]
 
 [dependencies]
 bitflags = "2"
 lazy_static = "1"
 regex = "1.11.1"
 serde = { optional = true, version = "1.0", features = ["serde_derive"] }
+naga = { optional = true, version = "=30.0.0", default-features = false, features = ["spv-in", "spv-out", "msl-out", "hlsl-out"] }
+serde_json = { optional = true, version = "1.0" }
+
+[[example]]
+name = "hal_translate"
+required-features = ["hal-translate-probe"]

@@ -797,7 +797,8 @@ int32_t BufferTextureHost::GetCbCrStride() const {
 already_AddRefed<gfx::DataSourceSurface> BufferTextureHost::GetAsSurface(
     gfx::DataSourceSurface* aSurface) {
   RefPtr<gfx::DataSourceSurface> result;
-  if (mFormat == gfx::SurfaceFormat::UNKNOWN) {
+  // YCbCr readback supports depths without a dedicated SurfaceFormat.
+  if (mFormat == gfx::SurfaceFormat::UNKNOWN && !IsYCbCr()) {
     NS_WARNING("BufferTextureHost: unsupported format!");
     return nullptr;
   }

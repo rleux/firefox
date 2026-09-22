@@ -180,7 +180,7 @@ const EXTERNAL_SCROLL_VARIANTS: [ExternalScrollVariation; 1] = [
     },
 ];
 
-impl<'a> RawtestHarness<'a> {
+impl<'a, R: crate::reftest::ReftestRenderer> RawtestHarness<'a, R> {
     pub fn test_snapping(&mut self) {
         println!("\tsnapping test...");
 

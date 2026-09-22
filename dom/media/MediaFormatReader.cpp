@@ -2644,12 +2644,14 @@ void MediaFormatReader::Update(TrackType aTrack) {
       return;
     }
 #ifdef XP_LINUX
+    bool retryWithSoftware = false;
     // We failed to decode on Linux with HW decoder,
     // give it another try without HW decoder.
     if (decoder.mError.ref() == NS_ERROR_DOM_MEDIA_DECODE_ERR &&
         decoder.mDecoder->IsHardwareAccelerated(error)) {
       LOG("Error: {} decode error, disable HW acceleration",
           TrackTypeToStr(aTrack));
+      retryWithSoftware = !decoder.mHardwareDecodingDisabled;
       needsNewDecoder = true;
       decoder.mHardwareDecodingDisabled = true;
     }
@@ -2658,6 +2660,7 @@ void MediaFormatReader::Update(TrackType aTrack) {
         NS_ERROR_DOM_MEDIA_REMOTE_CRASHED_RDD_OR_GPU_ERR) {
       LOG("Error: {} remote decoder crashed, disable HW acceleration",
           TrackTypeToStr(aTrack));
+      retryWithSoftware = needsNewDecoder && !decoder.mHardwareDecodingDisabled;
       decoder.mHardwareDecodingDisabled = true;
     }
 #endif
@@ -2705,6 +2708,13 @@ void MediaFormatReader::Update(TrackType aTrack) {
           decoder.mLastDecodedSampleTime.refOr(TimeInterval()).Length());
     } else if (aTrack == TrackType::kAudioTrack) {
       decoder.Flush();
+#ifdef XP_LINUX
+    } else if (retryWithSoftware && decoder.mLastDecodedSampleTime &&
+               (mInfo.mMediaSeekable ||
+                mInfo.mMediaSeekableOnlyInBufferedRanges)) {
+      InternalSeek(aTrack, InternalSeekTarget(
+                               decoder.mLastDecodedSampleTime.ref(), true));
+#endif
     } else {
       DDLOG(DDLogCategory::Log, "no_keyframe", NS_ERROR_DOM_MEDIA_FATAL_ERR);
       // We can't recover from this error.

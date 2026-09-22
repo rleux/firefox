@@ -1,0 +1,171 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8">
+<title>Native video transfer benchmark</title>
+<style>
+  html, body { margin: 0; background: black; overflow: hidden; }
+  video { display: block; inline-size: 100vw; block-size: auto; }
+</style>
+<video id="video" muted playsinline preload="auto" src="/clip.webm"></video>
+<script>
+  const video = document.querySelector("video");
+  const samplePoints = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+
+  const waitFor = (target, name) => new Promise((resolve, reject) => {
+    const failed = () => reject(new Error(target.error?.message || `${name} failed`));
+    target.addEventListener("error", failed, { once: true });
+    target.addEventListener(name, () => {
+      target.removeEventListener("error", failed);
+      resolve();
+    }, { once: true });
+  });
+
+  const painted = () => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+
+  const quality = () => {
+    const value = video.getVideoPlaybackQuality();
+    return {
+      creationTime: value.creationTime,
+      totalVideoFrames: value.totalVideoFrames,
+      droppedVideoFrames: value.droppedVideoFrames,
+      corruptedVideoFrames: value.corruptedVideoFrames,
+    };
+  };
+
+  window.videoTransferBenchmark = {
+    async ready() {
+      if (video.readyState < video.HAVE_CURRENT_DATA) {
+        await waitFor(video, "loadeddata");
+      }
+      await painted();
+      return {
+        duration: video.duration,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+    },
+
+    async warmup(seconds) {
+      video.currentTime = 0;
+      await video.play();
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(finish, seconds * 1000);
+        function finish() {
+          cleanup();
+          resolve();
+        }
+        function ended() {
+          cleanup();
+          reject(new Error("Video ended during warmup"));
+        }
+        function failed() {
+          cleanup();
+          reject(new Error(video.error?.message || "Video failed during warmup"));
+        }
+        function cleanup() {
+          clearTimeout(timeout);
+          video.removeEventListener("ended", ended);
+          video.removeEventListener("error", failed);
+        }
+        video.addEventListener("ended", ended, { once: true });
+        video.addEventListener("error", failed, { once: true });
+      });
+      return { mediaTime: video.currentTime, quality: quality() };
+    },
+
+    measure(seconds) {
+      return new Promise(resolve => {
+        const samples = [];
+        const events = [];
+        const startQuality = quality();
+        const start = performance.now();
+        let callback = 0;
+        let finished = false;
+        const listeners = {
+          pause: () => events.push({ type: "pause", now: performance.now(), mediaTime: video.currentTime }),
+          waiting: () => events.push({ type: "waiting", now: performance.now(), mediaTime: video.currentTime }),
+          stalled: () => events.push({ type: "stalled", now: performance.now(), mediaTime: video.currentTime }),
+          error: () => {
+            const message = video.error?.message || "Video playback failed";
+            events.push({ type: "error", now: performance.now(), mediaTime: video.currentTime,
+                          message });
+            finish(new Error(message));
+          },
+          ended: () => {
+            events.push({ type: "ended", now: performance.now(), mediaTime: video.currentTime });
+            finish(new Error("Video ended before the fixed measurement interval"));
+          },
+        };
+        const cleanup = () => {
+          clearTimeout(timeout);
+          if (callback) video.cancelVideoFrameCallback(callback);
+          for (const [name, listener] of Object.entries(listeners)) {
+            video.removeEventListener(name, listener);
+          }
+        };
+        const finish = error => {
+          if (finished) return;
+          finished = true;
+          const end = performance.now();
+          const endQuality = quality();
+          const mediaTime = video.currentTime;
+          cleanup();
+          video.pause();
+          resolve({ start, end, elapsed: end - start, mediaTime, samples, events,
+                    quality: { start: startQuality, end: endQuality },
+                    aborted: error ? String(error) : null });
+        };
+        const frame = (now, metadata) => {
+          samples.push({
+            now,
+            mediaTime: metadata.mediaTime,
+            expectedDisplayTime: metadata.expectedDisplayTime,
+            presentedFrames: metadata.presentedFrames,
+            processingDuration: metadata.processingDuration ?? null,
+          });
+          if (!finished) callback = video.requestVideoFrameCallback(frame);
+        };
+        for (const [name, listener] of Object.entries(listeners)) {
+          video.addEventListener(name, listener);
+        }
+        callback = video.requestVideoFrameCallback(frame);
+        const timeout = setTimeout(() => finish(), seconds * 1000);
+        if (video.paused) finish(new Error("Video paused before measurement"));
+      });
+    },
+
+    async finalReadback() {
+      if (!video.paused) throw new Error("Final readback must happen after timing");
+      await painted();
+      const rect = video.getBoundingClientRect();
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(rect.width * devicePixelRatio);
+      canvas.height = Math.round(rect.height * devicePixelRatio);
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const mean = (x, y) => {
+        const data = context.getImageData(x - 2, y - 2, 5, 5).data;
+        const result = [0, 0, 0, 0];
+        for (let i = 0; i < data.length; i += 4) {
+          for (let channel = 0; channel < 4; ++channel) result[channel] += data[i + channel];
+        }
+        return result.map(value => value / 25);
+      };
+      const pixels = samplePoints.map(([x, y]) =>
+        mean(Math.floor(x * canvas.width), Math.floor(y * canvas.height)));
+      return {
+        mediaTime: video.currentTime,
+        pixels,
+        sampleMethod: "5x5 mean after scaling decoded video to displayed device-pixel size",
+        points: samplePoints.map(([x, y]) => [
+          (rect.x + x * rect.width) * devicePixelRatio,
+          (rect.y + y * rect.height) * devicePixelRatio,
+        ]),
+      };
+    },
+  };
+</script>

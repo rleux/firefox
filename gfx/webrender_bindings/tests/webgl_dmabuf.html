@@ -1,0 +1,199 @@
+<!doctype html>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+<meta charset="utf-8"><title>WebGL DMA-BUF compositor test</title>
+<style>
+html, body { margin: 0; block-size: 100%; background: white; }
+canvas { display: block; inline-size: 100vw; block-size: 100vh; }
+</style><canvas width="256" height="128"></canvas>
+<script>
+window.webglErrors = [];
+window.contextEvents = [];
+window.active = null;
+
+const twoFrames = () => new Promise(resolve =>
+  requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+const replaceCanvas = () => {
+  const previous = document.querySelector("canvas");
+  const canvas = document.createElement("canvas");
+  canvas.width = previous.width;
+  canvas.height = previous.height;
+  canvas.addEventListener("webglcontextlost", event => {
+    event.preventDefault();
+    window.contextEvents.push("lost");
+  });
+  canvas.addEventListener("webglcontextrestored", () =>
+    window.contextEvents.push("restored"));
+  previous.replaceWith(canvas);
+  return canvas;
+};
+
+const createContext = (version, alpha, preserve, offscreen = false) => {
+  const canvas = replaceCanvas();
+  const source = offscreen ? canvas.transferControlToOffscreen() : canvas;
+  const name = version === 2 ? "webgl2" : "webgl";
+  const gl = source.getContext(name, {
+    alpha,
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: preserve,
+    antialias: false,
+    depth: false,
+    stencil: false,
+  });
+  if (!gl) throw new Error(`${name} unavailable`);
+  window.active = {canvas, source, gl, version, alpha, preserve, offscreen};
+  return window.active;
+};
+
+const clearFrame = (active, phase, opaque = false) => {
+  const {gl, source, alpha} = active;
+  gl.viewport(0, 0, source.width, source.height);
+  gl.enable(gl.SCISSOR_TEST);
+  const opacity = alpha && !opaque ? 0.5 : 1;
+  const colors = phase % 2
+    ? [[opacity, 0, 0, opacity], [0, 0, opacity, opacity]]
+    : [[0, 0, opacity, opacity], [opacity, 0, 0, opacity]];
+  for (const [index, color] of colors.entries()) {
+    gl.scissor(0, index * Math.floor(source.height / 2), source.width,
+               index ? source.height - Math.floor(source.height / 2) : Math.floor(source.height / 2));
+    gl.clearColor(...color);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  gl.disable(gl.SCISSOR_TEST);
+  gl.flush();
+};
+
+window.renderCase = async (version, alpha, preserve, phase, offscreen = false) => {
+  const key = [version, alpha, preserve, offscreen].join("/");
+  if (window.configuration !== key) {
+    createContext(version, alpha, preserve, offscreen);
+    window.configuration = key;
+  }
+  clearFrame(window.active, phase);
+  await twoFrames();
+  const error = window.active.gl.getError();
+  if (error !== window.active.gl.NO_ERROR) window.webglErrors.push(error);
+  return {version, alpha, preserve, phase, offscreen};
+};
+
+window.resizeAndRender = async (width, height) => {
+  const canvas = document.querySelector("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  window.configuration = null;
+  return window.renderCase(2, false, true, 0);
+};
+
+window.snapshotPixels = () => {
+  const source = document.querySelector("canvas");
+  const copy = document.createElement("canvas");
+  copy.width = source.width;
+  copy.height = source.height;
+  const context = copy.getContext("2d", {willReadFrequently: true});
+  context.fillStyle = "white";
+  context.fillRect(0, 0, copy.width, copy.height);
+  context.drawImage(source, 0, 0);
+  return [0.25, 0.75].map(y => [...context.getImageData(
+    Math.floor(copy.width / 2), Math.floor(copy.height * y), 1, 1).data]);
+};
+
+window.contextInfo = () => {
+  const gl = window.active.gl;
+  const debug = gl.getExtension("WEBGL_debug_renderer_info");
+  return {
+    version: gl.getParameter(gl.VERSION),
+    vendor: gl.getParameter(gl.VENDOR),
+    renderer: gl.getParameter(gl.RENDERER),
+    unmaskedVendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : null,
+    unmaskedRenderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
+  };
+};
+
+window.loseAndRestore = async () => {
+  if (!window.active) await window.renderCase(2, false, true, 0);
+  const extension = window.active.gl.getExtension("WEBGL_lose_context");
+  if (!extension) throw new Error("WEBGL_lose_context unavailable");
+  const canvas = document.querySelector("canvas");
+  const lost = new Promise(resolve => canvas.addEventListener("webglcontextlost", resolve, {once: true}));
+  extension.loseContext();
+  await lost;
+  const restored = new Promise(resolve => canvas.addEventListener("webglcontextrestored", resolve, {once: true}));
+  extension.restoreContext();
+  await restored;
+  if (window.active.gl.isContextLost()) throw new Error("WebGL context stayed lost");
+  clearFrame(window.active, 0);
+  await twoFrames();
+  return {sameContext: true};
+};
+
+window.workerOffscreen = async () => {
+  const canvas = replaceCanvas();
+  canvas.width = 256; canvas.height = 128;
+  const offscreen = canvas.transferControlToOffscreen();
+  const source = `onmessage = ({data: canvas}) => {
+    const gl = canvas.getContext("webgl2", {alpha: false, preserveDrawingBuffer: true,
+      antialias: false, depth: false, stencil: false});
+    if (!gl) { postMessage({error: "worker WebGL2 unavailable"}); return; }
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, canvas.width, canvas.height / 2);
+    gl.clearColor(0, 0, 1, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.scissor(0, canvas.height / 2, canvas.width, canvas.height / 2);
+    gl.clearColor(1, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.flush(); postMessage({done: true});
+  };`;
+  const url = URL.createObjectURL(new Blob([source], {type: "text/javascript"}));
+  const worker = new Worker(url);
+  URL.revokeObjectURL(url);
+  const result = await new Promise((resolve, reject) => {
+    worker.onmessage = event => event.data.error ? reject(new Error(event.data.error)) : resolve(event.data);
+    worker.onerror = event => reject(new Error(event.message));
+    worker.postMessage(offscreen, [offscreen]);
+  });
+  window.offscreenWorker = worker;
+  window.active = null;
+  window.configuration = null;
+  await twoFrames();
+  return result;
+};
+
+window.recoverWorkerOffscreen = async () => {
+  window.offscreenWorker?.terminate();
+  window.offscreenWorker = null;
+  replaceCanvas();
+  window.active = null;
+  window.configuration = null;
+  return window.renderCase(2, false, true, 0);
+};
+
+window.benchmark = async count => {
+  const active = createContext(2, true, false);
+  active.canvas.width = 1920;
+  active.canvas.height = 1080;
+  active.source.width = 1920;
+  active.source.height = 1080;
+  const samples = [];
+  for (let frame = 0; frame < count + 15; ++frame) {
+    const tick = await new Promise(requestAnimationFrame);
+    const started = performance.now();
+    const counter = frame + 1;
+    const low = counter & 255;
+    const high = (counter >> 8) & 255;
+    active.gl.enable(active.gl.SCISSOR_TEST);
+    active.gl.scissor(0, 0, active.source.width, active.source.height / 2);
+    active.gl.clearColor(96 / 255, low / 255, high / 255, 1);
+    active.gl.clear(active.gl.COLOR_BUFFER_BIT);
+    active.gl.scissor(0, active.source.height / 2, active.source.width,
+                      active.source.height / 2);
+    active.gl.clearColor(low / 255, high / 255, 64 / 255, 1);
+    active.gl.clear(active.gl.COLOR_BUFFER_BIT);
+    active.gl.disable(active.gl.SCISSOR_TEST);
+    active.gl.flush();
+    const submitCpuMs = performance.now() - started;
+    if (frame >= 15) samples.push({tick, submitCpuMs});
+  }
+  await twoFrames();
+  return {width: active.source.width, height: active.source.height, samples};
+};
+</script>

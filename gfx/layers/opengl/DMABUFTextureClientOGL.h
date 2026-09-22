@@ -44,9 +44,11 @@ class DMABUFTextureData : public TextureData {
 
  protected:
   DMABUFTextureData(DMABufSurface* aSurface, gfx::BackendType aBackend);
+  void ReleaseSurface();
 
   RefPtr<DMABufSurface> mSurface;
   gfx::BackendType mBackend;
+  bool mHasGlobalRef = false;
 };
 
 }  // namespace layers

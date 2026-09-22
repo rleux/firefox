@@ -3,6 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RendererOGL.h"
+#ifdef MOZ_WIDGET_GTK
+#  include "RenderDMABUFTextureHost.h"
+#endif
 
 #include "GLContext.h"
 #include "base/task.h"
@@ -115,6 +118,91 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
   }
 }
 
+struct WrHalImageLease {
+  RefPtr<RenderTextureHost> mTexture;
+  bool mForeignLocked = false;
+  bool mVAAPILocked = false;
+  bool mVulkanLocked = false;
+};
+
+extern "C" bool wr_renderer_lock_foreign_rgb(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (texture && texture->GetSurface()->LockForeignRGB()) {
+    aLease->mForeignLocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
+
+extern "C" bool wr_renderer_lock_vaapi_image(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (!texture || aLease->mVAAPILocked) {
+    return false;
+  }
+  auto surface = texture->GetSurface();
+  auto* yuv = surface->GetAsDMABufSurfaceYUV();
+  if (yuv && yuv->GetVAAPIDescriptor() && surface->WaitForAccess(5000)) {
+    aLease->mVAAPILocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
+
+extern "C" bool wr_renderer_lock_vulkan_dmabuf(WrHalImageLease* aLease) {
+#ifdef MOZ_WIDGET_GTK
+  auto* texture = aLease->mTexture->AsRenderDMABUFTextureHost();
+  if (!texture || aLease->mVulkanLocked) {
+    return false;
+  }
+  auto surface = texture->GetSurface();
+  if (surface->GetVulkanDescriptor() && surface->WaitForAccess(5000)) {
+    aLease->mVulkanLocked = true;
+    return true;
+  }
+#endif
+  return false;
+}
+
+extern "C" WrHalImageLease* wr_renderer_acquire_hal_image(
+    void* aObj, wr::ExternalImageId aId, uint8_t aChannelIndex,
+    WrHalImage* aImage) {
+  auto* renderer = static_cast<RendererOGL*>(aObj);
+  RefPtr<RenderTextureHost> texture = renderer->GetRenderTexture(aId);
+  if (!texture || texture->IsFromDRMSource()) {
+    gfxCriticalNote << "HAL external image unavailable: " << AsUint64(aId)
+                    << " missing=" << !texture;
+    return nullptr;
+  }
+  if (!texture->LockHalImage(aChannelIndex, aImage)) {
+    gfxCriticalNote << "HAL external image lock rejected: " << AsUint64(aId)
+                    << " channel=" << int(aChannelIndex)
+                    << " format=" << int(texture->GetFormat());
+    return nullptr;
+  }
+  return new WrHalImageLease{std::move(texture)};
+}
+
+extern "C" void wr_renderer_release_hal_image(WrHalImageLease* aLease,
+                                              WrHalImageRelease aStatus) {
+  UniquePtr<WrHalImageLease> lease(aLease);
+#ifdef MOZ_WIDGET_GTK
+  if (lease->mVAAPILocked || lease->mVulkanLocked) {
+    lease->mTexture->AsRenderDMABUFTextureHost()->GetSurface()->UnlockAccess(
+        aStatus == WrHalImageRelease::Abandoned);
+  }
+  if (lease->mForeignLocked) {
+    lease->mTexture->AsRenderDMABUFTextureHost()
+        ->GetSurface()
+        ->UnlockForeignRGB(aStatus == WrHalImageRelease::Abandoned);
+  }
+#endif
+  lease->mTexture->UnlockHalImage(aStatus);
+}
+
 RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
                          UniquePtr<RenderCompositor> aCompositor,
                          wr::WindowId aWindowId, wr::Renderer* aRenderer,
@@ -134,6 +222,7 @@ RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
 
 RendererOGL::~RendererOGL() {
   MOZ_COUNT_DTOR(RendererOGL);
+  mCompositor->SetRenderer(nullptr);
 #ifdef MOZ_WIDGET_ANDROID
   if (mPendingScreenPixelsRequest) {
     mPendingScreenPixelsRequest->mPromise->Reject(NS_ERROR_ABORT, __func__);
@@ -185,8 +274,21 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   bool fullRender = false;
   bool needPostRenderCall = false;
   bool beginFrame = !mThread->IsHandlingDeviceReset();
+  bool needsPixels = aReadbackBuffer.isSome() ||
+                     layers::ProfilerScreenshots::IsEnabled() ||
+                     mCompositionRecorder;
+#ifdef MOZ_WIDGET_ANDROID
+  needsPixels |= mPendingScreenPixelsRequest.isSome();
+#endif
+  bool hidden = beginFrame && present && !mCompositor->IsPaused() &&
+                mCompositor->IsWindowHidden();
+  if (hidden && needsPixels && mCompositor->GetBufferSize().IsEmpty()) {
+    hidden = false;
+  }
+  const bool windowPresent = present && !hidden;
+  const bool skipRender = hidden && !needsPixels;
 
-  if (beginFrame && present) {
+  if (beginFrame && windowPresent) {
     if (!mCompositor->GetWidget()->PreRender(&widgetContext)) {
       // XXX This could cause oom in webrender since pending_texture_updates is
       // not handled. It needs to be addressed.
@@ -238,9 +340,14 @@ RenderedFrameId RendererOGL::UpdateAndRender(
 
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
-  bool rendered =
-      wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
-                         aOutStats, &dirtyRects, &didRasterize);
+  bool rendered;
+  if (skipRender) {
+    *aOutStats = RendererStats{};
+    rendered = wr_renderer_service_hidden_frame(mRenderer);
+  } else {
+    rendered = wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
+                                  aOutStats, &dirtyRects, &didRasterize);
+  }
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
@@ -248,7 +355,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   // until explicitly cleared by CheckAndClearDidRasterize().
   mLastFrameDidRasterize = mLastFrameDidRasterize || didRasterize;
   if (!rendered) {
-    if (present) {
+    if (windowPresent) {
       mCompositor->CancelFrame();
     }
     if (needPostRenderCall) {
@@ -273,10 +380,19 @@ RenderedFrameId RendererOGL::UpdateAndRender(
       if (!mCompositor->MaybeReadback(aReadbackSize.ref(),
                                       aReadbackFormat.ref(),
                                       aReadbackBuffer.ref(), aNeedsYFlip)) {
-        wr_renderer_readback(mRenderer, aReadbackSize.ref().width,
-                             aReadbackSize.ref().height, aReadbackFormat.ref(),
-                             &aReadbackBuffer.ref()[0],
-                             aReadbackBuffer.ref().length());
+        if (!wr_renderer_readback(
+                mRenderer, aReadbackSize.ref().width,
+                aReadbackSize.ref().height, aReadbackFormat.ref(),
+                &aReadbackBuffer.ref()[0], aReadbackBuffer.ref().length())) {
+          if (windowPresent) {
+            mCompositor->CancelFrame();
+          }
+          if (needPostRenderCall) {
+            mCompositor->GetWidget()->PostRender(&widgetContext);
+          }
+          RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
+          return RenderedFrameId();
+        }
         if (aNeedsYFlip != nullptr) {
           *aNeedsYFlip = !mCompositor->SurfaceOriginIsTopLeft();
         }
@@ -287,7 +403,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     MaybeCaptureScreenPixels();
 #endif
 
-    if (size.Width() != 0 && size.Height() != 0) {
+    if (!skipRender && size.Width() != 0 && size.Height() != 0) {
       if (!mCompositor->MaybeGrabScreenshot(size.ToUnknownSize())) {
         mScreenshotGrabber.MaybeGrabScreenshot(this, size.ToUnknownSize());
       }
@@ -296,10 +412,13 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     // Frame recording must happen before EndFrame, as we must ensure we read
     // the contents of the back buffer before any calls to SwapBuffers which
     // might invalidate it.
-    MaybeRecordFrame(mLastPipelineInfo);
+    if (!skipRender) {
+      MaybeRecordFrame(mLastPipelineInfo);
+    }
     frameId = mCompositor->EndFrame(dirtyRects);
-    MOZ_ASSERT(needPostRenderCall);
-    mCompositor->GetWidget()->PostRender(&widgetContext);
+    if (needPostRenderCall) {
+      mCompositor->GetWidget()->PostRender(&widgetContext);
+    }
   }
 
 #if defined(ENABLE_FRAME_LATENCY_LOG)

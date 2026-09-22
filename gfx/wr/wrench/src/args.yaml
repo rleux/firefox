@@ -4,6 +4,50 @@ author: Vladimir Vukicevic <vladimir@pobox.com>
 about: WebRender testing and debugging utility
 
 args:
+  - backend:
+      long: backend
+      takes_value: true
+      possible_values: [gl, hal]
+      default_value: gl
+      global: true
+      help: Select the GL renderer or experimental HAL renderer
+  - hal_backend:
+      long: hal-backend
+      takes_value: true
+      possible_values: [vulkan, metal]
+      global: true
+      help: Select the HAL graphics API
+  - hal_adapter:
+      long: hal-adapter
+      takes_value: true
+      global: true
+      help: Select exactly one HAL adapter by name substring
+  - hal_validation:
+      long: hal-validation
+      global: true
+      help: Require verified native validation support
+  - hal_filtering:
+      long: hal-filtering
+      takes_value: true
+      possible_values: [standard, legacy-brilinear]
+      global: true
+      help: Select standard filtering or experimental legacy mip weighting
+  - hal_compositor:
+      long: hal-compositor
+      takes_value: true
+      possible_values: [draw, native, layer]
+      help: Select the HAL compositor test adapter
+      global: true
+  - hal_frames:
+      long: hal-frames
+      takes_value: true
+      global: true
+      help: Stop HAL show after this many frames (headless defaults to one)
+  - hal_windows:
+      long: hal-windows
+      takes_value: true
+      global: true
+      help: Number of independent HAL show windows (default one)
   - precache:
       short: c
       long: precache
@@ -88,6 +132,32 @@ args:
       help: A string describing what to show on in the profiler HUD (See https://github.com/servo/webrender/wiki/Debugging-WebRender#anchor_6).
 
 subcommands:
+    - measure:
+        about: Measure fixed completed frames without presenting, retaining raw samples
+        args:
+          - INPUT:
+              required: true
+              index: 1
+          - OUTPUT:
+              required: true
+              index: 2
+          - frames:
+              long: frames
+              takes_value: true
+              default_value: "5"
+          - warmup:
+              long: warmup
+              takes_value: true
+              default_value: "2"
+          - inspection_ms:
+              long: inspection-ms
+              takes_value: true
+              default_value: "0"
+              help: Keep the context alive after writing results for external device inspection
+    - test_surface:
+        about: Exercise HAL surface acquisition, presentation, resize, and discard
+    - test_hal:
+        about: Check HAL color/depth readback and same-device native-image ownership
     - png:
         about: render frame described by YAML and save it to a png file
         args:
@@ -148,11 +218,15 @@ subcommands:
               help: Add a minimum fuzziness tolerance to all tests.
               required: false
           - REFTEST:
-              help: a specific reftest or directory to run
+              help: a specific reftest, directory, or .list manifest to run
               required: false
               index: 1
     - rawtest:
         about: run rawtests
+        args:
+          - TEST:
+              help: Run one named raw test (for example test_resize_image)
+              index: 1
     - perf:
         about: run benchmarks
         args:
