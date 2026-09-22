@@ -172,22 +172,49 @@ impl<A: hal::Api> Buffer<A> {
         Ok(())
     }
 
-    pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::BufferUses) {
+    #[inline]
+    fn prepare_transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::BufferUses) -> Option<wgt::BufferUses> {
         commands.keep(self.clone());
         let from = self.state.replace(to);
-        if from != to {
-            let resource = self.clone();
-            commands.commit(move || resource.committed_state.set(to));
+        if from == to { return None; }
+        let resource = self.clone();
+        commands.commit(move || resource.committed_state.set(to));
+        Some(from)
+    }
+
+    pub fn transition(self: &Rc<Self>, commands: &mut Submission<A>, to: wgt::BufferUses) {
+        if let Some(from) = self.prepare_transition(commands, to) {
             unsafe {
-                commands
-                    .encoder()
-                    .transition_buffers(std::iter::once(hal::BufferBarrier {
-                        buffer: &*self.raw,
-                        usage: hal::StateTransition { from, to },
-                    }))
+                commands.encoder().transition_buffers(std::iter::once(hal::BufferBarrier {
+                    buffer: &*self.raw, usage: hal::StateTransition { from, to },
+                }));
             }
         }
     }
+
+    pub fn transition_many<'a>(
+        commands: &mut Submission<A>,
+        buffers: impl IntoIterator<Item = (&'a Rc<Self>, wgt::BufferUses)>,
+    ) {
+        let mut barriers = smallvec::SmallVec::<[_; 8]>::new();
+        for (buffer, to) in buffers {
+            if let Some(from) = buffer.prepare_transition(commands, to) {
+                barriers.push(hal::BufferBarrier { buffer: &*buffer.raw, usage: hal::StateTransition { from, to } });
+            }
+        }
+        if !barriers.is_empty() {
+            unsafe { commands.encoder().transition_buffers(barriers.into_iter()); }
+        }
+    }
+
+    pub fn vertex_binding(&self, offset: u64, size: u64) -> Result<hal::BufferBinding<'_, A::Buffer>> {
+        if !self.usage.contains(wgt::BufferUses::VERTEX) || offset % 4 != 0 || size == 0
+            || offset.checked_add(size).map_or(true, |end| end > self.used_size.get()) {
+            return Err("Invalid HAL vertex buffer range".into());
+        }
+        Ok(hal::BufferBinding::new_unchecked(&*self.raw, offset, std::num::NonZeroU64::new(size)))
+    }
+
     pub fn binding(&self) -> hal::BufferBinding<'_, A::Buffer> {
         hal::BufferBinding::new_unchecked(
             &*self.raw,
