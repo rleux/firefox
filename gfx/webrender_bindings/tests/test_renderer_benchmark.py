@@ -202,7 +202,7 @@ class TestRendererBenchmark(MarionetteTestCase):
     def test_renderer_workload(self):
         expected = self.config["expected"]
         self.report["backend"] = self.backend()
-        if expected["workload"] == "canvas":
+        if expected["workload"] in ("canvas", "canvas-partial"):
             with self.marionette.using_context("chrome"):
                 self.report["canvasPolicy"] = self.marionette.execute_script(
                     """

@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 import renderer_benchmark_metrics as metrics
 from renderer_benchmark_metrics import (
+    FRAME_TABLE_FIELDS,
+    FRAME_TABLE_NAMES,
     HAL_COUNTERS,
     HAL_GAUGES,
     Sampler,
@@ -437,6 +439,10 @@ def diagnostic_record():
         "gauges": {name: 0 for name in HAL_GAUGES},
         "peaks": {name: 0 for name in HAL_GAUGES},
         "lastWorkNs": {name: 0 for name in HAL_COUNTERS},
+        "frameTables": {
+            name: {field: 0 for field in FRAME_TABLE_FIELDS}
+            for name in FRAME_TABLE_NAMES
+        },
     }
 
 
@@ -1527,6 +1533,12 @@ class TestValidateReport(unittest.TestCase):
         report["diagnostics"][0]["counters"].pop("executions")
         self.assertIn(
             "diagnostics[0].counters is incomplete",
+            validate_report(report, diagnostic_expected),
+        )
+        report["diagnostics"] = [diagnostic_record()]
+        del report["diagnostics"][0]["frameTables"]["sGpuBufferF"]["updatedBytes"]
+        self.assertIn(
+            "diagnostics[0].frameTables.sGpuBufferF is incomplete",
             validate_report(report, diagnostic_expected),
         )
         report["diagnostics"] = [diagnostic_record()]

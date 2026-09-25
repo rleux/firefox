@@ -65,6 +65,24 @@ fields!(RenderGauge,
 
 const COUNTERS: usize = RenderCounter::ALL.len();
 const GAUGES: usize = RenderGauge::ALL.len();
+const FRAME_TABLES: [&str; 6] = [
+    "sPrimitiveHeadersF",
+    "sPrimitiveHeadersI",
+    "sGpuBufferF",
+    "sGpuBufferI",
+    "sTransformPalette",
+    "sRenderTasks",
+];
+
+#[derive(Default)]
+struct FrameTableMetrics {
+    source_bytes: AtomicU64,
+    upload_bytes: AtomicU64,
+    updated_bytes: AtomicU64,
+    pack_ns: AtomicU64,
+    buffer_uploads: AtomicU64,
+    texture_uploads: AtomicU64,
+}
 
 #[derive(Clone, Debug)]
 pub struct RenderMetricsSnapshot {
@@ -75,6 +93,7 @@ pub struct RenderMetricsSnapshot {
     gauges: [u64; GAUGES],
     peaks: [u64; GAUGES],
     last_work_ns: [u64; COUNTERS],
+    frame_tables: [[u64; 6]; 6],
 }
 
 impl RenderMetricsSnapshot {
@@ -94,9 +113,14 @@ impl RenderMetricsSnapshot {
         let last_work = RenderCounter::ALL.iter().map(|&counter| {
             format!("\"{}\":{}", counter.name(), self.last_work_ns[counter as usize])
         }).collect::<Vec<_>>().join(",");
-        format!("{{\"version\":1,\"pid\":{},\"deviceId\":{},\"rendererId\":{},\"sequence\":{},\"monotonicNs\":{},\"final\":{},\"counters\":{{{}}},\"gauges\":{{{}}},\"peaks\":{{{}}},\"lastWorkNs\":{{{}}}}}",
+        let frame_tables = FRAME_TABLES.iter().enumerate().map(|(index, name)| {
+            let values = self.frame_tables[index];
+            format!("\"{name}\":{{\"sourceBytes\":{},\"writeBytes\":{},\"updatedBytes\":{},\"prepareNs\":{},\"bufferUploads\":{},\"textureUploads\":{}}}",
+                values[0], values[1], values[2], values[3], values[4], values[5])
+        }).collect::<Vec<_>>().join(",");
+        format!("{{\"version\":1,\"pid\":{},\"deviceId\":{},\"rendererId\":{},\"sequence\":{},\"monotonicNs\":{},\"final\":{},\"counters\":{{{}}},\"gauges\":{{{}}},\"peaks\":{{{}}},\"lastWorkNs\":{{{}}},\"frameTables\":{{{}}}}}",
             std::process::id(), self.device_id, self.renderer_id, sequence,
-            self.monotonic_ns, final_report, counters, gauges, peaks, last_work)
+            self.monotonic_ns, final_report, counters, gauges, peaks, last_work, frame_tables)
     }
 }
 
@@ -110,6 +134,7 @@ pub struct RenderMetrics {
     gauges: [AtomicU64; GAUGES],
     peaks: [AtomicU64; GAUGES],
     last_work_ns: [AtomicU64; COUNTERS],
+    frame_tables: [FrameTableMetrics; 6],
 }
 
 impl RenderMetrics {
@@ -138,6 +163,7 @@ impl RenderMetrics {
             gauges: std::array::from_fn(|_| AtomicU64::new(0)),
             peaks: std::array::from_fn(|_| AtomicU64::new(0)),
             last_work_ns: std::array::from_fn(|_| AtomicU64::new(0)),
+            frame_tables: std::array::from_fn(|_| FrameTableMetrics::default()),
         }
     }
 
@@ -163,16 +189,45 @@ impl RenderMetrics {
         self.gauges[gauge as usize].fetch_sub(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_frame_table(
+        &self,
+        name: &str,
+        source_bytes: u64,
+        write_bytes: u64,
+        updated_bytes: u64,
+        prepare_ns: u64,
+        storage_buffer: bool,
+    ) {
+        let Some(index) = FRAME_TABLES.iter().position(|&table| table == name) else {
+            return;
+        };
+        let table = &self.frame_tables[index];
+        table.source_bytes.fetch_add(source_bytes, Ordering::Relaxed);
+        table.upload_bytes.fetch_add(write_bytes, Ordering::Relaxed);
+        table.updated_bytes.fetch_add(updated_bytes, Ordering::Relaxed);
+        table.pack_ns.fetch_add(prepare_ns, Ordering::Relaxed);
+        let uploads = if storage_buffer { &table.buffer_uploads } else { &table.texture_uploads };
+        uploads.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> RenderMetricsSnapshot {
         let counters = std::array::from_fn(|i| self.counters[i].load(Ordering::Relaxed));
         let gauges = std::array::from_fn(|i| self.gauges[i].load(Ordering::Relaxed));
         let peaks = std::array::from_fn(|i| self.peaks[i].load(Ordering::Relaxed));
         let last_work_ns = std::array::from_fn(|i| self.last_work_ns[i].load(Ordering::Relaxed));
+        let frame_tables = std::array::from_fn(|i| [
+            self.frame_tables[i].source_bytes.load(Ordering::Relaxed),
+            self.frame_tables[i].upload_bytes.load(Ordering::Relaxed),
+            self.frame_tables[i].updated_bytes.load(Ordering::Relaxed),
+            self.frame_tables[i].pack_ns.load(Ordering::Relaxed),
+            self.frame_tables[i].buffer_uploads.load(Ordering::Relaxed),
+            self.frame_tables[i].texture_uploads.load(Ordering::Relaxed),
+        ]);
         RenderMetricsSnapshot {
             device_id: self.device_id,
             renderer_id: self.renderer_id,
             monotonic_ns: self.now(),
-            counters, gauges, peaks, last_work_ns,
+            counters, gauges, peaks, last_work_ns, frame_tables,
         }
     }
 

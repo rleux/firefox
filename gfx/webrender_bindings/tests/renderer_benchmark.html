@@ -16,7 +16,7 @@
   .scroll #scroller { display: block; }
   #long { block-size: 12000px; background: repeating-linear-gradient(to bottom, #164 0 20px, #acf 20px 40px); }
   canvas { display: none; }
-  .canvas canvas { display: block; }
+  .canvas canvas, .canvas-partial canvas { display: block; }
   #filters { display: none; position: relative; inline-size: 600px; block-size: 400px; clip-path: circle(45%); filter: blur(2px); background: linear-gradient(120deg, #369, #edc); font: 24px sans-serif; }
   #filter-marker { position: absolute; inset-block-start: 180px; inset-inline-start: 280px; inline-size: 40px; block-size: 40px; background: rgb(80, 160, 200); }
   .filters #filters { display: block; animation: movement 1s linear infinite alternate; }
@@ -61,9 +61,13 @@
       tile.classList.toggle("alternate", frameCount % 2 === 0);
     } else if (workload === "scroll") {
       scroller.scrollTop = (frameCount * 7) % 11000;
-    } else if (workload === "canvas") {
+    } else if (workload === "canvas" || workload === "canvas-partial") {
       context.fillStyle = frameCount % 2 ? "rgb(20, 180, 80)" : "rgb(40, 80, 220)";
-      context.fillRect(0, 0, 512, 512);
+      if (workload === "canvas-partial") {
+        context.fillRect(128, 128, 256, 256);
+      } else {
+        context.fillRect(0, 0, 512, 512);
+      }
     }
     animationFrame = requestAnimationFrame(animate);
   }
@@ -73,8 +77,12 @@
       workload = name;
       scene.className = name;
       scene.focus();
-      if (name === "canvas") {
+      if (name === "canvas" || name === "canvas-partial") {
         context = canvas.getContext("2d", {alpha: false});
+        if (name === "canvas-partial") {
+          context.fillStyle = "rgb(40, 80, 220)";
+          context.fillRect(0, 0, 512, 512);
+        }
       }
       if (name !== "static") {
         animationFrame = requestAnimationFrame(animate);
@@ -124,7 +132,7 @@
         const row = Math.floor((point[1] - rect.y + scroller.scrollTop) / 20);
         points.push(point);
         expected.push(row % 2 ? [170, 204, 255, 255] : [17, 102, 68, 255]);
-      } else if (workload === "canvas") {
+      } else if (workload === "canvas" || workload === "canvas-partial") {
         points.push(center(canvas));
         expected.push(frameCount % 2 ? green : blue);
       } else if (workload === "filters") {

@@ -8,11 +8,13 @@ pub(super) struct Table<A: BackendApi> {
     bytes: Vec<u8>,
     buffer: Option<Rc<Buffer<A>>>,
     texture_current: bool,
+    updated_bytes: u64,
 }
 
 impl<A: BackendApi> Table<A> {
     pub(super) fn release_buffer(&mut self) {
         self.buffer = None;
+        self.updated_bytes = 0;
     }
 }
 
@@ -53,6 +55,7 @@ impl<A: BackendApi> HalGpuBackend<A> {
                 bytes: vec![0; texture.size.height as usize * pitch],
                 buffer: None,
                 texture_current: false,
+                updated_bytes: 0,
             });
         let width = rect.width() as usize * 16;
         let source_pitch = stride.map_or(width, |n| n as usize);
@@ -61,6 +64,9 @@ impl<A: BackendApi> HalGpuBackend<A> {
             table.bytes[offset..offset + width]
                 .copy_from_slice(&data[row * source_pitch..row * source_pitch + width]);
         }
+        table.updated_bytes = table
+            .updated_bytes
+            .saturating_add(width as u64 * rect.height() as u64);
         table.buffer = None;
         table.texture_current = false;
         true
@@ -91,13 +97,37 @@ impl<A: BackendApi> HalGpuBackend<A> {
             };
             if self.gpu.buffer_tables {
                 if table.buffer.is_none() {
-                    table.buffer = Some(self.gpu.data_buffer(&table.bytes)?);
+                    let metrics = self.gpu.metrics();
+                    let started = metrics.as_ref().map(|_| std::time::Instant::now());
+                    let source_bytes = table.bytes.len() as u64;
+                    let updated_bytes = table.updated_bytes;
+                    let buffer = self.gpu.data_buffer(&table.bytes)?;
+                    let write_bytes = buffer.binding_size();
+                    table.buffer = Some(buffer);
+                    if let (Some(metrics), Some(started)) = (metrics, started) {
+                        metrics.record_frame_table(
+                            name,
+                            source_bytes,
+                            write_bytes,
+                            updated_bytes,
+                            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                            true,
+                        );
+                    }
                     self.stats.data_table_uploads += 1;
                 }
                 self.gpu
                     .data_buffers
                     .insert(name, table.buffer.as_ref().unwrap().clone());
             } else if !table.texture_current {
+                let metrics = self.gpu.metrics();
+                let started = metrics.as_ref().map(|_| std::time::Instant::now());
+                let source_bytes = table.bytes.len() as u64;
+                let updated_bytes = table.updated_bytes;
+                let row_bytes = texture.size.width as usize * 16;
+                let alignment = self.gpu.owner.capabilities.alignments.buffer_copy_pitch.get() as usize;
+                let pitch = row_bytes.div_ceil(alignment) * alignment;
+                let write_bytes = pitch as u64 * texture.size.height as u64;
                 texture.upload_recorded(
                     &self.gpu.owner,
                     &self.gpu.submissions,
@@ -110,6 +140,16 @@ impl<A: BackendApi> HalGpuBackend<A> {
                     0,
                     None,
                 )?;
+                if let (Some(metrics), Some(started)) = (metrics, started) {
+                    metrics.record_frame_table(
+                        name,
+                        source_bytes,
+                        write_bytes,
+                        updated_bytes,
+                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                        false,
+                    );
+                }
                 table.texture_current = true;
                 self.stats.data_table_uploads += 1;
                 self.stats.data_table_copies += 1;

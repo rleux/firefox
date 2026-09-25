@@ -18,7 +18,7 @@ from renderer_benchmark_metrics import validate_report
 from renderer_benchmark_perf import PERF_FINALIZE_TIMEOUT_SECONDS
 from renderer_benchmark_startup import STARTUP_TIMEOUT_SECONDS
 
-WORKLOADS = ("static", "css", "dirty", "scroll", "canvas", "filters")
+WORKLOADS = ("static", "css", "dirty", "scroll", "canvas", "canvas-partial", "filters")
 
 
 def install_termination_handler():
@@ -262,7 +262,7 @@ def main():
         "layers.gpu-process.enabled": args.gpu_process,
         "privacy.reduceTimerPrecision": "false",
     }
-    if args.workload == "canvas":
+    if args.workload in ("canvas", "canvas-partial"):
         prefs.update({
             "gfx.canvas.accelerated": "false",
             "gfx.canvas.accelerated.force-enabled": "false",

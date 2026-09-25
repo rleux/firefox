@@ -21,6 +21,22 @@ HAL_ENVELOPE = {
     "peaks",
     "lastWorkNs",
 }
+FRAME_TABLE_NAMES = {
+    "sPrimitiveHeadersF",
+    "sPrimitiveHeadersI",
+    "sGpuBufferF",
+    "sGpuBufferI",
+    "sTransformPalette",
+    "sRenderTasks",
+}
+FRAME_TABLE_FIELDS = {
+    "sourceBytes",
+    "writeBytes",
+    "updatedBytes",
+    "prepareNs",
+    "bufferUploads",
+    "textureUploads",
+}
 SOFTWARE_RENDERERS = ["llvmpipe", "lavapipe", "softpipe", "software", "swiftshader"]
 LIGHT_TREE_RETRIES = 2
 HAL_COUNTERS = {
@@ -597,7 +613,7 @@ def validate_environment(report, expected):
     errors = []
     if not isinstance(report, dict):
         return ["report must be an object"]
-    if expected.get("workload") == "canvas":
+    if expected.get("workload") in ("canvas", "canvas-partial"):
         policy = report.get("canvasPolicy")
         if (
             not isinstance(policy, dict)
@@ -1806,6 +1822,21 @@ def validate_report(report, expected):
                 and record["rendererId"] > 0
             ):
                 renderer_records += 1
+                tables = record.get("frameTables")
+                if not isinstance(tables, dict) or FRAME_TABLE_NAMES - tables.keys():
+                    errors.append(f"diagnostics[{index}].frameTables is incomplete")
+                else:
+                    for name in FRAME_TABLE_NAMES:
+                        values = tables.get(name)
+                        if not isinstance(values, dict) or FRAME_TABLE_FIELDS - values.keys():
+                            errors.append(f"diagnostics[{index}].frameTables.{name} is incomplete")
+                        elif any(
+                            not isinstance(values[field], int)
+                            or isinstance(values[field], bool)
+                            or values[field] < 0
+                            for field in FRAME_TABLE_FIELDS
+                        ):
+                            errors.append(f"diagnostics[{index}].frameTables.{name} is invalid")
             for key, names in [
                 ("counters", HAL_COUNTERS),
                 ("gauges", HAL_GAUGES),

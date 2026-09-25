@@ -39,12 +39,18 @@ impl<A: hal::Api> BufferPool<A> {
     ) -> Result<Rc<Buffer<A>>> {
         let mut buffers = self.buffers.borrow_mut();
         // Submission references disappear only after an observed completion fence.
-        if let Some(index) = buffers.iter_mut().position(|buffer| {
-            Rc::get_mut(buffer).map_or(false, |buffer| {
-                buffer.usage == usage | wgt::BufferUses::MAP_WRITE
-                    && buffer.size >= (length as u64).max(4)
+        let required_size = (length as u64).max(4);
+        let best_fit = buffers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, buffer)| {
+                let buffer = Rc::get_mut(buffer)?;
+                (buffer.usage == usage | wgt::BufferUses::MAP_WRITE && buffer.size >= required_size)
+                    .then_some((index, buffer.size))
             })
-        }) {
+            .min_by_key(|(_, size)| *size)
+            .map(|(index, _)| index);
+        if let Some(index) = best_fit {
             let mut buffer = buffers.swap_remove(index);
             Rc::get_mut(&mut buffer).unwrap().write_with(length, write)?;
             buffers.push(buffer.clone());
