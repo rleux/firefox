@@ -59,9 +59,9 @@ The optimized Rust build succeeded. Three 10-second `dirty` Vulkan browser runs 
 
 ## Best-fit upload-buffer reuse
 
-`BufferPool::upload_with` now scans idle, uniquely owned buffers with matching usage and picks the smallest buffer large enough for the request. The pool is capped at 256 entries, so the additional scan is bounded. Buffers still remain unavailable while submissions hold references, and the existing byte budget and eviction rules are unchanged.
+The initial best-fit implementation scanned idle, uniquely owned buffers with matching usage and chose the smallest buffer that fit. That implementation has since been replaced by idle free lists, keyed by usage and power-of-two allocation size. Upload takes an idle buffer from the requested or next larger size class; the buffer returns to the pool only after its submission fence completes and submission references are cleared. The 64 MiB and 256-entry cache limits remain.
 
-The optimized Rust build succeeded. Three 10-second `dirty` Vulkan browser runs before and after on Iris Xe/Mesa 26.2.3 passed the benchmark checks. Median frame interval was 17.06 ms both before and after, with 600 updates in each run. Process CPU readings varied substantially between runs: median GPU-process CPU was 2.37 s before and 1.82 s after, while median Firefox-root CPU was 4.58 s before and 4.23 s after. The spread, including a 3.21 s baseline and 3.83 s post-change GPU-process sample, is too large to attribute these differences to buffer selection. This refresh-paced workload shows no frame-pacing gain and does not establish a CPU improvement. One post-change attempt failed fixture setup because the window position differed; it is excluded. Reports are under `artifacts/idea5-before-1` through `artifacts/idea5-before-3` and `artifacts/idea5-after-2` through `artifacts/idea5-after-4`.
+The browser measurements above compare the initial best-fit scan against first-fit; they do not measure the free-list implementation. The free-list change has compiled successfully, but has not yet been measured in the browser.
 
 ## Frame-table upload measurements
 

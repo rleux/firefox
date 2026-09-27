@@ -4,31 +4,69 @@
 
 use super::*;
 use super::resources::{Buffer, Texture, bytes_per_pixel};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+};
 
 const BUFFER_BUDGET: u64 = 64 * 1024 * 1024;
 const TEXTURE_BUDGET: u64 = 64 * 1024 * 1024;
 
 pub(super) struct BufferPool<A: hal::Api> {
     owner: Rc<Device<A>>,
-    buffers: RefCell<Vec<Rc<Buffer<A>>>>,
+    idle: Rc<RefCell<IdleBuffers<A>>>,
+}
+
+struct IdleBuffers<A: hal::Api> {
+    buckets: HashMap<(u16, u32), VecDeque<Rc<Buffer<A>>>>,
+    bytes: u64,
+    count: usize,
+    epoch: u64,
+}
+
+pub(super) struct BufferRecycle<A: hal::Api> {
+    idle: Rc<RefCell<IdleBuffers<A>>>,
+    buffer: Rc<Buffer<A>>,
+    epoch: u64,
+}
+
+impl<A: hal::Api> BufferRecycle<A> {
+    pub fn recycle(self) {
+        BufferPool::<A>::cache_buffer(&self.idle, self.buffer, self.epoch);
+    }
 }
 
 impl<A: hal::Api> BufferPool<A> {
-    pub fn clear(&self) { self.buffers.borrow_mut().clear(); }
+    pub fn clear(&self) {
+        let mut idle = self.idle.borrow_mut();
+        idle.buckets.clear();
+        idle.bytes = 0;
+        idle.count = 0;
+        idle.epoch = idle.epoch.wrapping_add(1);
+    }
 
     pub fn new(owner: &Rc<Device<A>>) -> Self {
         Self {
             owner: owner.clone(),
-            buffers: RefCell::new(Vec::new()),
+            idle: Rc::new(RefCell::new(IdleBuffers {
+                buckets: HashMap::new(),
+                bytes: 0,
+                count: 0,
+                epoch: 0,
+            })),
         }
     }
 
+    #[cfg(test)]
     pub fn upload(&self, bytes: &[u8], usage: wgt::BufferUses) -> Result<Rc<Buffer<A>>> {
-        self.upload_with(bytes.len(), usage, |destination| {
+        let buffer = self.upload_with(bytes.len(), usage, |destination| {
             destination.copy_from_slice(bytes);
             Ok(())
-        })
+        })?;
+        let epoch = self.idle.borrow().epoch;
+        Self::cache_buffer(&self.idle, buffer.clone(), epoch);
+        Ok(buffer)
     }
 
     pub fn upload_with(
@@ -37,46 +75,56 @@ impl<A: hal::Api> BufferPool<A> {
         usage: wgt::BufferUses,
         write: impl FnOnce(&mut [u8]) -> Result<()>,
     ) -> Result<Rc<Buffer<A>>> {
-        let mut buffers = self.buffers.borrow_mut();
-        // Submission references disappear only after an observed completion fence.
-        let required_size = (length as u64).max(4);
-        let best_fit = buffers
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(index, buffer)| {
-                let buffer = Rc::get_mut(buffer)?;
-                (buffer.usage == usage | wgt::BufferUses::MAP_WRITE && buffer.size >= required_size)
-                    .then_some((index, buffer.size))
-            })
-            .min_by_key(|(_, size)| *size)
-            .map(|(index, _)| index);
-        if let Some(index) = best_fit {
-            let mut buffer = buffers.swap_remove(index);
-            Rc::get_mut(&mut buffer).unwrap().write_with(length, write)?;
-            buffers.push(buffer.clone());
-            return Ok(buffer);
-        }
-        let buffer = Buffer::new_with(&self.owner, length, usage, write)?;
-        let mut size: u64 = buffers.iter().map(|buffer| buffer.size).sum();
-        let mut count = buffers.len();
-        buffers.retain(|old| {
-            if (size + buffer.size > BUFFER_BUDGET || count >= 256) && Rc::strong_count(old) == 1 {
-                size -= old.size;
-                count -= 1;
-                false
-            } else {
-                true
+        let required_size = (length as u64)
+            .max(4)
+            .checked_next_power_of_two()
+            .ok_or("HAL buffer size overflow")?;
+        let usage = usage | wgt::BufferUses::MAP_WRITE;
+        let mut idle = self.idle.borrow_mut();
+        for size_class in required_size.trailing_zeros()..64 {
+            let key = (usage.bits(), size_class);
+            let attempts = idle.buckets.get(&key).map_or(0, VecDeque::len);
+            for _ in 0..attempts {
+                let mut buffer = idle.buckets.get_mut(&key).unwrap().pop_front().unwrap();
+                let buffer_size = buffer.size;
+                if let Some(buffer_mut) = Rc::get_mut(&mut buffer) {
+                    idle.count -= 1;
+                    idle.bytes -= buffer_size;
+                    buffer_mut.write_with(length, write)?;
+                    return Ok(buffer);
+                }
+                idle.buckets.get_mut(&key).unwrap().push_back(buffer);
             }
-        });
-        if size + buffer.size <= BUFFER_BUDGET && buffers.len() < 256 {
-            buffers.push(buffer.clone());
         }
-        Ok(buffer)
+        drop(idle);
+        Buffer::new_with(&self.owner, length, usage, write)
     }
 
-    pub fn bytes(&self) -> u64 {
-        self.buffers.borrow().iter().map(|buffer| buffer.size).sum()
+    pub fn recycle_after(&self, recording: &mut super::submission::Submission<A>, buffer: Rc<Buffer<A>>) {
+        let epoch = self.idle.borrow().epoch;
+        recording.recycle_buffer(BufferRecycle { idle: self.idle.clone(), buffer, epoch });
     }
+
+    fn cache_buffer(idle: &Rc<RefCell<IdleBuffers<A>>>, buffer: Rc<Buffer<A>>, epoch: u64) {
+        let mut idle = idle.borrow_mut();
+        if idle.epoch != epoch || buffer.size > BUFFER_BUDGET {
+            return;
+        }
+        while idle.bytes + buffer.size > BUFFER_BUDGET || idle.count >= 256 {
+            let old = idle.buckets.values_mut().find_map(VecDeque::pop_front);
+            let Some(old) = old else { break };
+            idle.bytes -= old.size;
+            idle.count -= 1;
+        }
+        if idle.bytes + buffer.size <= BUFFER_BUDGET && idle.count < 256 {
+            let key = (buffer.usage.bits(), buffer.size.trailing_zeros());
+            idle.bytes += buffer.size;
+            idle.count += 1;
+            idle.buckets.entry(key).or_default().push_back(buffer);
+        }
+    }
+
+    pub fn bytes(&self) -> u64 { self.idle.borrow().bytes }
 }
 
 pub(super) struct TexturePool<A: hal::Api> {

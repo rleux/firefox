@@ -40,6 +40,7 @@ pub(super) struct Submission<A: hal::Api> {
     sync: Vec<Rc<dyn SubmissionSync<A>>>,
     commits: Vec<Box<dyn FnOnce()>>,
     completions: Vec<Box<dyn FnOnce()>>,
+    recycles: Vec<super::pool::BufferRecycle<A>>,
 }
 
 impl<A: hal::Api> Submission<A> {
@@ -59,6 +60,7 @@ impl<A: hal::Api> Submission<A> {
             sync: Vec::new(),
             commits: Vec::new(),
             completions: Vec::new(),
+            recycles: Vec::new(),
         };
         unsafe {
             submission.encoder = Some(
@@ -98,6 +100,7 @@ impl<A: hal::Api> Submission<A> {
         self.completion_check = None;
         self.resources.clear();
         self.sync.clear();
+        for recycle in self.recycles.drain(..) { recycle.recycle(); }
     }
 
     fn restart(&mut self, serial: u64) -> Result<()> {
@@ -128,6 +131,10 @@ impl<A: hal::Api> Submission<A> {
 
     pub fn on_complete(&mut self, complete: impl FnOnce() + 'static) {
         self.completions.push(Box::new(complete));
+    }
+
+    pub fn recycle_buffer(&mut self, recycle: super::pool::BufferRecycle<A>) {
+        self.recycles.push(recycle);
     }
 
     fn submit(&mut self, surfaces: &[&A::SurfaceTexture]) -> Result<()> {
@@ -318,12 +325,18 @@ impl<A: hal::Api> SubmissionQueue<A> {
         usage: wgt::BufferUses,
     ) -> Result<Rc<super::resources::Buffer<A>>> {
         Self::retire(&mut self.state.borrow_mut(), false, self.wait_timeout)?;
-        self.uploads.upload(bytes, usage)
+        let mut recording = self.recording()?;
+        let buffer = self.uploads.upload_with(bytes.len(), usage, |destination| {
+            destination.copy_from_slice(bytes);
+            Ok(())
+        })?;
+        self.uploads.recycle_after(&mut recording, buffer.clone());
+        Ok(buffer)
     }
 
     pub fn upload_in_recording(
         &self,
-        recording: &Submission<A>,
+        recording: &mut Submission<A>,
         length: usize,
         usage: wgt::BufferUses,
         write: impl FnOnce(&mut [u8]) -> Result<()>,
@@ -331,7 +344,9 @@ impl<A: hal::Api> SubmissionQueue<A> {
         if !Rc::ptr_eq(&recording.owner, &self.owner) || !recording.recording {
             return Err("HAL upload requires a recording on the same device".into());
         }
-        self.uploads.upload_with(length, usage, write)
+        let buffer = self.uploads.upload_with(length, usage, write)?;
+        self.uploads.recycle_after(recording, buffer.clone());
+        Ok(buffer)
     }
 
     #[cfg(test)]
@@ -352,8 +367,9 @@ impl<A: hal::Api> SubmissionQueue<A> {
         usage: wgt::BufferUses,
         write: impl FnOnce(&mut [u8]) -> Result<()>,
     ) -> Result<(RefMut<'_, Submission<A>>, Rc<super::resources::Buffer<A>>)> {
-        let recording = self.recording()?;
+        let mut recording = self.recording()?;
         let buffer = self.uploads.upload_with(length, usage, write)?;
+        self.uploads.recycle_after(&mut recording, buffer.clone());
         Ok((recording, buffer))
     }
 
@@ -680,11 +696,11 @@ mod tests {
         let owner = Rc::new(create_vulkan_device(&Options { validation: true, ..Options::default() }).unwrap());
         let queue = SubmissionQueue::new(&owner, 3, false);
         let mut commands = queue.recording().unwrap();
-        let first = queue.upload_in_recording(&commands, 16, wgt::BufferUses::VERTEX, |bytes| {
+        let first = queue.upload_in_recording(&mut commands, 16, wgt::BufferUses::VERTEX, |bytes| {
             bytes.fill(17);
             Ok(())
         }).unwrap();
-        let second = queue.upload_in_recording(&commands, 16, wgt::BufferUses::VERTEX, |bytes| {
+        let second = queue.upload_in_recording(&mut commands, 16, wgt::BufferUses::VERTEX, |bytes| {
             bytes.fill(23);
             Ok(())
         }).unwrap();

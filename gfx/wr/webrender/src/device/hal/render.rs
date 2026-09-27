@@ -1804,7 +1804,7 @@ impl<A: BackendApi> FrameRenderer<A> {
 
     fn upload_instances(
         &self,
-        commands: &super::submission::Submission<A>,
+        commands: &mut super::submission::Submission<A>,
         draws: &[Draw<'_, A>],
     ) -> Result<(Vec<Rc<Buffer<A>>>, Vec<InstanceRange>)> {
         let sizes = draws.iter().map(|draw| packed_instance_size(draw.shader, draw.instances.bytes()))
@@ -1924,7 +1924,7 @@ impl<A: BackendApi> FrameRenderer<A> {
         };
         let submissions = self.submissions.clone();
         let mut commands = submissions.recording()?;
-        let (instance_buffers, instance_ranges) = self.upload_instances(&commands, draws)?;
+        let (instance_buffers, instance_ranges) = self.upload_instances(&mut commands, draws)?;
         let mut resources = Vec::new();
         let mut sampled = Vec::new();
         for (draw, instance_range) in draws.iter().zip(instance_ranges) {

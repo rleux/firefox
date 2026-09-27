@@ -1,5 +1,10 @@
 # Experimental HAL renderer
 
+For the current browser architecture and review scope, see the
+[overview](../../../../../docs/VulkanWebRenderOverview.md) and
+[implementation document](../../../../../docs/VulkanWebRenderImplementation.md).
+The stage notes below also contain historical acceptance results and limitations.
+
 The `hal-vulkan` feature implements WebRender's backend-neutral `GpuBackend`
 interface using `wgpu-hal` 30.0.0. GL remains the default. Native platform
 validation is still required; this is not a production-readiness claim.

@@ -9,6 +9,8 @@ This document describes the implementation at `a3a23237cc0`, based on Mozilla
 `main` at `f9a73919fe0`. See the [implementation document](VulkanWebRenderImplementation.md)
 for contracts, source entry points, validation scope, and measurement provenance.
 
+[WebRender Vulkan image](WebRenderVulkan.png)
+
 ## Architecture and key decisions
 
 - **Use Mozilla's shared renderer.** Following bug 2072784, `HalGpuBackend`

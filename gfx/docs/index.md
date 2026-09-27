@@ -16,4 +16,6 @@ Silk
 Moz2D
 DebuggingWebRenderScreenshots
 GraphicsOverview
+VulkanWebRenderOverview
+VulkanWebRenderImplementation
 ```
