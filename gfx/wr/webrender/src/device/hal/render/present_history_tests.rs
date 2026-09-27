@@ -53,6 +53,23 @@ fn gapped_serials_accumulate_damage_for_rotating_images() {
 }
 
 #[test]
+fn presentation_damage_uses_last_present_instead_of_acquired_image_age() {
+    let mut history = OutputHistory::default();
+    let first = rect(8, 12, 16, 20);
+    let second = rect(80, 24, 24, 28);
+    let third = rect(32, 96, 20, 16);
+    history.record(101, SIZE, first);
+    history.record(109, SIZE, second);
+    history.record(140, SIZE, third);
+    assert_eq!(history.repair(140, SIZE, Some(101)), Repair::Partial(second.union(&third)));
+    assert_eq!(history.present_damage(140, SIZE, Some(109)), Some(third));
+    assert_eq!(history.present_damage(140, SIZE, Some(101)), Some(second.union(&third)));
+    assert_eq!(history.present_damage(140, SIZE, None), None);
+    assert_eq!(history.present_damage(140, SIZE, Some(140)), None);
+    assert_eq!(history.present_damage(140, [800, 600], Some(109)), None);
+}
+
+#[test]
 fn size_changes_break_the_previous_image_boundary() {
     let resized = [800, 600];
     let mut history = OutputHistory::default();

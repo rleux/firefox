@@ -80,7 +80,10 @@ impl<A: BackendApi> FrameRenderer<A> {
     pub fn present_output(&mut self, output: &RenderedFrame<A>) -> Result<PresentationStatus> {
         let result = self.present_output_inner(output);
         if result.is_err() {
-            if let Some(surface) = &mut self.surface { surface.image_versions.clear(); }
+            if let Some(surface) = &mut self.surface {
+                surface.image_versions.clear();
+                surface.last_presented = None;
+            }
         }
         result
     }
@@ -113,6 +116,11 @@ impl<A: BackendApi> FrameRenderer<A> {
             Repair::Full
         } else {
             self.output_history.repair(output.serial, output.size, previous)
+        };
+        let damage = if self.force_full_present || output.size != size {
+            None
+        } else {
+            self.output_history.present_damage(output.serial, output.size, surface.last_presented)
         };
         let region = match repair {
             Repair::Partial(rect) => Some([rect.min.x as u32, rect.min.y as u32, rect.width() as u32, rect.height() as u32]),
@@ -168,8 +176,9 @@ impl<A: BackendApi> FrameRenderer<A> {
         }
         self.submissions.submit_surfaces(&[&acquired.texture])?;
         let surface = self.surface.as_mut().unwrap();
-        let status = surface.present()?;
+        let status = surface.present(damage)?;
         if matches!(status, PresentationStatus::Presented { suboptimal: false }) {
+            surface.last_presented = Some(output.serial);
             if let Some(id) = image_id {
                 if !surface.image_versions.contains_key(&id) && surface.image_versions.len() >= 16 {
                     surface.image_versions.clear();
@@ -178,6 +187,7 @@ impl<A: BackendApi> FrameRenderer<A> {
             }
         } else {
             surface.image_versions.clear();
+            surface.last_presented = None;
         }
         if matches!(status, PresentationStatus::Presented { .. }) { self.count(RenderCounter::Presents, 1); }
         self.failed.set(false);

@@ -204,16 +204,18 @@ pub(super) fn open_adapter(
     if supported {
         features |= wgt::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
     }
-    let callback: Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> = if supported {
+    let callback: Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> =
         Some(Box::new(|args| {
-            args.extensions.push(ash::khr::external_semaphore_fd::NAME);
-            if caps.supports_extension(ash::ext::queue_family_foreign::NAME) {
-                args.extensions.push(ash::ext::queue_family_foreign::NAME);
+            if supported {
+                args.extensions.push(ash::khr::external_semaphore_fd::NAME);
+                if caps.supports_extension(ash::ext::queue_family_foreign::NAME) {
+                    args.extensions.push(ash::ext::queue_family_foreign::NAME);
+                }
             }
-        }))
-    } else {
-        None
-    };
+            if caps.supports_extension(ash::khr::incremental_present::NAME) {
+                args.extensions.push(ash::khr::incremental_present::NAME);
+            }
+        }));
     let open = unsafe {
         adapter.adapter.open_with_callback(
             features,

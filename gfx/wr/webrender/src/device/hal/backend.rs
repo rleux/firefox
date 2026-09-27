@@ -40,6 +40,15 @@ pub(crate) trait BackendApi: hal::Api + sealed::Sealed + 'static {
     fn request_surface_preservation(_surface: &Self::Surface) -> bool { false }
     fn has_native_swapchain(_surface: &Self::Surface) -> bool { false }
     fn surface_image_id(_texture: &Self::Texture) -> Option<u64> { None }
+    fn supports_incremental_present(_device: &Device<Self>, _surface: &Self::Surface) -> bool { false }
+    unsafe fn present(
+        device: &Device<Self>,
+        surface: &Self::Surface,
+        texture: Self::SurfaceTexture,
+        _damage: Option<api::units::DeviceIntRect>,
+    ) -> std::result::Result<(), hal::SurfaceError> {
+        unsafe { device.open.queue.present(surface, texture) }
+    }
     fn supports_presentation_blit(_device: &Device<Self>, _format: wgt::TextureFormat) -> bool { false }
     unsafe fn record_presentation_blit(
         _device: &Self::Device,

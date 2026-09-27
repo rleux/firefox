@@ -178,6 +178,35 @@ impl super::backend::BackendApi for hal::api::Vulkan {
         Some(ash::vk::Handle::as_raw(unsafe { texture.raw_handle() }))
     }
 
+    fn supports_incremental_present(device: &Device<Self>, surface: &Self::Surface) -> bool {
+        device.open.device.enabled_device_extensions().contains(&ash::khr::incremental_present::NAME)
+            && surface.raw_native_swapchain().is_some()
+    }
+
+    unsafe fn present(
+        device: &Device<Self>,
+        surface: &Self::Surface,
+        texture: Self::SurfaceTexture,
+        damage: Option<api::units::DeviceIntRect>,
+    ) -> std::result::Result<(), hal::SurfaceError> {
+        if let Some(rect) = damage.filter(|_| Self::supports_incremental_present(device, surface)) {
+            let rectangles = [vk::RectLayerKHR {
+                offset: vk::Offset2D { x: rect.min.x, y: rect.min.y },
+                extent: vk::Extent2D { width: rect.width() as u32, height: rect.height() as u32 },
+                layer: 0,
+            }];
+            let regions = [vk::PresentRegionKHR::default().rectangles(&rectangles)];
+            let mut info = vk::PresentRegionsKHR::default().regions(&regions);
+            // The HAL consumes this chain during the following present call.
+            unsafe {
+                surface.set_next_present_chain((&mut info as *mut vk::PresentRegionsKHR<'_>).cast());
+                device.open.queue.present(surface, texture)
+            }
+        } else {
+            unsafe { device.open.queue.present(surface, texture) }
+        }
+    }
+
     fn supports_presentation_blit(device: &Device<Self>, format: wgt::TextureFormat) -> bool {
         let instance = device.open.device.shared_instance().raw_instance();
         let format = match format {

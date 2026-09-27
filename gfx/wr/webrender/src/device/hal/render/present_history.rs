@@ -47,6 +47,13 @@ impl OutputHistory {
         let full = DeviceIntRect::from_size(DeviceIntSize::new(size[0] as i32, size[1] as i32));
         if damage.is_empty() || damage == full { Repair::Full } else { Repair::Partial(damage) }
     }
+
+    pub fn present_damage(&self, serial: u64, size: [u32; 2], last_presented: Option<u64>) -> Option<DeviceIntRect> {
+        match self.repair(serial, size, last_presented) {
+            Repair::Partial(rect) => Some(rect),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

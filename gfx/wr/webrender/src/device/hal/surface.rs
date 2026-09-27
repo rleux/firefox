@@ -6,6 +6,7 @@ use super::*;
 use super::backend::BackendApi;
 use wgpu_hal::Surface as _;
 use std::rc::Rc;
+use api::units::DeviceIntRect;
 pub(crate) mod platform;
 pub use platform::SurfaceWindow;
 
@@ -38,6 +39,7 @@ pub struct SurfaceInfo {
     pub alpha_mode: Option<wgt::CompositeAlphaMode>,
     pub generation: u64,
     pub contents_preserved: bool,
+    pub incremental_present: bool,
     pub acquired: u64,
     pub present_attempts: u64,
     pub presented: u64,
@@ -75,6 +77,7 @@ pub(super) struct SurfaceState<A: BackendApi> {
     pub acquired: Option<hal::AcquiredSurfaceTexture<A>>,
     pub info: SurfaceInfo,
     pub image_versions: std::collections::HashMap<u64, u64>,
+    pub last_presented: Option<u64>,
     preference: PresentationPreference,
     pub presentation: PresentationMethod,
     pub dirty: bool,
@@ -86,7 +89,7 @@ pub(super) struct SurfaceState<A: BackendApi> {
 impl<A: BackendApi> SurfaceState<A> {
     pub fn new(owner: &Rc<Device<A>>, setup: SurfaceSetup<A>, options: SurfaceOptions) -> Result<Self> {
         Ok(Self { setup, owner: owner.clone(), options, config: None, acquired: None,
-            info: SurfaceInfo::default(), image_versions: std::collections::HashMap::new(), dirty: true, lost: false,
+            info: SurfaceInfo::default(), image_versions: std::collections::HashMap::new(), last_presented: None, dirty: true, lost: false,
             preference: PresentationPreference::from_env()?, presentation: PresentationMethod::Draw,
             #[cfg(feature = "hal-testing")]
             injected_loss: false })
@@ -95,7 +98,9 @@ impl<A: BackendApi> SurfaceState<A> {
     pub fn configure(&mut self, size: [u32; 2]) -> Result<()> {
         if self.acquired.is_some() { return Err("Cannot configure an acquired surface".into()); }
         self.image_versions.clear();
+        self.last_presented = None;
         self.info.contents_preserved = false;
+        self.info.incremental_present = false;
         { let _guard = self.owner.lock_queue()?;
             unsafe { self.owner.open.queue.wait_for_idle() }.map_err(|error| format!("Retiring presentation: {error:?}"))?; }
         if self.config.take().is_some() { unsafe { self.setup.raw.unconfigure(&self.owner.open.device) }; }
@@ -124,7 +129,8 @@ impl<A: BackendApi> SurfaceState<A> {
         self.info.alpha_mode = Some(config.composite_alpha_mode);
         self.info.generation += 1;
         self.info.contents_preserved = preservation_requested && A::has_native_swapchain(&self.setup.raw);
-        println!("HAL presentation: {:?} format={:?} usage={:?} preserved={}", presentation, config.format, config.usage, self.info.contents_preserved);
+        self.info.incremental_present = A::supports_incremental_present(&self.owner, &self.setup.raw);
+        println!("HAL presentation: {:?} format={:?} usage={:?} preserved={} incremental={}", presentation, config.format, config.usage, self.info.contents_preserved, self.info.incremental_present);
         self.presentation = presentation;
         self.config = Some(config);
         self.dirty = false;
@@ -144,7 +150,10 @@ impl<A: BackendApi> SurfaceState<A> {
         self.owner.check_fault(FailurePoint::Acquire)?;
         match unsafe { self.setup.raw.acquire_texture(Some(std::time::Duration::from_millis(100)), fence) } {
             Ok(acquired) => {
-                if acquired.suboptimal { self.image_versions.clear(); }
+                if acquired.suboptimal {
+                    self.image_versions.clear();
+                    self.last_presented = None;
+                }
                 self.info.acquired += 1;
                 self.acquired = Some(acquired);
                 Ok(PresentationStatus::Acquired)
@@ -155,18 +164,20 @@ impl<A: BackendApi> SurfaceState<A> {
 
     pub fn error(&mut self, error: hal::SurfaceError) -> Result<PresentationStatus> {
         self.image_versions.clear();
+        self.last_presented = None;
         let status = classify_error(error).map_err(|error| { self.owner.lost.set(true); error })?;
         self.dirty |= matches!(status, PresentationStatus::Outdated | PresentationStatus::Lost);
         self.lost |= status == PresentationStatus::Lost;
         Ok(status)
     }
 
-    pub fn present(&mut self) -> Result<PresentationStatus> {
+    pub fn present(&mut self, damage: Option<DeviceIntRect>) -> Result<PresentationStatus> {
         let acquired = self.acquired.take().ok_or("No acquired surface image")?;
         self.info.present_attempts += 1;
         self.dirty |= acquired.suboptimal;
         if acquired.suboptimal { self.image_versions.clear(); }
-        let result = { let _guard = self.owner.lock_queue()?; unsafe { self.owner.open.queue.present(&self.setup.raw, acquired.texture) } };
+        let result = { let _guard = self.owner.lock_queue()?;
+            unsafe { A::present(&self.owner, &self.setup.raw, acquired.texture, damage) } };
         match result {
             Ok(()) => {
                 self.info.presented += 1;
@@ -178,6 +189,7 @@ impl<A: BackendApi> SurfaceState<A> {
 
     pub fn discard(&mut self) {
         self.image_versions.clear();
+        self.last_presented = None;
         if let Some(acquired) = self.acquired.take() {
             unsafe { self.setup.raw.discard_texture(acquired.texture) };
             self.info.discarded += 1;
