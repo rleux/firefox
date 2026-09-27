@@ -724,13 +724,15 @@ mod tests {
                     bytes.fill(17);
                     Ok(())
                 }).unwrap());
+                queue.wait().unwrap();
                 assert_eq!(owner.memory.get().buffers, 1);
             }
+            let submitted = queue.submitted();
             assert!(queue.upload_recording_with(16, wgt::BufferUses::COPY_SRC, |bytes| {
                 bytes[..4].fill(23);
                 Err("Injected upload fill failure".into())
             }).is_err());
-            assert_eq!(queue.submitted(), 0);
+            assert_eq!(queue.submitted(), submitted);
             assert_eq!(owner.memory.get().buffers, 0);
             queue.discard_recording();
             assert!(queue.state.borrow().active.is_none());

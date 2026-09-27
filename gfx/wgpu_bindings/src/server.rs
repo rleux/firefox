@@ -1234,9 +1234,7 @@ unsafe fn dedicated_image_memory_requirements(
 
     if dedicated_requirements.requires_dedicated_allocation == vk::FALSE
         && dedicated_requirements.prefers_dedicated_allocation == vk::FALSE
-        && !*QUIET.get_or_init(|| {
-            std::env::var("WR_WEBGPU_BENCHMARK_QUIET").as_deref() == Ok("1")
-        })
+        && !*QUIET.get_or_init(|| std::env::var("WR_WEBGPU_BENCHMARK_QUIET").as_deref() == Ok("1"))
     {
         log::debug!("dmabuf image neither requires nor prefers a dedicated allocation");
     }
@@ -3093,7 +3091,7 @@ unsafe fn process_message(
                 .unwrap()
                 .retain(|_, export| export.device_id != id);
             global.device_destroy(id);
-        },
+        }
 
         Message::DropAdapter(id) => {
             global.adapter_remove(id);
@@ -3401,9 +3399,8 @@ pub unsafe extern "C" fn wgpu_vkimage_prepare_webrender_present(
             Err(error.unwrap_or_else(|| "Vulkan canvas device lost".into()))
         };
         enqueue_signal_semaphores_destruction(
-            global,
-            device_id,
-            queue_id,
+            &queue,
+            device.clone(),
             &[VkSemaphoreHandle(semaphore.as_raw())],
             !succeeded,
         );

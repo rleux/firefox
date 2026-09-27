@@ -48,7 +48,6 @@ pub(crate) struct HalGpuBackend<A: BackendApi> {
     default_target: Option<Rc<Texture<A>>>,
     read_target: Option<Rc<Texture<A>>>,
     scissor: Cell<Option<DeviceIntRect>>,
-    scissor_enabled: Cell<bool>,
     draws: Vec<Draw<'static, A>>,
     draw_data: HashMap<&'static str, Rc<Texture<A>>>,
     upload_method: wr::UploadMethod,
@@ -112,7 +111,6 @@ impl<A: BackendApi> HalGpuBackend<A> {
             default_target: None,
             read_target: None,
             scissor: Cell::new(None),
-            scissor_enabled: Cell::new(false),
             draws: Vec::new(),
             draw_data: HashMap::new(),
             upload_method: wr::UploadMethod::PixelBuffer(wr::VertexUsageHint::Stream),
@@ -212,11 +210,45 @@ impl<A: BackendApi> HalGpuBackend<A> {
         self.draws.clear();
     }
 
+    fn clear(
+        &mut self,
+        mut rect: DeviceIntRect,
+        color: Option<[f32; 4]>,
+        depth: Option<f32>,
+    ) {
+        self.flush();
+        if let Some(color) = color {
+            if self.active_default {
+                if let Some(damage) = self.composition_damage {
+                    rect = rect
+                        .intersection(&damage)
+                        .unwrap_or_else(DeviceIntRect::zero);
+                }
+            }
+            self.draws.push(
+                self.gpu
+                    .clear(rect, ColorF::new(color[0], color[1], color[2], color[3])),
+            );
+        }
+        if depth.is_some() && !self.gpu.is_failed() {
+            let target = self.target.as_ref().unwrap();
+            if let Some(depth) = self
+                .gpu
+                .depths
+                .get(&(target.allocation_id, target.base_mip))
+            {
+                if let Some(mut commands) = self.record_result(self.gpu.submissions.recording()) {
+                    depth.invalidate(&mut commands);
+                }
+            }
+        }
+    }
+
     fn target(&mut self, target: wr::DrawTarget) -> Rc<Texture<A>> {
         self.target_view = None;
         self.scissor_offset = DeviceIntVector2D::zero();
         match target {
-            wr::DrawTarget::Texture { fbo_id, .. } => self.textures[&fbo_id.0].clone(),
+            wr::DrawTarget::Texture { texture, .. } => self.textures[&(texture.0 as u32)].clone(),
             wr::DrawTarget::Default { total_size, .. } => {
                 let size = [total_size.width as u32, total_size.height as u32];
                 if self
@@ -268,9 +300,9 @@ impl<A: BackendApi> HalGpuBackend<A> {
     fn read_target(&self, target: wr::ReadTarget) -> Rc<Texture<A>> {
         match target {
             wr::ReadTarget::Default => self.default_target.as_ref().unwrap().clone(),
-            wr::ReadTarget::Texture { fbo_id } => self.textures[&fbo_id.0].clone(),
-            wr::ReadTarget::NativeSurface { fbo_id, .. } => {
-                self.compositor_targets.borrow().targets[&u64::from(fbo_id.0)]
+            wr::ReadTarget::Texture { texture } => self.textures[&(texture.0 as u32)].clone(),
+            wr::ReadTarget::NativeSurface { handle, .. } => {
+                self.compositor_targets.borrow().targets[&handle.0]
                     .texture
                     .clone()
             }
@@ -283,17 +315,13 @@ impl<A: BackendApi> HalGpuBackend<A> {
             target.size.width as i32,
             target.size.height as i32,
         ));
-        let rect = if self.scissor_enabled.get() {
-            self.scissor.get().map_or(full, |rect| {
-                if self.active_default {
-                    rect.translate(-self.output_origin.to_vector())
-                } else {
-                    rect
-                }
-            })
-        } else {
-            full
-        };
+        let rect = self.scissor.get().map_or(full, |rect| {
+            if self.active_default {
+                rect.translate(-self.output_origin.to_vector())
+            } else {
+                rect
+            }
+        });
         if self.active_default {
             if let Some(damage) = self.composition_damage {
                 return rect
@@ -735,6 +763,18 @@ impl<A: BackendApi + 'static> GpuBackend for HalGpuBackend<A> {
         }
         self.target = Some(target);
         self.in_pass = true;
+        self.scissor.set(None);
+        let color = match desc.color_load {
+            wr::LoadOp::Clear(color) => Some(color),
+            _ => None,
+        };
+        let depth = match desc.depth_load {
+            wr::LoadOp::Clear(depth) => Some(depth),
+            _ => None,
+        };
+        if color.is_some() || depth.is_some() {
+            self.clear(full, color, depth);
+        }
     }
     fn end_render_pass(&mut self, depth_store: wr::StoreOp) {
         assert!(self.in_pass);
@@ -801,8 +841,8 @@ impl<A: BackendApi + 'static> GpuBackend for HalGpuBackend<A> {
             filter,
             flags: wr::TextureFlags::empty(),
             active_swizzle: Cell::new(Swizzle::default()),
-            fbo: render_target.as_ref().map(|_| wr::FBOId(id)),
-            fbo_with_depth: render_target.filter(|r| r.has_depth).map(|_| wr::FBOId(id)),
+            target_id: wr::TextureId(u64::from(id)),
+            render_target,
             last_frame_used: wr::GpuFrameId::new(self.frame_id),
         }
     }
@@ -847,7 +887,7 @@ impl<A: BackendApi + 'static> GpuBackend for HalGpuBackend<A> {
         }
     }
     fn reuse_render_target(&mut self, texture: &mut wr::Texture, info: RenderTargetInfo) {
-        texture.fbo_with_depth = info.has_depth.then_some(wr::FBOId(texture.id));
+        texture.render_target = Some(info);
         if !info.has_depth {
             let raw = &self.textures[&texture.id];
             self.gpu.depths.remove(&(raw.allocation_id, raw.base_mip));
@@ -1314,50 +1354,20 @@ impl<A: BackendApi + 'static> GpuBackend for HalGpuBackend<A> {
             self.gpu.abort();
         }
     }
-    fn clear_target(
+    fn clear_rect(
         &mut self,
+        rect: FramebufferIntRect,
         color: Option<[f32; 4]>,
         depth: Option<f32>,
-        rect: Option<FramebufferIntRect>,
     ) {
-        self.flush();
-        if let Some(color) = color {
-            let mut rect = rect
-                .map(|r| r.cast_unit().translate(self.scissor_offset))
-                .unwrap_or_else(|| self.rect());
-            if self.active_default {
-                if let Some(damage) = self.composition_damage {
-                    rect = rect
-                        .intersection(&damage)
-                        .unwrap_or_else(DeviceIntRect::zero);
-                }
-            }
-            self.draws.push(
-                self.gpu
-                    .clear(rect, ColorF::new(color[0], color[1], color[2], color[3])),
-            );
+        let mut rect = rect.cast_unit().translate(self.scissor_offset);
+        if self.active_default {
+            rect = rect.translate(-self.output_origin.to_vector());
         }
-        if depth.is_some() && !self.gpu.is_failed() {
-            let target = self.target.as_ref().unwrap();
-            if let Some(depth) = self
-                .gpu
-                .depths
-                .get(&(target.allocation_id, target.base_mip))
-            {
-                if let Some(mut commands) = self.record_result(self.gpu.submissions.recording()) {
-                    depth.invalidate(&mut commands);
-                }
-            }
-        }
+        self.clear(rect, color, depth);
     }
-    fn set_scissor_rect(&self, rect: FramebufferIntRect) {
-        self.scissor.set(Some(rect.cast_unit()));
-    }
-    fn enable_scissor(&self) {
-        self.scissor_enabled.set(true);
-    }
-    fn disable_scissor(&self) {
-        self.scissor_enabled.set(false);
+    fn set_scissor(&mut self, rect: Option<FramebufferIntRect>) {
+        self.scissor.set(rect.map(|rect| rect.cast_unit()));
     }
     fn echo_driver_messages(&self) {}
     fn report_memory(
@@ -1645,8 +1655,10 @@ mod tests {
                 target: wr::DrawTarget::from_texture(&texture, false),
                 render_area,
                 color_load: wr::LoadOp::DontCare,
+                depth_load: wr::LoadOp::DontCare,
             });
-            backend.clear_target(Some([0.0, 1.0, 0.0, 1.0]), None, Some(clear.cast_unit()));
+            backend.set_scissor(Some(FramebufferIntRect::zero()));
+            backend.clear_rect(clear.cast_unit(), Some([0.0, 1.0, 0.0, 1.0]), None);
             backend.end_render_pass(wr::StoreOp::Store);
             backend.attach_read_texture(&texture);
             let pixels = backend.read_pixels(&ImageDescriptor::new(
@@ -1664,6 +1676,22 @@ mod tests {
                 assert_eq!(pixel, expected, "area {render_area:?}, pixel {i}");
             }
         }
+        backend.begin_render_pass(&wr::RenderPassDescriptor {
+            target: wr::DrawTarget::from_texture(&texture, false),
+            render_area: Some(clear),
+            color_load: wr::LoadOp::Clear([0.0, 0.0, 1.0, 1.0]),
+            depth_load: wr::LoadOp::DontCare,
+        });
+        assert_eq!(backend.scissor.get(), None);
+        backend.end_render_pass(wr::StoreOp::Store);
+        backend.attach_read_texture(&texture);
+        let pixels = backend.read_pixels(&ImageDescriptor::new(
+            16,
+            16,
+            ImageFormat::RGBA8,
+            ImageDescriptorFlags::empty(),
+        ));
+        assert!(pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 255, 255]));
         backend.delete_texture(texture);
         backend.deinit();
         backend.end_frame();
