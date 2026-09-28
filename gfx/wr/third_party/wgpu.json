@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/gfx-rs/wgpu",
+  "revision": "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8",
+  "source_directory": "wgpu",
+  "archive_url": "https://codeload.github.com/gfx-rs/wgpu/tar.gz/4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8",
+  "archive_sha256": "7c8d552c06fbb9cf5a239acfb26ab0f85e987a19f8bae42d01c2b28b6c6905de",
+  "package_sha256": "c61c7b435c2061682945347a23761518d4d27d571acc3f448a5dc4a893ea898e",
+  "version": "30.0.0",
+  "files": 238,
+  "update_command": "python3 gfx/wr/third_party/update-wgpu.py --archive <downloaded-archive>"
+}

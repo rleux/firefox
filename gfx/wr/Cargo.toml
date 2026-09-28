@@ -7,6 +7,7 @@ members = [
     "wrshell",
 ]
 resolver = "2"
+exclude = ["third_party/wgpu"]
 
 [workspace.dependencies]
 gleam = "0.16"
