@@ -9,6 +9,11 @@ pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 }
 
+mod resources;
+#[path = "vulkan/mod.rs"]
+mod native;
+pub use self::resources::Buffer;
+
 #[derive(Default)]
 pub struct Options {
     pub adapter_name: Option<String>,
@@ -90,6 +95,3 @@ fn select_adapter<'a>(
 
 #[cfg(test)]
 mod tests;
-
-#[path = "vulkan/mod.rs"]
-mod native;
