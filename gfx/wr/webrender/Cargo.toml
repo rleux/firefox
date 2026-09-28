@@ -9,8 +9,8 @@ build = "build.rs"
 edition = "2018"
 
 [features]
-vulkan = ["dep:webrender_shader_build", "webrender_build/vulkan"]
 default = ["static_freetype"]
+vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
 replay = ["api/deserialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/replay"]
@@ -69,6 +69,11 @@ serde_json = { optional=true, version="1" }
 url = { optional=true, version="2.5" }
 sha1 = { optional=true, version="0.10" }
 base64 = { optional=true, version="0.22" }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dependencies]
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0", optional = true, default-features = false, features = ["vulkan"] }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0", optional = true, default-features = false, features = ["std"] }
+ash = { version = "0.38", optional = true }
 
 [dev-dependencies]
 mozangle = "0.5.2"

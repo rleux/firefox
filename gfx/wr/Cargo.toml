@@ -28,6 +28,10 @@ opt-level = 2
 opt-level = 2
 
 [patch.crates-io]
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0" }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0" }
+wgpu-sync = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0" }
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0" }
 firefox-on-glean = { path = "fog" }
 # gl_generator 0.14.0 + https://github.com/rust-windowing/gl-rs/pull/566
 gl_generator = { git = "https://github.com/jamienicol/gl-rs", rev = "71c792dbfe0ec5caeb242fc90937e19098386342" }

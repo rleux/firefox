@@ -1,0 +1,7 @@
+[source.firefox-wgpu]
+git = "https://github.com/gfx-rs/wgpu"
+rev = "db0782e398f7ba6f4f3f071d75deacec64ff84b0"
+replace-with = "firefox-vendored"
+
+[source.firefox-vendored]
+directory = "../../third_party/rust"
