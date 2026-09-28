@@ -11,6 +11,9 @@ mod resources;
 pub use self::resources::Buffer;
 mod submission;
 pub use self::submission::{Recording, Submission};
+mod textures;
+pub use self::textures::Texture;
+pub use crate::device::TextureFilter;
 
 #[derive(Default)]
 pub struct Options {
@@ -24,7 +27,7 @@ pub struct Device {
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
     features: wgt::Features,
-    _adapter: hal::vulkan::Adapter,
+    adapter: hal::vulkan::Adapter,
     _instance: hal::vulkan::Instance,
 }
 
@@ -105,7 +108,7 @@ impl Device {
             info: exposed.info,
             capabilities: exposed.capabilities,
             features,
-            _adapter: exposed.adapter,
+            adapter: exposed.adapter,
             _instance: instance,
         })
     }

@@ -331,3 +331,6 @@ fn submission_drop_and_abandon_release_buffers() {
     drop(device);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[path = "texture_tests.rs"]
+mod texture;
