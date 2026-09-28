@@ -3,8 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use crate::device::wgpu::{Device, Options};
+use crate::device::wgpu::{Device, Options, Texture, TextureFilter};
 use crate::device::wgpu::tests::{map_upload, validation_logging, ERRORS};
+use api::units::{DeviceIntRect, DeviceIntSize};
 use std::sync::atomic::Ordering;
 use wgpu_hal::CommandEncoder as _;
 
@@ -148,6 +149,89 @@ fn queue_bounds_pending_submissions_and_waits_by_serial() {
     queue.state.borrow_mut().next_serial = u64::MAX;
     assert!(queue.recording().is_err());
     assert!(!device.is_lost());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn queue_discards_recordings_and_drains_submitted_work_on_drop() {
+    let device = device();
+    let pool = Rc::new(BufferPool::new(&device));
+    let queue = SubmissionQueue::new(&pool, 2).unwrap();
+    let texture = Texture::new(
+        &device,
+        1,
+        1,
+        wgt::TextureFormat::Rgba8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let rect = DeviceIntRect::from_size(DeviceIntSize::new(1, 1));
+    let (source, abandoned_output) = upload_copy(&queue, &[17; 8]);
+    let source_id = Rc::as_ptr(&source);
+    texture
+        .upload(
+            &queue,
+            rect,
+            &[19; 4],
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    assert!(texture.initialized());
+    drop(source);
+    queue.discard_recording();
+    assert!(!texture.initialized());
+    assert_eq!(queue.submit().unwrap(), 0);
+    drop(abandoned_output);
+    let (source, output) = upload_copy(&queue, &[23; 8]);
+    assert_eq!(Rc::as_ptr(&source), source_id);
+    drop(source);
+    assert_eq!(queue.submit().unwrap(), 2);
+    texture
+        .upload(
+            &queue,
+            rect,
+            &[29; 4],
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    drop(queue);
+    assert!(!texture.initialized());
+    assert_eq!(map_upload(&device, &**output, 8), vec![23; 8]);
+    let queue = SubmissionQueue::new(&pool, 1).unwrap();
+    let foreign = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap(),
+    );
+    let mut foreign_recording_submission = Submission::new(&foreign).unwrap();
+    let mut foreign_recording = foreign_recording_submission.recording().unwrap();
+    assert!(queue
+        .upload_in_recording(
+            &mut foreign_recording,
+            4,
+            wgt::BufferUses::COPY_SRC,
+            |_| Ok(())
+        )
+        .is_err());
+    let mut recording = queue.recording().unwrap();
+    assert!(queue
+        .upload_in_recording(&mut recording, 4, wgt::BufferUses::COPY_SRC, |_| Err(
+            "writer failed".into()
+        ))
+        .is_err());
+    drop(recording);
+    queue.wait().unwrap();
+    device.lost.set(true);
+    assert!(queue.recording().is_err());
+    assert!(queue.submit().is_err());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 
