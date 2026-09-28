@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
 use std::ffi::CStr;
 use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
@@ -14,6 +15,7 @@ pub use self::submission::{Recording, Submission};
 mod textures;
 pub use self::textures::Texture;
 pub use crate::device::TextureFilter;
+mod state;
 
 #[derive(Default)]
 pub struct Options {
@@ -27,6 +29,7 @@ pub struct Device {
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
     features: wgt::Features,
+    lost: Cell<bool>,
     adapter: hal::vulkan::Adapter,
     _instance: hal::vulkan::Instance,
 }
@@ -108,6 +111,7 @@ impl Device {
             info: exposed.info,
             capabilities: exposed.capabilities,
             features,
+            lost: Cell::new(false),
             adapter: exposed.adapter,
             _instance: instance,
         })
@@ -115,6 +119,10 @@ impl Device {
 
     pub fn info(&self) -> &wgt::AdapterInfo {
         &self.info
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.lost.get()
     }
 
     pub fn capabilities(&self) -> &hal::Capabilities {

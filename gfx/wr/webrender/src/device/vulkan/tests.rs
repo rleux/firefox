@@ -121,14 +121,10 @@ fn record_upload(
         ));
         let mut submission = Submission::new(device).unwrap();
         let mut commands = submission.recording().unwrap();
+        source
+            .transition(&mut commands, wgt::BufferUses::COPY_SRC)
+            .unwrap();
         let encoder = commands.encoder();
-        encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
-            buffer: &*source.raw,
-            usage: hal::StateTransition {
-                from: wgt::BufferUses::MAP_WRITE,
-                to: wgt::BufferUses::COPY_SRC,
-            },
-        }));
         encoder.copy_buffer_to_buffer(
             &source.raw,
             &target,
@@ -138,23 +134,16 @@ fn record_upload(
                 size: std::num::NonZeroU64::new(source.size()).unwrap(),
             }),
         );
-        encoder.transition_buffers(IntoIterator::into_iter([
-            hal::BufferBarrier {
-                buffer: &**target,
-                usage: hal::StateTransition {
-                    from: wgt::BufferUses::COPY_DST,
-                    to: wgt::BufferUses::MAP_READ,
-                },
+        encoder.transition_buffers(std::iter::once(hal::BufferBarrier {
+            buffer: &**target,
+            usage: hal::StateTransition {
+                from: wgt::BufferUses::COPY_DST,
+                to: wgt::BufferUses::MAP_READ,
             },
-            hal::BufferBarrier {
-                buffer: &*source.raw,
-                usage: hal::StateTransition {
-                    from: wgt::BufferUses::COPY_SRC,
-                    to: wgt::BufferUses::MAP_WRITE,
-                },
-            },
-        ]));
-        commands.keep(source.clone());
+        }));
+        source
+            .transition(&mut commands, wgt::BufferUses::MAP_WRITE)
+            .unwrap();
         commands.keep(target.clone());
         { drop(commands); (submission, target) }
     }
@@ -334,3 +323,6 @@ fn submission_drop_and_abandon_release_buffers() {
 
 #[path = "texture_tests.rs"]
 mod texture;
+
+#[path = "state_tests.rs"]
+mod state;

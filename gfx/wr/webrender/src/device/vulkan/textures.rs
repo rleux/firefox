@@ -3,10 +3,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::resources::Owned;
-use super::{hal, wgt, Device};
+use super::state::UsageState;
+use super::{hal, wgt, Device, Recording};
 use crate::device::TextureFilter;
 use std::rc::Rc;
-use wgpu_hal::{Adapter as _, Device as _};
+use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
 pub struct Texture {
     view: Owned<hal::vulkan::TextureView>,
@@ -16,6 +17,8 @@ pub struct Texture {
     format: wgt::TextureFormat,
     filter: TextureFilter,
     mip_count: u32,
+    usage: wgt::TextureUses,
+    states: Vec<UsageState<wgt::TextureUses>>,
 }
 
 impl Texture {
@@ -156,7 +159,72 @@ impl Texture {
             format,
             filter,
             mip_count,
+            usage,
+            states: (0..mip_count)
+                .map(|_| UsageState::new(wgt::TextureUses::UNINITIALIZED))
+                .collect(),
         }))
+    }
+
+    pub fn current_usage(&self) -> wgt::TextureUses {
+        self.states[0].current()
+    }
+
+    pub fn transition(
+        self: &Rc<Self>,
+        commands: &mut Recording<'_>,
+        to: wgt::TextureUses,
+    ) -> Result<(), String> {
+        if !self.usage.contains(to)
+            || ![
+                wgt::TextureUses::COPY_SRC,
+                wgt::TextureUses::COPY_DST,
+                wgt::TextureUses::RESOURCE,
+                wgt::TextureUses::COLOR_TARGET,
+                wgt::TextureUses::DEPTH_WRITE,
+            ]
+            .contains(&to)
+        {
+            return Err("Invalid Vulkan texture usage transition".into());
+        }
+        let recording = commands.recording_id(&self.raw.owner)?;
+        let count = if to == wgt::TextureUses::RESOURCE {
+            self.mip_count
+        } else {
+            1
+        };
+        for state in self.states.iter().take(count as usize) {
+            state.check_recording(&recording)?;
+        }
+        commands.keep(self.clone());
+        for level in 0..count as usize {
+            let (from, first) = self.states[level].prepare(&recording, to)?;
+            if first {
+                let resource = self.clone();
+                commands.commit(move || resource.states[level].commit());
+            }
+            // Separate render passes need dependencies even without a layout change.
+            if from != to
+                || to.intersects(wgt::TextureUses::COLOR_TARGET | wgt::TextureUses::DEPTH_WRITE)
+            {
+                unsafe {
+                    commands
+                        .encoder()
+                        .transition_textures(std::iter::once(hal::TextureBarrier {
+                            queue_family_ownership_transfer: None,
+                            texture: &**self.raw,
+                            range: wgt::ImageSubresourceRange {
+                                base_mip_level: level as u32,
+                                mip_level_count: Some(1),
+                                array_layer_count: Some(1),
+                                ..Default::default()
+                            },
+                            usage: hal::StateTransition { from, to },
+                        }));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn view(&self) -> &hal::vulkan::TextureView {

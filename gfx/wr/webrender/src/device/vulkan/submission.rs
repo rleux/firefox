@@ -18,6 +18,8 @@ pub struct Submission {
     attempted: bool,
     submitted: bool,
     complete: bool,
+    recording_id: Option<Rc<()>>,
+    commits: Vec<Box<dyn FnOnce()>>,
     resources: Vec<Box<dyn Any>>,
 }
 
@@ -31,6 +33,17 @@ impl Recording<'_> {
         self.submission.encoder.as_mut().unwrap()
     }
 
+    pub(super) fn recording_id(&self, owner: &Rc<Device>) -> Result<Rc<()>, String> {
+        if !Rc::ptr_eq(owner, &self.submission.owner) {
+            return Err("Vulkan recording device mismatch".into());
+        }
+        Ok(self.submission.recording_id.as_ref().unwrap().clone())
+    }
+
+    pub(super) fn commit(&mut self, commit: impl FnOnce() + 'static) {
+        self.submission.commits.push(Box::new(commit));
+    }
+
     pub fn keep<T: 'static>(&mut self, value: T) {
         self.submission.resources.push(Box::new(value));
     }
@@ -38,6 +51,9 @@ impl Recording<'_> {
 
 impl Submission {
     pub fn new(owner: &Rc<Device>) -> Result<Self, String> {
+        if owner.is_lost() {
+            return Err("Vulkan device requires recreation".into());
+        }
         let fence = unsafe { owner.open.device.create_fence() }
             .map_err(|error| format!("Creating submission fence: {error:?}"))?;
         let mut submission = Self {
@@ -49,6 +65,8 @@ impl Submission {
             attempted: false,
             submitted: false,
             complete: false,
+            recording_id: Some(Rc::new(())),
+            commits: Vec::new(),
             resources: Vec::new(),
         };
         unsafe {
@@ -74,13 +92,16 @@ impl Submission {
     }
 
     pub fn recording(&mut self) -> Result<Recording<'_>, String> {
-        if !self.recording || self.attempted {
+        if !self.recording || self.attempted || self.owner.is_lost() {
             return Err("Submission is no longer recording".into());
         }
         Ok(Recording { submission: self })
     }
 
     pub fn submit(&mut self) -> Result<(), String> {
+        if self.owner.is_lost() {
+            return Err("Vulkan device requires recreation".into());
+        }
         if !self.recording || self.attempted {
             return Err("Submission has already been attempted".into());
         }
@@ -91,16 +112,26 @@ impl Submission {
                     .as_mut()
                     .unwrap()
                     .end_encoding()
-                    .map_err(|error| format!("Finishing submission: {error:?}"))?,
+                    .map_err(|error| {
+                        self.owner.lost.set(true);
+                        format!("Finishing submission: {error:?}")
+                    })?,
             );
             self.recording = false;
             self.owner
                 .open
                 .queue
                 .submit(&[self.buffer.as_ref().unwrap()], &[], (&self.fence, 1))
-                .map_err(|error| format!("Submitting commands: {error:?}"))?;
+                .map_err(|error| {
+                    self.owner.lost.set(true);
+                    format!("Submitting commands: {error:?}")
+                })?;
         }
         self.submitted = true;
+        for commit in self.commits.drain(..) {
+            commit();
+        }
+        self.recording_id.take();
         Ok(())
     }
 
@@ -155,5 +186,6 @@ impl Drop for Submission {
                 encoder.reset_all(self.buffer.take().into_iter());
             }
         }
+        self.recording_id.take();
     }
 }
