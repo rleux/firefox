@@ -1,0 +1,159 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use super::resources::Owned;
+use super::{hal, Device};
+use std::any::Any;
+use std::rc::Rc;
+use std::time::Duration;
+use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
+
+pub struct Submission {
+    owner: Rc<Device>,
+    encoder: Option<hal::vulkan::CommandEncoder>,
+    buffer: Option<hal::vulkan::CommandBuffer>,
+    fence: Owned<hal::vulkan::Fence>,
+    recording: bool,
+    attempted: bool,
+    submitted: bool,
+    complete: bool,
+    resources: Vec<Box<dyn Any>>,
+}
+
+/// Exclusive access to an open submission; releasing this borrow does not submit it.
+pub struct Recording<'a> {
+    submission: &'a mut Submission,
+}
+
+impl Recording<'_> {
+    pub fn encoder(&mut self) -> &mut hal::vulkan::CommandEncoder {
+        self.submission.encoder.as_mut().unwrap()
+    }
+
+    pub fn keep<T: 'static>(&mut self, value: T) {
+        self.submission.resources.push(Box::new(value));
+    }
+}
+
+impl Submission {
+    pub fn new(owner: &Rc<Device>) -> Result<Self, String> {
+        let fence = unsafe { owner.open.device.create_fence() }
+            .map_err(|error| format!("Creating submission fence: {error:?}"))?;
+        let mut submission = Self {
+            owner: owner.clone(),
+            encoder: None,
+            buffer: None,
+            fence: Owned::new(owner, fence, hal::vulkan::Device::destroy_fence),
+            recording: false,
+            attempted: false,
+            submitted: false,
+            complete: false,
+            resources: Vec::new(),
+        };
+        unsafe {
+            submission.encoder = Some(
+                owner
+                    .open
+                    .device
+                    .create_command_encoder(&hal::CommandEncoderDescriptor {
+                        label: Some("WR Vulkan submission"),
+                        queue: &owner.open.queue,
+                    })
+                    .map_err(|error| format!("Creating submission encoder: {error:?}"))?,
+            );
+            submission
+                .encoder
+                .as_mut()
+                .unwrap()
+                .begin_encoding(Some("WR Vulkan submission"))
+                .map_err(|error| format!("Beginning submission: {error:?}"))?;
+        }
+        submission.recording = true;
+        Ok(submission)
+    }
+
+    pub fn recording(&mut self) -> Result<Recording<'_>, String> {
+        if !self.recording || self.attempted {
+            return Err("Submission is no longer recording".into());
+        }
+        Ok(Recording { submission: self })
+    }
+
+    pub fn submit(&mut self) -> Result<(), String> {
+        if !self.recording || self.attempted {
+            return Err("Submission has already been attempted".into());
+        }
+        self.attempted = true;
+        unsafe {
+            self.buffer = Some(
+                self.encoder
+                    .as_mut()
+                    .unwrap()
+                    .end_encoding()
+                    .map_err(|error| format!("Finishing submission: {error:?}"))?,
+            );
+            self.recording = false;
+            self.owner
+                .open
+                .queue
+                .submit(&[self.buffer.as_ref().unwrap()], &[], (&self.fence, 1))
+                .map_err(|error| format!("Submitting commands: {error:?}"))?;
+        }
+        self.submitted = true;
+        Ok(())
+    }
+
+    fn retire(&mut self) {
+        let buffer = self.buffer.take();
+        unsafe {
+            self.encoder.as_mut().unwrap().reset_all(buffer.into_iter());
+        }
+        self.resources.clear();
+        self.complete = true;
+    }
+
+    pub fn poll(&mut self) -> Result<bool, String> {
+        if !self.submitted {
+            return Err("Cannot poll an unsubmitted recording".into());
+        }
+        if !self.complete {
+            let completed = unsafe { self.owner.open.device.get_fence_value(&self.fence) }
+                .map_err(|error| format!("Polling submission: {error:?}"))?;
+            if completed >= 1 {
+                self.retire();
+            }
+        }
+        Ok(self.complete)
+    }
+
+    pub fn wait(&mut self, timeout: Option<Duration>) -> Result<bool, String> {
+        if !self.submitted {
+            return Err("Cannot wait for an unsubmitted recording".into());
+        }
+        if !self.complete {
+            let completed = unsafe { self.owner.open.device.wait(&self.fence, 1, timeout) }
+                .map_err(|error| format!("Waiting for submission: {error:?}"))?;
+            if completed {
+                self.retire();
+            }
+        }
+        Ok(self.complete)
+    }
+}
+
+impl Drop for Submission {
+    fn drop(&mut self) {
+        unsafe {
+            if self.attempted && !self.complete {
+                let _ = self.owner.open.queue.wait_for_idle();
+            }
+            if let Some(mut encoder) = self.encoder.take() {
+                if self.recording {
+                    encoder.discard_encoding();
+                }
+                encoder.reset_all(self.buffer.take().into_iter());
+            }
+        }
+    }
+}

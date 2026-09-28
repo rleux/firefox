@@ -9,6 +9,8 @@ use wgpu_types as wgt;
 
 mod resources;
 pub use self::resources::Buffer;
+mod submission;
+pub use self::submission::{Recording, Submission};
 
 #[derive(Default)]
 pub struct Options {
