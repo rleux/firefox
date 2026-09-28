@@ -173,15 +173,15 @@ pub fn ui(app: &mut Gui, ui: &mut egui::Ui) {
     state.selection.hovered = None;
     let SceneTreeState { tree, selection, .. } = state;
     if let Some(tree) = tree {
-        egui::SidePanel::right(ui.make_persistent_id("scene-details"))
+        egui::Panel::right(ui.make_persistent_id("scene-details"))
             .resizable(true)
-            .default_width(320.0)
-            .show_inside(ui, |ui| {
+            .default_size(320.0)
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     details_ui(ui, tree, selection);
                 });
             });
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 for (i, root) in tree.roots.iter().enumerate() {
                     changed |= node_ui(ui, root, i, selection);

@@ -290,10 +290,10 @@ pub fn ui(app: &mut Gui, ui: &mut egui::Ui) {
     ui.label(&app.data_model.shaders.status);
     ui.separator();
 
-    egui::SidePanel::left(ui.make_persistent_id("shader-files"))
+    egui::Panel::left(ui.make_persistent_id("shader-files"))
         .resizable(true)
-        .default_width(240.0)
-        .show_inside(ui, |ui| {
+        .default_size(240.0)
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Filter:");
                 ui.text_edit_singleline(&mut app.data_model.shaders.filter);
@@ -379,10 +379,10 @@ pub fn ui(app: &mut Gui, ui: &mut egui::Ui) {
                 });
         });
 
-    egui::TopBottomPanel::bottom(ui.make_persistent_id("shader-diagnostics"))
+    egui::Panel::bottom(ui.make_persistent_id("shader-diagnostics"))
         .resizable(true)
-        .default_height(140.0)
-        .show_inside(ui, |ui| {
+        .default_size(140.0)
+        .show(ui, |ui| {
             let state = &app.data_model.shaders;
             if state.diagnostics.is_empty() {
                 ui.label(egui::RichText::new("No diagnostics").weak());
@@ -417,7 +417,7 @@ pub fn ui(app: &mut Gui, ui: &mut egui::Ui) {
                 });
         });
 
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    egui::CentralPanel::default().show(ui, |ui| {
         let state = &mut app.data_model.shaders;
         let Some(name) = state.selected.clone() else {
             ui.label("Select a shader file");

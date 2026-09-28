@@ -286,6 +286,8 @@ impl Gui {
 
     pub fn run(self) {
         let native_options = eframe::NativeOptions {
+            #[cfg(feature = "vulkan")]
+            renderer: eframe::Renderer::Wgpu,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1280.0, 720.0])
                 .with_title("WebRender Debug UI"),
@@ -328,7 +330,8 @@ impl Gui {
 }
 
 impl eframe::App for Gui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Process pending events
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
@@ -341,10 +344,10 @@ impl eframe::App for Gui {
             }
         }
 
-        textures::prepare(self, ctx);
+        textures::prepare(self, &ctx);
 
         // Main menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Exit").clicked() {
@@ -383,7 +386,7 @@ impl eframe::App for Gui {
         });
 
         let mut ui_tiles = self.ui_tiles.take().unwrap();
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.spacing_mut().window_margin = egui::Margin::ZERO;
             ui_tiles.ui(self, ui);
         });

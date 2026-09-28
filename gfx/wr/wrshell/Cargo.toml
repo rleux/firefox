@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 
+[features]
+vulkan = ["eframe/wgpu_no_default_features", "dep:wgpu"]
+
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = [ "blocking" ] }
 webrender = { path = "../webrender", features = [ "debugger", "replay" ] }
@@ -17,8 +20,9 @@ repl-ng = "0.3"
 ron = "0.12.0"
 png = "0.16"
 
-egui = "0.33"
-egui_tiles = { version = "0.14", features = ["serde"] }
-eframe = "0.33"
+egui = "0.36"
+egui_tiles = { version = "0.17", features = ["serde"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "links", "wayland", "x11"] }
+wgpu = { version = "=30.0.0", optional = true, default-features = false, features = ["std", "vulkan", "wgsl"] }
 winit = "0.30"
 confy = "1.0.0"
