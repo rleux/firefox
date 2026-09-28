@@ -130,7 +130,10 @@ fn buffer_allocation_bounds() {
     assert!(allocation_size(isize::MAX as usize, u64::MAX).is_err());
 }
 
-fn read_upload(device: &Device, source: &Buffer) -> Vec<u8> {
+fn record_upload(
+    device: &Rc<Device>,
+    source: &Rc<Buffer>,
+) -> (Submission, Rc<super::resources::Owned<dyn hal::DynBuffer>>) {
     unsafe {
         let raw = device.open.device.as_ref();
         let (target, _) = raw
@@ -141,13 +144,14 @@ fn read_upload(device: &Device, source: &Buffer) -> Vec<u8> {
                 memory_flags: hal::MemoryFlags::PREFER_COHERENT,
             })
             .unwrap();
-        let mut encoder = raw
-            .create_command_encoder(&hal::CommandEncoderDescriptor {
-                label: Some("WR upload test"),
-                queue: device.queue(),
-            })
-            .unwrap();
-        encoder.begin_encoding(None).unwrap();
+        let target = Rc::new(super::resources::Owned::new(
+            device,
+            target,
+            <dyn hal::DynDevice>::destroy_buffer,
+        ));
+        let mut submission = Submission::new(device).unwrap();
+        let mut commands = submission.recording().unwrap();
+        let encoder = commands.encoder();
         encoder.transition_buffers(&[hal::BufferBarrier {
             buffer: &*source.raw,
             usage: hal::StateTransition {
@@ -157,7 +161,7 @@ fn read_upload(device: &Device, source: &Buffer) -> Vec<u8> {
         }]);
         encoder.copy_buffer_to_buffer(
             &*source.raw,
-            &*target,
+            &**target,
             &[hal::BufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
@@ -166,7 +170,7 @@ fn read_upload(device: &Device, source: &Buffer) -> Vec<u8> {
         );
         encoder.transition_buffers(&[
             hal::BufferBarrier {
-                buffer: &*target,
+                buffer: &**target,
                 usage: hal::StateTransition {
                     from: wgt::BufferUses::COPY_DST,
                     to: wgt::BufferUses::MAP_READ,
@@ -180,31 +184,32 @@ fn read_upload(device: &Device, source: &Buffer) -> Vec<u8> {
                 },
             },
         ]);
-        let commands = encoder.end_encoding().unwrap();
-        let fence = raw.create_fence().unwrap();
-        device.open.queue
-            .submit(&[commands.as_ref()], &[], (fence.as_ref(), 1))
-            .unwrap();
-        let completed = raw
-            .wait(fence.as_ref(), 1, Some(std::time::Duration::from_secs(10)))
-            .unwrap();
-        if !completed {
-            device.queue().wait_for_idle().unwrap();
-        }
-        let mapping = raw.map_buffer(&*target, 0..source.size()).unwrap();
+        commands.keep(&source);
+        commands.keep(&target);
+        { drop(commands); (submission, target) }
+    }
+}
+
+fn map_upload(device: &Device, target: &dyn hal::DynBuffer, size: u64) -> Vec<u8> {
+    unsafe {
+        let raw = device.open.device.as_ref();
+        let mapping = raw.map_buffer(target, 0..size).unwrap();
         if !mapping.is_coherent {
-            raw.invalidate_mapped_ranges(&*target, &[0..source.size()]);
+            raw.invalidate_mapped_ranges(target, &[0..size]);
         }
-        let result =
-            std::slice::from_raw_parts(mapping.ptr.as_ptr(), source.size() as usize).to_vec();
-        raw.unmap_buffer(&*target);
-        encoder.reset_all(vec![commands]);
-        drop(encoder);
-        raw.destroy_fence(fence);
-        raw.destroy_buffer(target);
-        assert!(completed);
+        let result = std::slice::from_raw_parts(mapping.ptr.as_ptr(), size as usize).to_vec();
+        raw.unmap_buffer(target);
         result
     }
+}
+
+fn read_upload(device: &Rc<Device>, source: &Rc<Buffer>) -> Vec<u8> {
+    let (mut submission, target) = record_upload(device, source);
+    submission.submit().unwrap();
+    assert!(submission
+        .wait(Some(std::time::Duration::from_secs(10)))
+        .unwrap());
+    map_upload(device, &**target, source.size())
 }
 
 #[test]
@@ -270,5 +275,89 @@ fn upload_buffers_preserve_data_and_device() {
     assert!(weak_device.upgrade().is_some());
     drop(buffer);
     assert!(weak_device.upgrade().is_none());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn submission_completion_releases_buffers() {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap(),
+    );
+    eprintln!("Vulkan adapter: {:?}", device.info());
+    for poll in [false, true] {
+        let bytes: Vec<_> = (0..129).map(|index| (index * 13) as u8).collect();
+        let source = Buffer::new(&device, &bytes, wgt::BufferUses::COPY_SRC).unwrap();
+        let size = source.size();
+        let weak_source = Rc::downgrade(&source);
+        let (mut submission, target) = record_upload(&device, &source);
+        drop(source);
+        assert!(weak_source.upgrade().is_some());
+        assert!(submission.poll().is_err());
+        assert!(submission.wait(None).is_err());
+        submission.submit().unwrap();
+        assert!(submission.submit().is_err());
+        assert!(submission.recording().is_err());
+        assert!(weak_source.upgrade().is_some());
+        if poll {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !submission.poll().unwrap() {
+                assert!(weak_source.upgrade().is_some());
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        } else if !submission.wait(Some(std::time::Duration::ZERO)).unwrap() {
+            assert!(weak_source.upgrade().is_some());
+            assert!(submission
+                .wait(Some(std::time::Duration::from_secs(10)))
+                .unwrap());
+        }
+        assert!(weak_source.upgrade().is_none());
+        assert!(submission.poll().unwrap());
+        assert!(submission.wait(None).unwrap());
+        let copied = map_upload(&device, &**target, size);
+        assert_eq!(&copied[..bytes.len()], &bytes);
+        assert!(copied[bytes.len()..].iter().all(|&byte| byte == 0));
+    }
+    assert_eq!(Rc::strong_count(&device), 1);
+    drop(device);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn submission_drop_and_abandon_release_buffers() {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap(),
+    );
+    eprintln!("Vulkan adapter: {:?}", device.info());
+    for submit in [false, true] {
+        let bytes = [37; 64];
+        let source = Buffer::new(&device, &bytes, wgt::BufferUses::COPY_SRC).unwrap();
+        let weak_source = Rc::downgrade(&source);
+        let (mut submission, target) = record_upload(&device, &source);
+        drop(source);
+        assert!(weak_source.upgrade().is_some());
+        if submit {
+            submission.submit().unwrap();
+        }
+        drop(submission);
+        assert!(weak_source.upgrade().is_none());
+        if submit {
+            assert_eq!(map_upload(&device, &**target, bytes.len() as u64), bytes);
+        }
+    }
+    assert_eq!(Rc::strong_count(&device), 1);
+    drop(device);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }

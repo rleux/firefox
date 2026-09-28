@@ -107,6 +107,13 @@ impl Device {
     }
 }
 
+impl Recording<'_> {
+    pub fn vulkan_encoder(&mut self) -> Result<&mut hal::vulkan::CommandEncoder, String> {
+        self.encoder().as_any_mut().downcast_mut()
+            .ok_or_else(|| "Native Vulkan commands require a Vulkan encoder".into())
+    }
+}
+
 fn spirv_module(device: &dyn hal::DynDevice, label: &str, words: &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String> {
     unsafe {
         device.create_shader_module(&hal::ShaderModuleDescriptor {
