@@ -116,6 +116,13 @@ impl Device {
     }
 }
 
+impl Recording<'_> {
+    pub fn vulkan_encoder(&mut self) -> Result<&mut hal::vulkan::CommandEncoder, String> {
+        self.encoder().as_any_mut().downcast_mut()
+            .ok_or_else(|| "Native Vulkan commands require a Vulkan encoder".into())
+    }
+}
+
 fn supports_shader_api_version(version: u32) -> bool {
     version >= ash::vk::API_VERSION_1_1
 }

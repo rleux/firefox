@@ -13,6 +13,8 @@ mod resources;
 #[path = "vulkan/mod.rs"]
 mod native;
 pub use self::resources::Buffer;
+mod submission;
+pub use self::submission::{Recording, Submission};
 
 #[derive(Default)]
 pub struct Options {
