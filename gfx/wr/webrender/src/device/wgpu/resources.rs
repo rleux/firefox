@@ -2,12 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{hal, wgt, Device};
+use super::{hal, wgt, Device, Recording};
+use super::state::UsageState;
 use std::ops::Deref;
 use std::rc::Rc;
 
 pub(super) struct Owned<T: ?Sized> {
-    owner: Rc<Device>,
+    pub(super) owner: Rc<Device>,
     raw: Option<Box<T>>,
     destroy: unsafe fn(&dyn hal::DynDevice, Box<T>),
 }
@@ -44,6 +45,7 @@ pub struct Buffer {
     usage: wgt::BufferUses,
     mapping: hal::BufferMapping,
     used_size: wgt::BufferSize,
+    state: UsageState<wgt::BufferUses>,
 }
 
 pub(super) fn allocation_size(length: usize, limit: u64) -> Result<u64, String> {
@@ -95,6 +97,7 @@ impl Buffer {
             usage: usage | wgt::BufferUses::MAP_WRITE,
             mapping,
             used_size: wgt::BufferSize::new((length as u64).max(4)).unwrap(),
+            state: UsageState::new(wgt::BufferUses::MAP_WRITE),
         };
         unsafe {
             std::ptr::write_bytes(
@@ -122,6 +125,42 @@ impl Buffer {
             unsafe { device.flush_mapped_ranges(&*self.raw, &[0..self.size]) }
         }
         self.used_size = wgt::BufferSize::new((length as u64).max(4)).unwrap();
+        self.state.reset(wgt::BufferUses::MAP_WRITE);
+        Ok(())
+    }
+
+    pub fn current_usage(&self) -> wgt::BufferUses {
+        self.state.current()
+    }
+
+    pub fn transition(
+        self: &Rc<Self>,
+        commands: &mut Recording<'_>,
+        to: wgt::BufferUses,
+    ) -> Result<(), String> {
+        if to.is_empty()
+            || !self.usage.contains(to)
+            || (to.bits().count_ones() > 1 && !wgt::BufferUses::INCLUSIVE.contains(to))
+        {
+            return Err("Invalid Vulkan buffer usage transition".into());
+        }
+        let recording = commands.recording_id(&self.raw.owner)?;
+        let (from, first) = self.state.prepare(&recording, to)?;
+        if first {
+            let resource = self.clone();
+            commands.commit(move || resource.state.commit());
+        }
+        commands.keep(self);
+        if from != to {
+            unsafe {
+                commands
+                    .encoder()
+                    .transition_buffers(&[hal::BufferBarrier {
+                        buffer: &*self.raw,
+                        usage: hal::StateTransition { from, to },
+                    }]);
+            }
+        }
         Ok(())
     }
 
