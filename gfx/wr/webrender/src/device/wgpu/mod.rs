@@ -15,6 +15,9 @@ mod native;
 pub use self::resources::Buffer;
 mod submission;
 pub use self::submission::{Recording, Submission};
+mod textures;
+pub use self::textures::Texture;
+pub use crate::device::TextureFilter;
 
 #[derive(Default)]
 pub struct Options {
