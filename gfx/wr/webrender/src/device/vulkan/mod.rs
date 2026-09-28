@@ -7,6 +7,9 @@ use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
 use wgpu_types as wgt;
 
+mod resources;
+pub use self::resources::Buffer;
+
 #[derive(Default)]
 pub struct Options {
     pub adapter_name: Option<String>,
