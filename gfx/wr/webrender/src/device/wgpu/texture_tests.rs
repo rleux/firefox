@@ -5,7 +5,8 @@
 use super::*;
 use super::super::TextureFilter;
 
-fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
+pub(super) fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
+    let remaining_references = Rc::strong_count(&texture) - 1;
     let size = texture.size();
     let depth = texture.format() == wgt::TextureFormat::Depth32Float;
     let alignment = device.capabilities().alignments.buffer_copy_pitch.get();
@@ -33,16 +34,8 @@ fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
         wgt::TextureUses::COLOR_TARGET
     };
     unsafe {
+        texture.transition(&mut commands, usage).unwrap();
         let encoder = commands.encoder();
-        encoder.transition_textures(&[hal::TextureBarrier {
-            queue_family_ownership_transfer: None,
-            texture: texture.raw_texture(),
-            range: wgt::ImageSubresourceRange::default(),
-            usage: hal::StateTransition {
-                from: wgt::TextureUses::UNINITIALIZED,
-                to: usage,
-            },
-        }]);
         let attachment = || hal::Attachment {
             view: texture.target_view().unwrap(),
             usage,
@@ -88,15 +81,10 @@ fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
             })
             .unwrap();
         encoder.end_render_pass();
-        encoder.transition_textures(&[hal::TextureBarrier {
-            queue_family_ownership_transfer: None,
-            texture: texture.raw_texture(),
-            range: wgt::ImageSubresourceRange::default(),
-            usage: hal::StateTransition {
-                from: usage,
-                to: wgt::TextureUses::COPY_SRC,
-            },
-        }]);
+        texture
+            .transition(&mut commands, wgt::TextureUses::COPY_SRC)
+            .unwrap();
+        let encoder = commands.encoder();
         encoder.copy_texture_to_buffer(
             texture.raw_texture(),
             wgt::TextureUses::COPY_SRC,
@@ -129,7 +117,6 @@ fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
         }]);
     }
     let weak = Rc::downgrade(&texture);
-    commands.keep(&texture);
     drop(texture);
     commands.keep(&target);
     drop(commands);
@@ -138,7 +125,7 @@ fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u8> {
     assert!(submission
         .wait(Some(std::time::Duration::from_secs(10)))
         .unwrap());
-    assert!(weak.upgrade().is_none());
+    assert_eq!(weak.strong_count(), remaining_references);
     unsafe {
         let raw = device.open.device.as_ref();
         let mapping = raw.map_buffer(&**target, 0..bytes).unwrap();

@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use std::cell::Cell;
 use wgpu_hal as hal;
 use wgpu_types as wgt;
 
@@ -18,6 +19,7 @@ pub use self::submission::{Recording, Submission};
 mod textures;
 pub use self::textures::Texture;
 pub use crate::device::TextureFilter;
+mod state;
 
 #[derive(Default)]
 pub struct Options {
@@ -31,7 +33,6 @@ pub struct Device {
     #[cfg(test)]
     trace: std::cell::RefCell<Vec<tests::Command>>,
     shader_module: fn(&dyn hal::DynDevice, &str, &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String>,
-    lost: std::cell::Cell<bool>,
     max_viewport_dimensions: [u32; 2],
     viewport_bounds_range: [f32; 2],
     flip_y: bool,
@@ -39,6 +40,7 @@ pub struct Device {
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
     features: wgt::Features,
+    lost: Cell<bool>,
     adapter: Box<dyn hal::DynAdapter>,
     instance: Box<dyn hal::DynInstance>,
 }
@@ -48,14 +50,14 @@ impl Device {
         (self.shader_module)(self.open.device.as_ref(), label, words)
     }
 
-    pub fn is_lost(&self) -> bool {
-        self.lost.get()
-    }
-
 
 
     pub fn info(&self) -> &wgt::AdapterInfo {
         &self.info
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.lost.get()
     }
 
     pub fn capabilities(&self) -> &hal::Capabilities {

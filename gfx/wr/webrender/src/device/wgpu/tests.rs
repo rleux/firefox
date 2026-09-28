@@ -11,6 +11,7 @@ use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
 pub(super) enum Command {
     BeginPass(hal::AttachmentOps, hal::AttachmentOps),
     EndPass,
+    SubmissionIdleWait,
     TextureBarrier(wgt::TextureUses, wgt::TextureUses),
     BindGroup,
 }
@@ -63,7 +64,7 @@ fn adapter_name_validation_precedes_device_initialization() {
     }
 }
 
-static ERRORS: AtomicUsize = AtomicUsize::new(0);
+pub(super) static ERRORS: AtomicUsize = AtomicUsize::new(0);
 struct TestLogger;
 
 impl log::Log for TestLogger {
@@ -81,7 +82,7 @@ impl log::Log for TestLogger {
     fn flush(&self) {}
 }
 
-fn validation_logging() {
+pub(super) fn validation_logging() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         log::set_logger(&TestLogger).unwrap();
@@ -130,7 +131,7 @@ fn buffer_allocation_bounds() {
     assert!(allocation_size(isize::MAX as usize, u64::MAX).is_err());
 }
 
-fn record_upload(
+pub(super) fn record_upload(
     device: &Rc<Device>,
     source: &Rc<Buffer>,
 ) -> (Submission, Rc<super::resources::Owned<dyn hal::DynBuffer>>) {
@@ -151,14 +152,10 @@ fn record_upload(
         ));
         let mut submission = Submission::new(device).unwrap();
         let mut commands = submission.recording().unwrap();
+        source
+            .transition(&mut commands, wgt::BufferUses::COPY_SRC)
+            .unwrap();
         let encoder = commands.encoder();
-        encoder.transition_buffers(&[hal::BufferBarrier {
-            buffer: &*source.raw,
-            usage: hal::StateTransition {
-                from: wgt::BufferUses::MAP_WRITE,
-                to: wgt::BufferUses::COPY_SRC,
-            },
-        }]);
         encoder.copy_buffer_to_buffer(
             &*source.raw,
             &**target,
@@ -168,29 +165,22 @@ fn record_upload(
                 size: std::num::NonZeroU64::new(source.size()).unwrap(),
             }],
         );
-        encoder.transition_buffers(&[
-            hal::BufferBarrier {
-                buffer: &**target,
-                usage: hal::StateTransition {
-                    from: wgt::BufferUses::COPY_DST,
-                    to: wgt::BufferUses::MAP_READ,
-                },
+        encoder.transition_buffers(&[hal::BufferBarrier {
+            buffer: &**target,
+            usage: hal::StateTransition {
+                from: wgt::BufferUses::COPY_DST,
+                to: wgt::BufferUses::MAP_READ,
             },
-            hal::BufferBarrier {
-                buffer: &*source.raw,
-                usage: hal::StateTransition {
-                    from: wgt::BufferUses::COPY_SRC,
-                    to: wgt::BufferUses::MAP_WRITE,
-                },
-            },
-        ]);
-        commands.keep(&source);
+        }]);
+        source
+            .transition(&mut commands, wgt::BufferUses::MAP_WRITE)
+            .unwrap();
         commands.keep(&target);
         { drop(commands); (submission, target) }
     }
 }
 
-fn map_upload(device: &Device, target: &dyn hal::DynBuffer, size: u64) -> Vec<u8> {
+pub(super) fn map_upload(device: &Device, target: &dyn hal::DynBuffer, size: u64) -> Vec<u8> {
     unsafe {
         let raw = device.open.device.as_ref();
         let mapping = raw.map_buffer(target, 0..size).unwrap();
@@ -364,3 +354,6 @@ fn submission_drop_and_abandon_release_buffers() {
 
 #[path = "texture_tests.rs"]
 mod texture;
+
+#[path = "state_tests.rs"]
+mod state;

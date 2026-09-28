@@ -84,7 +84,6 @@ impl Device {
             #[cfg(test)]
             trace: Default::default(),
             shader_module: spirv_module,
-            lost: std::cell::Cell::new(false),
             max_viewport_dimensions: limits.max_viewport_dimensions,
             viewport_bounds_range: limits.viewport_bounds_range,
             flip_y: true,
@@ -92,6 +91,7 @@ impl Device {
             info: exposed.info,
             capabilities: exposed.capabilities,
             features,
+            lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
             instance: Box::new(instance),
         })
