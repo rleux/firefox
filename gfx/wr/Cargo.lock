@@ -6418,6 +6418,7 @@ name = "webrender"
 version = "0.62.0"
 dependencies = [
  "allocator-api2",
+ "ash",
  "base64",
  "bincode",
  "bitflags 2.13.2",
@@ -6458,6 +6459,8 @@ dependencies = [
  "url",
  "webrender_api",
  "webrender_build",
+ "wgpu-hal",
+ "wgpu-types",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
