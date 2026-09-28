@@ -9,6 +9,15 @@ use crate::device::TextureFilter;
 use std::rc::Rc;
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
+#[path = "texture_upload.rs"]
+mod upload;
+
+#[derive(Clone, Copy)]
+struct TextureState {
+    usage: wgt::TextureUses,
+    initialized: bool,
+}
+
 pub struct Texture {
     view: Owned<hal::vulkan::TextureView>,
     target: Option<Owned<hal::vulkan::TextureView>>,
@@ -18,7 +27,7 @@ pub struct Texture {
     filter: TextureFilter,
     mip_count: u32,
     usage: wgt::TextureUses,
-    states: Vec<UsageState<wgt::TextureUses>>,
+    states: Vec<UsageState<TextureState>>,
 }
 
 impl Texture {
@@ -161,13 +170,43 @@ impl Texture {
             mip_count,
             usage,
             states: (0..mip_count)
-                .map(|_| UsageState::new(wgt::TextureUses::UNINITIALIZED))
+                .map(|_| {
+                    UsageState::new(TextureState {
+                        usage: wgt::TextureUses::UNINITIALIZED,
+                        initialized: false,
+                    })
+                })
                 .collect(),
         }))
     }
 
     pub fn current_usage(&self) -> wgt::TextureUses {
-        self.states[0].current()
+        self.states[0].current().usage
+    }
+
+    pub fn initialized(&self) -> bool {
+        self.states[0].current().initialized
+    }
+
+    pub fn sample_initialized(&self) -> bool {
+        self.states.iter().all(|state| state.current().initialized)
+    }
+
+    pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        let recording = commands.recording_id(&self.raw.owner)?;
+        let (_, first) = self.states[0].prepare(
+            &recording,
+            TextureState {
+                initialized: true,
+                ..self.states[0].current()
+            },
+        )?;
+        if first {
+            let resource = self.clone();
+            commands.commit(move || resource.states[0].commit());
+        }
+        commands.keep(self.clone());
+        Ok(())
     }
 
     pub fn transition(
@@ -198,13 +237,19 @@ impl Texture {
         }
         commands.keep(self.clone());
         for level in 0..count as usize {
-            let (from, first) = self.states[level].prepare(&recording, to)?;
+            let (from, first) = self.states[level].prepare(
+                &recording,
+                TextureState {
+                    usage: to,
+                    ..self.states[level].current()
+                },
+            )?;
             if first {
                 let resource = self.clone();
                 commands.commit(move || resource.states[level].commit());
             }
             // Separate render passes need dependencies even without a layout change.
-            if from != to
+            if from.usage != to
                 || to.intersects(wgt::TextureUses::COLOR_TARGET | wgt::TextureUses::DEPTH_WRITE)
             {
                 unsafe {
@@ -219,7 +264,10 @@ impl Texture {
                                 array_layer_count: Some(1),
                                 ..Default::default()
                             },
-                            usage: hal::StateTransition { from, to },
+                            usage: hal::StateTransition {
+                                from: from.usage,
+                                to,
+                            },
                         }));
                 }
             }
