@@ -8,6 +8,18 @@ use super::{hal, wgt, Device, Recording};
 use crate::device::TextureFilter;
 use std::rc::Rc;
 
+#[path = "texture_access.rs"]
+mod access;
+
+#[path = "texture_upload.rs"]
+mod upload;
+
+#[derive(Clone, Copy)]
+struct TextureState {
+    usage: wgt::TextureUses,
+    initialized: bool,
+}
+
 pub struct Texture {
     view: Owned<dyn hal::DynTextureView>,
     target: Option<Owned<dyn hal::DynTextureView>>,
@@ -17,7 +29,7 @@ pub struct Texture {
     filter: TextureFilter,
     mip_count: u32,
     usage: wgt::TextureUses,
-    states: Vec<UsageState<wgt::TextureUses>>,
+    states: Vec<UsageState<TextureState>>,
 }
 
 pub(super) fn supports_float_color_format(
@@ -175,13 +187,30 @@ impl Texture {
             mip_count,
             usage,
             states: (0..mip_count)
-                .map(|_| UsageState::new(wgt::TextureUses::UNINITIALIZED))
+                .map(|_| {
+                    UsageState::new(TextureState {
+                        usage: wgt::TextureUses::UNINITIALIZED,
+                        initialized: false,
+                    })
+                })
                 .collect(),
         }))
     }
 
     pub fn current_usage(&self) -> wgt::TextureUses {
-        self.states[0].current()
+        self.states[0].current().usage
+    }
+
+    pub fn initialized(&self) -> bool {
+        self.states[0].current().initialized
+    }
+
+    pub fn sample_initialized(&self) -> bool {
+        self.states.iter().all(|state| state.current().initialized)
+    }
+
+    pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        self.writable()?.initialize(commands)
     }
 
     pub fn transition(
@@ -201,6 +230,14 @@ impl Texture {
         {
             return Err("Invalid Vulkan texture usage transition".into());
         }
+        self.transition_validated(commands, to)
+    }
+
+    fn transition_validated(
+        self: &Rc<Self>,
+        commands: &mut Recording<'_>,
+        to: wgt::TextureUses,
+    ) -> Result<(), String> {
         let recording = commands.recording_id(&self.raw.owner)?;
         let count = if to == wgt::TextureUses::RESOURCE {
             self.mip_count
@@ -212,17 +249,23 @@ impl Texture {
         }
         commands.keep(self);
         for level in 0..count as usize {
-            let (from, first) = self.states[level].prepare(&recording, to)?;
+            let (from, first) = self.states[level].prepare(
+                &recording,
+                TextureState {
+                    usage: to,
+                    ..self.states[level].current()
+                },
+            )?;
             if first {
                 let resource = self.clone();
                 commands.commit(move || resource.states[level].commit());
             }
             // Separate render passes need dependencies even without a layout change.
-            if from != to
+            if from.usage != to
                 || to.intersects(wgt::TextureUses::COLOR_TARGET | wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::COPY_DST)
             {
                 #[cfg(test)]
-                self.raw.owner.trace.borrow_mut().push(super::tests::Command::TextureBarrier(from, to));
+                self.raw.owner.trace.borrow_mut().push(super::tests::Command::TextureBarrier(from.usage, to));
                 unsafe {
                     commands
                         .encoder()
@@ -235,7 +278,10 @@ impl Texture {
                                 array_layer_count: Some(1),
                                 ..Default::default()
                             },
-                            usage: hal::StateTransition { from, to },
+                            usage: hal::StateTransition {
+                                from: from.usage,
+                                to,
+                            },
                         }]);
                 }
             }
@@ -243,6 +289,7 @@ impl Texture {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn view(&self) -> &dyn hal::DynTextureView {
         &*self.view
     }

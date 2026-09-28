@@ -81,6 +81,7 @@ pub(super) fn clear_and_read(device: &Rc<Device>, texture: Rc<Texture>) -> Vec<u
             })
             .unwrap();
         encoder.end_render_pass();
+        texture.initialize(&mut commands).unwrap();
         texture
             .transition(&mut commands, wgt::TextureUses::COPY_SRC)
             .unwrap();
