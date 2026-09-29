@@ -3,6 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+#[cfg(wr_vulkan_shaders)]
+use super::pipeline::DrawPipeline;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
@@ -355,3 +357,7 @@ mod sampler;
 #[cfg(wr_vulkan_shaders)]
 #[path = "shader_tests.rs"]
 mod shader;
+
+#[cfg(wr_vulkan_shaders)]
+#[path = "pipeline_tests.rs"]
+mod pipeline;

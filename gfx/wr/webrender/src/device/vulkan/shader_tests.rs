@@ -5,6 +5,7 @@
 use super::*;
 use super::super::resources::Owned;
 use api::units::{DeviceIntRect, DeviceIntSize};
+use crate::device::RenderState;
 use super::super::shader::{create_draw_shader_layouts, create_shader_module};
 
 #[test]
@@ -120,13 +121,28 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
         .unwrap(),
     );
     eprintln!("Vulkan adapter: {:?}", device.info());
+    assert_eq!(
+        draw_clear(
+            &device,
+            &[(RenderState::default(), [1.0, 0.0, 0.0, 1.0])],
+            None
+        ),
+        [255, 0, 0, 255].repeat(4),
+    );
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+pub(super) fn draw_clear(
+    device: &Rc<Device>,
+    draws: &[(RenderState, [f32; 4])],
+    depth_clear: Option<f32>,
+) -> Vec<u8> {
+    assert!(!draws.is_empty());
     let shader = super::super::shader::select_draw_shader("ps_clear", &[], false).unwrap();
     assert!(shader.textures.is_empty() && shader.storage_buffers.is_empty());
     assert_eq!(shader.inputs.len(), 3);
-    let (vertex, instances_layout, instance_stride) =
-        vertex_layouts(super::super::shader::draw_vertex_descriptor(shader).unwrap(), shader).unwrap();
     let quad = Buffer::new(
-        &device,
+        device,
         &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
         wgt::BufferUses::VERTEX,
     )
@@ -137,14 +153,14 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
             .flat_map(|v| v.to_ne_bytes())
             .collect::<Vec<_>>()
     };
-    let instances = Buffer::new(
-        &device,
-        &bytes(&[-1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
-        wgt::BufferUses::VERTEX,
-    )
-    .unwrap();
+    let mut instance_data = Vec::new();
+    for (_, color) in draws {
+        instance_data.extend_from_slice(&bytes(&[-1.0, -1.0, 1.0, 1.0]));
+        instance_data.extend_from_slice(&bytes(color));
+    }
+    let instances = Buffer::new(device, &instance_data, wgt::BufferUses::VERTEX).unwrap();
     let transform = Buffer::new(
-        &device,
+        device,
         &bytes(&[
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]),
@@ -152,7 +168,7 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
     )
     .unwrap();
     let target = Texture::new(
-        &device,
+        device,
         2,
         2,
         wgt::TextureFormat::Rgba8Unorm,
@@ -160,62 +176,37 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
         true,
     )
     .unwrap();
+    let depth = depth_clear.map(|_| {
+        Texture::new(
+            device,
+            2,
+            2,
+            wgt::TextureFormat::Depth32Float,
+            TextureFilter::Nearest,
+            true,
+        )
+        .unwrap()
+    });
+    let pipelines: Vec<_> = draws
+        .iter()
+        .map(|(state, _)| {
+            DrawPipeline::new(
+                device,
+                shader,
+                target.format(),
+                depth.is_some(),
+                *state,
+            )
+            .unwrap()
+        })
+        .collect();
+    let pending: Vec<_> = pipelines.iter().map(Rc::downgrade).collect();
     unsafe {
         let raw = device.raw_device();
-        let (layout, bindings) = create_draw_shader_layouts(&device, shader).unwrap();
-        let vs = create_shader_module(&device, shader, false).unwrap();
-        let fs = create_shader_module(&device, shader, true).unwrap();
-        let constants = Default::default();
-        let stage = |module| hal::ProgrammableStage {
-            module,
-            entry_point: "main",
-            constants: &constants,
-            zero_initialize_workgroup_memory: false,
-        };
-        let pipeline = raw
-            .create_render_pipeline(&hal::RenderPipelineDescriptor {
-                label: Some("WR generated clear"),
-                layout: &layout,
-                vertex_processor: hal::VertexProcessor::Standard {
-                    vertex_buffers: &[
-                        Some(hal::VertexBufferLayout {
-                            array_stride: 4,
-                            step_mode: wgt::VertexStepMode::Vertex,
-                            attributes: &vertex,
-                        }),
-                        Some(hal::VertexBufferLayout {
-                            array_stride: instance_stride,
-                            step_mode: wgt::VertexStepMode::Instance,
-                            attributes: &instances_layout,
-                        }),
-                    ],
-                    vertex_stage: stage(&*vs),
-                },
-                fragment_stage: Some(stage(&*fs)),
-                primitive: wgt::PrimitiveState {
-                    topology: wgt::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                color_targets: &[Some(wgt::ColorTargetState {
-                    format: target.format(),
-                    blend: None,
-                    write_mask: wgt::ColorWrites::ALL,
-                })],
-                multiview_mask: None,
-                cache: None,
-            })
-            .unwrap();
-        let pipeline = Owned::new(
-            &device,
-            pipeline,
-            hal::vulkan::Device::destroy_render_pipeline,
-        );
         let group = raw
             .create_bind_group(&hal::BindGroupDescriptor {
                 label: Some("WR generated clear group"),
-                layout: &bindings,
+                layout: &pipelines[0].bindings,
                 buffers: &[transform.binding()],
                 samplers: &[],
                 textures: &[],
@@ -228,8 +219,11 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
                 }],
             })
             .unwrap();
-        let group = Owned::new(&device, group, hal::vulkan::Device::destroy_bind_group);
-        let mut commands_submission = Submission::new(&device).unwrap();
+        let group = (
+            Owned::new(device, group, hal::vulkan::Device::destroy_bind_group),
+            pipelines[0].clone(),
+        );
+        let mut commands_submission = Submission::new(device).unwrap();
         let mut commands = commands_submission.recording().unwrap();
         quad.transition(&mut commands, wgt::BufferUses::VERTEX)
             .unwrap();
@@ -242,6 +236,11 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
         target
             .transition(&mut commands, wgt::TextureUses::COLOR_TARGET)
             .unwrap();
+        if let Some(depth) = &depth {
+            depth
+                .transition(&mut commands, wgt::TextureUses::DEPTH_WRITE)
+                .unwrap();
+        }
         let encoder = commands.encoder();
         encoder
             .begin_render_pass(&hal::RenderPassDescriptor {
@@ -256,16 +255,25 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
                     depth_slice: None,
                     resolve_target: None,
                     ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
-                    clear_value: wgt::Color::TRANSPARENT,
+                    clear_value: wgt::Color::BLUE,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: depth.as_ref().map(|depth| hal::DepthStencilAttachment {
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                    target: hal::Attachment {
+                        view: depth.target_view().unwrap(),
+                        usage: wgt::TextureUses::DEPTH_WRITE,
+                    },
+                    depth_ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
+                    stencil_ops: hal::AttachmentOps::LOAD_DONT_CARE
+                        | hal::AttachmentOps::STORE_DISCARD,
+                    clear_value: (depth_clear.unwrap(), 0),
+                }),
                 multiview_mask: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             })
             .unwrap();
-        encoder.set_render_pipeline(&pipeline);
-        encoder.set_bind_group(&layout, 0, &group, &[]);
         encoder.set_viewport(
             &hal::Rect {
                 x: 0.0,
@@ -273,7 +281,8 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
                 w: 2.0,
                 h: 2.0,
             },
-            0.0..1.0,
+            // ps_clear writes the far depth; use an interior depth for comparisons.
+            0.0..0.5,
         );
         encoder.set_scissor_rect(&hal::Rect {
             x: 0,
@@ -282,23 +291,32 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
             h: 2,
         });
         encoder.set_vertex_buffer(0, quad.binding());
-        encoder.set_vertex_buffer(1, instances.binding());
-        encoder.draw(0, 4, 0, 1);
+        for (index, pipeline) in pipelines.iter().enumerate() {
+            encoder.set_render_pipeline(&pipeline.raw);
+            encoder.set_bind_group(&pipeline.layout, 0, &group.0, &[]);
+            encoder.set_vertex_buffer(1, instances.vertex_binding(index as u64 * 32, 32).unwrap());
+            encoder.draw(0, 4, 0, 1);
+        }
         encoder.end_render_pass();
         target.initialize(&mut commands).unwrap();
+        if let Some(depth) = &depth {
+            depth.initialize(&mut commands).unwrap();
+        }
+        commands.keep(group);
+        for pipeline in pipelines {
+            commands.keep(pipeline);
+        }
+        assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_some()));
         drop(commands);
         commands_submission.submit().unwrap();
         commands_submission.wait(None).unwrap();
+        assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_none()));
     }
-    assert_eq!(
-        target
-            .readback(DeviceIntRect::from_size(DeviceIntSize::new(2, 2)))
-            .unwrap()
-            .wait()
-            .unwrap(),
-        [255, 0, 0, 255].repeat(4)
-    );
-    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+    target
+        .readback(DeviceIntRect::from_size(DeviceIntSize::new(2, 2)))
+        .unwrap()
+        .wait()
+        .unwrap()
 }
 
 #[test]
