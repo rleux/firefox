@@ -15,79 +15,15 @@ fn rect(x: i32, y: i32, width: i32, height: i32) -> DeviceIntRect {
     )
 }
 
-pub(super) fn read_texture(device: &Rc<Device>, texture: &Rc<Texture>, bpp: usize) -> Vec<u8> {
+pub(super) fn read_texture(_device: &Rc<Device>, texture: &Rc<Texture>, bpp: usize) -> Vec<u8> {
     let size = texture.size();
-    let alignment = device.capabilities().alignments.buffer_copy_pitch.get() as usize;
-    let row = size.width as usize * bpp;
-    let pitch = row.div_ceil(alignment) * alignment;
-    let bytes = pitch * size.height as usize;
-    unsafe {
-        let raw = device.open.device.as_ref();
-        let (target, _) = raw
-            .create_buffer(&hal::BufferDescriptor {
-                label: Some("WR upload texture readback"),
-                size: bytes as u64,
-                usage: wgt::BufferUses::COPY_DST | wgt::BufferUses::MAP_READ,
-                memory_flags: hal::MemoryFlags::PREFER_COHERENT,
-            })
-            .unwrap();
-        let target = Rc::new(super::super::resources::Owned::new(
-            device,
-            target,
-            <dyn hal::DynDevice>::destroy_buffer,
-        ));
-        let mut commands_submission = Submission::new(device).unwrap();
-        let mut commands = commands_submission.recording().unwrap();
-        texture
-            .transition(&mut commands, wgt::TextureUses::COPY_SRC)
-            .unwrap();
-        let encoder = commands.encoder();
-        encoder.copy_texture_to_buffer(
-            texture.raw_texture(),
-            wgt::TextureUses::COPY_SRC,
-            &**target,
-            &[hal::BufferTextureCopy {
-                buffer_layout: wgt::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(pitch as u32),
-                    rows_per_image: Some(size.height),
-                },
-                texture_base: hal::TextureCopyBase {
-                    mip_level: 0,
-                    array_layer: 0,
-                    origin: wgt::Origin3d::ZERO,
-                    aspect: hal::FormatAspects::COLOR,
-                },
-                size: size.into(),
-            }],
-        );
-        encoder.transition_buffers(&[hal::BufferBarrier {
-            buffer: &**target,
-            usage: hal::StateTransition {
-                from: wgt::BufferUses::COPY_DST,
-                to: wgt::BufferUses::MAP_READ,
-            },
-        }]);
-        commands.keep(&target);
-        drop(commands);
-        commands_submission.submit().unwrap();
-        assert!(commands_submission
-            .wait(Some(std::time::Duration::from_secs(10)))
-            .unwrap());
-        let mapping = raw.map_buffer(&**target, 0..bytes as u64).unwrap();
-        if !mapping.is_coherent {
-            raw.invalidate_mapped_ranges(&**target, &[0..bytes as u64]);
-        }
-        let mut pixels = Vec::new();
-        for y in 0..size.height as usize {
-            pixels.extend_from_slice(std::slice::from_raw_parts(
-                mapping.ptr.as_ptr().add(y * pitch),
-                row,
-            ));
-        }
-        raw.unmap_buffer(&**target);
-        pixels
-    }
+    let pixels = texture
+        .readback(rect(0, 0, size.width as i32, size.height as i32))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(pixels.len(), size.width as usize * size.height as usize * bpp);
+    pixels
 }
 
 #[test]
