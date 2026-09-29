@@ -381,3 +381,6 @@ mod texture_pool;
 
 #[path = "mip_view_tests.rs"]
 mod mip_view;
+
+#[path = "sampler_tests.rs"]
+mod sampler;

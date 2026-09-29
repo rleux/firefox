@@ -10,6 +10,8 @@ pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 }
 
+mod samplers;
+pub use self::samplers::Samplers;
 mod resources;
 #[path = "vulkan/mod.rs"]
 mod native;
