@@ -107,6 +107,8 @@ impl Device {
             shader_module: spirv_module,
             max_viewport_dimensions: limits.max_viewport_dimensions,
             viewport_bounds_range: limits.viewport_bounds_range,
+            prepared_shaders: Default::default(),
+            shader_layouts: Default::default(),
             flip_y: true,
             depth_zero_to_one: true,
             info: exposed.info,
