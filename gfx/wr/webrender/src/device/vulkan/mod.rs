@@ -8,6 +8,11 @@ use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
 use wgpu_types as wgt;
 
+#[cfg(wr_vulkan_shaders)]
+pub mod shaders {
+    include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
+}
+
 mod samplers;
 pub use self::samplers::Samplers;
 mod resources;

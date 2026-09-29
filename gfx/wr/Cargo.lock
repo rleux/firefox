@@ -6459,6 +6459,7 @@ dependencies = [
  "url",
  "webrender_api",
  "webrender_build",
+ "webrender_shader_build",
  "wgpu-hal",
  "wgpu-types",
  "wr_glyph_rasterizer",
@@ -6509,6 +6510,14 @@ dependencies = [
  "lazy_static",
  "regex",
  "serde",
+]
+
+[[package]]
+name = "webrender_shader_build"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "webrender_build",
 ]
 
 [[package]]

@@ -322,6 +322,42 @@ fn write_optimized_shader_file(
 fn main() -> Result<(), std::io::Error> {
     let out_dir = env::var("OUT_DIR").unwrap_or("out".to_owned());
 
+    println!("cargo:rustc-check-cfg=cfg(wr_vulkan_shaders)");
+    #[cfg(feature = "vulkan")]
+    {
+        println!("cargo:rerun-if-env-changed=WR_SHADER_COMPILER");
+        let compiler = match env::var("WR_SHADER_COMPILER") {
+            Ok(value) => Some(webrender_shader_build::Compiler::from_name(&value)?),
+            Err(env::VarError::NotPresent) => webrender_shader_build::Compiler::available()
+                .last()
+                .copied(),
+            Err(error) => return Err(std::io::Error::other(error)),
+        };
+        if let Some(compiler) = compiler {
+            webrender_shader_build::build(
+                Path::new("res"),
+                Path::new(&out_dir),
+                compiler,
+                |source, vertex| {
+                    let optimizer = glslopt::Context::new(glslopt::Target::OpenGl);
+                    let output = optimizer.optimize(
+                        if vertex {
+                            glslopt::ShaderType::Vertex
+                        } else {
+                            glslopt::ShaderType::Fragment
+                        },
+                        source,
+                    );
+                    if !output.get_status() {
+                        return Err(std::io::Error::other(output.get_log()));
+                    }
+                    Ok(output.get_output().unwrap().to_owned())
+                },
+            )?;
+            println!("cargo:rustc-cfg=wr_vulkan_shaders");
+        }
+    }
+
     let shaders_file_path = Path::new(&out_dir).join("shaders.rs");
     let mut glsl_files = vec![];
 

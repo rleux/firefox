@@ -351,3 +351,7 @@ mod mip_view;
 
 #[path = "sampler_tests.rs"]
 mod sampler;
+
+#[cfg(wr_vulkan_shaders)]
+#[path = "shader_tests.rs"]
+mod shader;

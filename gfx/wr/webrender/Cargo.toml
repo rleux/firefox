@@ -10,7 +10,7 @@ edition = "2018"
 
 [features]
 default = ["static_freetype"]
-vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash"]
+vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
 replay = ["api/deserialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/replay"]
@@ -24,6 +24,7 @@ sw_compositor = ["swgl"]
 debugger = ["hyper", "hyper-util", "http-body-util", "tokio", "serde_json", "url", "sha1", "base64", "libloading", "api/debugger", "capture"]
 
 [build-dependencies]
+webrender_shader_build = { path = "../webrender_shader_build", optional = true }
 build-parallel = "0.1.2"
 glslopt = "0.1.14"
 webrender_build = { version = "0.0.2", path = "../webrender_build" }
