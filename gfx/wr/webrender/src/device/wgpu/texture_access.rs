@@ -58,6 +58,29 @@ impl<'a> CopyDestination<'a> {
 }
 
 impl WritableTexture<'_> {
+    pub(in crate::device::wgpu) fn invalidate(&self, commands: &mut Recording<'_>) -> Result<(), String> {
+        let texture = self.texture;
+        let recording = commands.recording_id(&texture.raw.owner)?;
+        for state in &texture.states {
+            state.check_recording(&recording)?;
+        }
+        for (level, state) in texture.states.iter().enumerate() {
+            let (_, first) = state.prepare(
+                &recording,
+                TextureState {
+                    initialized: false,
+                    ..state.current()
+                },
+            )?;
+            if first {
+                let resource = texture.clone();
+                commands.commit(move || resource.states[level].commit());
+            }
+        }
+        commands.keep(texture);
+        Ok(())
+    }
+
     pub(in crate::device::wgpu) fn initialize(&self, commands: &mut Recording<'_>) -> Result<(), String> {
         let texture = self.texture;
         let recording = commands.recording_id(&texture.raw.owner)?;

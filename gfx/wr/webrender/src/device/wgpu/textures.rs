@@ -214,6 +214,10 @@ impl Texture {
         self.states.iter().all(|state| state.current().initialized)
     }
 
+    pub fn invalidate(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        self.writable()?.invalidate(commands)
+    }
+
     pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
         self.writable()?.initialize(commands)
     }

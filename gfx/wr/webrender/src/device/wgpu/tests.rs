@@ -373,3 +373,6 @@ mod copy;
 
 #[path = "readback_tests.rs"]
 mod readback;
+
+#[path = "texture_pool_tests.rs"]
+mod texture_pool;
