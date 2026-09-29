@@ -9,6 +9,10 @@ pub(in crate::device::wgpu) struct WritableTexture<'a> {
     texture: &'a Rc<Texture>,
 }
 
+pub(in crate::device::wgpu) struct CopySource<'a> {
+    texture: &'a Rc<Texture>,
+}
+
 pub(in crate::device::wgpu) struct CopyDestination<'a> {
     writable: WritableTexture<'a>,
 }
@@ -18,11 +22,24 @@ impl Texture {
         Ok(WritableTexture { texture: self })
     }
 
+    pub(in crate::device::wgpu) fn copy_source(self: &Rc<Self>) -> Result<CopySource<'_>, String> {
+        if !self.usage.contains(wgt::TextureUses::COPY_SRC) {
+            return Err("Texture does not support copy-source access".into());
+        }
+        Ok(CopySource { texture: self })
+    }
+
     pub(in crate::device::wgpu) fn copy_destination(self: &Rc<Self>) -> Result<CopyDestination<'_>, String> {
         if !self.usage.contains(wgt::TextureUses::COPY_DST) {
             return Err("Texture does not support copy-destination access".into());
         }
         Ok(CopyDestination { writable: self.writable()? })
+    }
+}
+
+impl CopySource<'_> {
+    pub(in crate::device::wgpu) fn prepare(&self, commands: &mut Recording<'_>) -> Result<(), String> {
+        self.texture.transition_validated(commands, wgt::TextureUses::COPY_SRC)
     }
 }
 
