@@ -20,6 +20,8 @@ mod textures;
 pub use self::textures::Texture;
 pub use crate::device::TextureFilter;
 mod state;
+mod buffer_pool;
+pub use self::buffer_pool::BufferPool;
 
 #[derive(Default)]
 pub struct Options {
