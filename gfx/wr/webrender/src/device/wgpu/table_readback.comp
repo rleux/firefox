@@ -1,0 +1,18 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) readonly buffer Source {
+    uint words[];
+} source;
+layout(std430, set = 0, binding = 1) writeonly buffer Destination {
+    uint words[];
+} destination;
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index < source.words.length()) {
+        destination.words[index] = source.words[index];
+    }
+}
