@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::pipeline::DrawPipeline;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
@@ -385,3 +386,6 @@ mod sampler;
 
 #[path = "shader_tests.rs"]
 mod shader;
+
+#[path = "pipeline_tests.rs"]
+mod pipeline;

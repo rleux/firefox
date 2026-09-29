@@ -10,6 +10,7 @@ pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 }
 
+mod pipeline;
 mod shader;
 mod vertex_layout;
 pub use self::vertex_layout::vertex_layouts;
