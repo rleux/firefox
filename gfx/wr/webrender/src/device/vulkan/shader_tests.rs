@@ -5,7 +5,69 @@
 use super::*;
 use super::super::resources::Owned;
 use api::units::{DeviceIntRect, DeviceIntSize};
-use std::convert::TryInto;
+use super::super::shader::{create_draw_shader_layouts, create_shader_module};
+
+#[test]
+fn draw_shader_selection_preserves_variants_and_accepts_feature_order() {
+    use super::super::shader::{draw_vertex_descriptor, select_draw_shader};
+
+    for artifact in shaders::SHADERS {
+        let mut features: Vec<_> = artifact
+            .features
+            .split(',')
+            .filter(|f| !f.is_empty())
+            .collect();
+        for rect in [false, true] {
+            features.reverse();
+            if rect {
+                for feature in &mut features {
+                    if *feature == "TEXTURE_2D" {
+                        *feature = "TEXTURE_RECT";
+                    }
+                }
+            }
+            let selected =
+                select_draw_shader(artifact.name, &features, artifact.buffer_tables).unwrap();
+            assert!(std::ptr::eq(selected, artifact));
+            vertex_layouts(draw_vertex_descriptor(selected).unwrap(), selected).unwrap();
+        }
+        assert!(!artifact.buffer_tables);
+        assert!(select_draw_shader(artifact.name, &features, true).is_err());
+    }
+}
+
+#[test]
+fn draw_shader_selection_rejects_missing_or_ambiguous_variants() {
+    use super::super::shader::{draw_vertex_descriptor, select_draw_shader};
+
+    for (name, features) in [
+        ("missing", &[][..]),
+        ("ps_clear", &["TEXTURE_2D"][..]),
+        ("ps_clear", &[""][..]),
+        ("cs_scale", &["TEXTURE_2D", "TEXTURE_2D"][..]),
+        ("cs_scale", &["TEXTURE_RECT", "TEXTURE_2D"][..]),
+        ("cs_scale", &["UNKNOWN_TEXTURE_RECT"][..]),
+        ("ps_text_run", &["TEXTURE_2D,DUAL_SOURCE_BLENDING"][..]),
+    ] {
+        for buffer_tables in [false, true] {
+            let error = select_draw_shader(name, features, buffer_tables)
+                .err()
+                .unwrap();
+            assert!(error.contains(name), "{}", error);
+            assert!(error.contains(&features.join(",")), "{}", error);
+            assert!(error.contains(if buffer_tables {
+                "buffer tables"
+            } else {
+                "texture tables"
+            }));
+        }
+    }
+    let unknown = webrender_build::vulkan::ShaderArtifact {
+        name: "future_primitive_shader",
+        ..shaders::SHADERS[0]
+    };
+    assert!(draw_vertex_descriptor(&unknown).is_err());
+}
 
 #[test]
 fn generated_shader_bindings_are_dense_and_stage_qualified() {
@@ -58,17 +120,11 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
         .unwrap(),
     );
     eprintln!("Vulkan adapter: {:?}", device.info());
-    let shader = shaders::SHADERS
-        .iter()
-        .find(|s| s.name == "ps_clear" && !s.buffer_tables)
-        .unwrap();
+    let shader = super::super::shader::select_draw_shader("ps_clear", &[], false).unwrap();
     assert!(shader.textures.is_empty() && shader.storage_buffers.is_empty());
     assert_eq!(shader.inputs.len(), 3);
-    let (vertex, instances_layout, instance_stride) = vertex_layouts(
-        &crate::renderer::desc::CLEAR,
-        shader,
-    )
-    .unwrap();
+    let (vertex, instances_layout, instance_stride) =
+        vertex_layouts(super::super::shader::draw_vertex_descriptor(shader).unwrap(), shader).unwrap();
     let quad = Buffer::new(
         &device,
         &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
@@ -106,58 +162,9 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
     .unwrap();
     unsafe {
         let raw = device.raw_device();
-        let bindings = raw
-            .create_bind_group_layout(&hal::BindGroupLayoutDescriptor {
-                label: Some("WR generated clear bindings"),
-                flags: hal::BindGroupLayoutFlags::empty(),
-                entries: &[wgt::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgt::ShaderStages::from_bits(shader.projection_stages).unwrap(),
-                    ty: wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            })
-            .unwrap();
-        let bindings = Owned::new(
-            &device,
-            bindings,
-            hal::vulkan::Device::destroy_bind_group_layout,
-        );
-        let layout = raw
-            .create_pipeline_layout(&hal::PipelineLayoutDescriptor {
-                label: Some("WR generated clear layout"),
-                flags: hal::PipelineLayoutFlags::empty(),
-                bind_group_layouts: &[Some(&*bindings)],
-                immediate_size: 0,
-            })
-            .unwrap();
-        let layout = Owned::new(
-            &device,
-            layout,
-            hal::vulkan::Device::destroy_pipeline_layout,
-        );
-        let module = |data: &[u8]| {
-            let words: Vec<_> = data
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
-            let module = raw
-                .create_shader_module(
-                    &hal::ShaderModuleDescriptor {
-                        label: Some("WR generated clear"),
-                        runtime_checks: wgt::ShaderRuntimeChecks::unchecked(),
-                    },
-                    hal::ShaderInput::SpirV(&words),
-                )
-                .unwrap();
-            Owned::new(&device, module, hal::vulkan::Device::destroy_shader_module)
-        };
-        let vs = module(shader.vertex);
-        let fs = module(shader.fragment);
+        let (layout, bindings) = create_draw_shader_layouts(&device, shader).unwrap();
+        let vs = create_shader_module(&device, shader, false).unwrap();
+        let fs = create_shader_module(&device, shader, true).unwrap();
         let constants = Default::default();
         let stage = |module| hal::ProgrammableStage {
             module,
@@ -291,5 +298,44 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
             .unwrap(),
         [255, 0, 0, 255].repeat(4)
     );
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn generated_draw_shaders_create_modules_and_layouts() {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap(),
+    );
+    eprintln!("Vulkan adapter: {:?}", device.info());
+    let owner = Rc::downgrade(&device);
+    let mut retained = None;
+    let mut count = 0;
+    for shader in shaders::SHADERS {
+        if shader.features.contains("DUAL_SOURCE_BLENDING")
+            && !device
+                .features()
+                .contains(wgt::Features::DUAL_SOURCE_BLENDING)
+        {
+            continue;
+        }
+        let (layout, bindings) = create_draw_shader_layouts(&device, shader)
+            .unwrap_or_else(|error| panic!("{} {}: {error}", shader.name, shader.features));
+        let vertex = create_shader_module(&device, shader, false).unwrap();
+        let fragment = create_shader_module(&device, shader, true).unwrap();
+        retained = Some((layout, bindings, vertex, fragment));
+        count += 1;
+    }
+    assert!(count > 1);
+    eprintln!("Created modules and layouts for {count} shader pairs");
+    drop(device);
+    assert!(owner.upgrade().is_some());
+    drop(retained);
+    assert!(owner.upgrade().is_none());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
