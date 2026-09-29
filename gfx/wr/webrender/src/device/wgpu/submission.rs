@@ -13,7 +13,7 @@ use std::time::Duration;
 
 #[path = "submission_queue.rs"]
 mod queue;
-pub use self::queue::SubmissionQueue;
+pub use self::queue::{InstanceBuffers, SubmissionQueue};
 
 pub struct Submission {
     data: SubmissionData,
