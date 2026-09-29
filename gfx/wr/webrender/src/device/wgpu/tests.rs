@@ -357,3 +357,6 @@ mod texture;
 
 #[path = "state_tests.rs"]
 mod state;
+
+#[path = "buffer_pool_tests.rs"]
+mod buffer_pool;
