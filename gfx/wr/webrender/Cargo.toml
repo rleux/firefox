@@ -9,6 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
+vulkan = ["dep:webrender_shader_build", "webrender_build/vulkan"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -23,6 +24,7 @@ sw_compositor = ["swgl"]
 debugger = ["hyper", "hyper-util", "http-body-util", "tokio", "serde_json", "url", "sha1", "base64", "libloading", "api/debugger", "capture"]
 
 [build-dependencies]
+webrender_shader_build = { path = "../webrender_shader_build", optional = true }
 build-parallel = "0.1.2"
 glslopt = "0.1.14"
 webrender_build = { version = "0.0.2", path = "../webrender_build" }
