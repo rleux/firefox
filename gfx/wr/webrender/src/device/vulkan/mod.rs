@@ -8,6 +8,8 @@ use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
 use wgpu_types as wgt;
 
+mod samplers;
+pub use self::samplers::Samplers;
 mod resources;
 pub use self::resources::Buffer;
 mod submission;
