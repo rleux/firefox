@@ -20,7 +20,7 @@ impl CopyDestination<'_> {
             && destination_rect.max.y as u32 == texture.size.height;
         if !texture.initialized() && !full_destination {
             unsafe {
-                texture.raw.owner.clear_color_copy_destination(commands.encoder(), texture.raw_texture(), 0);
+                texture.raw.owner.clear_color_copy_destination(commands.encoder(), texture.raw_texture(), texture.base_mip);
             }
             self.transition(commands)?;
         }
@@ -56,7 +56,7 @@ impl Texture {
             {
                 return Err("Invalid Vulkan texture copy bounds".into());
             }
-            for state in &texture.states {
+            for state in texture.states() {
                 state.check_recording(&recording)?;
             }
         }
@@ -69,8 +69,8 @@ impl Texture {
         copy_source.prepare(commands)?;
         destination.prepare_copy_destination(commands, destination_rect)?;
         let encoder = commands.encoder();
-        let base = |rect: DeviceIntRect| hal::TextureCopyBase {
-            mip_level: 0,
+        let base = |rect: DeviceIntRect, mip_level| hal::TextureCopyBase {
+            mip_level,
             array_layer: 0,
             origin: wgt::Origin3d {
                 x: rect.min.x as u32,
@@ -85,8 +85,8 @@ impl Texture {
                 wgt::TextureUses::COPY_SRC,
                 self.raw_texture(),
                 &[hal::TextureCopy {
-                    src_base: base(source_rect),
-                    dst_base: base(destination_rect),
+                    src_base: base(source_rect, source.base_mip),
+                    dst_base: base(destination_rect, self.base_mip),
                     size: wgt::Extent3d {
                         width: source_rect.width() as u32,
                         height: source_rect.height() as u32,
