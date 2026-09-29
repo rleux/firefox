@@ -249,10 +249,16 @@ impl Frontend {
         name: &str,
         meta: Span,
     ) -> Result<Handle<Expression>> {
-        let (ty, is_pointer) = match *ctx.resolve_type(expression, meta)? {
-            TypeInner::Pointer { base, .. } => (&ctx.module.types[base].inner, true),
-            ref ty => (ty, false),
+        let (owned_ty, is_pointer) = match *ctx.resolve_type(expression, meta)? {
+            TypeInner::Pointer { base, .. } => (ctx.module.types[base].inner.clone(), true),
+            TypeInner::ValuePointer {
+                size: Some(size),
+                scalar,
+                ..
+            } => (TypeInner::Vector { size, scalar }, true),
+            ref ty => (ty.clone(), false),
         };
+        let ty = &owned_ty;
         match *ty {
             TypeInner::Struct { ref members, .. } => {
                 let index = members

@@ -90,7 +90,7 @@ impl ParsingContext<'_> {
                     frontend,
                     ctx,
                     &mut members,
-                    StructLayout::Std140,
+                    StructLayout::Std430,
                 )?;
                 let end_meta = self.expect(frontend, TokenValue::RightBrace)?.meta;
                 meta.subsume(end_meta);

@@ -109,6 +109,7 @@ impl Writer {
             std140_compat_uniform_types: crate::FastHashMap::default(),
             fake_missing_bindings: options.fake_missing_bindings,
             binding_map: options.binding_map.clone(),
+            combined_image_samplers: Default::default(),
             saved_cached: CachedExpressions::default(),
             gl450_ext_inst_id,
             temp_list: Vec::new(),
@@ -180,6 +181,7 @@ impl Writer {
             capabilities_available: take(&mut self.capabilities_available),
             fake_missing_bindings: self.fake_missing_bindings,
             binding_map: take(&mut self.binding_map),
+            combined_image_samplers: take(&mut self.combined_image_samplers),
             task_dispatch_limits: self.task_dispatch_limits,
             mesh_shader_primitive_indices_clamp: self.mesh_shader_primitive_indices_clamp,
             emit_int_div_checks: self.emit_int_div_checks,
@@ -1528,7 +1530,12 @@ impl Writer {
             gv.reset_for_function();
         }
         for (handle, var) in ir_module.global_variables.iter() {
-            if info[handle].is_empty() {
+            if info[handle].is_empty()
+                || self
+                    .combined_image_samplers
+                    .values()
+                    .any(|&sampler| sampler == handle)
+            {
                 continue;
             }
 
@@ -1550,9 +1557,27 @@ impl Writer {
                     if var.space == crate::AddressSpace::Handle {
                         let var_type_id = self.get_handle_type_id(var.ty);
                         let id = self.id_gen.next();
-                        prelude
-                            .body
-                            .push(Instruction::load(var_type_id, id, gv.var_id, None));
+                        if self.combined_image_samplers.contains_key(&handle) {
+                            let sampled_type =
+                                self.get_type_id(LookupType::Local(LocalType::SampledImage {
+                                    image_type_id: var_type_id,
+                                }));
+                            let sampled_id = self.id_gen.next();
+                            prelude.body.push(Instruction::load(
+                                sampled_type,
+                                sampled_id,
+                                gv.var_id,
+                                None,
+                            ));
+                            prelude
+                                .body
+                                .push(Instruction::image(var_type_id, id, sampled_id));
+                            gv.sampled_id = sampled_id;
+                        } else {
+                            prelude
+                                .body
+                                .push(Instruction::load(var_type_id, id, gv.var_id, None));
+                        }
                         gv.access_id = gv.var_id;
                         gv.handle_id = id;
                     } else if global_needs_wrapper(ir_module, var) {
@@ -3453,6 +3478,7 @@ impl Writer {
         &mut self,
         ir_module: &crate::Module,
         global_variable: &crate::GlobalVariable,
+        combined: bool,
     ) -> Result<Word, Error> {
         use spirv::Decoration;
 
@@ -3538,8 +3564,17 @@ impl Writer {
             substitute_inner_type_lookup.unwrap_or(LookupType::Handle(global_variable.ty)),
         );
 
+        let inner_type_id = if combined {
+            self.get_type_id(LookupType::Local(LocalType::SampledImage {
+                image_type_id: inner_type_id,
+            }))
+        } else {
+            inner_type_id
+        };
         // generate the wrapping structure if needed
-        let pointer_type_id = if global_needs_wrapper(ir_module, global_variable) {
+        let pointer_type_id = if combined {
+            self.get_pointer_type_id(inner_type_id, class)
+        } else if global_needs_wrapper(ir_module, global_variable) {
             let wrapper_type_id = self.id_gen.next();
 
             self.decorate(wrapper_type_id, Decoration::Block, &[]);
@@ -3844,6 +3879,15 @@ impl Writer {
 
         // write all global variables
         for (handle, var) in ir_module.global_variables.iter() {
+            if self
+                .combined_image_samplers
+                .values()
+                .any(|&sampler| sampler == handle)
+            {
+                self.global_variables
+                    .insert(handle, GlobalVariable::dummy());
+                continue;
+            }
             // If a single entry point was specified, only write `OpVariable` instructions
             // for the globals it actually uses. Emit dummies for the others,
             // to preserve the indices in `global_variables`.
@@ -3852,7 +3896,11 @@ impl Writer {
                     GlobalVariable::dummy()
                 }
                 _ => {
-                    let id = self.write_global_variable(ir_module, var)?;
+                    let id = self.write_global_variable(
+                        ir_module,
+                        var,
+                        self.combined_image_samplers.contains_key(&handle),
+                    )?;
                     GlobalVariable::new(id)
                 }
             };
@@ -3944,6 +3992,14 @@ impl Writer {
         Ok(())
     }
 
+    /// Emit the supplied image/sampler pairs as combined Vulkan descriptors.
+    pub fn set_combined_image_samplers(
+        &mut self,
+        pairs: impl IntoIterator<Item = (Handle<crate::GlobalVariable>, Handle<crate::GlobalVariable>)>,
+    ) {
+        self.combined_image_samplers = pairs.into_iter().collect();
+    }
+
     pub fn write(
         &mut self,
         ir_module: &crate::Module,
@@ -3953,6 +4009,63 @@ impl Writer {
         words: &mut Vec<Word>,
     ) -> Result<(), Error> {
         self.reset();
+        let mut combined_samplers = crate::FastHashSet::default();
+        for (&image, &sampler) in &self.combined_image_samplers {
+            let image_var = ir_module
+                .global_variables
+                .iter()
+                .find_map(|(h, var)| (h == image).then_some(var))
+                .ok_or(Error::Validation("unknown combined image"))?;
+            let sampler_var = ir_module
+                .global_variables
+                .iter()
+                .find_map(|(h, var)| (h == sampler).then_some(var))
+                .ok_or(Error::Validation("unknown combined sampler"))?;
+            if image_var.space != crate::AddressSpace::Handle
+                || sampler_var.space != crate::AddressSpace::Handle
+                || !matches!(
+                    ir_module.types[image_var.ty].inner,
+                    crate::TypeInner::Image {
+                        class: crate::ImageClass::Sampled { multi: false, .. },
+                        ..
+                    }
+                )
+                || !matches!(
+                    ir_module.types[sampler_var.ty].inner,
+                    crate::TypeInner::Sampler { comparison: false }
+                )
+                || !combined_samplers.insert(sampler)
+            {
+                return Err(Error::Validation("invalid combined image/sampler pair"));
+            }
+        }
+        for function in ir_module
+            .functions
+            .iter()
+            .map(|(_, f)| f)
+            .chain(ir_module.entry_points.iter().map(|e| &e.function))
+        {
+            for (_, expression) in function.expressions.iter() {
+                if let crate::Expression::ImageSample { image, sampler, .. } = *expression {
+                    if let crate::Expression::GlobalVariable(sampler) =
+                        function.expressions[sampler]
+                    {
+                        if let Some((&expected, _)) = self
+                            .combined_image_samplers
+                            .iter()
+                            .find(|(_, s)| **s == sampler)
+                        {
+                            if !matches!(function.expressions[image], crate::Expression::GlobalVariable(actual) if actual == expected)
+                            {
+                                return Err(Error::Validation(
+                                    "combined sampler used with a different image",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Try to find the entry point and corresponding index
         let ep_index = match pipeline_options {

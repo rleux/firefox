@@ -423,6 +423,59 @@ impl ParsingContext<'_> {
                 let token = self.bump(frontend)?;
                 match token.value {
                     TokenValue::Identifier(ty_name) => {
+                        if matches!(ty_name.as_str(), "sampler2D" | "isampler2D" | "usampler2D") {
+                            if !external
+                                || qualifiers.storage.0
+                                    != StorageQualifier::AddressSpace(AddressSpace::Uniform)
+                            {
+                                return Err(Error {
+                                    kind: ErrorKind::SemanticError(
+                                        "combined samplers require a uniform declaration".into(),
+                                    ),
+                                    meta: token.meta,
+                                });
+                            }
+                            let (name, meta) = self.expect_ident(frontend)?;
+                            self.expect(frontend, TokenValue::Semicolon)?;
+                            let texture = crate::front::glsl::types::parse_type(
+                                &ty_name.replace("sampler", "texture"),
+                            )
+                            .unwrap();
+                            let ty = ctx.module.types.insert(texture, meta);
+                            let image = frontend.add_global_var(
+                                ctx,
+                                VarDeclaration {
+                                    qualifiers: &mut qualifiers,
+                                    ty,
+                                    name: Some(name.clone()),
+                                    init: None,
+                                    meta,
+                                },
+                            )?;
+                            let GlobalOrConstant::Global(image) = image else {
+                                unreachable!()
+                            };
+                            let ty = ctx.module.types.insert(
+                                Type {
+                                    name: None,
+                                    inner: TypeInner::Sampler { comparison: false },
+                                },
+                                meta,
+                            );
+                            let sampler = ctx.module.global_variables.append(
+                                crate::GlobalVariable {
+                                    name: Some(alloc::format!("{name}_sampler")),
+                                    space: AddressSpace::Handle,
+                                    binding: None,
+                                    ty,
+                                    init: None,
+                                    memory_decorations: crate::MemoryDecorations::empty(),
+                                },
+                                meta,
+                            );
+                            frontend.meta.combined_samplers.push((image, sampler));
+                            return Ok(Some(meta));
+                        }
                         if self.bump_if(frontend, TokenValue::LeftBrace).is_some() {
                             self.parse_block_declaration(
                                 frontend,
@@ -634,6 +687,12 @@ impl ParsingContext<'_> {
 
         loop {
             // TODO: type_qualifier
+            if self
+                .peek(frontend)
+                .is_some_and(|t| matches!(t.value, TokenValue::PrecisionQualifier(_)))
+            {
+                self.bump(frontend)?;
+            }
 
             let (base_ty, mut meta) = self.parse_type_non_void(frontend, ctx)?;
 

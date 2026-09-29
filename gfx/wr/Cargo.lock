@@ -3512,6 +3512,7 @@ dependencies = [
  "naga-types",
  "num-traits",
  "once_cell",
+ "pp-rs",
  "rustc-hash 1.1.0",
  "spirv",
  "thiserror 2.0.20",
@@ -4394,6 +4395,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5a7c30837279ca13e7c867e9e40053bc68740f988cb07f7ca6df43cc734b585"
 dependencies = [
  "zerovec",
+]
+
+[[package]]
+name = "pp-rs"
+version = "0.2.1"
+dependencies = [
+ "unicode-xid",
 ]
 
 [[package]]
@@ -5934,8 +5942,6 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 [[package]]
 name = "unicode-xid"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "826e7639553986605ec5979c7dd957c7895e93eabed50ab2ffa7f6128a75097c"
 
 [[package]]
 name = "uniffi"
@@ -6516,6 +6522,8 @@ dependencies = [
 name = "webrender_shader_build"
 version = "0.1.0"
 dependencies = [
+ "naga",
+ "pp-rs",
  "regex",
  "webrender_build",
 ]

@@ -627,8 +627,25 @@ impl ParsingContext<'_> {
         }
 
         loop {
-            if self.peek_type_name(frontend) || self.peek_parameter_qualifier(frontend) {
+            if self.peek_type_name(frontend)
+                || self.peek_parameter_qualifier(frontend)
+                || self
+                    .peek(frontend)
+                    .is_some_and(|t| matches!(t.value, TokenValue::PrecisionQualifier(_)))
+            {
+                if self
+                    .peek(frontend)
+                    .is_some_and(|t| matches!(t.value, TokenValue::PrecisionQualifier(_)))
+                {
+                    self.bump(frontend)?;
+                }
                 let qualifier = self.parse_parameter_qualifier(frontend);
+                if self
+                    .peek(frontend)
+                    .is_some_and(|t| matches!(t.value, TokenValue::PrecisionQualifier(_)))
+                {
+                    self.bump(frontend)?;
+                }
                 let mut ty = self.parse_type_non_void(frontend, ctx)?.0;
 
                 match self.expect_peek(frontend)?.value {

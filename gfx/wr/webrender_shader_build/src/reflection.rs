@@ -54,3 +54,8 @@ pub(super) struct Reflection {
 mod glslang;
 #[cfg(feature = "glslang")]
 pub(super) use glslang::reflect;
+
+#[cfg(feature = "naga")]
+mod binary;
+#[cfg(feature = "naga")]
+pub(super) use binary::reflect_binary;

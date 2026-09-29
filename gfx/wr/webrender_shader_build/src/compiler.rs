@@ -12,6 +12,10 @@ use std::{
 #[path = "glslang.rs"]
 mod glslang;
 
+#[cfg(feature = "naga")]
+#[path = "naga.rs"]
+mod naga;
+
 #[derive(Clone, Copy)]
 pub struct Compiler {
     name: &'static str,
@@ -27,6 +31,8 @@ impl Compiler {
         &[
             #[cfg(feature = "glslang")]
             glslang::COMPILER,
+            #[cfg(feature = "naga")]
+            naga::COMPILER,
         ]
     }
 

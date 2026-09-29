@@ -8,7 +8,13 @@ description = "Host-side Vulkan shader compilation for WebRender"
 [features]
 default = ["glslang"]
 glslang = []
+naga = ["dep:naga", "dep:pp-rs"]
 
 [dependencies]
 webrender_build = { path = "../webrender_build", features = ["vulkan"] }
 regex = "1.11.1"
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8", optional = true, default-features = false, features = ["glsl-in", "spv-out"] }
+pp-rs = { version = "=0.2.1", optional = true }
+
+[dev-dependencies]
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8", default-features = false, features = ["wgsl-in", "spv-out"] }

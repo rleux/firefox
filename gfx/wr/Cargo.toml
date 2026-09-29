@@ -29,6 +29,8 @@ opt-level = 2
 opt-level = 2
 
 [patch.crates-io]
+pp-rs = { path = "../../third_party/rust/pp-rs" }
+unicode-xid = { path = "../../third_party/rust/unicode-xid" }
 wgpu = { path = "third_party/wgpu" }
 wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8" }

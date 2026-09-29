@@ -904,7 +904,7 @@ impl Frontend {
                 size,
                 scalar,
                 space,
-            } if space != AddressSpace::Function => {
+            } => {
                 let inner = match size {
                     Some(size) => TypeInner::Vector { size, scalar },
                     None => TypeInner::Scalar(scalar),
@@ -1221,6 +1221,28 @@ impl Frontend {
         mut ctx: Context,
     ) -> Result<()> {
         let mut arguments = Vec::new();
+        let dual = self.entry_args.iter().any(|arg| {
+            arg.storage == StorageQualifier::Output
+                && matches!(
+                    arg.binding,
+                    crate::Binding::Location {
+                        blend_src: Some(1),
+                        ..
+                    }
+                )
+        });
+        if !dual {
+            for arg in &mut self.entry_args {
+                if let crate::Binding::Location {
+                    ref mut blend_src, ..
+                } = arg.binding
+                {
+                    if *blend_src == Some(0) {
+                        *blend_src = None;
+                    }
+                }
+            }
+        }
 
         let body = Block::with_capacity(
             // global init body
@@ -1411,6 +1433,36 @@ impl Context<'_> {
         ),
     ) -> Result<()> {
         match self.module.types[ty].inner {
+            TypeInner::Matrix {
+                columns,
+                rows,
+                scalar,
+            } => {
+                let vector = self.module.types.insert(
+                    crate::Type {
+                        name: None,
+                        inner: TypeInner::Vector { size: rows, scalar },
+                    },
+                    Span::default(),
+                );
+                for column in 0..columns as u32 {
+                    let mut column_binding = binding.clone();
+                    if let crate::Binding::Location {
+                        ref mut location, ..
+                    } = column_binding
+                    {
+                        *location += column;
+                    }
+                    let component = self.add_expression(
+                        Expression::AccessIndex {
+                            base: pointer,
+                            index: column,
+                        },
+                        Span::default(),
+                    )?;
+                    f(self, name.clone(), component, vector, column_binding);
+                }
+            }
             // TODO: Better error reporting
             // right now we just don't walk the array if the size isn't known at
             // compile time and let validation catch it

@@ -339,7 +339,7 @@ pub fn inject_builtin(
 
                 declaration
                     .overloads
-                    .push(module.add_builtin(args, MacroCall::ImageLoad { multi }))
+                    .push(module.add_builtin(args, MacroCall::ImageLoad { multi, offset }))
             };
 
             // Don't generate shadow images since they aren't supported
@@ -400,9 +400,13 @@ pub fn inject_builtin(
 
                 let args = vec![image, coordinates];
 
-                declaration
-                    .overloads
-                    .push(module.add_builtin(args, MacroCall::ImageLoad { multi: false }))
+                declaration.overloads.push(module.add_builtin(
+                    args,
+                    MacroCall::ImageLoad {
+                        multi: false,
+                        offset: false,
+                    },
+                ))
             };
 
             // Don't generate shadow nor multisampled images since they aren't supported
@@ -1557,6 +1561,7 @@ pub enum MacroCall {
     TextureQueryLevels,
     ImageLoad {
         multi: bool,
+        offset: bool,
     },
     ImageStore,
     MathFunction(MathFunction),
@@ -1799,8 +1804,20 @@ impl MacroCall {
                     Span::default(),
                 )?
             }
-            MacroCall::ImageLoad { multi } => {
+            MacroCall::ImageLoad { multi, offset } => {
                 let comps = frontend.coordinate_components(ctx, args[0], args[1], None, meta)?;
+                let coordinate = if offset {
+                    ctx.add_expression(
+                        Expression::Binary {
+                            op: crate::BinaryOperator::Add,
+                            left: comps.coordinate,
+                            right: args[3],
+                        },
+                        meta,
+                    )?
+                } else {
+                    comps.coordinate
+                };
                 let (sample, level) = match (multi, args.get(2)) {
                     (_, None) => (None, None),
                     (true, Some(&arg)) => (Some(arg), None),
@@ -1809,7 +1826,7 @@ impl MacroCall {
                 ctx.add_expression(
                     Expression::ImageLoad {
                         image: args[0],
-                        coordinate: comps.coordinate,
+                        coordinate,
                         array_index: comps.array_index,
                         sample,
                         level,

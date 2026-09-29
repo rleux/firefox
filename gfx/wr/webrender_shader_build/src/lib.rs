@@ -455,3 +455,7 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "wgsl_tests.rs"]
+mod wgsl_tests;

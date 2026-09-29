@@ -29,6 +29,7 @@ mod error;
 mod functions;
 mod lex;
 mod offset;
+mod order;
 mod parser;
 #[cfg(test)]
 mod parser_tests;
@@ -100,6 +101,8 @@ pub struct ShaderMetadata {
     /// This field only stores extensions which were required or requested to
     /// be enabled if possible and they are supported.
     pub extensions: FastHashSet<String>,
+    /// Image/sampler handles to recombine when emitting Vulkan SPIR-V.
+    pub combined_samplers: Vec<(Handle<crate::GlobalVariable>, Handle<crate::GlobalVariable>)>,
 }
 
 impl ShaderMetadata {
@@ -110,6 +113,7 @@ impl ShaderMetadata {
         self.workgroup_size = [u32::from(stage.compute_like()); 3];
         self.early_fragment_tests = false;
         self.extensions.clear();
+        self.combined_samplers.clear();
     }
 }
 
@@ -122,6 +126,7 @@ impl Default for ShaderMetadata {
             workgroup_size: [0; 3],
             early_fragment_tests: false,
             extensions: FastHashSet::default(),
+            combined_samplers: Vec::new(),
         }
     }
 }
@@ -205,7 +210,32 @@ impl Frontend {
         let mut ctx = ParsingContext::new(lexer);
 
         match ctx.parse(self) {
-            Ok(module) => {
+            Ok(mut module) => {
+                if let Err(message) = order::order_functions(&mut module) {
+                    self.errors.push(Error {
+                        kind: ErrorKind::SemanticError(message.into()),
+                        meta: Span::UNDEFINED,
+                    });
+                }
+                let mut used: FastHashSet<_> = module
+                    .global_variables
+                    .iter()
+                    .filter_map(|(_, var)| var.binding.clone())
+                    .collect();
+                let mut next = 0;
+                for &(_, sampler) in &self.meta.combined_samplers {
+                    let binding = loop {
+                        let binding = crate::ResourceBinding {
+                            group: u32::MAX,
+                            binding: next,
+                        };
+                        next += 1;
+                        if used.insert(binding.clone()) {
+                            break binding;
+                        }
+                    };
+                    module.global_variables[sampler].binding = Some(binding);
+                }
                 if self.errors.is_empty() {
                     Ok(module)
                 } else {

@@ -11,6 +11,7 @@ edition = "2018"
 [features]
 default = ["static_freetype"]
 vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
+vulkan-naga = ["vulkan", "webrender_shader_build/naga"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
 replay = ["api/deserialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/replay"]

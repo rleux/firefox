@@ -841,7 +841,23 @@ impl BlockContext<'_> {
         let sampled_image_type_id =
             self.get_type_id(LookupType::Local(LocalType::SampledImage { image_type_id }));
 
-        let sampler_id = self.get_handle_id(sampler);
+        let combined = match (
+            self.ir_function.expressions[image].clone(),
+            self.ir_function.expressions[sampler].clone(),
+        ) {
+            (
+                crate::Expression::GlobalVariable(image),
+                crate::Expression::GlobalVariable(sampler),
+            ) if self.writer.combined_image_samplers.get(&image) == Some(&sampler) => {
+                Some(self.writer.global_variables[image].sampled_id)
+            }
+            _ => None,
+        };
+        let sampler_id = if combined.is_some() {
+            0
+        } else {
+            self.get_handle_id(sampler)
+        };
 
         let coordinates = self.write_image_coordinates(coordinate, array_index, block)?;
         let coordinates_id = if clamp_to_edge {
@@ -936,13 +952,18 @@ impl BlockContext<'_> {
             coordinates.value_id
         };
 
-        let sampled_image_id = self.gen_id();
-        block.body.push(Instruction::sampled_image(
-            sampled_image_type_id,
-            sampled_image_id,
-            image_id,
-            sampler_id,
-        ));
+        let sampled_image_id = if let Some(id) = combined {
+            id
+        } else {
+            let sampled_image_id = self.gen_id();
+            block.body.push(Instruction::sampled_image(
+                sampled_image_type_id,
+                sampled_image_id,
+                image_id,
+                sampler_id,
+            ));
+            sampled_image_id
+        };
         let id = self.gen_id();
 
         let depth_id = depth_ref.map(|handle| self.cached[handle]);
