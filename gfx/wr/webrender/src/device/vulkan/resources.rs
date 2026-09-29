@@ -43,7 +43,7 @@ impl<T> Drop for Owned<T> {
 pub struct Buffer {
     pub(super) raw: Owned<hal::vulkan::Buffer>,
     size: u64,
-    usage: wgt::BufferUses,
+    pub(super) usage: wgt::BufferUses,
     mapping: Option<hal::BufferMapping>,
     used_size: u64,
     state: UsageState<wgt::BufferUses>,
@@ -125,6 +125,10 @@ impl Buffer {
             .as_ref()
             .ok_or("Vulkan buffer is not mapped for upload")?;
         write(unsafe { std::slice::from_raw_parts_mut(mapping.ptr.as_ptr(), length) })?;
+        // Short bindings still expose four bytes.
+        if length < 4 {
+            unsafe { std::ptr::write_bytes(mapping.ptr.as_ptr().add(length), 0, 4 - length) };
+        }
         if !mapping.is_coherent {
             unsafe { device.flush_mapped_ranges(&self.raw, std::iter::once(0..self.size)) }
         }
@@ -170,6 +174,15 @@ impl Buffer {
 
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    pub(super) fn mapped_read_only(&self) -> Result<&[u8], String> {
+        // GPU access must be read-only while CPU code reads this mapping.
+        if self.usage != (wgt::BufferUses::MAP_WRITE | wgt::BufferUses::STORAGE_READ_ONLY) {
+            return Err("Direct mapped reads require a read-only storage upload buffer".into());
+        }
+        let mapping = self.mapping.as_ref().ok_or("Buffer is not mapped")?;
+        Ok(unsafe { std::slice::from_raw_parts(mapping.ptr.as_ptr(), self.used_size as usize) })
     }
 
     pub fn vertex_binding(
