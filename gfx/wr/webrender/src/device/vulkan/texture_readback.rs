@@ -74,7 +74,7 @@ impl Texture {
         let mut submission = Submission::new(owner)?;
         let mut commands = submission.recording()?;
         let recording = commands.recording_id(owner)?;
-        for state in &self.states {
+        for state in self.states() {
             state.check_recording(&recording)?;
         }
         let layout = ReadbackLayout::new(
@@ -110,7 +110,7 @@ impl Texture {
                         rows_per_image: Some(rect.height() as u32),
                     },
                     texture_base: hal::TextureCopyBase {
-                        mip_level: 0,
+                        mip_level: self.base_mip,
                         array_layer: 0,
                         origin: wgt::Origin3d {
                             x: rect.min.x as u32,

@@ -38,7 +38,7 @@ impl Texture {
         let mut commands = queue.recording()?;
         let owner = &self.raw.owner;
         let recording = commands.recording_id(owner)?;
-        for state in &self.states {
+        for state in self.states() {
             state.check_recording(&recording)?;
         }
         if rect.min.x < 0
@@ -156,7 +156,7 @@ impl Texture {
                         rows_per_image: Some(destination.height() as u32),
                     },
                     texture_base: hal::TextureCopyBase {
-                        mip_level: 0,
+                        mip_level: self.base_mip,
                         array_layer: 0,
                         origin: wgt::Origin3d {
                             x: destination.min.x as u32,

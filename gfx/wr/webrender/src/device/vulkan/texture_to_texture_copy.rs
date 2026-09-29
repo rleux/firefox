@@ -35,7 +35,7 @@ impl Texture {
             {
                 return Err("Invalid Vulkan texture copy bounds".into());
             }
-            for state in &texture.states {
+            for state in texture.states() {
                 state.check_recording(&recording)?;
             }
         }
@@ -65,7 +65,7 @@ impl Texture {
                         &vk::ClearColorValue { uint32: [0; 4] },
                         &[vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
+                            base_mip_level: self.base_mip,
                             level_count: 1,
                             base_array_layer: 0,
                             layer_count: 1,
@@ -76,6 +76,7 @@ impl Texture {
                     queue_family_ownership_transfer: None,
                     texture: self.raw_texture(),
                     range: wgt::ImageSubresourceRange {
+                        base_mip_level: self.base_mip,
                         mip_level_count: Some(1),
                         array_layer_count: Some(1),
                         ..Default::default()
@@ -87,8 +88,8 @@ impl Texture {
                 }));
             }
         }
-        let base = |rect: DeviceIntRect| hal::TextureCopyBase {
-            mip_level: 0,
+        let base = |rect: DeviceIntRect, mip_level| hal::TextureCopyBase {
+            mip_level,
             array_layer: 0,
             origin: wgt::Origin3d {
                 x: rect.min.x as u32,
@@ -103,8 +104,8 @@ impl Texture {
                 wgt::TextureUses::COPY_SRC,
                 self.raw_texture(),
                 std::iter::once(hal::TextureCopy {
-                    src_base: base(source_rect),
-                    dst_base: base(destination_rect),
+                    src_base: base(source_rect, source.base_mip),
+                    dst_base: base(destination_rect, self.base_mip),
                     size: wgt::Extent3d {
                         width: source_rect.width() as u32,
                         height: source_rect.height() as u32,

@@ -30,9 +30,10 @@ pub struct Texture {
     size: wgt::Extent3d,
     format: wgt::TextureFormat,
     filter: TextureFilter,
+    base_mip: u32,
     mip_count: u32,
     usage: wgt::TextureUses,
-    states: Vec<UsageState<TextureState>>,
+    states: Rc<Vec<UsageState<TextureState>>>,
 }
 
 impl Texture {
@@ -172,37 +173,113 @@ impl Texture {
             size,
             format,
             filter,
+            base_mip: 0,
             mip_count,
             usage,
-            states: (0..mip_count)
-                .map(|_| {
-                    UsageState::new(TextureState {
-                        usage: wgt::TextureUses::UNINITIALIZED,
-                        initialized: false,
+            states: Rc::new(
+                (0..mip_count)
+                    .map(|_| {
+                        UsageState::new(TextureState {
+                            usage: wgt::TextureUses::UNINITIALIZED,
+                            initialized: false,
+                        })
                     })
-                })
-                .collect(),
+                    .collect(),
+            ),
         }))
     }
 
+    pub fn mip_view(self: &Rc<Self>, level: u32) -> Result<Rc<Self>, String> {
+        if self.raw.owner.is_lost() {
+            return Err("Vulkan device requires recreation".into());
+        }
+        if self.target.is_none() || level >= self.mip_count {
+            return Err("Invalid Vulkan renderable mip view".into());
+        }
+        let base_mip = self.base_mip + level;
+        let depth = self.format == wgt::TextureFormat::Depth32Float;
+        let target_usage = if depth {
+            wgt::TextureUses::DEPTH_WRITE
+        } else {
+            wgt::TextureUses::COLOR_TARGET
+        };
+        let make_view = |usage| {
+            let owner = &self.raw.owner;
+            let raw = unsafe {
+                owner.open.device.create_texture_view(
+                    &self.raw,
+                    &hal::TextureViewDescriptor {
+                        label: Some("WR Vulkan mip view"),
+                        swizzle: Default::default(),
+                        format: self.format,
+                        dimension: wgt::TextureViewDimension::D2,
+                        usage,
+                        range: wgt::ImageSubresourceRange {
+                            base_mip_level: base_mip,
+                            mip_level_count: Some(1),
+                            array_layer_count: Some(1),
+                            ..Default::default()
+                        },
+                    },
+                )
+            }
+            .map_err(|error| format!("Creating Vulkan mip view: {error:?}"))?;
+            Ok::<_, String>(Owned::new(
+                owner,
+                raw,
+                hal::vulkan::Device::destroy_texture_view,
+            ))
+        };
+        Ok(Rc::new(Self {
+            view: make_view(if depth {
+                target_usage
+            } else {
+                wgt::TextureUses::RESOURCE
+            })?,
+            target: Some(make_view(target_usage)?),
+            raw: self.raw.clone(),
+            size: wgt::Extent3d {
+                width: (self.size.width >> level).max(1),
+                height: (self.size.height >> level).max(1),
+                depth_or_array_layers: 1,
+            },
+            format: self.format,
+            filter: if self.filter == TextureFilter::Trilinear {
+                TextureFilter::Linear
+            } else {
+                self.filter
+            },
+            base_mip,
+            mip_count: 1,
+            usage: self.usage,
+            states: self.states.clone(),
+        }))
+    }
+
+    fn states(&self) -> &[UsageState<TextureState>] {
+        &self.states[self.base_mip as usize..(self.base_mip + self.mip_count) as usize]
+    }
+
     pub fn current_usage(&self) -> wgt::TextureUses {
-        self.states[0].current().usage
+        self.states()[0].current().usage
     }
 
     pub fn initialized(&self) -> bool {
-        self.states[0].current().initialized
+        self.states()[0].current().initialized
     }
 
     pub fn sample_initialized(&self) -> bool {
-        self.states.iter().all(|state| state.current().initialized)
+        self.states()
+            .iter()
+            .all(|state| state.current().initialized)
     }
 
     pub fn invalidate(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
         let recording = commands.recording_id(&self.raw.owner)?;
-        for state in &self.states {
+        for state in self.states() {
             state.check_recording(&recording)?;
         }
-        for (level, state) in self.states.iter().enumerate() {
+        for (level, state) in self.states().iter().enumerate() {
             let (_, first) = state.prepare(
                 &recording,
                 TextureState {
@@ -212,7 +289,7 @@ impl Texture {
             )?;
             if first {
                 let resource = self.clone();
-                commands.commit(move || resource.states[level].commit());
+                commands.commit(move || resource.states()[level].commit());
             }
         }
         commands.keep(self.clone());
@@ -221,16 +298,16 @@ impl Texture {
 
     pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
         let recording = commands.recording_id(&self.raw.owner)?;
-        let (_, first) = self.states[0].prepare(
+        let (_, first) = self.states()[0].prepare(
             &recording,
             TextureState {
                 initialized: true,
-                ..self.states[0].current()
+                ..self.states()[0].current()
             },
         )?;
         if first {
             let resource = self.clone();
-            commands.commit(move || resource.states[0].commit());
+            commands.commit(move || resource.states()[0].commit());
         }
         commands.keep(self.clone());
         Ok(())
@@ -259,21 +336,21 @@ impl Texture {
         } else {
             1
         };
-        for state in self.states.iter().take(count as usize) {
+        for state in self.states().iter().take(count as usize) {
             state.check_recording(&recording)?;
         }
         commands.keep(self.clone());
         for level in 0..count as usize {
-            let (from, first) = self.states[level].prepare(
+            let (from, first) = self.states()[level].prepare(
                 &recording,
                 TextureState {
                     usage: to,
-                    ..self.states[level].current()
+                    ..self.states()[level].current()
                 },
             )?;
             if first {
                 let resource = self.clone();
-                commands.commit(move || resource.states[level].commit());
+                commands.commit(move || resource.states()[level].commit());
             }
             // Separate render passes need dependencies even without a layout change.
             if from.usage != to
@@ -286,7 +363,7 @@ impl Texture {
                             queue_family_ownership_transfer: None,
                             texture: &**self.raw,
                             range: wgt::ImageSubresourceRange {
-                                base_mip_level: level as u32,
+                                base_mip_level: self.base_mip + level as u32,
                                 mip_level_count: Some(1),
                                 array_layer_count: Some(1),
                                 ..Default::default()
