@@ -5,6 +5,19 @@
 use super::*;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub(super) fn device() -> Rc<Device> {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Options::default()
+        })
+        .unwrap(),
+    );
+    eprintln!("Vulkan adapter: {:?}", device.info());
+    device
+}
 use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
 
 #[derive(Debug)]
@@ -131,6 +144,10 @@ fn buffer_allocation_bounds() {
     assert!(allocation_size(0, 3).is_err());
     assert!(allocation_size(usize::MAX, u64::MAX).is_err());
     assert!(allocation_size(isize::MAX as usize, u64::MAX).is_err());
+}
+
+pub(super) fn upload_queue(device: &Rc<Device>) -> SubmissionQueue {
+    SubmissionQueue::new(&Rc::new(BufferPool::new(device)), 3).unwrap()
 }
 
 pub(super) fn record_upload(
