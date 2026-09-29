@@ -1,0 +1,79 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+---
+task-defaults:
+    attributes:
+        local-toolchain: true
+    description: "WebRender GLSL and SPIR-V host tools"
+    worker-type: b-linux-docker-amd
+    worker:
+        max-run-time: 1800
+    run:
+        script: build-shader-tools.sh
+        toolchain-artifact: public/build/shader-tools.tar.zst
+    fetches:
+        toolchain:
+            - linux64-clang-toolchain
+        fetch:
+            - webrender-glslang
+            - webrender-spirv-tools
+            - webrender-spirv-headers
+
+linux64-shader-tools:
+    treeherder:
+        symbol: TL(shader-tools)
+    run:
+        arguments: ['x86_64-linux-gnu']
+    fetches:
+        toolchain:
+            - sysroot-x86_64-linux-gnu
+
+linux64-aarch64-shader-tools:
+    treeherder:
+        symbol: TLA64(shader-tools)
+    run:
+        arguments: ['aarch64-linux-gnu']
+    fetches:
+        toolchain:
+            - sysroot-aarch64-linux-gnu
+
+win64-shader-tools:
+    treeherder:
+        symbol: TW64(shader-tools)
+    run:
+        arguments: ['x86_64-pc-windows-msvc']
+    fetches:
+        toolchain:
+            - vs-toolchain
+
+win64-aarch64-shader-tools:
+    treeherder:
+        symbol: TWA64(shader-tools)
+    run:
+        arguments: ['aarch64-pc-windows-msvc']
+    fetches:
+        toolchain:
+            - vs-toolchain
+
+macosx64-shader-tools:
+    treeherder:
+        symbol: TM(shader-tools)
+    run:
+        arguments: ['x86_64-apple-darwin']
+        resources:
+            - taskcluster/scripts/misc/macos-setup.sh
+    fetches:
+        toolchain:
+            - macosx64-sdk-toolchain
+
+macosx64-aarch64-shader-tools:
+    treeherder:
+        symbol: TMA64(shader-tools)
+    run:
+        arguments: ['aarch64-apple-darwin']
+        resources:
+            - taskcluster/scripts/misc/macos-setup.sh
+    fetches:
+        toolchain:
+            - macosx64-sdk-toolchain
