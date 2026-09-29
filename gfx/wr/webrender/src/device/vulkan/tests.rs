@@ -339,3 +339,6 @@ mod buffer_pool;
 
 #[path = "copy_tests.rs"]
 mod copy;
+
+#[path = "readback_tests.rs"]
+mod readback;

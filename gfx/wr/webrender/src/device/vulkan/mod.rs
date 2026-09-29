@@ -13,7 +13,7 @@ pub use self::resources::Buffer;
 mod submission;
 pub use self::submission::{Recording, Submission, SubmissionQueue};
 mod textures;
-pub use self::textures::Texture;
+pub use self::textures::{PendingReadback, Texture};
 pub use crate::device::TextureFilter;
 mod state;
 mod buffer_pool;
