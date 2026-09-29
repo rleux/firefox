@@ -64,14 +64,11 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
         .unwrap();
     assert!(shader.textures.is_empty() && shader.storage_buffers.is_empty());
     assert_eq!(shader.inputs.len(), 3);
-    let location = |name| {
-        shader
-            .inputs
-            .iter()
-            .find(|input| input.name == name)
-            .unwrap()
-            .location
-    };
+    let (vertex, instances_layout, instance_stride) = vertex_layouts(
+        &crate::renderer::desc::CLEAR,
+        shader,
+    )
+    .unwrap();
     let quad = Buffer::new(
         &device,
         &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
@@ -177,27 +174,12 @@ fn generated_clear_shader_draws_through_reflected_interfaces() {
                         Some(hal::VertexBufferLayout {
                             array_stride: 4,
                             step_mode: wgt::VertexStepMode::Vertex,
-                            attributes: &[wgt::VertexAttribute {
-                                format: wgt::VertexFormat::Unorm8x2,
-                                offset: 0,
-                                shader_location: location("aPosition"),
-                            }],
+                            attributes: &vertex,
                         }),
                         Some(hal::VertexBufferLayout {
-                            array_stride: 32,
+                            array_stride: instance_stride,
                             step_mode: wgt::VertexStepMode::Instance,
-                            attributes: &[
-                                wgt::VertexAttribute {
-                                    format: wgt::VertexFormat::Float32x4,
-                                    offset: 0,
-                                    shader_location: location("aRect"),
-                                },
-                                wgt::VertexAttribute {
-                                    format: wgt::VertexFormat::Float32x4,
-                                    offset: 16,
-                                    shader_location: location("aColor"),
-                                },
-                            ],
+                            attributes: &instances_layout,
                         }),
                     ],
                     vertex_stage: stage(&*vs),

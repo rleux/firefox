@@ -13,6 +13,9 @@ pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 }
 
+mod shader;
+mod vertex_layout;
+pub use self::vertex_layout::vertex_layouts;
 mod samplers;
 pub use self::samplers::Samplers;
 mod resources;
