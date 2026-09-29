@@ -40,6 +40,7 @@ impl TexturePool {
         }
         if let Some(texture) = self.textures.iter().find(|texture| {
             Rc::strong_count(texture) == 1
+                && Rc::strong_count(&texture.raw) == 1
                 && texture.size().width == width
                 && texture.size().height == height
                 && texture.format() == format
