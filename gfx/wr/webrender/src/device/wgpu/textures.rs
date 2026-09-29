@@ -15,6 +15,9 @@ mod access;
 mod upload;
 #[path = "texture_to_texture_copy.rs"]
 mod texture_to_texture_copy;
+#[path = "texture_readback.rs"]
+mod readback;
+pub use self::readback::PendingReadback;
 
 #[derive(Clone, Copy)]
 struct TextureState {
