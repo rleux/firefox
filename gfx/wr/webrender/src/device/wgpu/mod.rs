@@ -15,7 +15,7 @@ mod resources;
 mod native;
 pub use self::resources::Buffer;
 mod submission;
-pub use self::submission::{Recording, Submission};
+pub use self::submission::{Recording, Submission, SubmissionQueue};
 mod textures;
 pub use self::textures::Texture;
 pub use crate::device::TextureFilter;

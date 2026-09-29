@@ -131,6 +131,10 @@ fn buffer_allocation_bounds() {
     assert!(allocation_size(isize::MAX as usize, u64::MAX).is_err());
 }
 
+pub(super) fn upload_queue(device: &Rc<Device>) -> SubmissionQueue {
+    SubmissionQueue::new(&Rc::new(BufferPool::new(device)), 3).unwrap()
+}
+
 pub(super) fn record_upload(
     device: &Rc<Device>,
     source: &Rc<Buffer>,
