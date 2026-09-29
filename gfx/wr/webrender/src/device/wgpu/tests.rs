@@ -378,3 +378,6 @@ mod readback;
 
 #[path = "texture_pool_tests.rs"]
 mod texture_pool;
+
+#[path = "mip_view_tests.rs"]
+mod mip_view;
