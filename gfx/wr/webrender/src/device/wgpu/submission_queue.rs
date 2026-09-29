@@ -8,6 +8,10 @@ use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+#[path = "instance_buffers.rs"]
+mod instances;
+pub use self::instances::InstanceBuffers;
+
 struct QueueState {
     active: Option<Submission>,
     pending: VecDeque<Submission>,
