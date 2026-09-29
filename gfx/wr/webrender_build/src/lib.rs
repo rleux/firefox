@@ -14,6 +14,8 @@ extern crate lazy_static;
 #[macro_use]
 extern crate serde;
 
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
 pub mod shader;
 pub mod shader_features;
 
