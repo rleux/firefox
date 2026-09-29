@@ -1,0 +1,17 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 0, binding = 0) uniform texture2D image;
+layout(set = 0, binding = 1) uniform sampler image_sampler;
+layout(set = 0, binding = 2, std430) writeonly buffer Results {
+    vec4 pixels[4];
+};
+void main() {
+    pixels[0] = textureLod(sampler2D(image, image_sampler), vec2(0.625), 0.0);
+    pixels[1] = textureLod(sampler2D(image, image_sampler), vec2(-1.0, 2.0), 0.0);
+    pixels[2] = textureLod(sampler2D(image, image_sampler), vec2(0.625), 1.0);
+    pixels[3] = textureLod(sampler2D(image, image_sampler), vec2(0.625), 0.5);
+}
