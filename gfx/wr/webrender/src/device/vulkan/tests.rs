@@ -33,7 +33,7 @@ fn adapter_filter_requires_one_match() {
     }
 }
 
-static ERRORS: AtomicUsize = AtomicUsize::new(0);
+pub(super) static ERRORS: AtomicUsize = AtomicUsize::new(0);
 struct TestLogger;
 
 impl log::Log for TestLogger {
@@ -51,7 +51,7 @@ impl log::Log for TestLogger {
     fn flush(&self) {}
 }
 
-fn validation_logging() {
+pub(super) fn validation_logging() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         log::set_logger(&TestLogger).unwrap();
@@ -98,6 +98,10 @@ fn buffer_allocation_bounds() {
     assert!(allocation_size(0, 3).is_err());
     assert!(allocation_size(usize::MAX, u64::MAX).is_err());
     assert!(allocation_size(isize::MAX as usize, u64::MAX).is_err());
+}
+
+pub(super) fn upload_queue(device: &Rc<Device>) -> SubmissionQueue {
+    SubmissionQueue::new(&Rc::new(BufferPool::new(device)), 3).unwrap()
 }
 
 fn record_upload(
@@ -149,7 +153,7 @@ fn record_upload(
     }
 }
 
-fn map_upload(device: &Device, target: &hal::vulkan::Buffer, size: u64) -> Vec<u8> {
+pub(super) fn map_upload(device: &Device, target: &hal::vulkan::Buffer, size: u64) -> Vec<u8> {
     unsafe {
         let raw = device.raw_device();
         let mapping = raw.map_buffer(target, 0..size).unwrap();

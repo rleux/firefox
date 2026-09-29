@@ -5,15 +5,22 @@
 use super::resources::Owned;
 use super::{hal, Device};
 use std::any::Any;
+use std::cell::RefMut;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::time::Duration;
 use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
+
+#[path = "submission_queue.rs"]
+mod queue;
+pub use self::queue::SubmissionQueue;
 
 pub struct Submission {
     owner: Rc<Device>,
     encoder: Option<hal::vulkan::CommandEncoder>,
     buffer: Option<hal::vulkan::CommandBuffer>,
-    fence: Owned<hal::vulkan::Fence>,
+    fence: Rc<Owned<hal::vulkan::Fence>>,
+    fence_value: u64,
     recording: bool,
     attempted: bool,
     submitted: bool,
@@ -25,7 +32,32 @@ pub struct Submission {
 
 /// Exclusive access to an open submission; releasing this borrow does not submit it.
 pub struct Recording<'a> {
-    submission: &'a mut Submission,
+    submission: SubmissionBorrow<'a>,
+}
+
+enum SubmissionBorrow<'a> {
+    Direct(&'a mut Submission),
+    Queued(RefMut<'a, Submission>),
+}
+
+impl Deref for SubmissionBorrow<'_> {
+    type Target = Submission;
+
+    fn deref(&self) -> &Submission {
+        match self {
+            Self::Direct(submission) => submission,
+            Self::Queued(submission) => submission,
+        }
+    }
+}
+
+impl DerefMut for SubmissionBorrow<'_> {
+    fn deref_mut(&mut self) -> &mut Submission {
+        match self {
+            Self::Direct(submission) => submission,
+            Self::Queued(submission) => submission,
+        }
+    }
 }
 
 impl Recording<'_> {
@@ -56,11 +88,24 @@ impl Submission {
         }
         let fence = unsafe { owner.open.device.create_fence() }
             .map_err(|error| format!("Creating submission fence: {error:?}"))?;
+        Self::with_fence(
+            owner,
+            Rc::new(Owned::new(owner, fence, hal::vulkan::Device::destroy_fence)),
+            1,
+        )
+    }
+
+    fn with_fence(
+        owner: &Rc<Device>,
+        fence: Rc<Owned<hal::vulkan::Fence>>,
+        fence_value: u64,
+    ) -> Result<Self, String> {
         let mut submission = Self {
             owner: owner.clone(),
             encoder: None,
             buffer: None,
-            fence: Owned::new(owner, fence, hal::vulkan::Device::destroy_fence),
+            fence,
+            fence_value,
             recording: false,
             attempted: false,
             submitted: false,
@@ -91,11 +136,32 @@ impl Submission {
         Ok(submission)
     }
 
+    fn restart(&mut self, fence_value: u64) -> Result<(), String> {
+        assert!(self.complete && self.buffer.is_none());
+        unsafe {
+            self.encoder
+                .as_mut()
+                .unwrap()
+                .begin_encoding(Some("WR Vulkan submission"))
+        }
+        .map_err(|error| {
+            self.owner.lost.set(true);
+            format!("Reusing submission encoder: {error:?}")
+        })?;
+        self.fence_value = fence_value;
+        self.recording = true;
+        self.attempted = false;
+        self.submitted = false;
+        self.complete = false;
+        self.recording_id = Some(Rc::new(()));
+        Ok(())
+    }
+
     pub fn recording(&mut self) -> Result<Recording<'_>, String> {
         if !self.recording || self.attempted || self.owner.is_lost() {
             return Err("Submission is no longer recording".into());
         }
-        Ok(Recording { submission: self })
+        Ok(Recording { submission: SubmissionBorrow::Direct(self) })
     }
 
     pub fn submit(&mut self) -> Result<(), String> {
@@ -121,7 +187,11 @@ impl Submission {
             self.owner
                 .open
                 .queue
-                .submit(&[self.buffer.as_ref().unwrap()], &[], (&self.fence, 1))
+                .submit(
+                    &[self.buffer.as_ref().unwrap()],
+                    &[],
+                    (&self.fence, self.fence_value),
+                )
                 .map_err(|error| {
                     self.owner.lost.set(true);
                     format!("Submitting commands: {error:?}")
@@ -151,7 +221,7 @@ impl Submission {
         if !self.complete {
             let completed = unsafe { self.owner.open.device.get_fence_value(&self.fence) }
                 .map_err(|error| format!("Polling submission: {error:?}"))?;
-            if completed >= 1 {
+            if completed >= self.fence_value {
                 self.retire();
             }
         }
@@ -163,8 +233,13 @@ impl Submission {
             return Err("Cannot wait for an unsubmitted recording".into());
         }
         if !self.complete {
-            let completed = unsafe { self.owner.open.device.wait(&self.fence, 1, timeout) }
-                .map_err(|error| format!("Waiting for submission: {error:?}"))?;
+            let completed = unsafe {
+                self.owner
+                    .open
+                    .device
+                    .wait(&self.fence, self.fence_value, timeout)
+            }
+            .map_err(|error| format!("Waiting for submission: {error:?}"))?;
             if completed {
                 self.retire();
             }
