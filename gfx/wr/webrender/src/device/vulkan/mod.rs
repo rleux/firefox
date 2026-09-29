@@ -13,7 +13,7 @@ pub use self::samplers::Samplers;
 mod resources;
 pub use self::resources::Buffer;
 mod submission;
-pub use self::submission::{Recording, Submission, SubmissionQueue};
+pub use self::submission::{Recording, InstanceBuffers, Submission, SubmissionQueue};
 mod texture_pool;
 pub use self::texture_pool::TexturePool;
 mod textures;

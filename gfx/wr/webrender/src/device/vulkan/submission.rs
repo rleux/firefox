@@ -13,7 +13,7 @@ use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
 
 #[path = "submission_queue.rs"]
 mod queue;
-pub use self::queue::SubmissionQueue;
+pub use self::queue::{InstanceBuffers, SubmissionQueue};
 
 pub struct Submission {
     owner: Rc<Device>,
