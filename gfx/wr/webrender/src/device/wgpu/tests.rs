@@ -382,3 +382,6 @@ mod upload;
 
 #[path = "buffer_pool_tests.rs"]
 mod buffer_pool;
+
+#[path = "copy_tests.rs"]
+mod copy;

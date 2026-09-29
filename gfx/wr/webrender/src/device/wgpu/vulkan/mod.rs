@@ -2,6 +2,27 @@ use super::*;
 use std::ffi::CStr;
 use wgpu_hal::{Adapter as _, Instance as _};
 impl Device {
+    pub(super) unsafe fn clear_color_copy_destination(
+        &self,
+        encoder: &mut dyn hal::DynCommandEncoder,
+        texture: &dyn hal::DynTexture,
+        mip_level: u32,
+    ) {
+        self.raw_device().raw_device().cmd_clear_color_image(
+            encoder.as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
+            texture.as_any().downcast_ref::<hal::vulkan::Texture>().unwrap().raw_handle(),
+            ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &ash::vk::ClearColorValue { uint32: [0; 4] },
+            &[ash::vk::ImageSubresourceRange {
+                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                base_mip_level: mip_level,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            }],
+        );
+    }
+
     pub fn new(options: &Options) -> Result<Self, String> {
         if let Some(name) = &options.adapter_name {
             if name.trim().is_empty() {

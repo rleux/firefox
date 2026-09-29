@@ -13,6 +13,8 @@ mod access;
 
 #[path = "texture_upload.rs"]
 mod upload;
+#[path = "texture_to_texture_copy.rs"]
+mod texture_to_texture_copy;
 
 #[derive(Clone, Copy)]
 struct TextureState {
