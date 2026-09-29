@@ -382,3 +382,6 @@ mod mip_view;
 
 #[path = "sampler_tests.rs"]
 mod sampler;
+
+#[path = "shader_tests.rs"]
+mod shader;
