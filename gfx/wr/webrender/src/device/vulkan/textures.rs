@@ -197,6 +197,28 @@ impl Texture {
         self.states.iter().all(|state| state.current().initialized)
     }
 
+    pub fn invalidate(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        let recording = commands.recording_id(&self.raw.owner)?;
+        for state in &self.states {
+            state.check_recording(&recording)?;
+        }
+        for (level, state) in self.states.iter().enumerate() {
+            let (_, first) = state.prepare(
+                &recording,
+                TextureState {
+                    initialized: false,
+                    ..state.current()
+                },
+            )?;
+            if first {
+                let resource = self.clone();
+                commands.commit(move || resource.states[level].commit());
+            }
+        }
+        commands.keep(self.clone());
+        Ok(())
+    }
+
     pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
         let recording = commands.recording_id(&self.raw.owner)?;
         let (_, first) = self.states[0].prepare(
