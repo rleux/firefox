@@ -8,6 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "glslang")]
+#[path = "glslang.rs"]
+mod glslang;
+
 #[derive(Clone, Copy)]
 pub struct Compiler {
     name: &'static str,
@@ -20,7 +24,10 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn available() -> &'static [Self] {
-        &[]
+        &[
+            #[cfg(feature = "glslang")]
+            glslang::COMPILER,
+        ]
     }
 
     pub fn from_name(name: &str) -> io::Result<Self> {

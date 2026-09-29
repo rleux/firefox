@@ -49,3 +49,8 @@ pub(super) struct Reflection {
     pub samplers: Vec<u32>,
     pub projection: bool,
 }
+
+#[cfg(feature = "glslang")]
+mod glslang;
+#[cfg(feature = "glslang")]
+pub(super) use glslang::reflect;

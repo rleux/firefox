@@ -6,7 +6,8 @@ license = "MPL-2.0"
 description = "Host-side Vulkan shader compilation for WebRender"
 
 [features]
-default = []
+default = ["glslang"]
+glslang = []
 
 [dependencies]
 webrender_build = { path = "../webrender_build", features = ["vulkan"] }
