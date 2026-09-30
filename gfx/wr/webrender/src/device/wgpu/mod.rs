@@ -13,6 +13,7 @@ pub mod shaders {
 mod bindings;
 mod binding_cache;
 mod draw;
+mod texture_blit;
 mod pipeline;
 mod shader;
 mod vertex_layout;
