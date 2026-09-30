@@ -361,3 +361,6 @@ mod shader;
 #[cfg(wr_vulkan_shaders)]
 #[path = "pipeline_tests.rs"]
 mod pipeline;
+
+#[cfg(wr_vulkan_shaders)]
+pub(super) use self::shader::draw_scaled_texture;

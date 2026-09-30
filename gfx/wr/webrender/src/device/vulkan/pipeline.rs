@@ -12,6 +12,7 @@ use wgpu_hal::{Adapter as _, Device as _};
 
 /// Bind groups must retain the pipeline that owns their allocation layout.
 pub(super) struct DrawPipeline {
+    pub shader: &'static ShaderArtifact,
     pub raw: Owned<hal::vulkan::RenderPipeline>,
     pub layout: Owned<hal::vulkan::PipelineLayout>,
     pub bindings: Owned<hal::vulkan::BindGroupLayout>,
@@ -20,7 +21,7 @@ pub(super) struct DrawPipeline {
 impl DrawPipeline {
     pub fn new(
         owner: &Rc<Device>,
-        shader: &ShaderArtifact,
+        shader: &'static ShaderArtifact,
         format: wgt::TextureFormat,
         has_depth: bool,
         state: RenderState,
@@ -119,6 +120,7 @@ impl DrawPipeline {
             )
         })?;
         Ok(Rc::new(Self {
+            shader,
             raw: Owned::new(owner, raw, hal::vulkan::Device::destroy_render_pipeline),
             layout,
             bindings,

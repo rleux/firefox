@@ -13,6 +13,7 @@ pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
 }
 
+mod bindings;
 mod pipeline;
 mod shader;
 mod vertex_layout;
