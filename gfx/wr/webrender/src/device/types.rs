@@ -667,6 +667,7 @@ pub enum VertexUsageHint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum GraphicsApi {
     OpenGL,
+    Vulkan,
 }
 
 /// How a draw is blended with the contents of the bound draw target.
