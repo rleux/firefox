@@ -235,107 +235,45 @@ fn draw_quads(
         Some((texture, samplers)) => (vec![(texture, TextureFilter::Linear)], Some(samplers)),
         None => (Vec::new(), None),
     };
-    unsafe {
-        let group = DrawBindings::new(
-            &pipelines[0],
-            Some(transform),
-            textures,
-            Vec::new(),
-            samplers,
-        )
-        .unwrap();
-        let mut commands_submission = Submission::new(device).unwrap();
-        let mut commands = commands_submission.recording().unwrap();
-        quad.transition(&mut commands, wgt::BufferUses::VERTEX)
-            .unwrap();
-        instances
-            .transition(&mut commands, wgt::BufferUses::VERTEX)
-            .unwrap();
-        group.prepare(&mut commands).unwrap();
-        target
-            .transition(&mut commands, wgt::TextureUses::COLOR_TARGET)
-            .unwrap();
-        if let Some(depth) = &depth {
-            depth
-                .transition(&mut commands, wgt::TextureUses::DEPTH_WRITE)
-                .unwrap();
-        }
-        let encoder = commands.encoder();
-        encoder
-            .begin_render_pass(&hal::RenderPassDescriptor {
-                label: Some("WR generated clear"),
-                extent: target.size(),
-                sample_count: 1,
-                color_attachments: &[Some(hal::ColorAttachment {
-                    target: hal::Attachment {
-                        view: target.target_view().unwrap(),
-                        usage: wgt::TextureUses::COLOR_TARGET,
-                    },
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
-                    clear_value: wgt::Color::BLUE,
-                })],
-                depth_stencil_attachment: depth.as_ref().map(|depth| hal::DepthStencilAttachment {
-                    depth_read_only: false,
-                    stencil_read_only: true,
-                    target: hal::Attachment {
-                        view: depth.target_view().unwrap(),
-                        usage: wgt::TextureUses::DEPTH_WRITE,
-                    },
-                    depth_ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
-                    stencil_ops: hal::AttachmentOps::LOAD_DONT_CARE
-                        | hal::AttachmentOps::STORE_DISCARD,
-                    clear_value: (depth_clear.unwrap(), 0),
-                }),
-                multiview_mask: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            })
-            .unwrap();
-        encoder.set_viewport(
-            &hal::Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 2.0,
-                h: 2.0,
-            },
-            // ps_clear writes the far depth; use an interior depth for comparisons.
-            0.0..0.5,
-        );
-        encoder.set_scissor_rect(&hal::Rect {
-            x: 0,
-            y: 0,
-            w: 2,
-            h: 2,
-        });
-        encoder.set_vertex_buffer(0, quad.binding());
-        for (index, pipeline) in pipelines.iter().enumerate() {
-            encoder.set_render_pipeline(&*pipeline.raw);
-            encoder.set_bind_group(&*pipeline.layouts.layout, 0, &*group.resources.raw, group.projection_offset.as_slice());
-            encoder.set_vertex_buffer(
-                1,
-                instances
-                    .vertex_binding(index as u64 * instance_stride, instance_stride)
-                    .unwrap(),
-            );
-            encoder.draw(0, 4, 0, 1);
-        }
-        encoder.end_render_pass();
-        target.initialize(&mut commands).unwrap();
-        if let Some(depth) = &depth {
-            depth.initialize(&mut commands).unwrap();
-        }
-        drop(group);
-        for pipeline in pipelines {
-            commands.keep(&pipeline);
-        }
-        assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_some()));
-        drop(commands);
-        commands_submission.submit().unwrap();
-        commands_submission.wait(None).unwrap();
-        assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_none()));
+    let recorded_draws: Vec<_> = pipelines
+        .iter()
+        .enumerate()
+        .map(|(index, pipeline)| super::super::draw::Draw {
+            bindings: DrawBindings::new(
+                pipeline,
+                Some(transform.clone()),
+                textures.clone(),
+                Vec::new(),
+                samplers.clone(),
+            )
+            .unwrap(),
+            instances: instances.clone(),
+            instance_offset: index as u64 * instance_stride,
+            instance_count: 1,
+            scissor: DeviceIntRect::from_size(DeviceIntSize::new(2, 2)),
+        })
+        .collect();
+    let mut submission = Submission::new(device).unwrap();
+    let mut commands = submission.recording().unwrap();
+    super::super::draw::DrawPass {
+            origin: api::units::DeviceIntPoint::zero(),
+            viewport: None,
+        target: &target,
+        depth: depth.as_ref(),
+        clear_color: Some(wgt::Color::BLUE),
+        clear_depth: depth_clear,
+        // ps_clear writes the far depth; use an interior depth for comparisons.
+        depth_range: 0.0..0.5,
     }
+    .record(&mut commands, &quad, &recorded_draws)
+    .unwrap();
+    drop(recorded_draws);
+    drop(pipelines);
+    assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_some()));
+    drop(commands);
+    submission.submit().unwrap();
+    submission.wait(None).unwrap();
+    assert!(pending.iter().all(|pipeline| pipeline.upgrade().is_none()));
     target
         .readback(DeviceIntRect::from_size(DeviceIntSize::new(2, 2)))
         .unwrap()

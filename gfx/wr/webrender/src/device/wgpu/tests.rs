@@ -15,6 +15,11 @@ pub(super) enum Command {
     SubmissionIdleWait,
     TextureBarrier(wgt::TextureUses, wgt::TextureUses),
     BindGroup,
+    PrepareSampledView,
+    DrawInvariant,
+    DrawPipeline,
+    DrawScissor,
+    DrawInstances,
 }
 
 #[test]
