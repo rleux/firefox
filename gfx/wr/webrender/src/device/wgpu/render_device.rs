@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::program_store::ProgramStore;
+use super::renderer_properties::RendererProperties;
 use super::render_pass::RenderPassState;
 use super::texture_store::TextureStore;
 use super::texture_blit::{TextureBlit, TextureBlitter};
@@ -22,6 +23,7 @@ use std::convert::TryFrom;
 use std::rc::Rc;
 
 pub(super) struct RenderDevice {
+    pub properties: RendererProperties,
     pub programs: ProgramStore,
     pub textures: TextureStore,
     pub vertex_arrays: VertexArrayStore,
@@ -64,6 +66,7 @@ impl RenderDevice {
             None,
         )?;
         Ok(Self {
+            properties: RendererProperties::new(owner),
             programs: ProgramStore::default(),
             textures: TextureStore::new(owner),
             vertex_arrays: VertexArrayStore::new(&pool),

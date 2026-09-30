@@ -26,6 +26,7 @@ mod vertex_array;
 mod upload_buffers;
 pub use self::vertex_layout::vertex_layouts;
 mod samplers;
+mod renderer_properties;
 pub use self::samplers::Samplers;
 mod resources;
 #[path = "vulkan/mod.rs"]
@@ -57,6 +58,7 @@ pub struct Device {
     shader_module: fn(&dyn hal::DynDevice, &str, &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String>,
     prepared_shaders: std::cell::RefCell<crate::internal_types::FastHashMap<*const webrender_build::vulkan::ShaderArtifact, std::rc::Weak<shader::PreparedShader>>>,
     shader_layouts: std::cell::RefCell<crate::internal_types::FastHashMap<Vec<wgt::BindGroupLayoutEntry>, std::rc::Weak<shader::ShaderLayouts>>>,
+    graphics_api: crate::device::GraphicsApi,
     flip_y: bool,
     depth_zero_to_one: bool,
     info: wgt::AdapterInfo,
