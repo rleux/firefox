@@ -15,6 +15,8 @@ pub mod shaders {
 
 mod bindings;
 mod draw;
+#[cfg(wr_vulkan_shaders)]
+mod texture_blit;
 mod pipeline;
 mod shader;
 mod vertex_layout;
