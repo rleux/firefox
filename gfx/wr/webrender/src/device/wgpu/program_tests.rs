@@ -136,20 +136,20 @@ fn resolved_programs_preserve_uniforms_and_textures_for_queued_draws() {
     let left = program.resolve(&pipeline, &pass, |slot| {
         resolved_slots.push(slot);
         slots.get(slot).cloned()
-    }).unwrap();
+    }, None).unwrap();
     assert_eq!(resolved_slots, [1]);
     assert!(!left.textures.spilled() && !left.buffers.spilled());
     assert_eq!(left.textures[0].1, TextureFilter::Linear);
     program.bind_samplers(&[("sColor0", TextureSlot(2))]);
     transform.m41 = 0.0;
     program.set_transform(&transform);
-    let right = program.resolve(&pipeline, &pass, |slot| slots.get(slot).cloned()).unwrap();
+    let right = program.resolve(&pipeline, &pass, |slot| slots.get(slot).cloned(), None).unwrap();
     let weak_left = Rc::downgrade(&left.textures[0].0);
     let weak_right = Rc::downgrade(&right.textures[0].0);
     slots.clear();
     program.set_transform(&Transform3D::identity());
     program.bind_samplers(&[("sColor0", TextureSlot(usize::MAX))]);
-    let error = program.resolve(&pipeline, &pass, |slot| slots.get(slot).cloned()).err().unwrap();
+    let error = program.resolve(&pipeline, &pass, |slot| slots.get(slot).cloned(), None).err().unwrap();
     assert!(error.contains("sColor0") && error.contains("slot"));
     let other = select_draw_shader(
         "cs_scale",
@@ -159,7 +159,7 @@ fn resolved_programs_preserve_uniforms_and_textures_for_queued_draws() {
     .unwrap();
     let other = create_pipeline(&device, other);
     assert!(program
-        .resolve(&other, &pass, |slot| slots.get(slot).cloned())
+        .resolve(&other, &pass, |slot| slots.get(slot).cloned(), None)
         .err()
         .unwrap()
         .contains("variant"));

@@ -3,8 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::textures::texture_format;
-use super::{wgt, Device, Texture, TextureFilter};
-use crate::device::{GpuFrameId, Texture as TextureHandle, TextureFlags, TextureId};
+use super::program::ShaderResource;
+use super::{wgt, Device, Recording, Texture, TextureFilter};
+use crate::device::{GpuFrameId, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot};
 use crate::internal_types::RenderTargetInfo;
 use api::{ImageBufferKind, ImageFormat, units::DeviceIntSize};
 use std::cell::Cell;
@@ -25,6 +26,7 @@ pub(super) struct TextureStore {
     frame: GpuFrameId,
     created: u32,
     deleted: u32,
+    bound: [Option<u32>; 16],
 }
 
 impl TextureStore {
@@ -36,10 +38,12 @@ impl TextureStore {
             frame: GpuFrameId::new(0),
             created: 0,
             deleted: 0,
+            bound: [None; 16],
         }
     }
 
     pub fn begin_frame(&mut self, frame: GpuFrameId) {
+        self.reset_bindings();
         self.frame = frame;
         self.created = 0;
         self.deleted = 0;
@@ -129,6 +133,63 @@ impl TextureStore {
         Ok(self.entry(handle)?.color.clone())
     }
 
+    pub fn bind(&mut self, slot: TextureSlot, handle: &TextureHandle) -> Result<(), String> {
+        self.entry(handle)?;
+        let binding = self
+            .bound
+            .get_mut(slot.0)
+            .ok_or("Invalid Vulkan texture slot")?;
+        *binding = Some(handle.id);
+        Ok(())
+    }
+
+    pub fn reset_bindings(&mut self) {
+        self.bound.fill(None);
+    }
+
+    pub fn clear_color_bindings(&mut self) {
+        self.bound[..3].fill(None);
+    }
+
+    fn unbind_texture(&mut self, id: u32) {
+        for slot in &mut self.bound {
+            if *slot == Some(id) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub fn binding(&self, slot: usize) -> Option<Option<ShaderResource>> {
+        self.bound.get(slot).map(|id| {
+            id.map(|id| ShaderResource::Texture {
+                texture: self.entries[&id].color.clone(),
+                filter: None,
+            })
+        })
+    }
+
+    #[cfg(test)]
+    pub fn bindings(&self) -> [Option<ShaderResource>; 16] {
+        std::array::from_fn(|slot| self.binding(slot).unwrap())
+    }
+
+    pub fn invalidate_render_target(
+        &mut self,
+        handle: &TextureHandle,
+        commands: &mut Recording<'_>,
+    ) -> Result<(), String> {
+        let entry = self.entry(handle)?;
+        if !entry.renderable {
+            return Ok(());
+        }
+        entry.color.invalidate(commands)?;
+        if let Some(depth) = &entry.depth {
+            depth.invalidate(commands)?;
+        }
+        self.unbind_texture(handle.id);
+        Ok(())
+    }
+
     pub fn render_target(
         &self,
         id: TextureId,
@@ -188,6 +249,7 @@ impl TextureStore {
             return Ok(());
         }
         self.entry(handle)?;
+        self.unbind_texture(handle.id);
         self.entries.remove(&handle.id);
         handle.id = 0;
         handle.render_target = None;
