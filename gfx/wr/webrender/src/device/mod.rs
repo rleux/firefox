@@ -181,7 +181,7 @@ pub trait GpuBackend {
         render_target: Option<RenderTargetInfo>,
     ) -> Texture;
 
-    /// Copies the specified subregion from src_texture to dest_texture.
+    /// Copies the specified subregion at mip level zero without regenerating mipmaps.
     fn copy_texture_sub_region(
         &mut self,
         src_texture: &Texture,
@@ -207,7 +207,8 @@ pub trait GpuBackend {
         rt_info: RenderTargetInfo,
     );
 
-    /// Perform a blit between src_target and dest_target.
+    /// Blits between targets. Texture targets use mip level zero, and destination
+    /// mipmaps are not regenerated.
     /// This will overwrite self.bound_read_fbo and self.bound_draw_fbo.
     fn blit_render_target(
         &mut self,
