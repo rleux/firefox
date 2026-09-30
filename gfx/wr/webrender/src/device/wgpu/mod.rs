@@ -30,6 +30,7 @@ pub use self::resources::Buffer;
 mod submission;
 pub use self::submission::{Recording, InstanceBuffers, Submission, SubmissionQueue};
 mod texture_pool;
+mod texture_store;
 pub use self::texture_pool::TexturePool;
 mod textures;
 pub use self::textures::{PendingReadback, Texture};
