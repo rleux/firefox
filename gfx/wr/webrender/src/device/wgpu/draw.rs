@@ -4,14 +4,26 @@
 
 use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
-use super::{hal, wgt, Buffer, Device, Recording, Texture, TextureFilter};
+use super::{hal, wgt, Buffer, Device, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use euclid::default::Transform3D;
 use crate::internal_types::FastHashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-
+#[cfg(test)]
+pub(super) fn upload_projection(
+    commands: &mut Recording<'_>,
+    uploads: &SubmissionQueue,
+    matrix: &[f32; 16],
+) -> Result<Rc<Buffer>, String> {
+    uploads.upload_in_recording(commands, 64, wgt::BufferUses::UNIFORM, |bytes| {
+        for (destination, value) in bytes.chunks_exact_mut(4).zip(matrix) {
+            destination.copy_from_slice(&value.to_ne_bytes());
+        }
+        Ok(())
+    })
+}
 
 #[derive(Clone)]
 pub(super) struct Draw {
@@ -30,7 +42,17 @@ enum PreparedCommand<'a> {
     Draw(&'a Draw, DeviceIntRect, hal::BufferBinding<'a, dyn hal::DynBuffer, wgt::BufferAddress>),
 }
 
-
+/// Resource slices follow the pipeline's reflected binding order.
+pub(super) struct DrawBatch<'a> {
+    pub pipeline: &'a Rc<DrawPipeline>,
+    /// Column-major transform producing Vulkan clip coordinates.
+    pub projection: Option<&'a [f32; 16]>,
+    pub textures: &'a [(Rc<Texture>, TextureFilter)],
+    pub buffers: &'a [Rc<Buffer>],
+    pub instances: &'a [u8],
+    pub instance_count: u32,
+    pub scissor: DeviceIntRect,
+}
 
 pub(super) trait ColorAttachment {
     fn owner(&self) -> &Rc<Device>;
@@ -135,7 +157,64 @@ impl<'a, T: ColorAttachment> DrawPass<'a, T> {
         Ok(DeviceIntRect::new(self.origin, DeviceIntPoint::new(x, y)))
     }
 
-
+    pub fn record_batches(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        quad: &Rc<Buffer>,
+        samplers: Option<&Rc<Samplers>>,
+        batches: &[DrawBatch<'_>],
+    ) -> Result<(), String> {
+        let owner = self.target.owner();
+        let validated = self.validate(commands)?;
+        let full = validated.bounds;
+        let active = batches
+            .iter()
+            .filter(|batch| {
+                batch.instance_count != 0 && batch.scissor.intersection(&full).is_some()
+            });
+        for batch in active.clone() {
+            if !Rc::ptr_eq(&batch.pipeline.raw.owner, owner)
+                || batch.pipeline.format != self.target.format()
+                || batch.pipeline.has_depth != self.depth.is_some()
+            {
+                return Err("Draw batch pipeline does not match the render pass".into());
+            }
+            let bytes = batch
+                .pipeline
+                .instance_stride
+                .checked_mul(u64::from(batch.instance_count))
+                .ok_or("Draw batch instance size overflow")?;
+            if bytes != batch.instances.len() as u64 {
+                return Err("Draw batch data does not match the instance count and stride".into());
+            }
+            if batch.pipeline.shader.projection_stages != 0 && batch.projection.is_none() {
+                return Err("Missing draw batch projection".into());
+            }
+        }
+        let mut write_batches = active.clone();
+        let instances = uploads.upload_instances_iter(commands,
+            active.clone().map(|batch| batch.instances.len()), |_, destination| {
+                destination.copy_from_slice(write_batches.next().unwrap().instances);
+                Ok(())
+            })?;
+        commands.with_binding_cache(|commands, bindings| {
+            let mut operations = Vec::new();
+            for (index, batch) in active.enumerate() {
+                let bindings = bindings.resolve(commands, uploads, batch.pipeline, batch.projection,
+                    batch.textures, batch.buffers, samplers)?;
+                let (buffer, range) = instances.buffer_range(index)?;
+                operations.push(PassCommand::Draw(Draw {
+                    bindings,
+                    instances: buffer.clone(),
+                    instance_offset: range.start,
+                    instance_count: batch.instance_count,
+                    scissor: batch.scissor,
+                }));
+            }
+            validated.record_commands(commands, quad, &operations, None)
+        })
+    }
 
     #[cfg(test)]
     pub fn record(

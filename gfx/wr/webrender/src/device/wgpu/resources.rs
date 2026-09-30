@@ -5,6 +5,7 @@
 use super::{hal, wgt, Device, Recording};
 use super::state::UsageState;
 use std::ops::Deref;
+use std::cell::Cell;
 use std::rc::Rc;
 
 pub(super) struct Owned<T: ?Sized> {
@@ -45,6 +46,7 @@ pub struct Buffer {
     pub(super) usage: wgt::BufferUses,
     mapping: hal::BufferMapping,
     used_size: wgt::BufferSize,
+    dirty_end: Cell<u64>,
     state: UsageState<wgt::BufferUses>,
 }
 
@@ -97,6 +99,7 @@ impl Buffer {
             usage: usage | wgt::BufferUses::MAP_WRITE,
             mapping,
             used_size: wgt::BufferSize::new((length as u64).max(4)).unwrap(),
+            dirty_end: Cell::new(0),
             state: UsageState::new(wgt::BufferUses::MAP_WRITE),
         };
         unsafe {
@@ -126,8 +129,9 @@ impl Buffer {
             unsafe { std::ptr::write_bytes(mapping.ptr.as_ptr().add(length), 0, 4 - length) };
         }
         if !mapping.is_coherent {
-            unsafe { device.flush_mapped_ranges(&*self.raw, &[0..self.size]) }
+            unsafe { device.flush_mapped_ranges(&*self.raw, &[0..(length as u64).max(4)]) }
         }
+        self.dirty_end.set(0);
         self.used_size = wgt::BufferSize::new((length as u64).max(4)).unwrap();
         self.state.reset(wgt::BufferUses::MAP_WRITE);
         Ok(())
@@ -135,6 +139,34 @@ impl Buffer {
 
     pub fn current_usage(&self) -> wgt::BufferUses {
         self.state.current()
+    }
+
+    /// The range must be unused and its recording must not have been submitted.
+    pub(super) unsafe fn write_unsubmitted_range(&self, offset: u64, bytes: &[u8]) -> Result<(), String> {
+        if offset.checked_add(bytes.len() as u64).map_or(true, |end| end > self.size) {
+            return Err("Uniform upload exceeds its buffer".into());
+        }
+        let mapping = &self.mapping;
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapping.ptr.as_ptr().add(offset as usize), bytes.len());
+            if !mapping.is_coherent {
+                self.dirty_end.set(self.dirty_end.get().max(offset + bytes.len() as u64));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn needs_uniform_flush(&self) -> bool {
+        !self.mapping.is_coherent
+    }
+
+    pub(super) fn flush_uniform_writes(&self) {
+        let end = self.dirty_end.replace(0);
+        if end != 0 {
+            #[cfg(test)]
+            self.raw.owner.trace.borrow_mut().push(super::tests::Command::FlushUniform(end));
+            unsafe { self.raw.owner.open.device.flush_mapped_ranges(&*self.raw, &[0..end]); }
+        }
     }
 
     pub fn transition(
@@ -216,3 +248,7 @@ impl Drop for Buffer {
         unsafe { self.raw.owner.open.device.unmap_buffer(&*self.raw) }
     }
 }
+
+#[cfg(test)]
+#[path = "uniform_flush_tests.rs"]
+mod uniform_flush_tests;

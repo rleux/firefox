@@ -20,6 +20,8 @@ pub(super) enum Command {
     DrawPipeline,
     DrawScissor,
     DrawInstances,
+    UniformArena(usize),
+    FlushUniform(u64),
 }
 
 #[test]

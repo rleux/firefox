@@ -11,6 +11,7 @@ pub mod shaders {
 }
 
 mod bindings;
+mod binding_cache;
 mod draw;
 mod pipeline;
 mod shader;
