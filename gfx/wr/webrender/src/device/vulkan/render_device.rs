@@ -5,11 +5,19 @@
 use super::program_store::ProgramStore;
 use super::render_pass::RenderPassState;
 use super::texture_store::TextureStore;
+use super::texture_blit::TextureBlitter;
 use super::vertex_array::VertexArrayStore;
 use super::upload_buffers::UploadBuffers;
-use super::{wgt, Buffer, BufferPool, Device, Samplers, SubmissionQueue, Texture, TextureFilter};
+use super::{
+    wgt, Buffer, BufferPool, Device, Samplers, SubmissionQueue, Texture, TextureFilter, TexturePool,
+};
+use api::ImageFormat;
 use api::units::{DeviceIntRect, DeviceIntSize, FramebufferIntRect};
-use crate::device::{GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp};
+use crate::device::{
+    GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp, Texture as TextureHandle,
+    TransferBuffer, UploadBufferMapping, UploadChunk,
+};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 pub(super) struct RenderDevice {
@@ -24,6 +32,8 @@ pub(super) struct RenderDevice {
     fallback: Rc<Texture>,
     frame: GpuFrameId,
     inside_frame: bool,
+    mip_blitter: Option<(wgt::TextureFormat, TextureBlitter)>,
+    scratch: TexturePool,
 }
 
 impl RenderDevice {
@@ -64,7 +74,81 @@ impl RenderDevice {
             fallback,
             frame: GpuFrameId::new(0),
             inside_frame: false,
+            mip_blitter: None,
+            scratch: TexturePool::new(owner),
         })
+    }
+
+    pub fn upload_texture_region(
+        &mut self,
+        texture: &TextureHandle,
+        rect: DeviceIntRect,
+        stride: Option<i32>,
+        format: Option<ImageFormat>,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let image = self.textures.image(texture)?;
+        image.upload(&self.submissions, rect, data, stride, 0, format)?;
+        self.update_mipmaps(&image)
+    }
+
+    pub fn upload_texture_immediate(
+        &mut self,
+        texture: &TextureHandle,
+        data: &[u8],
+    ) -> Result<(), String> {
+        self.upload_texture_region(
+            texture,
+            DeviceIntRect::from_size(texture.get_dimensions()),
+            None,
+            None,
+            data,
+        )
+    }
+
+    pub fn flush_upload_buffer(
+        &mut self,
+        buffer: &TransferBuffer,
+        mapping: &UploadBufferMapping,
+        size_used: usize,
+        chunks: &[UploadChunk<'_>],
+    ) -> Result<(), String> {
+        self.uploads.flush(
+            buffer,
+            mapping,
+            size_used,
+            chunks,
+            &self.textures,
+            &self.submissions,
+        )?;
+        let mut updated = HashSet::new();
+        for chunk in chunks {
+            if chunk.texture.get_filter() == TextureFilter::Trilinear
+                && updated.insert(chunk.texture.id)
+            {
+                let image = self.textures.image(chunk.texture)?;
+                self.update_mipmaps(&image)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn update_mipmaps(&mut self, texture: &Rc<Texture>) -> Result<(), String> {
+        if texture.mip_count() == 1 {
+            return Ok(());
+        }
+        let format = texture.format();
+        if self.mip_blitter.as_ref().map(|entry| entry.0) != Some(format) {
+            let blitter =
+                TextureBlitter::new(&texture.raw.owner, format, &self.quad, &self.samplers)?;
+            self.mip_blitter = Some((format, blitter));
+        }
+        self.mip_blitter.as_ref().unwrap().1.generate_mipmaps(
+            &mut self.submissions.recording()?,
+            &self.submissions,
+            &mut self.scratch,
+            texture,
+        )
     }
 
     pub fn begin_frame(&mut self) -> Result<GpuFrameId, String> {
