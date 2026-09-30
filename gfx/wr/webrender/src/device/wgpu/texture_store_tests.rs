@@ -11,6 +11,9 @@ use api::units::{DeviceIntPoint, DeviceIntRect};
 use crate::device::DrawTarget;
 use std::sync::atomic::Ordering;
 
+#[path = "texture_binding_tests.rs"]
+mod bindings;
+
 #[path = "shared_depth_tests.rs"]
 mod shared_depth;
 

@@ -223,6 +223,7 @@ fn queued_program_snapshot_survives_shared_handle_deletion() {
                 texture: source.clone(),
                 filter: None,
             })),
+            None,
         )
         .unwrap();
     drop(source);
