@@ -6,12 +6,15 @@ use super::*;
 use super::super::{Device, Options, Samplers, Submission, TextureFilter};
 use super::super::pipeline::DrawPipeline;
 use super::super::tests::{validation_logging, ERRORS};
-use api::units::DeviceIntPoint;
+use api::units::{DeviceIntPoint, DeviceIntSize};
 use crate::device::RenderState;
 use std::sync::atomic::Ordering;
 
 #[path = "draw_upload_tests.rs"]
 mod uploads;
+
+#[path = "draw_projection_tests.rs"]
+mod projection;
 
 #[path = "attachment_sync_tests.rs"]
 pub(in crate::device::wgpu) mod synchronization;
@@ -52,9 +55,9 @@ fn quad(device: &Rc<Device>) -> Rc<Buffer> {
 
 fn pass(target: &Rc<Texture>) -> DrawPass<'_> {
     DrawPass {
-            origin: api::units::DeviceIntPoint::zero(),
             viewport: None,
         target,
+        origin: DeviceIntPoint::zero(),
         depth: None,
         clear_color: None,
         clear_depth: None,
