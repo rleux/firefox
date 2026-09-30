@@ -389,6 +389,11 @@ impl Texture {
         self.target.as_deref()
     }
 
+    pub(super) fn samples_attachment(&self, attachment: &Self) -> bool {
+        Rc::ptr_eq(&self.raw, &attachment.raw)
+            && (self.base_mip..self.base_mip + self.mip_count).contains(&attachment.base_mip)
+    }
+
     pub fn size(&self) -> wgt::Extent3d {
         self.size
     }

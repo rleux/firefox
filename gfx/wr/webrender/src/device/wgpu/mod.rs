@@ -11,6 +11,7 @@ pub mod shaders {
 }
 
 mod bindings;
+mod draw;
 mod pipeline;
 mod shader;
 mod vertex_layout;
