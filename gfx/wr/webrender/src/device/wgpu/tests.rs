@@ -391,3 +391,5 @@ mod shader;
 
 #[path = "pipeline_tests.rs"]
 mod pipeline;
+
+pub(super) use self::shader::draw_scaled_texture;
