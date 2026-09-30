@@ -111,6 +111,7 @@ impl Device {
             shader_module: spirv_module,
             prepared_shaders: Default::default(),
             shader_layouts: Default::default(),
+            graphics_api: crate::device::GraphicsApi::Vulkan,
             flip_y: true,
             depth_zero_to_one: true,
             info: exposed.info,
