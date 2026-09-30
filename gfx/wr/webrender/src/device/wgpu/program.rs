@@ -2,9 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::draw::{DrawBatch, DrawPass};
+use super::bindings::DrawBindings;
+use super::draw::DrawPass;
+#[cfg(test)]
+use super::draw::{upload_projection, DrawBatch};
 use super::pipeline::DrawPipeline;
-use super::{Buffer, Texture, TextureFilter};
+use super::{Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 #[cfg(test)]
 use api::units::DeviceIntRect;
 use crate::device::TextureSlot;
@@ -131,6 +134,38 @@ impl ProgramState {
 }
 
 impl ResolvedProgram {
+    pub fn cached_bindings(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        samplers: Option<&Rc<Samplers>>,
+    ) -> Result<DrawBindings, String> {
+        commands.with_binding_cache(|commands, cache| {
+            cache.resolve(commands, uploads, &self.pipeline, Some(&self.projection), &self.textures, &self.buffers, samplers)
+        })
+    }
+
+    #[cfg(test)]
+    pub fn bindings(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        samplers: Option<&Rc<Samplers>>,
+    ) -> Result<DrawBindings, String> {
+        let projection = if self.pipeline.shader.projection_stages != 0 {
+            Some(upload_projection(commands, uploads, &self.projection)?)
+        } else {
+            None
+        };
+        DrawBindings::new(
+            &self.pipeline,
+            projection,
+            self.textures.to_vec(),
+            self.buffers.to_vec(),
+            samplers.cloned(),
+        )
+    }
+
     #[cfg(test)]
     pub fn batch<'a>(
         &'a self,
