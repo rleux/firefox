@@ -30,6 +30,8 @@ mod vertex_array;
 mod upload_buffers;
 pub use self::vertex_layout::vertex_layouts;
 mod samplers;
+#[cfg(wr_vulkan_shaders)]
+mod renderer_properties;
 pub use self::samplers::Samplers;
 mod resources;
 pub use self::resources::Buffer;
