@@ -10,6 +10,9 @@ use crate::device::{DrawTarget, Texture as TextureHandle, TextureSlot};
 use crate::internal_types::RenderTargetInfo;
 use std::sync::atomic::Ordering;
 
+#[path = "default_target_tests.rs"]
+mod default_target;
+
 fn setup(depth: bool) -> (TextureStore, TextureHandle, SubmissionQueue) {
     validation_logging();
     let device = Rc::new(
@@ -302,7 +305,7 @@ fn pass_errors_preserve_bindings_and_active_state() {
         dimensions.width += 1;
     }
     assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
-    invalid.target = DrawTarget::new_default(DeviceIntSize::new(2, 2), true);
+    invalid.target = DrawTarget::new_default(DeviceIntSize::new(2, 2), false);
     assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
     state.begin(&mut commands, &mut textures, &desc).unwrap();
     assert!(textures.bindings()[0].is_none());

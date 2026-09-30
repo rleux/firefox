@@ -141,9 +141,9 @@ fn render_target_handles_toggle_depth_and_retain_pending_images() {
     let queue = SubmissionQueue::new(&pool, 2).unwrap();
     let rect = DeviceIntRect::from_size(DeviceIntSize::new(2, 2));
     DrawPass {
-            viewport: None,
         target: &render_color,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: Some(&depth),
         clear_color: None,
         clear_depth: None,

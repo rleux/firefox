@@ -99,20 +99,24 @@ impl Device {
         }
         .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
 
-        let limits = exposed.adapter.physical_device_capabilities().properties().limits;
+        let limits = exposed
+            .adapter
+            .physical_device_capabilities()
+            .properties()
+            .limits;
         Ok(Self {
             open: open.into(),
             #[cfg(test)]
             trace: Default::default(),
             shader_module: spirv_module,
-            max_viewport_dimensions: limits.max_viewport_dimensions,
-            viewport_bounds_range: limits.viewport_bounds_range,
             prepared_shaders: Default::default(),
             shader_layouts: Default::default(),
             flip_y: true,
             depth_zero_to_one: true,
             info: exposed.info,
             capabilities: exposed.capabilities,
+            max_viewport_dimensions: limits.max_viewport_dimensions,
+            viewport_bounds_range: limits.viewport_bounds_range,
             features,
             lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
