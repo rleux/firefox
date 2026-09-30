@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::super::{hal, wgt, SubmissionQueue};
-use super::Texture;
+use super::{texture_format, Texture};
 use api::{
     ImageFormat,
     units::{DeviceIntRect, DeviceIntSize},
@@ -11,19 +11,6 @@ use api::{
 use std::convert::TryFrom;
 use std::rc::Rc;
 use wgpu_hal::CommandEncoder as _;
-
-fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
-    match format {
-        ImageFormat::RGBA8 => wgt::TextureFormat::Rgba8Unorm,
-        ImageFormat::BGRA8 => wgt::TextureFormat::Bgra8Unorm,
-        ImageFormat::R8 => wgt::TextureFormat::R8Unorm,
-        ImageFormat::RG8 => wgt::TextureFormat::Rg8Unorm,
-        ImageFormat::R16 => wgt::TextureFormat::R16Unorm,
-        ImageFormat::RG16 => wgt::TextureFormat::Rg16Unorm,
-        ImageFormat::RGBAF32 => wgt::TextureFormat::Rgba32Float,
-        ImageFormat::RGBAI32 => wgt::TextureFormat::Rgba32Sint,
-    }
-}
 
 impl Texture {
     pub fn upload(
