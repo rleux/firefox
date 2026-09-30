@@ -5,7 +5,7 @@
 use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
 use super::{hal, wgt, Buffer, Device, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
-use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
+use api::units::{DeviceIntPoint, DeviceIntRect};
 use euclid::default::Transform3D;
 use crate::internal_types::FastHashMap;
 use std::ops::Range;
