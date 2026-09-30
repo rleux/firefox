@@ -4,8 +4,10 @@
 
 use super::{hal, Owned, Recording, Submission, SubmissionBorrow, SubmissionState};
 use super::super::{wgt, Buffer, BufferPool, Device};
+use crate::device::{Fence, FenceStatus};
 use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
+use std::convert::TryFrom;
 use std::rc::Rc;
 
 #[path = "instance_buffers.rs"]
@@ -171,6 +173,25 @@ impl SubmissionQueue {
         let mut state = self.state.borrow_mut();
         Self::retire(&mut state, false)?;
         Ok(state.completed)
+    }
+
+    pub fn create_fence(&self) -> Result<Fence, String> {
+        let serial = self.submit()?;
+        Ok(Fence(
+            usize::try_from(serial).map_err(|_| "Vulkan fence serial exceeds handle range")?,
+        ))
+    }
+
+    pub fn poll_fence(&self, fence: &Fence) -> FenceStatus {
+        let serial = fence.0 as u64;
+        if self.pool.owner.is_lost() || serial > self.state.borrow().submitted {
+            return FenceStatus::Error;
+        }
+        match self.poll() {
+            Ok(completed) if completed >= serial => FenceStatus::Signaled,
+            Ok(_) => FenceStatus::Pending,
+            Err(_) => FenceStatus::Error,
+        }
     }
 
     pub fn wait_for(&self, serial: u64) -> Result<(), String> {

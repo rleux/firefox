@@ -114,6 +114,36 @@ fn queue_batches_copies_and_reuses_completed_uploads() {
 
 #[test]
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn queue_fences_mark_submitted_work_without_owning_native_objects() {
+    let device = device();
+    let queue = SubmissionQueue::new(&Rc::new(BufferPool::new(&device)), 2).unwrap();
+    let idle = queue.create_fence().unwrap();
+    assert_eq!(idle.0, 0);
+    assert_eq!(queue.poll_fence(&idle), FenceStatus::Signaled);
+    let (_, first_output) = upload_copy(&queue, &[21; 8]);
+    let first = queue.create_fence().unwrap();
+    let duplicate = queue.create_fence().unwrap();
+    assert_eq!(duplicate.0, first.0);
+    let (_, second_output) = upload_copy(&queue, &[37; 8]);
+    let second = queue.create_fence().unwrap();
+    assert!(second.0 > first.0);
+    assert!(matches!(
+        queue.poll_fence(&second),
+        FenceStatus::Pending | FenceStatus::Signaled
+    ));
+    queue.wait_for(first.0 as u64).unwrap();
+    assert_eq!(queue.poll_fence(&duplicate), FenceStatus::Signaled);
+    assert_eq!(map_upload(&device, &**first_output, 8), [21; 8]);
+    let serial = second.0 as u64;
+    drop(second);
+    queue.wait_for(serial).unwrap();
+    assert_eq!(queue.poll_fence(&first), FenceStatus::Signaled);
+    assert_eq!(map_upload(&device, &**second_output, 8), [37; 8]);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn queue_bounds_pending_submissions_and_waits_by_serial() {
     let device = device();
     let pool = Rc::new(BufferPool::new(&device));

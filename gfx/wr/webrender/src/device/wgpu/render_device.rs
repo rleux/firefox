@@ -8,7 +8,7 @@ use super::texture_store::TextureStore;
 use super::vertex_array::VertexArrayStore;
 use super::{wgt, Buffer, BufferPool, Device, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntRect, DeviceIntSize, FramebufferIntRect};
-use crate::device::{Program, RenderPassDescriptor, RenderState, StoreOp};
+use crate::device::{GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp};
 use std::rc::Rc;
 
 pub(super) struct RenderDevice {
@@ -20,6 +20,8 @@ pub(super) struct RenderDevice {
     quad: Rc<Buffer>,
     samplers: Rc<Samplers>,
     fallback: Rc<Texture>,
+    frame: GpuFrameId,
+    inside_frame: bool,
 }
 
 impl RenderDevice {
@@ -64,10 +66,43 @@ impl RenderDevice {
             quad,
             samplers,
             fallback,
+            frame: GpuFrameId::new(0),
+            inside_frame: false,
         })
     }
 
+    pub fn begin_frame(&mut self) -> Result<GpuFrameId, String> {
+        if self.inside_frame {
+            return Err("A Vulkan frame is already active".into());
+        }
+        let frame = GpuFrameId::new(
+            self.frame
+                .0
+                .checked_add(1)
+                .ok_or("Vulkan frame identifier overflow")?,
+        );
+        self.submissions.poll()?;
+        self.textures.begin_frame(frame);
+        self.programs.unbind();
+        self.vertex_arrays.unbind();
+        self.frame = frame;
+        self.inside_frame = true;
+        Ok(frame)
+    }
+
+    pub fn end_frame(&mut self) -> Result<u64, String> {
+        if !self.inside_frame || self.passes.is_active() {
+            return Err("Vulkan frame must be active with no unfinished render pass".into());
+        }
+        let serial = self.submissions.submit()?;
+        self.inside_frame = false;
+        Ok(serial)
+    }
+
     pub fn begin_render_pass(&mut self, descriptor: &RenderPassDescriptor) -> Result<(), String> {
+        if !self.inside_frame {
+            return Err("Vulkan render pass requires an active frame".into());
+        }
         self.passes.begin(
             &mut self.submissions.recording()?,
             &mut self.textures,

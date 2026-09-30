@@ -11,6 +11,9 @@ use crate::renderer::desc;
 use euclid::default::Transform3D;
 use std::sync::atomic::Ordering;
 
+#[path = "frame_tests.rs"]
+mod frame;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(
@@ -57,6 +60,7 @@ fn pixels(texture: &Rc<Texture>) -> Vec<u8> {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_orders_texture_updates_between_instanced_draws() {
     let mut device = device();
+    device.begin_frame().unwrap();
     let mut source = device
         .textures
         .create(
@@ -132,6 +136,7 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
     device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
     device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    device.end_frame().unwrap();
     let output = device.textures.output().unwrap();
     device.submissions.wait().unwrap();
     drop(device);
@@ -143,11 +148,21 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_preserves_instance_versions_and_clear_order() {
     let mut device = device();
+    device.begin_frame().unwrap();
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
-    let mut vertices = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut instances = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::CLEAR, &vertices, Some(&instances), None, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::CLEAR, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
         .write_buffer(
@@ -158,6 +173,8 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
         )
         .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
+    let owner = device.quad.raw.owner.clone();
+    owner.trace.borrow_mut().clear();
     device.begin_render_pass(&descriptor()).unwrap();
     device
         .bind_pipeline(&program, RenderState::default())
@@ -168,7 +185,13 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
         .vertex_arrays
         .update_range(&instances, 48, &floats(&[0.0, 0.0, 1.0, 1.0]))
         .unwrap();
+    device.programs.state(&program).unwrap().set_transform(&Transform3D::translation(0.5, 0.0, 0.0));
     scissor(&device, 1);
+    device.draw_instanced(1, 1).unwrap();
+    device.bind_pipeline(&program, RenderState {
+        blend_mode: crate::device::BlendMode::PremultipliedAlpha,
+        ..Default::default()
+    }).unwrap();
     device.draw_instanced(1, 1).unwrap();
     device
         .clear_target(Some([1.0, 0.0, 0.0, 1.0]), None, None)
@@ -177,7 +200,24 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
     device.vertex_arrays.delete(&mut vao).unwrap();
     device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
     device.vertex_arrays.delete_buffer(&mut instances).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    {
+        use super::super::tests::Command;
+        let trace = owner.trace.borrow();
+        assert_eq!(trace.iter().filter(|event| matches!(event, Command::BeginPass(..))).count(), 1);
+        assert_eq!(trace.iter().filter(|event| matches!(event, Command::EndPass)).count(), 1);
+        assert_eq!(trace.iter().filter(|event| matches!(event, Command::BindGroup)).count(), 1);
+        assert_eq!(trace.iter().filter(|event| matches!(event, Command::ClearBindGroup)).count(), 1);
+        assert_eq!(trace.iter().filter(|event| matches!(event, Command::UniformArena(_))).count(), 1);
+        let begin = trace.iter().position(|event| matches!(event, Command::BeginPass(..))).unwrap();
+        let end = trace.iter().position(|event| matches!(event, Command::EndPass)).unwrap();
+        assert!(!trace[begin..=end].iter().any(|event| matches!(event, Command::TextureBarrier(..))));
+        let Command::BeginPass(color, _) = trace[begin] else { unreachable!() };
+        assert!(color.contains(super::super::hal::AttachmentOps::LOAD_CLEAR | super::super::hal::AttachmentOps::STORE));
+    }
+    device.end_frame().unwrap();
     device.submissions.wait().unwrap();
     assert_eq!(
         pixels(&device.textures.output().unwrap()),
@@ -190,6 +230,7 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
     let mut device = device();
+    device.begin_frame().unwrap();
     assert!(device.draw_instanced(0, 0).is_err());
     assert!(device.end_render_pass(StoreOp::Store).is_err());
     device.begin_render_pass(&descriptor()).unwrap();
@@ -233,6 +274,7 @@ fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
     device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
     device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    device.end_frame().unwrap();
     device.submissions.wait().unwrap();
     assert_eq!(pixels(&device.textures.output().unwrap()), [255; 8]);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
