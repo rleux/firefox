@@ -4,7 +4,7 @@
 
 use super::binding_cache::BindingCache;
 use super::resources::Owned;
-use super::{hal, Device};
+use super::{hal, wgt, Buffer, BufferPool, Device};
 use std::any::Any;
 use crate::internal_types::FastHashMap;
 use std::cell::RefMut;
@@ -40,6 +40,7 @@ enum FailurePoint {
 
 struct SubmissionData {
     owner: Rc<Device>,
+    pool: Rc<BufferPool>,
     encoder: Box<dyn hal::DynCommandEncoder>,
     fence: Rc<Owned<dyn hal::DynFence>>,
     fence_value: u64,
@@ -121,6 +122,13 @@ impl Recording<'_> {
         result
     }
 
+    pub(super) fn upload_uniform(&mut self, length: usize) -> Result<Rc<Buffer>, String> {
+        let pool = self.submission.pool.clone();
+        let buffer = pool.upload_with(length, wgt::BufferUses::UNIFORM, |_| Ok(()))?;
+        self.keep_upload(queue::RecycleUpload { pool, buffer: buffer.clone() });
+        Ok(buffer)
+    }
+
     fn keep_upload(&mut self, upload: queue::RecycleUpload) {
         self.submission.uploads.push(upload);
     }
@@ -142,6 +150,7 @@ impl Submission {
             owner,
             Rc::new(Owned::new(owner, fence, <dyn hal::DynDevice>::destroy_fence)),
             1,
+            &Rc::new(BufferPool::new(owner)),
         )
     }
 
@@ -149,6 +158,7 @@ impl Submission {
         owner: &Rc<Device>,
         fence: Rc<Owned<dyn hal::DynFence>>,
         fence_value: u64,
+        pool: &Rc<BufferPool>,
     ) -> Result<Self, String> {
         let mut encoder = unsafe {
             owner.open.device.create_command_encoder(&hal::CommandEncoderDescriptor {
@@ -165,6 +175,7 @@ impl Submission {
         Ok(Self {
             data: SubmissionData {
                 owner: owner.clone(),
+                pool: pool.clone(),
                 encoder,
                 fence,
                 fence_value,

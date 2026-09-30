@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use super::super::{wgt, Buffer};
 use super::super::{Options, state::UsageState};
 use super::super::tests::{Command, ERRORS, map_upload, record_upload, validation_logging};
 use std::cell::Cell;

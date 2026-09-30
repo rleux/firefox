@@ -31,8 +31,8 @@ pub struct SubmissionQueue {
 }
 
 pub(super) struct RecycleUpload {
-    pool: Rc<BufferPool>,
-    buffer: Rc<Buffer>,
+    pub(super) pool: Rc<BufferPool>,
+    pub(super) buffer: Rc<Buffer>,
 }
 
 impl Drop for RecycleUpload {
@@ -116,7 +116,7 @@ impl SubmissionQueue {
                 ready.restart(serial)?;
                 ready
             } else {
-                Submission::with_fence(&self.pool.owner, self.fence.clone(), serial)?
+                Submission::with_fence(&self.pool.owner, self.fence.clone(), serial, &self.pool)?
             });
         }
         let (data, id) = RefMut::map_split(state, |state| {
