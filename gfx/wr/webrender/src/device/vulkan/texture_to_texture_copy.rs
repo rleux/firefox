@@ -10,42 +10,11 @@ use std::rc::Rc;
 use wgpu_hal::CommandEncoder as _;
 
 impl Texture {
-    pub fn copy_from_texture(
+    pub(super) fn prepare_copy_destination(
         self: &Rc<Self>,
         commands: &mut Recording<'_>,
-        source: &Rc<Self>,
-        source_rect: DeviceIntRect,
         destination_rect: DeviceIntRect,
     ) -> Result<(), String> {
-        let recording = commands.recording_id(&self.raw.owner)?;
-        commands.recording_id(&source.raw.owner)?;
-        if self.format != source.format
-            || self.format == wgt::TextureFormat::Depth32Float
-            || Rc::ptr_eq(&self.raw, &source.raw)
-        {
-            return Err("Unsupported Vulkan texture copy".into());
-        }
-        for (texture, rect) in [(source, source_rect), (self, destination_rect)] {
-            if rect.min.x < 0
-                || rect.min.y < 0
-                || rect.max.x <= rect.min.x
-                || rect.max.y <= rect.min.y
-                || rect.max.x as u32 > texture.size.width
-                || rect.max.y as u32 > texture.size.height
-            {
-                return Err("Invalid Vulkan texture copy bounds".into());
-            }
-            for state in texture.states() {
-                state.check_recording(&recording)?;
-            }
-        }
-        if source_rect.size() != destination_rect.size() {
-            return Err("Vulkan texture copies cannot scale".into());
-        }
-        if !source.initialized() {
-            return Err("Copying uninitialized Vulkan texture contents".into());
-        }
-        source.transition(commands, wgt::TextureUses::COPY_SRC)?;
         self.transition(commands, wgt::TextureUses::COPY_DST)?;
         let full_destination = destination_rect.min == DeviceIntPoint::zero()
             && destination_rect.max.x as u32 == self.size.width
@@ -88,6 +57,47 @@ impl Texture {
                 }));
             }
         }
+        Ok(())
+    }
+
+    pub fn copy_from_texture(
+        self: &Rc<Self>,
+        commands: &mut Recording<'_>,
+        source: &Rc<Self>,
+        source_rect: DeviceIntRect,
+        destination_rect: DeviceIntRect,
+    ) -> Result<(), String> {
+        let recording = commands.recording_id(&self.raw.owner)?;
+        commands.recording_id(&source.raw.owner)?;
+        if self.format != source.format
+            || self.format == wgt::TextureFormat::Depth32Float
+            || Rc::ptr_eq(&self.raw, &source.raw)
+        {
+            return Err("Unsupported Vulkan texture copy".into());
+        }
+        for (texture, rect) in [(source, source_rect), (self, destination_rect)] {
+            if rect.min.x < 0
+                || rect.min.y < 0
+                || rect.max.x <= rect.min.x
+                || rect.max.y <= rect.min.y
+                || rect.max.x as u32 > texture.size.width
+                || rect.max.y as u32 > texture.size.height
+            {
+                return Err("Invalid Vulkan texture copy bounds".into());
+            }
+            for state in texture.states() {
+                state.check_recording(&recording)?;
+            }
+        }
+        if source_rect.size() != destination_rect.size() {
+            return Err("Vulkan texture copies cannot scale".into());
+        }
+        if !source.initialized() {
+            return Err("Copying uninitialized Vulkan texture contents".into());
+        }
+        source.transition(commands, wgt::TextureUses::COPY_SRC)?;
+        self.prepare_copy_destination(commands, destination_rect)?;
+        let encoder = commands.encoder();
         let base = |rect: DeviceIntRect, mip_level| hal::TextureCopyBase {
             mip_level,
             array_layer: 0,

@@ -14,6 +14,8 @@ use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 mod upload;
 #[path = "texture_to_texture_copy.rs"]
 mod texture_to_texture_copy;
+#[path = "buffer_to_texture_copy.rs"]
+mod buffer_to_texture_copy;
 #[path = "texture_readback.rs"]
 mod readback;
 pub use self::readback::PendingReadback;

@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::super::{hal, wgt, SubmissionQueue};
+use super::super::{wgt, SubmissionQueue};
 use super::{texture_format, Texture};
 use api::{
     ImageFormat,
@@ -10,7 +10,6 @@ use api::{
 };
 use std::convert::TryFrom;
 use std::rc::Rc;
-use wgpu_hal::CommandEncoder as _;
 
 impl Texture {
     pub fn upload(
@@ -130,38 +129,6 @@ impl Texture {
                 Ok(())
             },
         )?;
-        staging.transition(&mut commands, wgt::BufferUses::COPY_SRC)?;
-        self.transition(&mut commands, wgt::TextureUses::COPY_DST)?;
-        unsafe {
-            commands.encoder().copy_buffer_to_texture(
-                &staging.raw,
-                self.raw_texture(),
-                std::iter::once(hal::BufferTextureCopy {
-                    buffer_layout: wgt::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(pitch_u32),
-                        rows_per_image: Some(destination.height() as u32),
-                    },
-                    texture_base: hal::TextureCopyBase {
-                        mip_level: self.base_mip,
-                        array_layer: 0,
-                        origin: wgt::Origin3d {
-                            x: destination.min.x as u32,
-                            y: destination.min.y as u32,
-                            z: 0,
-                        },
-                        aspect: hal::FormatAspects::COLOR,
-                    },
-                    size: wgt::Extent3d {
-                        width: destination.width() as u32,
-                        height: destination.height() as u32,
-                        depth_or_array_layers: 1,
-                    }
-                    .into(),
-                }),
-            );
-        }
-        self.transition(&mut commands, wgt::TextureUses::RESOURCE)?;
-        self.initialize(&mut commands)
+        self.copy_from_buffer(&mut commands, &staging, destination, 0, pitch_u32)
     }
 }
