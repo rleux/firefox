@@ -199,6 +199,114 @@ fn mipmap_generation_validates_and_rolls_back_abandoned_chains() {
 
 #[test]
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn mipmap_uploads_use_native_filterable_color_formats() {
+    use crate::device::wgpu::hal;
+    use crate::device::wgpu::render_device::RenderDevice;
+    use crate::device::wgpu::textures::texture_format;
+    use api::{ImageBufferKind, ImageFormat};
+
+    let ctx = Context::new();
+    let mut renderer = RenderDevice::new(&ctx.device).unwrap();
+    for (format, channels, component_bytes) in [
+        (ImageFormat::RGBA8, 4, 1),
+        (ImageFormat::BGRA8, 4, 1),
+        (ImageFormat::R8, 1, 1),
+        (ImageFormat::RG8, 2, 1),
+        (ImageFormat::R16, 1, 2),
+        (ImageFormat::RG16, 2, 2),
+        (ImageFormat::RGBAF32, 4, 4),
+    ] {
+        let native = texture_format(format);
+        let capabilities = unsafe { ctx.device.adapter.texture_format_capabilities(native) };
+        let required = hal::TextureFormatCapabilities::COPY_SRC
+            | hal::TextureFormatCapabilities::COPY_DST
+            | hal::TextureFormatCapabilities::SAMPLED
+            | hal::TextureFormatCapabilities::SAMPLED_LINEAR
+            | hal::TextureFormatCapabilities::COLOR_ATTACHMENT;
+        if !ctx.device.features().contains(native.required_features())
+            || !capabilities.contains(required)
+        {
+            assert!(
+                Texture::new(&ctx.device, 4, 4, native, TextureFilter::Trilinear, false).is_err()
+            );
+            eprintln!("Hardware cannot generate {format:?} mipmaps; allocation rejected");
+            continue;
+        }
+        renderer.begin_frame().unwrap();
+        let mut handle = renderer
+            .textures
+            .create(
+                ImageBufferKind::Texture2D,
+                format,
+                DeviceIntSize::new(4, 4),
+                TextureFilter::Trilinear,
+                None,
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                let sample = (x % 2 + (y % 2) * 2) as usize;
+                for channel in 0..channels {
+                    match component_bytes {
+                        1 => bytes.push([0u8, 64, 128, 192][sample] + channel as u8 * 3),
+                        2 => bytes.extend_from_slice(
+                            &([1000u16, 3000, 5000, 7000][sample] + channel as u16 * 13)
+                                .to_ne_bytes(),
+                        ),
+                        4 => bytes.extend_from_slice(
+                            &([-2f32, 2., 6., 10.][sample] + channel as f32 * 0.25).to_ne_bytes(),
+                        ),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        renderer
+            .upload_texture_immediate(&handle, &bytes)
+            .unwrap_or_else(|error| panic!("{:?} mipmap upload failed: {}", format, error));
+        renderer.end_frame().unwrap();
+        renderer.submissions.wait().unwrap();
+        let image = renderer.textures.image(&handle).unwrap();
+        assert!(image.sample_initialized());
+        assert_eq!(pixels(&image), bytes);
+        for level in 1..image.mip_count() {
+            let actual = pixels(&image.mip_view(level).unwrap());
+            for (index, component) in actual.chunks_exact(component_bytes).enumerate() {
+                let channel = index % channels;
+                match component_bytes {
+                    1 => assert!(component[0].abs_diff(96 + channel as u8 * 3) <= 1),
+                    2 => {
+                        let value = u16::from_ne_bytes([component[0], component[1]]);
+                        assert!(value.abs_diff(4000 + channel as u16 * 13) <= 1);
+                    }
+                    4 => {
+                        let value = f32::from_ne_bytes([
+                            component[0],
+                            component[1],
+                            component[2],
+                            component[3],
+                        ]);
+                        assert!((value - (4. + channel as f32 * 0.25)).abs() <= 0.00001);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        renderer.textures.delete(&mut handle).unwrap();
+        eprintln!("Native {format:?} mipmap upload and downsampling passed");
+    }
+    for format in [
+        wgt::TextureFormat::Rgba32Sint,
+        wgt::TextureFormat::Depth32Float,
+    ] {
+        assert!(Texture::new(&ctx.device, 4, 4, format, TextureFilter::Trilinear, true).is_err());
+    }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn mipmap_chains_share_one_uniform_arena_per_recording() {
     use super::super::super::tests::Command;
     let mut ctx = Context::new();

@@ -14,6 +14,9 @@ use std::sync::atomic::Ordering;
 #[path = "frame_tests.rs"]
 mod frame;
 
+#[path = "texture_update_tests.rs"]
+mod texture_update;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(
@@ -66,21 +69,13 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
         .create(
             ImageBufferKind::Texture2D,
             ImageFormat::RGBA8,
-            DeviceIntSize::new(1, 1),
-            TextureFilter::Nearest,
+            DeviceIntSize::new(4, 4),
+            TextureFilter::Trilinear,
             None,
         )
         .unwrap();
-    let image = device.textures.image(&source).unwrap();
-    image
-        .upload(
-            &device.submissions,
-            DeviceIntRect::from_size(DeviceIntSize::new(1, 1)),
-            &[255, 0, 0, 255],
-            None,
-            0,
-            None,
-        )
+    device
+        .upload_texture_immediate(&source, &[255, 0, 0, 255].repeat(16))
         .unwrap();
     let mut program = device
         .programs
@@ -115,15 +110,8 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
         .unwrap());
     scissor(&device, 0);
     device.draw_instanced(0, 1).unwrap();
-    image
-        .upload(
-            &device.submissions,
-            DeviceIntRect::from_size(DeviceIntSize::new(1, 1)),
-            &[0, 0, 255, 255],
-            None,
-            0,
-            None,
-        )
+    device
+        .upload_texture_immediate(&source, &[0, 0, 255, 255].repeat(16))
         .unwrap();
     scissor(&device, 1);
     assert!(!device
