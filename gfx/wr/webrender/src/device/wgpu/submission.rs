@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+use super::binding_cache::BindingCache;
 use super::resources::Owned;
 use super::{hal, Device};
 use std::any::Any;
@@ -43,8 +44,10 @@ struct SubmissionData {
     fence: Rc<Owned<dyn hal::DynFence>>,
     fence_value: u64,
     commits: Vec<Box<dyn FnOnce()>>,
+    uniform_writes: Vec<Rc<super::Buffer>>,
     resources: FastHashMap<*const (), Rc<dyn Any>>,
     uploads: Vec<queue::RecycleUpload>,
+    bindings: BindingCache,
 }
 
 /// Exclusive access to an open submission; releasing this borrow does not submit it.
@@ -102,6 +105,22 @@ impl Recording<'_> {
         self.submission.commits.push(Box::new(commit));
     }
 
+    pub(super) fn flush_uniform_before_submit(&mut self, buffer: &Rc<super::Buffer>) {
+        if buffer.needs_uniform_flush() {
+            self.submission.uniform_writes.push(buffer.clone());
+        }
+    }
+
+    pub(super) fn with_binding_cache<T>(
+        &mut self,
+        record: impl FnOnce(&mut Self, &mut BindingCache) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut bindings = std::mem::take(&mut self.submission.bindings);
+        let result = record(self, &mut bindings);
+        self.submission.bindings = bindings;
+        result
+    }
+
     fn keep_upload(&mut self, upload: queue::RecycleUpload) {
         self.submission.uploads.push(upload);
     }
@@ -150,8 +169,10 @@ impl Submission {
                 fence,
                 fence_value,
                 commits: Vec::new(),
+                uniform_writes: Vec::new(),
                 resources: FastHashMap::default(),
                 uploads: Vec::new(),
+                bindings: BindingCache::default(),
             },
             state: SubmissionState::Recording { id: Rc::new(()) },
             #[cfg(test)]
@@ -192,6 +213,9 @@ impl Submission {
         if !matches!(self.state, SubmissionState::Recording { .. }) {
             return Err("Submission has already been attempted".into());
         }
+        for buffer in &data.uniform_writes {
+            buffer.flush_uniform_writes();
+        }
         let SubmissionState::Recording { id } = std::mem::replace(&mut self.state, SubmissionState::Retired) else {
             unreachable!()
         };
@@ -227,11 +251,11 @@ impl Submission {
             unreachable!()
         };
         self.state = SubmissionState::Submitted { buffer };
-
+        data.uniform_writes.clear();
         for commit in data.commits.drain(..) {
             commit();
         }
-
+        data.bindings.clear();
         drop(id);
         Ok(())
     }
@@ -243,7 +267,7 @@ impl Submission {
         let data = &mut self.data;
         unsafe { data.encoder.reset_all(vec![buffer]); }
         data.resources.clear();
-
+        data.uniform_writes.clear();
         data.uploads.clear();
     }
 
@@ -301,12 +325,12 @@ impl Drop for Submission {
                 SubmissionState::Retired => (None, Vec::new()),
             };
             data.encoder.reset_all(buffers);
-
+            data.bindings.clear();
             drop(id);
         }
         data.commits.clear();
         data.resources.clear();
-
+        data.uniform_writes.clear();
         data.uploads.clear();
     }
 }
