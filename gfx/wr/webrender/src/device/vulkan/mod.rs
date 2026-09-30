@@ -15,6 +15,7 @@ pub mod shaders {
 
 mod bindings;
 mod draw;
+mod render_pass;
 #[cfg(wr_vulkan_shaders)]
 mod texture_blit;
 mod pipeline;

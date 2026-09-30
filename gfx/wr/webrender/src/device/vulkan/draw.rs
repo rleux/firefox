@@ -329,7 +329,7 @@ impl DrawPass<'_> {
         })
     }
 
-    fn validate(&self, commands: &Recording<'_>) -> Result<DeviceIntRect, String> {
+    pub(super) fn validate(&self, commands: &Recording<'_>) -> Result<DeviceIntRect, String> {
         let owner = &self.target.raw.owner;
         commands.recording_id(owner)?;
         let size = self.target.size();

@@ -5,9 +5,11 @@
 use super::textures::texture_format;
 use super::program::ShaderResource;
 use super::{wgt, Device, Recording, Texture, TextureFilter};
-use crate::device::{GpuFrameId, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot};
+use crate::device::{
+    DrawTarget, GpuFrameId, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot,
+};
 use crate::internal_types::RenderTargetInfo;
-use api::{ImageBufferKind, ImageFormat, units::DeviceIntSize};
+use api::{ImageBufferKind, ImageFormat, units::{DeviceIntRect, DeviceIntSize}};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -54,6 +56,29 @@ impl TextureStore {
     }
     pub fn deleted(&self) -> u32 {
         self.deleted
+    }
+
+    pub fn draw_target(
+        &mut self,
+        target: DrawTarget,
+    ) -> Result<(Rc<Texture>, Option<Rc<Texture>>, Option<DeviceIntRect>), String> {
+        let (color, depth, dimensions) = match target {
+            DrawTarget::Texture {
+                texture,
+                with_depth,
+                dimensions,
+            } => {
+                let (color, depth) = self.render_target(texture, with_depth)?;
+                (color, depth, dimensions)
+            }
+            _ => return Err("Vulkan render pass requires an owned texture target".into()),
+        };
+        if dimensions.width != color.size().width as i32
+            || dimensions.height != color.size().height as i32
+        {
+            return Err("Vulkan render target dimensions do not match its image".into());
+        }
+        Ok((color, depth, None))
     }
 
     pub fn create(
