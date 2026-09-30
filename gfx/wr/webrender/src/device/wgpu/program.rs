@@ -47,6 +47,10 @@ impl ProgramState {
         }
     }
 
+    pub fn shader(&self) -> &'static ShaderArtifact {
+        self.shader
+    }
+
     pub fn bind_samplers(&mut self, bindings: &[(&str, TextureSlot)]) {
         for (name, slot) in bindings {
             for (binding, index) in self.shader.textures.iter().zip(&mut self.texture_slots) {
