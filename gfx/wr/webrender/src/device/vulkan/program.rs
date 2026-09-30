@@ -10,7 +10,7 @@ use crate::device::TextureSlot;
 use euclid::default::Transform3D;
 use std::cell::Cell;
 use std::rc::Rc;
-use webrender_build::vulkan::ShaderArtifact;
+use webrender_build::vulkan::{ScalarType, ShaderArtifact};
 
 pub(super) enum ShaderResource {
     Texture {
@@ -77,15 +77,25 @@ impl ProgramState {
         pipeline: &Rc<DrawPipeline>,
         pass: &DrawPass<'_>,
         slots: &[Option<ShaderResource>],
+        fallback: Option<&Rc<Texture>>,
     ) -> Result<ResolvedProgram, String> {
         if !std::ptr::eq(self.shader, pipeline.shader) {
             return Err("Vulkan pipeline does not match the program's shader variant".into());
         }
         let mut textures = Vec::with_capacity(self.texture_slots.len());
         for (binding, &slot) in self.shader.textures.iter().zip(&self.texture_slots) {
-            match slots.get(slot).and_then(Option::as_ref) {
-                Some(ShaderResource::Texture { texture, filter }) => {
+            match (slots.get(slot), fallback) {
+                (Some(Some(ShaderResource::Texture { texture, filter })), _) => {
                     textures.push((texture.clone(), filter.unwrap_or_else(|| texture.filter())));
+                }
+                (Some(None), Some(texture))
+                    if binding.scalar == ScalarType::Float
+                        && matches!(
+                            binding.name,
+                            "sColor0" | "sColor1" | "sColor2" | "sClipMask"
+                        ) =>
+                {
+                    textures.push((texture.clone(), texture.filter()));
                 }
                 _ => {
                     return Err(format!(

@@ -222,6 +222,7 @@ fn queued_program_snapshot_survives_shared_handle_deletion() {
                 texture: source,
                 filter: None,
             })],
+            None,
         )
         .unwrap();
     store.delete(&mut program).unwrap();

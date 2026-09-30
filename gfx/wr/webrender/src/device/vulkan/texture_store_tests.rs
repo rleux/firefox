@@ -10,6 +10,10 @@ use api::units::{DeviceIntPoint, DeviceIntRect};
 use crate::device::DrawTarget;
 use std::sync::atomic::Ordering;
 
+#[cfg(wr_vulkan_shaders)]
+#[path = "texture_binding_tests.rs"]
+mod bindings;
+
 fn device() -> Rc<Device> {
     validation_logging();
     let device = Rc::new(
