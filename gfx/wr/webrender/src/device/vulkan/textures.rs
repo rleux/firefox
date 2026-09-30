@@ -6,6 +6,7 @@ use super::resources::Owned;
 use super::state::UsageState;
 use super::{hal, wgt, Device, Recording};
 use crate::device::TextureFilter;
+use api::ImageFormat;
 use std::rc::Rc;
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
@@ -34,6 +35,19 @@ pub struct Texture {
     mip_count: u32,
     usage: wgt::TextureUses,
     states: Rc<Vec<UsageState<TextureState>>>,
+}
+
+pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
+    match format {
+        ImageFormat::RGBA8 => wgt::TextureFormat::Rgba8Unorm,
+        ImageFormat::BGRA8 => wgt::TextureFormat::Bgra8Unorm,
+        ImageFormat::R8 => wgt::TextureFormat::R8Unorm,
+        ImageFormat::RG8 => wgt::TextureFormat::Rg8Unorm,
+        ImageFormat::R16 => wgt::TextureFormat::R16Unorm,
+        ImageFormat::RG16 => wgt::TextureFormat::Rg16Unorm,
+        ImageFormat::RGBAF32 => wgt::TextureFormat::Rgba32Float,
+        ImageFormat::RGBAI32 => wgt::TextureFormat::Rgba32Sint,
+    }
 }
 
 impl Texture {
