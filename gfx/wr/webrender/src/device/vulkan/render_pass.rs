@@ -39,6 +39,10 @@ pub(super) struct RenderPassState {
 }
 
 impl RenderPassState {
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
     pub fn begin(
         &mut self,
         commands: &mut Recording<'_>,

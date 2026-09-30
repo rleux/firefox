@@ -11,6 +11,9 @@ use crate::renderer::desc;
 use euclid::default::Transform3D;
 use std::sync::atomic::Ordering;
 
+#[path = "frame_tests.rs"]
+mod frame;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(
@@ -57,6 +60,7 @@ fn pixels(texture: &Rc<Texture>) -> Vec<u8> {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_orders_texture_updates_between_instanced_draws() {
     let mut device = device();
+    device.begin_frame().unwrap();
     let mut source = device
         .textures
         .create(
@@ -130,6 +134,7 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    device.end_frame().unwrap();
     let output = device.textures.output().unwrap();
     device.submissions.wait().unwrap();
     drop(device);
@@ -141,6 +146,7 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_preserves_instance_versions_and_clear_order() {
     let mut device = device();
+    device.begin_frame().unwrap();
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
     let mut vao = device.vertex_arrays.create(&desc::CLEAR, 1).unwrap();
@@ -174,6 +180,7 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    device.end_frame().unwrap();
     device.submissions.wait().unwrap();
     assert_eq!(
         pixels(&device.textures.output().unwrap()),
@@ -186,6 +193,7 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
     let mut device = device();
+    device.begin_frame().unwrap();
     assert!(device.draw_instanced(0, 0).is_err());
     assert!(device.end_render_pass(StoreOp::Store).is_err());
     device.begin_render_pass(&descriptor()).unwrap();
@@ -227,6 +235,7 @@ fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
+    device.end_frame().unwrap();
     device.submissions.wait().unwrap();
     assert_eq!(pixels(&device.textures.output().unwrap()), [255; 8]);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
