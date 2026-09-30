@@ -257,6 +257,7 @@ fn draw_quads(
     let mut commands = submission.recording().unwrap();
     super::super::draw::DrawPass {
         target: &target,
+        origin: api::units::DeviceIntPoint::zero(),
         depth: depth.as_ref(),
         clear_color: Some(wgt::Color::BLUE),
         clear_depth: depth_clear,

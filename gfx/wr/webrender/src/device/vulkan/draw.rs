@@ -5,7 +5,8 @@
 use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
 use super::{hal, wgt, Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
-use api::units::{DeviceIntRect, DeviceIntSize};
+use api::units::{DeviceIntPoint, DeviceIntRect};
+use euclid::default::Transform3D;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -33,6 +34,8 @@ pub(super) struct DrawBatch<'a> {
 
 pub(super) struct DrawPass<'a> {
     pub target: &'a Rc<Texture>,
+    /// Logical pixel coordinate at the attachment's top-left.
+    pub origin: DeviceIntPoint,
     pub depth: Option<&'a Rc<Texture>>,
     pub clear_color: Option<wgt::Color>,
     pub clear_depth: Option<f32>,
@@ -40,6 +43,36 @@ pub(super) struct DrawPass<'a> {
 }
 
 impl DrawPass<'_> {
+    /// Convert WebRender's GL clip transform for this target's logical origin.
+    pub fn projection(&self, transform: &Transform3D<f32>) -> [f32; 16] {
+        let size = self.target.size();
+        let dx = 2.0 * self.origin.x as f32 / size.width as f32;
+        let dy = 2.0 * self.origin.y as f32 / size.height as f32;
+        let mut matrix = transform.to_array();
+        for column in [0, 4, 8, 12] {
+            let w = matrix[column + 3];
+            matrix[column] -= dx * w;
+            matrix[column + 1] = -matrix[column + 1] + dy * w;
+            matrix[column + 2] = (matrix[column + 2] + w) * 0.5;
+        }
+        matrix
+    }
+
+    fn bounds(&self) -> Result<DeviceIntRect, String> {
+        let size = self.target.size();
+        let x = self
+            .origin
+            .x
+            .checked_add(size.width as i32)
+            .ok_or("Vulkan draw target X coordinate overflow")?;
+        let y = self
+            .origin
+            .y
+            .checked_add(size.height as i32)
+            .ok_or("Vulkan draw target Y coordinate overflow")?;
+        Ok(DeviceIntRect::new(self.origin, DeviceIntPoint::new(x, y)))
+    }
+
     pub fn record_batches(
         &self,
         commands: &mut Recording<'_>,
@@ -50,9 +83,7 @@ impl DrawPass<'_> {
     ) -> Result<(), String> {
         let owner = &self.target.raw.owner;
         commands.recording_id(owner)?;
-        let size = self.target.size();
-        let full =
-            DeviceIntRect::from_size(DeviceIntSize::new(size.width as i32, size.height as i32));
+        let full = self.bounds()?;
         let active: Vec<_> = batches
             .iter()
             .filter(|batch| {
@@ -159,8 +190,7 @@ impl DrawPass<'_> {
         {
             return Err("Invalid draw depth range or clear value".into());
         }
-        let full =
-            DeviceIntRect::from_size(DeviceIntSize::new(size.width as i32, size.height as i32));
+        let full = self.bounds()?;
         let mut buffers: HashMap<*const Buffer, (&Rc<Buffer>, wgt::BufferUses)> = HashMap::new();
         fn add_buffer<'a>(
             buffers: &mut HashMap<*const Buffer, (&'a Rc<Buffer>, wgt::BufferUses)>,
@@ -288,8 +318,8 @@ impl DrawPass<'_> {
             for (draw, scissor, instances) in active {
                 let pipeline = &draw.bindings.pipeline;
                 encoder.set_scissor_rect(&hal::Rect {
-                    x: scissor.min.x as u32,
-                    y: scissor.min.y as u32,
+                    x: (scissor.min.x - self.origin.x) as u32,
+                    y: (scissor.min.y - self.origin.y) as u32,
                     w: scissor.width() as u32,
                     h: scissor.height() as u32,
                 });

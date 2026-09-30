@@ -67,12 +67,13 @@ pub(in crate::device::vulkan) fn record_overlapping_passes(
                 instances,
                 instance_offset: 0,
                 instance_count: 1,
-                scissor: DeviceIntRect::from_size(DeviceIntSize::new(pass.target.size().width as i32, pass.target.size().height as i32)),
+                scissor: pass.bounds().unwrap(),
             },
         ));
     }
     DrawPass {
         target: pass.target,
+        origin: pass.origin,
         depth: pass.depth,
         clear_color: Some(wgt::Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }),
         clear_depth: Some(1.0),
@@ -83,6 +84,7 @@ pub(in crate::device::vulkan) fn record_overlapping_passes(
     for (z, draw) in draws {
         DrawPass {
             target: pass.target,
+            origin: pass.origin,
             depth: pass.depth,
             clear_color: None,
             clear_depth: None,
