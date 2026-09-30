@@ -7,6 +7,9 @@ use super::super::{BufferPool, Options};
 use super::super::tests::{validation_logging, ERRORS};
 use std::sync::atomic::Ordering;
 
+#[path = "mipmap_tests.rs"]
+mod mipmaps;
+
 struct Context {
     device: Rc<Device>,
     queue: SubmissionQueue,
