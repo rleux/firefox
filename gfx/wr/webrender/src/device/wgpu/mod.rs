@@ -14,6 +14,7 @@ mod bindings;
 mod binding_cache;
 mod draw;
 mod clear;
+mod render_pass;
 mod texture_blit;
 mod pipeline;
 mod program;

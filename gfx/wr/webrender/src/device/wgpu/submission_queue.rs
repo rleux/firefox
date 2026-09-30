@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::{hal, Owned, Recording, Submission, SubmissionBorrow, SubmissionState};
-use super::super::{wgt, Buffer, BufferPool};
+use super::super::{wgt, Buffer, BufferPool, Device};
 use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -42,6 +42,10 @@ impl Drop for RecycleUpload {
 }
 
 impl SubmissionQueue {
+    pub(in crate::device::wgpu) fn owner(&self) -> &Rc<Device> {
+        &self.pool.owner
+    }
+
     pub fn new(pool: &Rc<BufferPool>, limit: usize) -> Result<Self, String> {
         if limit == 0 || pool.owner.is_lost() {
             return Err("Invalid Vulkan submission limit or lost device".into());
