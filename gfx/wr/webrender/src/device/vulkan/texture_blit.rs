@@ -190,6 +190,48 @@ impl TextureBlitter {
             }],
         )
     }
+
+    pub fn generate_mipmaps(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        scratch: &mut TexturePool,
+        texture: &Rc<Texture>,
+    ) -> Result<(), String> {
+        commands.recording_id(&self.pipeline.raw.owner)?;
+        commands.recording_id(&texture.raw.owner)?;
+        if texture.format() != self.pipeline.format {
+            return Err("Vulkan mipmap format does not match the blit pipeline".into());
+        }
+        if texture.mip_count() == 1 {
+            return Ok(());
+        }
+        if !texture.initialized() {
+            return Err("Generating mipmaps from uninitialized Vulkan texture contents".into());
+        }
+        let full = |texture: &Texture| {
+            let size = texture.size();
+            DeviceIntRect::from_size(DeviceIntSize::new(size.width as i32, size.height as i32))
+        };
+        let mut source = texture.mip_view(0)?;
+        for level in 1..texture.mip_count() {
+            let target = texture.mip_view(level)?;
+            self.record(
+                commands,
+                uploads,
+                scratch,
+                TextureBlit {
+                    source: &source,
+                    target: &target,
+                    source_rect: full(&source),
+                    target_rect: full(&target),
+                    filter: TextureFilter::Linear,
+                },
+            )?;
+            source = target;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
