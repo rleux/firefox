@@ -263,6 +263,8 @@ bitflags! {
 
 /// WebRender interface to a GPU texture.
 ///
+/// Textures and targets derived from them must be used with their creating device.
+///
 /// Because freeing a texture requires various device handles that are not
 /// reachable from this struct, manual destruction via `Device` is required.
 /// Our `Drop` implementation asserts that this has happened.
