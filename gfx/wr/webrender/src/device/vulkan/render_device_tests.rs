@@ -17,6 +17,9 @@ mod frame;
 #[path = "texture_update_tests.rs"]
 mod texture_update;
 
+#[path = "texture_operation_tests.rs"]
+mod texture_operation;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(

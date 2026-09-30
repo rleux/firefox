@@ -202,7 +202,7 @@ fn nonmip_uploads_keep_integer_data_and_conversion_behavior() {
         read(&device.textures.image(&color).unwrap()),
         [71, 29, 13, 255].repeat(4)
     );
-    assert!(device.mip_blitter.is_none());
+    assert!(device.blitter.is_none());
     device.textures.delete(&mut integer).unwrap();
     device.textures.delete(&mut color).unwrap();
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
