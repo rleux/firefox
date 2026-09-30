@@ -120,3 +120,6 @@ impl WritableTexture<'_> {
     }
 }
 
+#[cfg(test)]
+#[path = "texture_access_tests.rs"]
+mod tests;
