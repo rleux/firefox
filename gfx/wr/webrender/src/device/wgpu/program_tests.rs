@@ -34,9 +34,9 @@ fn create_pipeline(device: &Rc<Device>, shader: &'static ShaderArtifact) -> Rc<D
 
 fn pass(target: &Rc<Texture>) -> DrawPass<'_> {
     DrawPass {
-            viewport: None,
         target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,

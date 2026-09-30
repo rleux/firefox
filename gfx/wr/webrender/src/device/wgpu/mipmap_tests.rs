@@ -51,9 +51,9 @@ fn mipmap_generation_downsamples_each_level_and_supports_trilinear_reads() {
 
     let target = ctx.texture(1, 1, image.format(), true);
     let pass = DrawPass {
-            viewport: None,
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,

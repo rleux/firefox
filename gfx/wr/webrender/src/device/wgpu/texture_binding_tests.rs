@@ -91,9 +91,9 @@ fn unbound_color_slots_use_fallbacks_without_masking_invalid_tables() {
         .unwrap();
     let target = Texture::new(&device, 2, 2, image.format(), TextureFilter::Nearest, true).unwrap();
     let pass = DrawPass {
-            viewport: None,
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: Some(wgt::Color::RED),
         clear_depth: None,
@@ -210,9 +210,9 @@ fn render_target_invalidation_unbinds_and_discards_color_and_depth() {
     let queue = SubmissionQueue::new(&pool, 2).unwrap();
     let rect = DeviceIntRect::from_size(DeviceIntSize::new(2, 2));
     let pass = DrawPass {
-            viewport: None,
         target: &color,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: Some(&depth),
         clear_color: None,
         clear_depth: None,

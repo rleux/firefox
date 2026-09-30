@@ -58,9 +58,9 @@ fn quad(device: &Rc<Device>) -> Rc<Buffer> {
 
 fn pass(target: &Rc<Texture>) -> DrawPass<'_> {
     DrawPass {
-            viewport: None,
         target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,
