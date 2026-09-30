@@ -6,7 +6,7 @@ use super::textures::texture_format;
 use super::program::ShaderResource;
 use super::{wgt, Device, Recording, Texture, TextureFilter};
 use crate::device::{
-    DrawTarget, GpuFrameId, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot,
+    DrawTarget, GpuFrameId, ReadTarget, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot,
 };
 use crate::internal_types::RenderTargetInfo;
 use api::{ImageBufferKind, ImageFormat, units::{DeviceIntRect, DeviceIntSize}};
@@ -134,6 +134,17 @@ impl TextureStore {
             return Err("Vulkan render target dimensions do not match its image".into());
         }
         Ok((color, depth, viewport))
+    }
+
+    pub fn read_target(&self, target: ReadTarget) -> Result<Rc<Texture>, String> {
+        match target {
+            ReadTarget::Default => self.output()
+                .ok_or_else(|| "Vulkan output has not been allocated".into()),
+            ReadTarget::Texture { texture } => Ok(self.render_target(texture, false)?.0),
+            ReadTarget::NativeSurface { .. } => {
+                Err("Vulkan native-surface targets are unsupported".into())
+            }
+        }
     }
 
     pub fn create(

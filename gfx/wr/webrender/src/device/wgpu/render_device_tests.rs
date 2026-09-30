@@ -17,6 +17,9 @@ mod frame;
 #[path = "texture_update_tests.rs"]
 mod texture_update;
 
+#[path = "texture_operation_tests.rs"]
+mod texture_operation;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(
@@ -169,6 +172,15 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
         .unwrap();
     scissor(&device, 0);
     device.draw_instanced(1, 1).unwrap();
+    let mut source = device.textures.create(ImageBufferKind::Texture2D, ImageFormat::RGBA8,
+        DeviceIntSize::new(1, 1), TextureFilter::Nearest, None).unwrap();
+    device.copy_texture_sub_region(&source, 0, 0, &source, 0, 0, 0, 1).unwrap();
+    device.copy_texture_sub_region(&source, 0, 0, &source, 0, 0, 1, 0).unwrap();
+    let mut upload = device.uploads.create().unwrap();
+    let mapping = device.uploads.allocate(&mut upload, 256, false).unwrap();
+    device.flush_upload_buffer(&upload, &mapping, 0, &[]).unwrap();
+    device.uploads.delete(&mut upload).unwrap();
+    device.textures.delete(&mut source).unwrap();
     device
         .vertex_arrays
         .update_range(&instances, 48, &floats(&[0.0, 0.0, 1.0, 1.0]))
