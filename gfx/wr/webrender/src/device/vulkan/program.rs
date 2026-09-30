@@ -2,9 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::draw::{DrawBatch, DrawPass};
+use super::bindings::DrawBindings;
+use super::draw::{upload_projection, DrawBatch, DrawPass};
 use super::pipeline::DrawPipeline;
-use super::{Buffer, Texture, TextureFilter};
+use super::{Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::DeviceIntRect;
 use crate::device::TextureSlot;
 use euclid::default::Transform3D;
@@ -127,6 +128,26 @@ impl ProgramState {
 }
 
 impl ResolvedProgram {
+    pub fn bindings(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        samplers: Option<&Rc<Samplers>>,
+    ) -> Result<Rc<DrawBindings>, String> {
+        let projection = if self.pipeline.shader.projection_stages != 0 {
+            Some(upload_projection(commands, uploads, &self.projection)?)
+        } else {
+            None
+        };
+        DrawBindings::new(
+            &self.pipeline,
+            projection,
+            self.textures.clone(),
+            self.buffers.clone(),
+            samplers.cloned(),
+        )
+    }
+
     pub fn batch<'a>(
         &'a self,
         instances: &'a [u8],

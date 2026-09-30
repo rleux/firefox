@@ -13,6 +13,19 @@ use std::ops::Range;
 use std::rc::Rc;
 use wgpu_hal::CommandEncoder as _;
 
+pub(super) fn upload_projection(
+    commands: &mut Recording<'_>,
+    uploads: &SubmissionQueue,
+    matrix: &[f32; 16],
+) -> Result<Rc<Buffer>, String> {
+    uploads.upload_in_recording(commands, 64, wgt::BufferUses::UNIFORM, |bytes| {
+        for (destination, value) in bytes.chunks_exact_mut(4).zip(matrix) {
+            destination.copy_from_slice(&value.to_ne_bytes());
+        }
+        Ok(())
+    })
+}
+
 pub(super) struct Draw {
     pub bindings: Rc<DrawBindings>,
     pub instances: Rc<Buffer>,
@@ -189,17 +202,7 @@ impl DrawPass<'_> {
         for (index, batch) in active.iter().enumerate() {
             let projection = if batch.pipeline.shader.projection_stages != 0 {
                 let matrix = batch.projection.unwrap();
-                Some(uploads.upload_in_recording(
-                    commands,
-                    64,
-                    wgt::BufferUses::UNIFORM,
-                    |bytes| {
-                        for (destination, value) in bytes.chunks_exact_mut(4).zip(matrix) {
-                            destination.copy_from_slice(&value.to_ne_bytes());
-                        }
-                        Ok(())
-                    },
-                )?)
+                Some(upload_projection(commands, uploads, matrix)?)
             } else {
                 None
             };

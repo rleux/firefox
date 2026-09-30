@@ -420,6 +420,7 @@ impl Drop for Buffer {
 #[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct BufferId(pub(super) u32);
 
+/// Vertex arrays and their buffer handles must be used with their creating device.
 /// A vertex layout together with the buffers its attributes and indices are
 /// read from, bound as a unit for drawing.
 pub struct VertexArray {
