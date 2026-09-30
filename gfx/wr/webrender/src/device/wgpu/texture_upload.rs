@@ -2,15 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::super::{hal, wgt, SubmissionQueue};
+use super::super::{wgt, SubmissionQueue};
 use super::{texture_format, Texture};
 use api::{
     ImageFormat,
-    units::{DeviceIntRect, DeviceIntSize},
+    units::DeviceIntRect,
 };
 use std::convert::TryFrom;
 use std::rc::Rc;
-use wgpu_hal::CommandEncoder as _;
 
 impl Texture {
     pub fn upload(
@@ -22,7 +21,7 @@ impl Texture {
         offset: i32,
         source_format: Option<ImageFormat>,
     ) -> Result<(), String> {
-        let copy_destination = self.copy_destination()?;
+        let destination = self.copy_destination()?;
         let mut commands = queue.recording()?;
         let owner = &self.raw.owner;
         let recording = commands.recording_id(owner)?;
@@ -79,25 +78,15 @@ impl Texture {
         {
             return Err("Unsupported Vulkan upload conversion".into());
         }
-        let destination = if self.initialized() {
-            rect
-        } else {
-            DeviceIntRect::from_size(DeviceIntSize::new(
-                i32::try_from(self.size.width)
-                    .map_err(|_| "Upload width exceeds coordinate range")?,
-                i32::try_from(self.size.height)
-                    .map_err(|_| "Upload height exceeds coordinate range")?,
-            ))
-        };
         let alignment = usize::try_from(owner.capabilities.alignments.buffer_copy_pitch.get())
             .map_err(|_| "Upload alignment exceeds address space")?;
-        let pitch = (destination.width() as usize)
+        let pitch = (rect.width() as usize)
             .checked_mul(bpp)
             .and_then(|row| row.div_ceil(alignment).checked_mul(alignment))
             .ok_or("Upload pitch overflow")?;
         let pitch_u32 = u32::try_from(pitch).map_err(|_| "Upload pitch exceeds u32")?;
         let packed_size = pitch
-            .checked_mul(destination.height() as usize)
+            .checked_mul(rect.height() as usize)
             .ok_or("Upload size overflow")?;
         let staging = queue.upload_in_recording(
             &mut commands,
@@ -105,19 +94,17 @@ impl Texture {
             wgt::BufferUses::COPY_SRC,
             |packed| {
                 if !swizzle
-                    && destination == rect
                     && source_stride == row_bytes
                     && pitch == row_bytes
                 {
                     packed.copy_from_slice(&data[offset as usize..end]);
                     return Ok(());
                 }
-                if destination != rect || pitch != row_bytes {
+                if pitch != row_bytes {
                     packed.fill(0);
                 }
                 for y in 0..rect.height() as usize {
-                    let start = (y + (rect.min.y - destination.min.y) as usize) * pitch
-                        + (rect.min.x - destination.min.x) as usize * bpp;
+                    let start = y * pitch;
                     let source = offset as usize + y * source_stride;
                     let source = &data[source..source + row_bytes];
                     let target = &mut packed[start..start + row_bytes];
@@ -131,38 +118,6 @@ impl Texture {
                 Ok(())
             },
         )?;
-        staging.transition(&mut commands, wgt::BufferUses::COPY_SRC)?;
-        copy_destination.transition(&mut commands)?;
-        unsafe {
-            commands.encoder().copy_buffer_to_texture(
-                &*staging.raw,
-                self.raw_texture(),
-                &[hal::BufferTextureCopy {
-                    buffer_layout: wgt::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(pitch_u32),
-                        rows_per_image: Some(destination.height() as u32),
-                    },
-                    texture_base: hal::TextureCopyBase {
-                        mip_level: self.base_mip,
-                        array_layer: 0,
-                        origin: wgt::Origin3d {
-                            x: destination.min.x as u32,
-                            y: destination.min.y as u32,
-                            z: 0,
-                        },
-                        aspect: hal::FormatAspects::COLOR,
-                    },
-                    size: wgt::Extent3d {
-                        width: destination.width() as u32,
-                        height: destination.height() as u32,
-                        depth_or_array_layers: 1,
-                    }
-                    .into(),
-                }],
-            );
-        }
-        self.transition(&mut commands, wgt::TextureUses::RESOURCE)?;
-        copy_destination.initialize(&mut commands)
+        destination.copy_from_buffer(&mut commands, &staging, rect, 0, pitch_u32)
     }
 }
