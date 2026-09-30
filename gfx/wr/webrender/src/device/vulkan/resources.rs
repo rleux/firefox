@@ -119,12 +119,31 @@ impl Buffer {
         if length as u64 > self.size {
             return Err("Vulkan buffer is too small".into());
         }
-        let device = &self.raw.owner.open.device;
         let mapping = self
             .mapping
             .as_ref()
             .ok_or("Vulkan buffer is not mapped for upload")?;
         write(unsafe { std::slice::from_raw_parts_mut(mapping.ptr.as_ptr(), length) })?;
+        self.flush_writes(length)
+    }
+
+    pub(super) fn mapped_write_ptr(
+        &mut self,
+    ) -> Result<std::ptr::NonNull<std::mem::MaybeUninit<u8>>, String> {
+        self.mapping
+            .as_ref()
+            .map(|mapping| mapping.ptr.cast())
+            .ok_or_else(|| "Vulkan buffer is not mapped for upload".into())
+    }
+
+    pub(super) fn flush_writes(&mut self, length: usize) -> Result<(), String> {
+        if length as u64 > self.size {
+            return Err("Vulkan buffer is too small".into());
+        }
+        let device = &self.raw.owner.open.device;
+        let mapping = self.mapping
+            .as_ref()
+            .ok_or("Vulkan buffer is not mapped for upload")?;
         // Short bindings still expose four bytes.
         if length < 4 {
             unsafe { std::ptr::write_bytes(mapping.ptr.as_ptr().add(length), 0, 4 - length) };
@@ -179,7 +198,7 @@ impl Buffer {
     pub(super) fn mapped_read_only(&self) -> Result<&[u8], String> {
         // GPU access must be read-only while CPU code reads this mapping.
         let allowed = wgt::BufferUses::MAP_WRITE | wgt::BufferUses::STORAGE_READ_ONLY
-            | wgt::BufferUses::VERTEX | wgt::BufferUses::INDEX;
+            | wgt::BufferUses::VERTEX | wgt::BufferUses::INDEX | wgt::BufferUses::COPY_SRC;
         if !self.usage.contains(wgt::BufferUses::MAP_WRITE) || !allowed.contains(self.usage) {
             return Err("Direct mapped reads require a GPU-read-only upload buffer".into());
         }

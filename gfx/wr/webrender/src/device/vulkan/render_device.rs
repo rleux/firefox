@@ -6,6 +6,7 @@ use super::program_store::ProgramStore;
 use super::render_pass::RenderPassState;
 use super::texture_store::TextureStore;
 use super::vertex_array::VertexArrayStore;
+use super::upload_buffers::UploadBuffers;
 use super::{wgt, Buffer, BufferPool, Device, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntRect, DeviceIntSize, FramebufferIntRect};
 use crate::device::{GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp};
@@ -15,6 +16,7 @@ pub(super) struct RenderDevice {
     pub programs: ProgramStore,
     pub textures: TextureStore,
     pub vertex_arrays: VertexArrayStore,
+    pub uploads: UploadBuffers,
     pub passes: RenderPassState,
     pub submissions: SubmissionQueue,
     quad: Rc<Buffer>,
@@ -54,6 +56,7 @@ impl RenderDevice {
             programs: ProgramStore::default(),
             textures: TextureStore::new(owner),
             vertex_arrays: VertexArrayStore::new(&pool),
+            uploads: UploadBuffers::new(&pool),
             passes: RenderPassState::default(),
             submissions,
             quad,

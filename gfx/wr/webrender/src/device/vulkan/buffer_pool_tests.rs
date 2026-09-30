@@ -68,19 +68,42 @@ fn reused_short_buffers_zero_minimum_binding_padding() {
     let device = device();
     let pool = BufferPool::new(&device);
     let usage = wgt::BufferUses::STORAGE_READ_ONLY | wgt::BufferUses::COPY_SRC;
-    for length in 0..=5 {
-        let original = pool.upload(&[0xcc; 8], usage).unwrap();
-        let allocation = Rc::as_ptr(&original);
-        pool.recycle(original);
-        let payload = [29; 5];
-        let reused = pool.upload(&payload[..length], usage).unwrap();
-        assert_eq!(Rc::as_ptr(&reused), allocation);
-        assert_eq!(reused.binding_size(), length.max(4) as u64);
-        let mut expected = [0xcc; 8];
-        expected[..length].copy_from_slice(&payload[..length]);
-        expected[length..length.max(4)].fill(0);
-        assert_eq!(read_upload(&device, &reused), expected, "length {}", length);
-        pool.recycle(reused);
+    for direct_mapping in [false, true] {
+        for length in 0..=5 {
+            let original = pool.upload(&[0xcc; 8], usage).unwrap();
+            let allocation = Rc::as_ptr(&original);
+            pool.recycle(original);
+            let payload = [29; 5];
+            let reused = if direct_mapping {
+                let mut reused = pool.upload_with(8, usage, |_| Ok(())).unwrap();
+                let buffer = Rc::get_mut(&mut reused).unwrap();
+                let pointer = buffer.mapped_write_ptr().unwrap();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        pointer.as_ptr().cast::<u8>(),
+                        length,
+                    );
+                }
+                buffer.flush_writes(length).unwrap();
+                reused
+            } else {
+                pool.upload(&payload[..length], usage).unwrap()
+            };
+            assert_eq!(Rc::as_ptr(&reused), allocation);
+            assert_eq!(reused.binding_size(), length.max(4) as u64);
+            let mut expected = [0xcc; 8];
+            expected[..length].copy_from_slice(&payload[..length]);
+            expected[length..length.max(4)].fill(0);
+            assert_eq!(
+                read_upload(&device, &reused),
+                expected,
+                "length {}, direct mapping {}",
+                length,
+                direct_mapping
+            );
+            pool.recycle(reused);
+        }
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
