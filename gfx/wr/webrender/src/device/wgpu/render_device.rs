@@ -5,19 +5,20 @@
 use super::program_store::ProgramStore;
 use super::render_pass::RenderPassState;
 use super::texture_store::TextureStore;
-use super::texture_blit::TextureBlitter;
+use super::texture_blit::{TextureBlit, TextureBlitter};
 use super::vertex_array::VertexArrayStore;
 use super::upload_buffers::UploadBuffers;
 use super::{
     wgt, Buffer, BufferPool, Device, Samplers, SubmissionQueue, Texture, TextureFilter, TexturePool,
 };
 use api::ImageFormat;
-use api::units::{DeviceIntRect, DeviceIntSize, FramebufferIntRect};
+use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize, FramebufferIntRect};
 use crate::device::{
-    GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp, Texture as TextureHandle,
-    TransferBuffer, UploadBufferMapping, UploadChunk,
+    DrawTarget, ReadTarget, GpuFrameId, Program, RenderPassDescriptor, RenderState, StoreOp,
+    Texture as TextureHandle, TransferBuffer, UploadBufferMapping, UploadChunk,
 };
 use std::collections::HashSet;
+use std::convert::TryFrom;
 use std::rc::Rc;
 
 pub(super) struct RenderDevice {
@@ -32,7 +33,7 @@ pub(super) struct RenderDevice {
     fallback: Rc<Texture>,
     frame: GpuFrameId,
     inside_frame: bool,
-    mip_blitter: Option<(wgt::TextureFormat, TextureBlitter)>,
+    blitter: crate::internal_types::FastHashMap<wgt::TextureFormat, TextureBlitter>,
     scratch: TexturePool,
 }
 
@@ -74,7 +75,7 @@ impl RenderDevice {
             fallback,
             frame: GpuFrameId::new(0),
             inside_frame: false,
-            mip_blitter: None,
+            blitter: Default::default(),
             scratch: TexturePool::new(owner),
         })
     }
@@ -148,18 +149,97 @@ impl RenderDevice {
         if texture.mip_count() == 1 {
             return Ok(());
         }
-        let format = texture.format();
-        if self.mip_blitter.as_ref().map(|entry| entry.0) != Some(format) {
-            let blitter =
-                TextureBlitter::new(&texture.raw.owner, format, &self.quad, &self.samplers)?;
-            self.mip_blitter = Some((format, blitter));
-        }
-        self.mip_blitter.as_ref().unwrap().1.generate_mipmaps(
+        self.prepare_blitter(texture)?;
+        self.blitter[&texture.format()].generate_mipmaps(
             &mut self.submissions.recording()?,
             &self.submissions,
             &mut self.scratch,
             texture,
         )
+    }
+
+    fn prepare_blitter(&mut self, target: &Rc<Texture>) -> Result<(), String> {
+        let format = target.format();
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.blitter.entry(format) {
+            let blitter =
+                TextureBlitter::new(&target.raw.owner, format, &self.quad, &self.samplers)?;
+            entry.insert(blitter);
+        }
+        Ok(())
+    }
+
+    pub fn copy_texture_sub_region(
+        &mut self,
+        source: &TextureHandle,
+        x: usize,
+        y: usize,
+        target: &TextureHandle,
+        dx: usize,
+        dy: usize,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        self.flush_pass()?;
+        let rect = |x: usize, y: usize| -> Result<DeviceIntRect, String> {
+            let point = |x, y| -> Result<DeviceIntPoint, String> {
+                Ok(DeviceIntPoint::new(
+                    i32::try_from(x).map_err(|_| "Vulkan copy X exceeds coordinate range")?,
+                    i32::try_from(y).map_err(|_| "Vulkan copy Y exceeds coordinate range")?,
+                ))
+            };
+            Ok(DeviceIntRect::new(
+                point(x, y)?,
+                point(
+                    x.checked_add(width).ok_or("Vulkan copy X overflow")?,
+                    y.checked_add(height).ok_or("Vulkan copy Y overflow")?,
+                )?,
+            ))
+        };
+        let source_rect = rect(x, y)?;
+        let target_rect = rect(dx, dy)?;
+        let source = self.textures.image(source)?;
+        let target = self.textures.image(target)?;
+        target.copy_from_texture(
+            &mut self.submissions.recording()?,
+            &source,
+            source_rect,
+            target_rect,
+        )
+    }
+
+    pub fn blit_render_target(
+        &mut self,
+        source: ReadTarget,
+        source_rect: FramebufferIntRect,
+        target: DrawTarget,
+        target_rect: FramebufferIntRect,
+        filter: TextureFilter,
+    ) -> Result<(), String> {
+        self.flush_pass()?;
+        let source = self.textures.read_target(source)?;
+        let (target, _, _) = self.textures.draw_target(target)?;
+        self.prepare_blitter(&target)?;
+        self.blitter[&target.format()].record(
+            &mut self.submissions.recording()?,
+            &self.submissions,
+            &mut self.scratch,
+            TextureBlit {
+                source: &source,
+                target: &target,
+                source_rect: source_rect.cast_unit(),
+                target_rect: target_rect.cast_unit(),
+                filter,
+            },
+        )
+    }
+
+    pub fn invalidate_render_target(&mut self, texture: &TextureHandle) -> Result<(), String> {
+        self.flush_pass()?;
+        self.textures
+            .invalidate_render_target(texture, &mut self.submissions.recording()?)
     }
 
     pub fn begin_frame(&mut self) -> Result<GpuFrameId, String> {

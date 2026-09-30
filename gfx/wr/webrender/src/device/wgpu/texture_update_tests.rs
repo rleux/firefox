@@ -202,8 +202,24 @@ fn nonmip_uploads_keep_integer_data_and_conversion_behavior() {
         read(&device.textures.image(&color).unwrap()),
         [71, 29, 13, 255].repeat(4)
     );
-    assert!(device.mip_blitter.is_none());
+    assert!(device.blitter.is_empty());
     device.textures.delete(&mut integer).unwrap();
     device.textures.delete(&mut color).unwrap();
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn alternating_blit_formats_retain_their_pipelines() {
+    let mut device = device();
+    let owner = device.quad.raw.owner.clone();
+    for _ in 0..3 {
+        for format in [wgt::TextureFormat::Rgba8Unorm, wgt::TextureFormat::Bgra8Unorm, wgt::TextureFormat::R8Unorm] {
+            let target = Texture::new(&owner, 2, 2, format, TextureFilter::Nearest, true).unwrap();
+            device.prepare_blitter(&target).unwrap();
+        }
+    }
+    assert_eq!(device.blitter.len(), 3);
+    assert_eq!(owner.prepared_shaders.borrow().values().map(|shader| shader.strong_count()).sum::<usize>(), 3);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
