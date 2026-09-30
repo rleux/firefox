@@ -2,10 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::program::ProgramState;
+use super::draw::DrawPass;
+use super::pipeline::DrawPipeline;
+use super::program::{ProgramState, ResolvedProgram, ShaderResource};
 use super::shader::{draw_vertex_descriptor, select_draw_shader};
 use super::vertex_layouts;
-use crate::device::{Program, ProgramSourceInfo, ProgramSourceType, ShaderError, VertexDescriptor};
+use super::Texture;
+use crate::device::{
+    Program, ProgramSourceInfo, ProgramSourceType, RenderState, ShaderError, VertexDescriptor,
+};
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
@@ -15,6 +20,7 @@ struct Entry {
     // IDs are local; the shared name allocation identifies the owning store entry.
     name: Rc<CString>,
     state: ProgramState,
+    pipelines: Vec<(RenderState, Rc<DrawPipeline>)>,
 }
 
 #[derive(Default)]
@@ -22,6 +28,7 @@ pub(in crate::device::vulkan) struct ProgramStore {
     last_id: u32,
     bound: Option<u32>,
     entries: HashMap<u32, Entry>,
+    pipeline: Option<(RenderState, Rc<DrawPipeline>)>,
 }
 
 impl ProgramStore {
@@ -54,6 +61,7 @@ impl ProgramStore {
             Entry {
                 name: full_name.clone(),
                 state: ProgramState::new(shader),
+                pipelines: Vec::new(),
             },
         );
         self.last_id = id;
@@ -148,8 +156,70 @@ impl ProgramStore {
     pub fn bind(&mut self, program: &Program) -> Result<bool, String> {
         self.state(program)?;
         let changed = self.bound != Some(program.id);
+        if changed {
+            self.pipeline = None;
+        }
         self.bound = Some(program.id);
         Ok(changed)
+    }
+
+    pub fn bind_pipeline(
+        &mut self,
+        program: &Program,
+        state: RenderState,
+        pass: &DrawPass<'_>,
+    ) -> Result<bool, String> {
+        let shader = self.state(program)?.shader();
+        if self.bound == Some(program.id) {
+            if let Some((previous, pipeline)) = &self.pipeline {
+                if *previous == state && Self::compatible(pipeline, pass) {
+                    return Ok(false);
+                }
+            }
+        }
+        let pipelines = &mut self.entries.get_mut(&program.id).unwrap().pipelines;
+        let pipeline = match pipelines.iter().find(|(previous, pipeline)| {
+            *previous == state && Self::compatible(pipeline, pass)
+        }) {
+            Some((_, pipeline)) => pipeline.clone(),
+            None => {
+                let pipeline = DrawPipeline::new(
+                    &pass.target.raw.owner,
+                    shader,
+                    pass.target.format(),
+                    pass.depth.is_some(),
+                    state,
+                )?;
+                pipelines.push((state, pipeline.clone()));
+                pipeline
+            }
+        };
+        self.bound = Some(program.id);
+        self.pipeline = Some((state, pipeline));
+        Ok(true)
+    }
+
+    fn compatible(pipeline: &DrawPipeline, pass: &DrawPass<'_>) -> bool {
+        Rc::ptr_eq(&pipeline.raw.owner, &pass.target.raw.owner)
+            && pipeline.format == pass.target.format()
+            && pipeline.has_depth == pass.depth.is_some()
+    }
+
+    pub fn resolve_current(
+        &self,
+        pass: &DrawPass<'_>,
+        slots: &[Option<ShaderResource>],
+        fallback: Option<&Rc<Texture>>,
+    ) -> Result<ResolvedProgram, String> {
+        let pipeline = &self
+            .pipeline
+            .as_ref()
+            .ok_or("No Vulkan pipeline is bound")?
+            .1;
+        if !Self::compatible(pipeline, pass) {
+            return Err("Bound Vulkan pipeline does not match the render target".into());
+        }
+        self.current()?.resolve(pipeline, pass, slots, fallback)
     }
 
     pub fn current(&self) -> Result<&ProgramState, String> {
@@ -161,6 +231,7 @@ impl ProgramStore {
 
     pub fn unbind(&mut self) {
         self.bound = None;
+        self.pipeline = None;
     }
 
     pub fn delete(&mut self, program: &mut Program) -> Result<(), String> {
