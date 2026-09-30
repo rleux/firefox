@@ -17,6 +17,8 @@ mod bindings;
 mod draw;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]
+mod render_device;
+#[cfg(wr_vulkan_shaders)]
 mod texture_blit;
 mod pipeline;
 mod program;
