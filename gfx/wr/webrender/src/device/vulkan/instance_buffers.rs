@@ -59,11 +59,22 @@ impl InstanceBuffers {
         &self,
         draw: usize,
     ) -> Result<hal::BufferBinding<'_, hal::vulkan::Buffer>, String> {
+        let (buffer, range) = self.buffer_range(draw)?;
+        buffer.vertex_binding(range.start, range.end - range.start)
+    }
+
+    pub(in crate::device::vulkan) fn buffer_range(
+        &self,
+        draw: usize,
+    ) -> Result<(&Rc<Buffer>, std::ops::Range<u64>), String> {
         let range = self
             .ranges
             .get(draw)
             .ok_or("Invalid Vulkan instance draw index")?;
-        self.buffers[range.buffer].vertex_binding(range.offset as u64, range.size.max(4) as u64)
+        Ok((
+            &self.buffers[range.buffer],
+            range.offset as u64..(range.offset + range.size.max(4)) as u64,
+        ))
     }
 }
 

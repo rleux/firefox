@@ -3,7 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::bindings::DrawBindings;
-use super::{hal, wgt, Buffer, Recording, Texture};
+use super::pipeline::DrawPipeline;
+use super::{hal, wgt, Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntRect, DeviceIntSize};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -18,6 +19,18 @@ pub(super) struct Draw {
     pub scissor: DeviceIntRect,
 }
 
+/// Resource slices follow the pipeline's reflected binding order.
+pub(super) struct DrawBatch<'a> {
+    pub pipeline: &'a Rc<DrawPipeline>,
+    /// Column-major transform producing Vulkan clip coordinates.
+    pub projection: Option<&'a [f32; 16]>,
+    pub textures: &'a [(Rc<Texture>, TextureFilter)],
+    pub buffers: &'a [Rc<Buffer>],
+    pub instances: &'a [u8],
+    pub instance_count: u32,
+    pub scissor: DeviceIntRect,
+}
+
 pub(super) struct DrawPass<'a> {
     pub target: &'a Rc<Texture>,
     pub depth: Option<&'a Rc<Texture>>,
@@ -27,6 +40,86 @@ pub(super) struct DrawPass<'a> {
 }
 
 impl DrawPass<'_> {
+    pub fn record_batches(
+        &self,
+        commands: &mut Recording<'_>,
+        uploads: &SubmissionQueue,
+        quad: &Rc<Buffer>,
+        samplers: Option<&Rc<Samplers>>,
+        batches: &[DrawBatch<'_>],
+    ) -> Result<(), String> {
+        let owner = &self.target.raw.owner;
+        commands.recording_id(owner)?;
+        let size = self.target.size();
+        let full =
+            DeviceIntRect::from_size(DeviceIntSize::new(size.width as i32, size.height as i32));
+        let active: Vec<_> = batches
+            .iter()
+            .filter(|batch| {
+                batch.instance_count != 0 && batch.scissor.intersection(&full).is_some()
+            })
+            .collect();
+        for batch in &active {
+            if !Rc::ptr_eq(&batch.pipeline.raw.owner, owner)
+                || batch.pipeline.format != self.target.format()
+                || batch.pipeline.has_depth != self.depth.is_some()
+            {
+                return Err("Draw batch pipeline does not match the render pass".into());
+            }
+            let bytes = batch
+                .pipeline
+                .instance_stride
+                .checked_mul(u64::from(batch.instance_count))
+                .ok_or("Draw batch instance size overflow")?;
+            if bytes != batch.instances.len() as u64 {
+                return Err("Draw batch data does not match the instance count and stride".into());
+            }
+            if batch.pipeline.shader.projection_stages != 0 && batch.projection.is_none() {
+                return Err("Missing draw batch projection".into());
+            }
+        }
+        let sizes: Vec<_> = active.iter().map(|batch| batch.instances.len()).collect();
+        let instances = uploads.upload_instances_with(commands, &sizes, |index, destination| {
+            destination.copy_from_slice(active[index].instances);
+            Ok(())
+        })?;
+        let mut draws = Vec::with_capacity(active.len());
+        for (index, batch) in active.iter().enumerate() {
+            let projection = if batch.pipeline.shader.projection_stages != 0 {
+                let matrix = batch.projection.unwrap();
+                Some(uploads.upload_in_recording(
+                    commands,
+                    64,
+                    wgt::BufferUses::UNIFORM,
+                    |bytes| {
+                        for (destination, value) in bytes.chunks_exact_mut(4).zip(matrix) {
+                            destination.copy_from_slice(&value.to_ne_bytes());
+                        }
+                        Ok(())
+                    },
+                )?)
+            } else {
+                None
+            };
+            let bindings = DrawBindings::new(
+                batch.pipeline,
+                projection,
+                batch.textures.to_vec(),
+                batch.buffers.to_vec(),
+                samplers.cloned(),
+            )?;
+            let (buffer, range) = instances.buffer_range(index)?;
+            draws.push(Draw {
+                bindings,
+                instances: buffer.clone(),
+                instance_offset: range.start,
+                instance_count: batch.instance_count,
+                scissor: batch.scissor,
+            });
+        }
+        self.record(commands, quad, &draws)
+    }
+
     pub fn record(
         &self,
         commands: &mut Recording<'_>,

@@ -10,6 +10,9 @@ use api::units::DeviceIntPoint;
 use crate::device::RenderState;
 use std::sync::atomic::Ordering;
 
+#[path = "draw_upload_tests.rs"]
+mod uploads;
+
 #[path = "attachment_sync_tests.rs"]
 pub(in crate::device::vulkan) mod synchronization;
 
