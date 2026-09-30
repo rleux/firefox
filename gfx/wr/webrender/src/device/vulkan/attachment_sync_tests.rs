@@ -71,15 +71,12 @@ pub(in crate::device::vulkan) fn record_overlapping_passes(
             },
         ));
     }
-    DrawPass {
-        target: pass.target,
-        origin: pass.origin,
-        depth: pass.depth,
-        clear_color: Some(wgt::Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }),
-        clear_depth: Some(1.0),
-        depth_range: 0.0..1.0,
-    }
-    .record(commands, &quad, &[])
+    pass.clear_rect(
+        commands,
+        pass.bounds().unwrap(),
+        Some([0.0, 0.0, 1.0, 1.0]),
+        Some(1.0),
+    )
     .unwrap();
     for (z, draw) in draws {
         DrawPass {

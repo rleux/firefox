@@ -6,6 +6,7 @@ use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
 use super::{hal, wgt, Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntPoint, DeviceIntRect};
+use ash::vk;
 use euclid::default::Transform3D;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -43,6 +44,76 @@ pub(super) struct DrawPass<'a> {
 }
 
 impl DrawPass<'_> {
+    pub fn clear_rect(
+        &self,
+        commands: &mut Recording<'_>,
+        rect: DeviceIntRect,
+        color: Option<[f32; 4]>,
+        depth: Option<f32>,
+    ) -> Result<(), String> {
+        let full = self.validate(commands)?;
+        if depth.map_or(false, |value| !(0.0..=1.0).contains(&value)) {
+            return Err("Invalid Vulkan depth clear value".into());
+        }
+        if depth.is_some() && self.depth.is_none() {
+            return Err("Vulkan depth clear requires an attachment".into());
+        }
+        if color.is_none() && depth.is_none() {
+            return Ok(());
+        }
+        let Some(rect) = rect.intersection(&full) else {
+            return Ok(());
+        };
+        let mut attachments = [vk::ClearAttachment::default(); 2];
+        let mut count = 0;
+        if let Some(color) = color {
+            attachments[count] = vk::ClearAttachment {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                color_attachment: 0,
+                clear_value: vk::ClearValue {
+                    color: vk::ClearColorValue { float32: color },
+                },
+            };
+            count += 1;
+        }
+        if let Some(depth) = depth {
+            attachments[count] = vk::ClearAttachment {
+                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                color_attachment: 0,
+                clear_value: vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
+                },
+            };
+            count += 1;
+        }
+        self.record_pass(commands, |encoder| unsafe {
+            self.target
+                .raw
+                .owner
+                .open
+                .device
+                .raw_device()
+                .cmd_clear_attachments(
+                    encoder.raw_handle(),
+                    &attachments[..count],
+                    &[vk::ClearRect {
+                        rect: vk::Rect2D {
+                            offset: vk::Offset2D {
+                                x: rect.min.x - self.origin.x,
+                                y: rect.min.y - self.origin.y,
+                            },
+                            extent: vk::Extent2D {
+                                width: rect.width() as u32,
+                                height: rect.height() as u32,
+                            },
+                        },
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }],
+                );
+        })
+    }
+
     /// Convert WebRender's GL clip transform for this target's logical origin.
     pub fn projection(&self, transform: &Transform3D<f32>) -> [f32; 16] {
         let size = self.target.size();
@@ -157,40 +228,9 @@ impl DrawPass<'_> {
         quad: &Rc<Buffer>,
         draws: &[Draw],
     ) -> Result<(), String> {
+        let full = self.validate(commands)?;
         let owner = &self.target.raw.owner;
-        commands.recording_id(owner)?;
         let size = self.target.size();
-        let target_view = self
-            .target
-            .target_view()
-            .ok_or("Draw target is not renderable")?;
-        if !matches!(
-            self.target.format().sample_type(None, Some(owner.features)),
-            Some(wgt::TextureSampleType::Float { .. })
-        ) {
-            return Err("Invalid draw color attachment".into());
-        }
-        if let Some(depth) = self.depth {
-            if !Rc::ptr_eq(&depth.raw.owner, owner)
-                || depth.format() != wgt::TextureFormat::Depth32Float
-                || depth.size() != size
-                || depth.target_view().is_none()
-            {
-                return Err("Invalid draw depth attachment".into());
-            }
-        } else if self.clear_depth.is_some() {
-            return Err("Depth clear requires an attachment".into());
-        }
-        if ![self.depth_range.start, self.depth_range.end]
-            .iter()
-            .all(|value| (0.0..=1.0).contains(value))
-            || self
-                .clear_depth
-                .map_or(false, |value| !(0.0..=1.0).contains(&value))
-        {
-            return Err("Invalid draw depth range or clear value".into());
-        }
-        let full = self.bounds()?;
         let mut buffers: HashMap<*const Buffer, (&Rc<Buffer>, wgt::BufferUses)> = HashMap::new();
         fn add_buffer<'a>(
             buffers: &mut HashMap<*const Buffer, (&'a Rc<Buffer>, wgt::BufferUses)>,
@@ -257,6 +297,78 @@ impl DrawPass<'_> {
             }
             commands.keep(draw.bindings.clone());
         }
+        self.record_pass(commands, |encoder| unsafe {
+            encoder.set_viewport(
+                &hal::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: size.width as f32,
+                    h: size.height as f32,
+                },
+                self.depth_range.clone(),
+            );
+            if !active.is_empty() {
+                encoder.set_vertex_buffer(0, quad.binding());
+            }
+            for (draw, scissor, instances) in active {
+                let pipeline = &draw.bindings.pipeline;
+                encoder.set_scissor_rect(&hal::Rect {
+                    x: (scissor.min.x - self.origin.x) as u32,
+                    y: (scissor.min.y - self.origin.y) as u32,
+                    w: scissor.width() as u32,
+                    h: scissor.height() as u32,
+                });
+                encoder.set_render_pipeline(&pipeline.raw);
+                encoder.set_bind_group(&pipeline.layout, 0, &draw.bindings.raw, &[]);
+                encoder.set_vertex_buffer(1, instances);
+                encoder.draw(0, 4, 0, draw.instance_count);
+            }
+        })
+    }
+
+    fn validate(&self, commands: &Recording<'_>) -> Result<DeviceIntRect, String> {
+        let owner = &self.target.raw.owner;
+        commands.recording_id(owner)?;
+        let size = self.target.size();
+        self.target
+            .target_view()
+            .ok_or("Draw target is not renderable")?;
+        if !matches!(
+            self.target.format().sample_type(None, Some(owner.features)),
+            Some(wgt::TextureSampleType::Float { .. })
+        ) {
+            return Err("Invalid draw color attachment".into());
+        }
+        if let Some(depth) = self.depth {
+            if !Rc::ptr_eq(&depth.raw.owner, owner)
+                || depth.format() != wgt::TextureFormat::Depth32Float
+                || depth.size() != size
+                || depth.target_view().is_none()
+            {
+                return Err("Invalid draw depth attachment".into());
+            }
+        } else if self.clear_depth.is_some() {
+            return Err("Depth clear requires an attachment".into());
+        }
+        if ![self.depth_range.start, self.depth_range.end]
+            .iter()
+            .all(|value| (0.0..=1.0).contains(value))
+            || self
+                .clear_depth
+                .map_or(false, |value| !(0.0..=1.0).contains(&value))
+        {
+            return Err("Invalid draw depth range or clear value".into());
+        }
+        self.bounds()
+    }
+
+    fn record_pass(
+        &self,
+        commands: &mut Recording<'_>,
+        record: impl FnOnce(&mut hal::vulkan::CommandEncoder),
+    ) -> Result<(), String> {
+        let size = self.target.size();
+        let target_view = self.target.target_view().unwrap();
         self.target
             .transition(commands, wgt::TextureUses::COLOR_TARGET)?;
         if let Some(depth) = self.depth {
@@ -303,31 +415,7 @@ impl DrawPass<'_> {
                     occlusion_query_set: None,
                 })
                 .map_err(|error| format!("Beginning draw pass: {error:?}"))?;
-            encoder.set_viewport(
-                &hal::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: size.width as f32,
-                    h: size.height as f32,
-                },
-                self.depth_range.clone(),
-            );
-            if !active.is_empty() {
-                encoder.set_vertex_buffer(0, quad.binding());
-            }
-            for (draw, scissor, instances) in active {
-                let pipeline = &draw.bindings.pipeline;
-                encoder.set_scissor_rect(&hal::Rect {
-                    x: (scissor.min.x - self.origin.x) as u32,
-                    y: (scissor.min.y - self.origin.y) as u32,
-                    w: scissor.width() as u32,
-                    h: scissor.height() as u32,
-                });
-                encoder.set_render_pipeline(&pipeline.raw);
-                encoder.set_bind_group(&pipeline.layout, 0, &draw.bindings.raw, &[]);
-                encoder.set_vertex_buffer(1, instances);
-                encoder.draw(0, 4, 0, draw.instance_count);
-            }
+            record(encoder);
             encoder.end_render_pass();
         }
         self.target.initialize(commands)?;

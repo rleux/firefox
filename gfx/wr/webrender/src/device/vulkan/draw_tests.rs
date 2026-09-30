@@ -16,6 +16,9 @@ mod uploads;
 #[path = "draw_projection_tests.rs"]
 mod projection;
 
+#[path = "draw_clear_tests.rs"]
+mod clears;
+
 #[path = "attachment_sync_tests.rs"]
 pub(in crate::device::vulkan) mod synchronization;
 
