@@ -36,10 +36,12 @@ pub(super) struct Draw {
 
 pub(super) enum PassCommand {
     Draw(Draw),
+    Clear(Rc<super::clear::Clear>),
 }
 
 enum PreparedCommand<'a> {
     Draw(&'a Draw, DeviceIntRect, hal::BufferBinding<'a, dyn hal::DynBuffer, wgt::BufferAddress>),
+    Clear(&'a Rc<super::clear::Clear>),
 }
 
 /// Resource slices follow the pipeline's reflected binding order.
@@ -116,7 +118,36 @@ pub(super) struct ValidatedPass<'p, 'a, T: ColorAttachment> {
 }
 
 impl<'a, T: ColorAttachment> DrawPass<'a, T> {
-
+    #[cfg(test)]
+    pub fn clear_rect(
+        &self,
+        commands: &mut Recording<'_>,
+        rect: DeviceIntRect,
+        color: Option<[f32; 4]>,
+        depth: Option<f32>,
+    ) -> Result<(), String> {
+        let validated = self.validate(commands)?;
+        let full = validated.bounds;
+        if depth.map_or(false, |value| !(0.0..=1.0).contains(&value)) {
+            return Err("Invalid Vulkan depth clear value".into());
+        }
+        if depth.is_some() && self.depth.is_none() {
+            return Err("Vulkan depth clear requires an attachment".into());
+        }
+        if color.is_none() && depth.is_none() {
+            return Ok(());
+        }
+        let Some(rect) = rect.intersection(&full) else {
+            return Ok(());
+        };
+        let clear = commands.clear(
+            self.target.owner(), self.target.format(), self.depth.is_some(),
+            rect, color, depth,
+        )?;
+        validated.record(commands, None, |encoder| unsafe {
+            clear.record(encoder, self.target.size(), self.origin);
+        })
+    }
 
     /// Convert WebRender's GL clip transform for this target's logical origin.
     pub fn projection(&self, transform: &Transform3D<f32>) -> [f32; 16] {
@@ -326,7 +357,14 @@ impl<T: ColorAttachment> ValidatedPass<'_, '_, T> {
         let mut textures = FastHashMap::default();
         let mut active = Vec::new();
         for operation in operations {
-            let PassCommand::Draw(draw) = operation;
+            let draw = match operation {
+                PassCommand::Draw(draw) => draw,
+                PassCommand::Clear(clear) => {
+                    clear.prepare(commands)?;
+                    active.push(PreparedCommand::Clear(clear));
+                    continue;
+                }
+            };
             let Some(scissor) = draw.scissor.intersection(&full) else {
                 continue;
             };
@@ -393,7 +431,15 @@ impl<T: ColorAttachment> ValidatedPass<'_, '_, T> {
             let mut bound = None;
             let mut draw_state = None;
             for operation in active {
-                let PreparedCommand::Draw(draw, scissor, instances) = operation;
+                let (draw, scissor, instances) = match operation {
+                    PreparedCommand::Clear(clear) => {
+                        clear.record(encoder, size, pass.origin);
+                        bound = None;
+                        draw_state = None;
+                        continue;
+                    }
+                    PreparedCommand::Draw(draw, scissor, instances) => (draw, scissor, instances),
+                };
                 let pipeline = &draw.bindings.pipeline;
                 let instance_binding = (Rc::as_ptr(&draw.instances), instances.offset, instances.size);
                 let state = (Rc::as_ptr(pipeline), scissor, instance_binding);

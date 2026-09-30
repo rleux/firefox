@@ -33,6 +33,7 @@ pub(super) enum Command {
     DrawPipeline,
     DrawScissor,
     DrawInstances,
+    ClearBindGroup,
     UniformArena(usize),
     FlushUniform(u64),
 }
