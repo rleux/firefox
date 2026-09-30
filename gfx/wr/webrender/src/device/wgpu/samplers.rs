@@ -45,6 +45,10 @@ impl Samplers {
         })
     }
 
+    pub(super) fn owner(&self) -> &Rc<Device> {
+        &self.samplers[0].owner
+    }
+
     pub fn get(&self, filter: TextureFilter) -> &dyn hal::DynSampler {
         &*self.samplers[match filter {
             TextureFilter::Nearest => 0,

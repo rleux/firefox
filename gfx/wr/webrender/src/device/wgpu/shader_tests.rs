@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use super::super::resources::Owned;
+use super::super::bindings::DrawBindings;
 use api::units::{DeviceIntRect, DeviceIntSize};
 use crate::device::RenderState;
 use super::super::shader::{create_draw_shader_layouts, create_shader_module};
@@ -137,10 +137,37 @@ pub(super) fn draw_clear(
     draws: &[(RenderState, [f32; 4])],
     depth_clear: Option<f32>,
 ) -> Vec<u8> {
+    draw_quads(device, draws, depth_clear, None)
+}
+
+pub(in crate::device::wgpu) fn draw_scaled_texture(
+    device: &Rc<Device>,
+    texture: Rc<Texture>,
+    samplers: Rc<Samplers>,
+) -> Vec<u8> {
+    draw_quads(
+        device,
+        &[(RenderState::default(), [0.0, 0.0, 1.0, 1.0])],
+        None,
+        Some((texture, samplers)),
+    )
+}
+
+fn draw_quads(
+    device: &Rc<Device>,
+    draws: &[(RenderState, [f32; 4])],
+    depth_clear: Option<f32>,
+    source: Option<(Rc<Texture>, Rc<Samplers>)>,
+) -> Vec<u8> {
     assert!(!draws.is_empty());
-    let shader = super::super::shader::select_draw_shader("ps_clear", &[], false).unwrap();
-    assert!(shader.textures.is_empty() && shader.storage_buffers.is_empty());
-    assert_eq!(shader.inputs.len(), 3);
+    let sampled = source.is_some();
+    let shader = super::super::shader::select_draw_shader(
+        if sampled { "cs_scale" } else { "ps_clear" },
+        if sampled { &["TEXTURE_2D"] } else { &[] },
+        false,
+    )
+    .unwrap();
+    let instance_stride = if sampled { 36 } else { 32 };
     let quad = Buffer::new(
         device,
         &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
@@ -154,9 +181,12 @@ pub(super) fn draw_clear(
             .collect::<Vec<_>>()
     };
     let mut instance_data = Vec::new();
-    for (_, color) in draws {
+    for (_, data) in draws {
         instance_data.extend_from_slice(&bytes(&[-1.0, -1.0, 1.0, 1.0]));
-        instance_data.extend_from_slice(&bytes(color));
+        instance_data.extend_from_slice(&bytes(data));
+        if sampled {
+            instance_data.extend_from_slice(&0.0f32.to_ne_bytes());
+        }
     }
     let instances = Buffer::new(device, &instance_data, wgt::BufferUses::VERTEX).unwrap();
     let transform = Buffer::new(
@@ -201,28 +231,19 @@ pub(super) fn draw_clear(
         })
         .collect();
     let pending: Vec<_> = pipelines.iter().map(Rc::downgrade).collect();
+    let (textures, samplers) = match source {
+        Some((texture, samplers)) => (vec![(texture, TextureFilter::Linear)], Some(samplers)),
+        None => (Vec::new(), None),
+    };
     unsafe {
-        let raw = device.open.device.as_ref();
-        let group = raw
-            .create_bind_group(&hal::BindGroupDescriptor {
-                label: Some("WR generated clear group"),
-                layout: &*pipelines[0].layouts.bindings,
-                buffers: &[transform.binding()],
-                samplers: &[],
-                textures: &[],
-                acceleration_structures: &[],
-                external_textures: &[],
-                entries: &[hal::BindGroupEntry {
-                    binding: 0,
-                    resource_index: 0,
-                    count: 1,
-                }],
-            })
-            .unwrap();
-        let group = (
-            Owned::new(device, group, <dyn hal::DynDevice>::destroy_bind_group),
-            pipelines[0].clone(),
-        );
+        let group = DrawBindings::new(
+            &pipelines[0],
+            Some(transform),
+            textures,
+            Vec::new(),
+            samplers,
+        )
+        .unwrap();
         let mut commands_submission = Submission::new(device).unwrap();
         let mut commands = commands_submission.recording().unwrap();
         quad.transition(&mut commands, wgt::BufferUses::VERTEX)
@@ -230,9 +251,7 @@ pub(super) fn draw_clear(
         instances
             .transition(&mut commands, wgt::BufferUses::VERTEX)
             .unwrap();
-        transform
-            .transition(&mut commands, wgt::BufferUses::UNIFORM)
-            .unwrap();
+        group.prepare(&mut commands).unwrap();
         target
             .transition(&mut commands, wgt::TextureUses::COLOR_TARGET)
             .unwrap();
@@ -293,8 +312,13 @@ pub(super) fn draw_clear(
         encoder.set_vertex_buffer(0, quad.binding());
         for (index, pipeline) in pipelines.iter().enumerate() {
             encoder.set_render_pipeline(&*pipeline.raw);
-            encoder.set_bind_group(&*pipeline.layouts.layout, 0, &*group.0, &[0]);
-            encoder.set_vertex_buffer(1, instances.vertex_binding(index as u64 * 32, 32).unwrap());
+            encoder.set_bind_group(&*pipeline.layouts.layout, 0, &*group.resources.raw, group.projection_offset.as_slice());
+            encoder.set_vertex_buffer(
+                1,
+                instances
+                    .vertex_binding(index as u64 * instance_stride, instance_stride)
+                    .unwrap(),
+            );
             encoder.draw(0, 4, 0, 1);
         }
         encoder.end_render_pass();
@@ -302,7 +326,7 @@ pub(super) fn draw_clear(
         if let Some(depth) = &depth {
             depth.initialize(&mut commands).unwrap();
         }
-        commands.keep(&Rc::new(group));
+        drop(group);
         for pipeline in pipelines {
             commands.keep(&pipeline);
         }

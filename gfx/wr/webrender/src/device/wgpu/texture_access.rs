@@ -5,6 +5,11 @@
 use super::{hal, wgt, Recording, Texture, TextureState};
 use std::rc::Rc;
 
+pub(in crate::device::wgpu) struct SampledTexture<'a> {
+    texture: &'a Rc<Texture>,
+    view: &'a dyn hal::DynTextureView,
+}
+
 pub(in crate::device::wgpu) struct WritableTexture<'a> {
     texture: &'a Rc<Texture>,
 }
@@ -18,6 +23,11 @@ pub(in crate::device::wgpu) struct CopyDestination<'a> {
 }
 
 impl Texture {
+    pub(in crate::device::wgpu) fn sampled(self: &Rc<Self>) -> Result<SampledTexture<'_>, String> {
+        let view = self.view.as_deref().ok_or("Texture has no sampled view")?;
+        Ok(SampledTexture { texture: self, view })
+    }
+
     pub(in crate::device::wgpu) fn writable(self: &Rc<Self>) -> Result<WritableTexture<'_>, String> {
         Ok(WritableTexture { texture: self })
     }
@@ -34,6 +44,16 @@ impl Texture {
             return Err("Texture does not support copy-destination access".into());
         }
         Ok(CopyDestination { writable: self.writable()? })
+    }
+}
+
+impl<'a> SampledTexture<'a> {
+    pub(in crate::device::wgpu) fn view(&self) -> &'a dyn hal::DynTextureView {
+        self.view
+    }
+
+    pub(in crate::device::wgpu) fn prepare(&self, commands: &mut Recording<'_>) -> Result<(), String> {
+        self.texture.transition_validated(commands, wgt::TextureUses::RESOURCE)
     }
 }
 
