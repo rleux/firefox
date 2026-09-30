@@ -258,6 +258,7 @@ fn draw_quads(
     super::super::draw::DrawPass {
         target: &target,
         origin: api::units::DeviceIntPoint::zero(),
+        viewport: None,
         depth: depth.as_ref(),
         clear_color: Some(wgt::Color::BLUE),
         clear_depth: depth_clear,

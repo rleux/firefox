@@ -29,6 +29,7 @@ pub(super) struct TextureStore {
     created: u32,
     deleted: u32,
     bound: [Option<u32>; 16],
+    output: Option<Rc<Texture>>,
 }
 
 impl TextureStore {
@@ -41,6 +42,7 @@ impl TextureStore {
             created: 0,
             deleted: 0,
             bound: [None; 16],
+            output: None,
         }
     }
 
@@ -58,27 +60,80 @@ impl TextureStore {
         self.deleted
     }
 
+    pub fn default_target(&mut self, size: DeviceIntSize) -> Result<Rc<Texture>, String> {
+        if size.width <= 0 || size.height <= 0 {
+            return Err("Invalid Vulkan output dimensions".into());
+        }
+        if let Some(output) = &self.output {
+            if output.size().width == size.width as u32
+                && output.size().height == size.height as u32
+            {
+                return Ok(output.clone());
+            }
+        }
+        let output = Texture::new(
+            &self.owner,
+            size.width as u32,
+            size.height as u32,
+            wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Linear,
+            true,
+        )?;
+        self.output = Some(output.clone());
+        Ok(output)
+    }
+
+    pub fn output(&self) -> Option<Rc<Texture>> {
+        self.output.clone()
+    }
+
     pub fn draw_target(
         &mut self,
         target: DrawTarget,
     ) -> Result<(Rc<Texture>, Option<Rc<Texture>>, Option<DeviceIntRect>), String> {
-        let (color, depth, dimensions) = match target {
+        let (color, depth, dimensions, viewport) = match target {
             DrawTarget::Texture {
                 texture,
                 with_depth,
                 dimensions,
             } => {
                 let (color, depth) = self.render_target(texture, with_depth)?;
-                (color, depth, dimensions)
+                (color, depth, dimensions, None)
             }
-            _ => return Err("Vulkan render pass requires an owned texture target".into()),
+            DrawTarget::Default {
+                rect,
+                total_size,
+                surface_origin_is_top_left,
+            } => {
+                // A resize can leave the frame's viewport larger than the current window.
+                if !surface_origin_is_top_left
+                    || rect.min.x < 0
+                    || rect.min.y < 0
+                    || rect.max.x <= rect.min.x
+                    || rect.max.y <= rect.min.y
+                    || total_size.width <= 0
+                    || total_size.height <= 0
+                {
+                    return Err("Invalid Vulkan default-target viewport or orientation".into());
+                }
+                let dimensions = total_size.cast_unit();
+                (
+                    self.default_target(dimensions)?,
+                    None,
+                    dimensions,
+                    Some(rect.cast_unit()),
+                )
+            }
+            DrawTarget::NativeSurface { .. } => {
+                return Err("Vulkan native-surface targets are unsupported".into())
+            }
         };
         if dimensions.width != color.size().width as i32
             || dimensions.height != color.size().height as i32
         {
             return Err("Vulkan render target dimensions do not match its image".into());
         }
-        Ok((color, depth, None))
+        Ok((color, depth, viewport))
     }
 
     pub fn create(

@@ -211,6 +211,7 @@ fn vertex_array_snapshots_draw_directly_after_updates_and_deletion() {
     let pass = DrawPass {
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,

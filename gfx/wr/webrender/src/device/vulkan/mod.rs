@@ -53,6 +53,8 @@ pub struct Device {
     open: hal::OpenDevice<hal::api::Vulkan>,
     info: wgt::AdapterInfo,
     capabilities: hal::Capabilities,
+    max_viewport_dimensions: [u32; 2],
+    viewport_bounds_range: [f32; 2],
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: hal::vulkan::Adapter,
@@ -131,10 +133,17 @@ impl Device {
         }
         .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
 
+        let limits = exposed
+            .adapter
+            .physical_device_capabilities()
+            .properties()
+            .limits;
         Ok(Self {
             open,
             info: exposed.info,
             capabilities: exposed.capabilities,
+            max_viewport_dimensions: limits.max_viewport_dimensions,
+            viewport_bounds_range: limits.viewport_bounds_range,
             features,
             lost: Cell::new(false),
             adapter: exposed.adapter,

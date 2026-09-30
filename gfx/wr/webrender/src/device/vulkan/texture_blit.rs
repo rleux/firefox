@@ -152,6 +152,7 @@ impl TextureBlitter {
         let pass = DrawPass {
             target,
             origin: DeviceIntPoint::zero(),
+            viewport: None,
             depth: None,
             clear_color: None,
             clear_depth: None,

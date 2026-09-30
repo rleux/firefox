@@ -50,6 +50,8 @@ pub(super) struct DrawPass<'a> {
     pub target: &'a Rc<Texture>,
     /// Logical pixel coordinate at the attachment's top-left.
     pub origin: DeviceIntPoint,
+    /// Attachment-local viewport; None uses the full attachment.
+    pub viewport: Option<DeviceIntRect>,
     pub depth: Option<&'a Rc<Texture>>,
     pub clear_color: Option<wgt::Color>,
     pub clear_depth: Option<f32>,
@@ -130,8 +132,12 @@ impl DrawPass<'_> {
     /// Convert WebRender's GL clip transform for this target's logical origin.
     pub fn projection(&self, transform: &Transform3D<f32>) -> [f32; 16] {
         let size = self.target.size();
-        let dx = 2.0 * self.origin.x as f32 / size.width as f32;
-        let dy = 2.0 * self.origin.y as f32 / size.height as f32;
+        let (width, height) = self.viewport.map_or(
+            (size.width as f32, size.height as f32),
+            |rect| (rect.width() as f32, rect.height() as f32),
+        );
+        let dx = 2.0 * self.origin.x as f32 / width;
+        let dy = 2.0 * self.origin.y as f32 / height;
         let mut matrix = transform.to_array();
         for column in [0, 4, 8, 12] {
             let w = matrix[column + 3];
@@ -234,6 +240,11 @@ impl DrawPass<'_> {
         let full = self.validate(commands)?;
         let owner = &self.target.raw.owner;
         let size = self.target.size();
+        let viewport = self.viewport.unwrap_or_else(|| {
+            DeviceIntRect::from_size(api::units::DeviceIntSize::new(
+                size.width as i32, size.height as i32,
+            ))
+        });
         let mut buffers: HashMap<*const Buffer, (&Rc<Buffer>, wgt::BufferUses)> = HashMap::new();
         fn add_buffer<'a>(
             buffers: &mut HashMap<*const Buffer, (&'a Rc<Buffer>, wgt::BufferUses)>,
@@ -303,10 +314,10 @@ impl DrawPass<'_> {
         self.record_pass(commands, |encoder| unsafe {
             encoder.set_viewport(
                 &hal::Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: size.width as f32,
-                    h: size.height as f32,
+                    x: viewport.min.x as f32,
+                    y: viewport.min.y as f32,
+                    w: viewport.width() as f32,
+                    h: viewport.height() as f32,
                 },
                 self.depth_range.clone(),
             );
@@ -333,6 +344,21 @@ impl DrawPass<'_> {
         let owner = &self.target.raw.owner;
         commands.recording_id(owner)?;
         let size = self.target.size();
+        if let Some(rect) = self.viewport {
+            if rect.min.x < 0
+                || rect.min.y < 0
+                || rect.max.x <= rect.min.x
+                || rect.max.y <= rect.min.y
+                || rect.width() as u32 > owner.max_viewport_dimensions[0]
+                || rect.height() as u32 > owner.max_viewport_dimensions[1]
+                || (rect.min.x as f32) < owner.viewport_bounds_range[0]
+                || (rect.min.y as f32) < owner.viewport_bounds_range[0]
+                || rect.max.x as f32 > owner.viewport_bounds_range[1]
+                || rect.max.y as f32 > owner.viewport_bounds_range[1]
+            {
+                return Err("Invalid Vulkan draw viewport".into());
+            }
+        }
         self.target
             .target_view()
             .ok_or("Draw target is not renderable")?;

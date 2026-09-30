@@ -53,6 +53,7 @@ fn mipmap_generation_downsamples_each_level_and_supports_trilinear_reads() {
     let pass = DrawPass {
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,

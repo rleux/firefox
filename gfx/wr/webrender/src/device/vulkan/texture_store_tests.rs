@@ -144,6 +144,7 @@ fn render_target_handles_toggle_depth_and_retain_pending_images() {
     DrawPass {
         target: &render_color,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: Some(&depth),
         clear_color: None,
         clear_depth: None,

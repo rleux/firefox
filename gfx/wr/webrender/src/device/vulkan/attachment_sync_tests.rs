@@ -82,6 +82,7 @@ pub(in crate::device::vulkan) fn record_overlapping_passes(
         DrawPass {
             target: pass.target,
             origin: pass.origin,
+            viewport: pass.viewport,
             depth: pass.depth,
             clear_color: None,
             clear_depth: None,

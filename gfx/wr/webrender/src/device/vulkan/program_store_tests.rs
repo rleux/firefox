@@ -207,6 +207,7 @@ fn queued_program_snapshot_survives_shared_handle_deletion() {
     let pass = DrawPass {
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,

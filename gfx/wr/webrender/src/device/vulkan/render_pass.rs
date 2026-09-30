@@ -14,6 +14,7 @@ struct ActivePass {
     color: Rc<Texture>,
     depth: Option<Rc<Texture>>,
     bounds: DeviceIntRect,
+    viewport: Option<DeviceIntRect>,
 }
 
 impl ActivePass {
@@ -21,6 +22,7 @@ impl ActivePass {
         DrawPass {
             target: &self.color,
             origin: DeviceIntPoint::zero(),
+            viewport: self.viewport,
             depth: self.depth.as_ref(),
             clear_color: None,
             clear_depth: None,
@@ -46,12 +48,16 @@ impl RenderPassState {
         if self.active.is_some() {
             return Err("A Vulkan render pass is already active".into());
         }
-        let (color, depth, _) = textures.draw_target(descriptor.target)?;
+        if descriptor.target.is_default() && matches!(descriptor.depth_load, LoadOp::Clear(_)) {
+            return Err("Vulkan default target has no depth attachment".into());
+        }
+        let (color, depth, viewport) = textures.draw_target(descriptor.target)?;
         let dimensions = descriptor.target.dimensions();
         let active = ActivePass {
             color,
             depth,
             bounds: DeviceIntRect::from_size(dimensions),
+            viewport,
         };
         let pass = active.draw_pass();
         pass.validate(commands)?;
@@ -66,7 +72,11 @@ impl RenderPassState {
             LoadOp::Clear(_) => return Err("Invalid Vulkan render-pass depth clear".into()),
             _ => None,
         };
-        if descriptor.render_area == Some(active.bounds) {
+        if descriptor.render_area == Some(active.bounds)
+            && active
+                .viewport
+                .map_or(true, |viewport| viewport == active.bounds)
+        {
             if descriptor.color_load == LoadOp::DontCare {
                 active.color.invalidate(commands)?;
             }
