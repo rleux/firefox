@@ -17,6 +17,7 @@ mod clear;
 mod texture_blit;
 mod pipeline;
 mod program;
+mod program_store;
 mod shader;
 mod vertex_layout;
 pub use self::vertex_layout::vertex_layouts;
