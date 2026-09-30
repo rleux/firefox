@@ -80,9 +80,9 @@ pub(in crate::device::wgpu) fn record_overlapping_passes(
     .unwrap();
     for (z, draw) in draws {
         DrawPass {
-            viewport: None,
             target: pass.target,
             origin: pass.origin,
+            viewport: pass.viewport,
             depth: pass.depth,
             clear_color: None,
             clear_depth: None,

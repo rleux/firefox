@@ -205,9 +205,9 @@ fn queued_program_snapshot_survives_shared_handle_deletion() {
     let colors = [255, 0, 0, 255, 0, 0, 255, 255];
     source.upload(&queue, rect, &colors, None, 0, None).unwrap();
     let pass = DrawPass {
-            viewport: None,
         target: &target,
         origin: DeviceIntPoint::zero(),
+        viewport: None,
         depth: None,
         clear_color: None,
         clear_depth: None,
