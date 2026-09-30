@@ -37,6 +37,7 @@ pub(super) struct RenderDevice {
     inside_frame: bool,
     blitter: crate::internal_types::FastHashMap<wgt::TextureFormat, TextureBlitter>,
     scratch: TexturePool,
+    failure: Option<String>,
 }
 
 impl RenderDevice {
@@ -80,7 +81,29 @@ impl RenderDevice {
             inside_frame: false,
             blitter: Default::default(),
             scratch: TexturePool::new(owner),
+            failure: None,
         })
+    }
+
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    pub fn operation<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Option<T> {
+        if self.failure.is_some() {
+            return None;
+        }
+        match operation(self) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.failure = Some(error);
+                self.submissions.discard_recording();
+                None
+            }
+        }
     }
 
     fn flush_pass(&self) -> Result<(), String> {

@@ -20,6 +20,9 @@ mod texture_update;
 #[path = "texture_operation_tests.rs"]
 mod texture_operation;
 
+#[path = "operation_failure_tests.rs"]
+mod operation_failure;
+
 fn device() -> RenderDevice {
     validation_logging();
     let device = Rc::new(
