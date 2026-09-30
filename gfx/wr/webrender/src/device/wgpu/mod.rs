@@ -20,6 +20,7 @@ mod program;
 mod program_store;
 mod shader;
 mod vertex_layout;
+mod vertex_array;
 pub use self::vertex_layout::vertex_layouts;
 mod samplers;
 pub use self::samplers::Samplers;
