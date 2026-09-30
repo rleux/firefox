@@ -15,10 +15,25 @@ pub(super) struct DrawBindings {
     textures: Vec<(Rc<Texture>, TextureFilter)>,
     buffers: Vec<Rc<Buffer>>,
     _samplers: Option<Rc<Samplers>>,
-    pipeline: Rc<DrawPipeline>,
+    pub(super) pipeline: Rc<DrawPipeline>,
 }
 
 impl DrawBindings {
+    pub fn buffer_uses(&self) -> impl Iterator<Item = (&Rc<Buffer>, wgt::BufferUses)> {
+        self.projection
+            .iter()
+            .map(|buffer| (buffer, wgt::BufferUses::UNIFORM))
+            .chain(
+                self.buffers
+                    .iter()
+                    .map(|buffer| (buffer, wgt::BufferUses::STORAGE_READ_ONLY)),
+            )
+    }
+
+    pub fn textures(&self) -> impl Iterator<Item = &Rc<Texture>> {
+        self.textures.iter().map(|(texture, _)| texture)
+    }
+
     /// Texture and storage buffer vectors follow the shader's reflected order.
     pub fn new(
         pipeline: &Rc<DrawPipeline>,

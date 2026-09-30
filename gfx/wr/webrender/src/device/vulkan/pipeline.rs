@@ -16,6 +16,9 @@ pub(super) struct DrawPipeline {
     pub raw: Owned<hal::vulkan::RenderPipeline>,
     pub layout: Owned<hal::vulkan::PipelineLayout>,
     pub bindings: Owned<hal::vulkan::BindGroupLayout>,
+    pub format: wgt::TextureFormat,
+    pub has_depth: bool,
+    pub instance_stride: u64,
 }
 
 impl DrawPipeline {
@@ -124,6 +127,9 @@ impl DrawPipeline {
             raw: Owned::new(owner, raw, hal::vulkan::Device::destroy_render_pipeline),
             layout,
             bindings,
+            format,
+            has_depth,
+            instance_stride: stride,
         }))
     }
 }
