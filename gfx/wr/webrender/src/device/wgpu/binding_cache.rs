@@ -31,6 +31,7 @@ pub(super) struct BindingCache {
     bindings: FastHashMap<BindingKey, Rc<BindingResources>>,
     previous_bindings: FastHashMap<BindingKey, Rc<BindingResources>>,
     uniforms: Option<UniformArena>,
+    pub(super) clears: super::clear::ClearCache,
 }
 
 impl BindingCache {
@@ -38,6 +39,7 @@ impl BindingCache {
         self.bindings.clear();
         self.previous_bindings.clear();
         self.uniforms = None;
+        self.clears.clear();
     }
 
     pub(super) fn uniform(
