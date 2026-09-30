@@ -17,6 +17,9 @@ use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use euclid::default::Transform3D;
 use std::sync::atomic::Ordering;
 
+#[path = "pipeline_binding_tests.rs"]
+mod pipeline_binding;
+
 #[test]
 fn program_handles_link_every_compiled_variant_and_delete_cleanly() {
     let mut store = ProgramStore::default();
