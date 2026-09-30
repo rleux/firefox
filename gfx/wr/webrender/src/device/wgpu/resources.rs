@@ -206,8 +206,10 @@ impl Buffer {
 
     pub(super) fn mapped_read_only(&self) -> Result<&[u8], String> {
         // GPU access must be read-only while CPU code reads this mapping.
-        if self.usage != (wgt::BufferUses::MAP_WRITE | wgt::BufferUses::STORAGE_READ_ONLY) {
-            return Err("Direct mapped reads require a read-only storage upload buffer".into());
+        let allowed = wgt::BufferUses::MAP_WRITE | wgt::BufferUses::STORAGE_READ_ONLY
+            | wgt::BufferUses::VERTEX | wgt::BufferUses::INDEX;
+        if !self.usage.contains(wgt::BufferUses::MAP_WRITE) || !allowed.contains(self.usage) {
+            return Err("Direct mapped reads require a GPU-read-only upload buffer".into());
         }
         let mapping = &self.mapping;
         Ok(unsafe { std::slice::from_raw_parts(mapping.ptr.as_ptr(), self.used_size.get() as usize) })
