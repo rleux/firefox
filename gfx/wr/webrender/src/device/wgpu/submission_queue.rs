@@ -49,6 +49,17 @@ impl SubmissionQueue {
         &self.pool.owner
     }
 
+    pub(in crate::device::wgpu) fn check_recording(
+        &self,
+        recording: &Recording<'_>,
+    ) -> Result<(), String> {
+        if Rc::ptr_eq(&self.fence, &recording.submission.fence) {
+            Ok(())
+        } else {
+            Err("Swapchain attachment requires its acquisition queue".into())
+        }
+    }
+
     pub fn new(pool: &Rc<BufferPool>, limit: usize) -> Result<Self, String> {
         if limit == 0 || pool.owner.is_lost() {
             return Err("Invalid Vulkan submission limit or lost device".into());
