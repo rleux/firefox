@@ -16,6 +16,7 @@ mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
 pub use self::window_surface::SurfaceWindow;
+mod swapchain;
 mod draw;
 mod clear;
 mod render_pass;
@@ -75,7 +76,7 @@ pub struct Device {
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: Box<dyn hal::DynAdapter>,
-    surface: Option<window_surface::WindowSurface>,
+    surface: Cell<Option<window_surface::WindowSurface>>,
     instance: Box<dyn hal::DynInstance>,
 }
 

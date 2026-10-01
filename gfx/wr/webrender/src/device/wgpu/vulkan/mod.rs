@@ -149,7 +149,7 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
-            surface,
+            surface: Cell::new(surface),
             instance: Box::new(instance),
         })
     }
