@@ -14,6 +14,8 @@ pub mod shaders {
 }
 
 mod bindings;
+mod surface_config;
+pub use self::surface_config::SurfaceOptions;
 mod draw;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]
