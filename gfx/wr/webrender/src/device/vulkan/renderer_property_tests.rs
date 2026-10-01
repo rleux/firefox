@@ -67,7 +67,11 @@ fn reported_capabilities_drive_mapped_upload_copy_and_base_instance_draws() {
         .create(kind, format, size, TextureFilter::Nearest, None)
         .unwrap();
     let (length, stride) = device.uploads.layout(size, format).unwrap();
-    let offset = if device.properties.capabilities.supports_nonzero_pbo_offsets {
+    let offset = if device
+        .properties
+        .capabilities
+        .supports_upload_buffer_offsets
+    {
         length
     } else {
         0
@@ -78,7 +82,10 @@ fn reported_capabilities_drive_mapped_upload_copy_and_base_instance_draws() {
         .allocate(
             &mut buffer,
             length + offset,
-            device.properties.capabilities.supports_buffer_storage,
+            device
+                .properties
+                .capabilities
+                .supports_persistent_upload_buffers,
         )
         .unwrap();
     let pointer = match mapping {
@@ -111,7 +118,6 @@ fn reported_capabilities_drive_mapped_upload_copy_and_base_instance_draws() {
             }],
         )
         .unwrap();
-    assert!(device.properties.capabilities.supports_copy_image_sub_data);
     device
         .copy_texture_sub_region(&source, 0, 0, &target, 0, 0, 2, 1)
         .unwrap();
@@ -141,10 +147,21 @@ fn reported_capabilities_drive_mapped_upload_copy_and_base_instance_draws() {
             .iter()
             .flat_map(|f| f.to_ne_bytes()),
     );
-    let mut vao = device.vertex_arrays.create(&desc::SCALE, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::SCALE, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
-        .update_instances(&vao, &bytes, 36, None)
+        .write_buffer(&mut instances, &bytes)
         .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
     device
@@ -179,6 +196,8 @@ fn reported_capabilities_drive_mapped_upload_copy_and_base_instance_draws() {
     device.textures.delete(&mut target).unwrap();
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 

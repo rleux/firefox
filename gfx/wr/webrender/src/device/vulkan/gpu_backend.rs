@@ -7,11 +7,12 @@ use crate::device as wr;
 use crate::device::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
 use crate::internal_types::{RenderTargetInfo, Swizzle, SwizzleSettings};
 use crate::render_api::MemoryReport;
-use api::{ExternalTextureHandle, ImageBufferKind, ImageDescriptor, Parameter};
+use api::{ImageBufferKind, Parameter};
+#[cfg(feature = "capture")]
+use api::{ExternalTextureHandle, ImageDescriptor};
 use api::units::DeviceSize;
 use euclid::default::Transform3D;
-use malloc_size_of::MallocSizeOfOps;
-use std::{borrow::Cow, cell::Cell, mem::MaybeUninit, num::NonZeroUsize, os::raw::c_void, ptr::NonNull};
+use std::{borrow::Cow, cell::Cell, mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull};
 use webrender_build::shader::ShaderFeatureFlags;
 
 struct DisabledQueries;
@@ -38,27 +39,6 @@ impl GpuQueryBackend for DisabledQueries {
     fn push_marker_group(&self, _: &str) {}
     fn pop_marker_group(&self) {}
     fn insert_marker(&self, _: &str) {}
-}
-
-fn empty_vao(descriptor: &wr::VertexDescriptor, divisor: u32) -> wr::VAO {
-    wr::VAO {
-        id: 0,
-        ibo_id: wr::IBOId(0),
-        main_vbo_id: wr::VBOId(0),
-        instance_vbo_id: wr::VBOId(0),
-        instance_stride: descriptor
-            .instance_attributes
-            .iter()
-            .fold(0usize, |stride, attribute| {
-                stride.saturating_add(
-                    (attribute.count as usize)
-                        .saturating_mul(attribute.kind.size_in_bytes() as usize),
-                )
-            }),
-        instance_divisor: divisor,
-        owns_vertices_and_indices: false,
-        owns_instances: false,
-    }
 }
 
 impl RenderDevice {
@@ -116,6 +96,10 @@ impl wr::GpuBackend for RenderDevice {
     fn failure(&self) -> Option<&str> {
         RenderDevice::failure(self)
     }
+    #[cfg(test)]
+    fn vulkan_test_output(&self) -> Option<Rc<Texture>> {
+        self.textures.output()
+    }
     fn blend_barrier(&self) {}
     fn shader_feature_flags(&self) -> ShaderFeatureFlags {
         self.properties.shader_feature_flags()
@@ -170,7 +154,6 @@ impl wr::GpuBackend for RenderDevice {
     fn bind_external_texture(&mut self, _: wr::TextureSlot, _: &wr::ExternalTexture) {
         self.unsupported("external textures");
     }
-    fn reset_read_target(&mut self) {}
     fn begin_render_pass(&mut self, descriptor: &RenderPassDescriptor) {
         self.operation(|device| RenderDevice::begin_render_pass(device, descriptor));
     }
@@ -181,6 +164,7 @@ impl wr::GpuBackend for RenderDevice {
         &mut self,
         program: &mut Program,
         descriptor: &wr::VertexDescriptor,
+        samplers: &[(&'static str, wr::TextureSlot)],
     ) -> Result<(), wr::ShaderError> {
         if let Some(error) = self.failure().map(str::to_owned) {
             let result = self.programs.delete(program);
@@ -193,7 +177,12 @@ impl wr::GpuBackend for RenderDevice {
                 Vec::new(),
             ));
         }
-        self.programs.link(program, descriptor)
+        self.programs.link(program, descriptor)?;
+        self.programs
+            .state_mut(program)
+            .expect("linked Vulkan program")
+            .bind_samplers(samplers);
+        Ok(())
     }
     fn bind_pipeline(&mut self, program: &Program, state: &RenderState) -> bool {
         self.operation(|device| RenderDevice::bind_pipeline(device, program, *state))
@@ -347,16 +336,6 @@ impl wr::GpuBackend for RenderDevice {
     fn expanded_shader_source(&self, _: &str, _: &[&'static str]) -> (String, String) {
         (String::new(), String::new())
     }
-    fn bind_shader_samplers(
-        &mut self,
-        program: &Program,
-        bindings: &[(&'static str, wr::TextureSlot)],
-    ) {
-        self.operation(|device| {
-            device.programs.state_mut(program)?.bind_samplers(bindings);
-            Ok(())
-        });
-    }
     fn set_uniforms(&self, program: &Program, transform: &Transform3D<f32>) {
         if self.failure().is_none() {
             self.programs
@@ -467,73 +446,102 @@ impl wr::GpuBackend for RenderDevice {
     fn upload_texture_immediate(&mut self, texture: &wr::Texture, data: &[u8]) {
         self.operation(|device| RenderDevice::upload_texture_immediate(device, texture, data));
     }
-    fn read_pixels(&mut self, _: &ImageDescriptor) -> Vec<u8> {
-        self.unsupported("capture readback");
+    #[cfg(feature = "capture")]
+    fn read_external_texture(
+        &mut self,
+        _: ExternalTextureHandle,
+        _: ImageBufferKind,
+        _: &ImageDescriptor,
+    ) -> Vec<u8> {
+        self.unsupported("external textures");
         Vec::new()
     }
-    fn read_pixels_into(&mut self, _: FramebufferIntRect, _: ImageFormat, output: &mut [u8]) {
+    fn read_pixels_into(
+        &mut self,
+        _: ReadTarget,
+        _: FramebufferIntRect,
+        _: ImageFormat,
+        output: &mut [u8],
+    ) {
         self.unsupported("capture readback");
         output.fill(0);
     }
-    fn attach_read_texture_external(&mut self, _: ExternalTextureHandle, _: ImageBufferKind) {
-        self.unsupported("external textures");
-    }
-    fn attach_read_texture(&mut self, _: &wr::Texture) {
+    fn read_texture(&mut self, _: &wr::Texture, _: ImageFormat, output: &mut [u8]) {
         self.unsupported("capture readback");
+        output.fill(0);
     }
-    fn bind_vao(&mut self, vao: &wr::VAO) {
-        self.operation(|device| device.vertex_arrays.bind(vao));
+    fn create_buffer(&mut self, kind: wr::BufferKind) -> wr::Buffer {
+        self.operation(|device| device.vertex_arrays.create_buffer(kind))
+            .unwrap_or(wr::Buffer {
+                id: 0,
+                kind,
+                size: 0,
+            })
     }
-    fn create_vao(&mut self, descriptor: &wr::VertexDescriptor, divisor: u32) -> wr::VAO {
-        self.operation(|device| device.vertex_arrays.create(descriptor, divisor))
-            .unwrap_or_else(|| empty_vao(descriptor, divisor))
-    }
-    fn delete_vao(&mut self, mut vao: wr::VAO) {
-        let result = self.vertex_arrays.delete(&mut vao);
+    fn delete_buffer(&mut self, mut buffer: wr::Buffer) {
+        let result = self.vertex_arrays.delete_buffer(&mut buffer);
         self.record_result(result);
-        vao.id = 0;
+        buffer.id = 0;
     }
-    fn create_vao_with_new_instances(
+    fn write_buffer(&mut self, buffer: &mut wr::Buffer, bytes: &[u8], _: wr::VertexUsageHint) {
+        self.operation(|device| device.vertex_arrays.write_buffer(buffer, bytes));
+    }
+    fn write_buffer_repeated(
         &mut self,
-        descriptor: &wr::VertexDescriptor,
-        base: &wr::VAO,
-    ) -> wr::VAO {
-        self.operation(|device| device.vertex_arrays.with_new_instances(descriptor, base))
-            .unwrap_or_else(|| empty_vao(descriptor, base.instance_divisor))
-    }
-    fn create_vao_with_shared_instances(
-        &mut self,
-        descriptor: &wr::VertexDescriptor,
-        base: &wr::VAO,
-    ) -> wr::VAO {
-        self.operation(|device| device.vertex_arrays.with_shared_instances(descriptor, base))
-            .unwrap_or_else(|| empty_vao(descriptor, base.instance_divisor))
-    }
-    fn update_vao_main_vertices(&mut self, vao: &wr::VAO, bytes: &[u8], _: wr::VertexUsageHint) {
-        self.operation(|device| device.vertex_arrays.update_vertices(vao, bytes));
-    }
-    fn update_vao_instances(
-        &mut self,
-        vao: &wr::VAO,
+        buffer: &mut wr::Buffer,
         bytes: &[u8],
-        stride: usize,
+        element_size: usize,
+        repeat: NonZeroUsize,
         _: wr::VertexUsageHint,
-        repeat: Option<NonZeroUsize>,
     ) {
         self.operation(|device| {
             device
                 .vertex_arrays
-                .update_instances(vao, bytes, stride, repeat)
+                .write_buffer_repeated(buffer, bytes, element_size, repeat)
         });
     }
-    fn update_vao_indices(&mut self, vao: &wr::VAO, bytes: &[u8], _: wr::VertexUsageHint) {
-        self.operation(|device| device.vertex_arrays.update_indices(vao, bytes));
+    fn reallocate_buffer(&mut self, buffer: &mut wr::Buffer, size: usize) {
+        self.operation(|device| device.vertex_arrays.reallocate(buffer, size));
     }
-    fn reallocate_vbo(&mut self, id: wr::VBOId, size: usize) {
-        self.operation(|device| device.vertex_arrays.reallocate(id, size));
+    fn write_buffer_unsynchronized(&mut self, buffer: &wr::Buffer, offset: usize, bytes: &[u8]) {
+        self.operation(|device| device.vertex_arrays.update_range(buffer, offset, bytes));
     }
-    fn update_vbo_data_unsynchronized(&mut self, id: wr::VBOId, bytes: &[u8], offset: usize) {
-        self.operation(|device| device.vertex_arrays.update_range(id, offset, bytes));
+    fn create_vertex_array(
+        &mut self,
+        descriptor: &wr::VertexDescriptor,
+        vertices: &wr::Buffer,
+        instances: Option<&wr::Buffer>,
+        indices: Option<&wr::Buffer>,
+        divisor: u32,
+    ) -> wr::VertexArray {
+        self.operation(|device| {
+            device
+                .vertex_arrays
+                .create(descriptor, vertices, instances, indices, divisor)
+        })
+        .unwrap_or_else(|| wr::VertexArray {
+            id: 0,
+            vertices: wr::BufferId(vertices.id),
+            instances: instances.map(|buffer| wr::BufferId(buffer.id)),
+            indices: indices.map(|buffer| wr::BufferId(buffer.id)),
+            instance_stride: descriptor.instance_attributes.iter().fold(
+                0usize,
+                |stride, attribute| {
+                    stride.saturating_add(
+                        (attribute.count as usize)
+                            .saturating_mul(attribute.kind.size_in_bytes() as usize),
+                    )
+                },
+            ),
+        })
+    }
+    fn delete_vertex_array(&mut self, mut array: wr::VertexArray) {
+        let result = self.vertex_arrays.delete(&mut array);
+        self.record_result(result);
+        array.id = 0;
+    }
+    fn bind_vertex_array(&mut self, array: &wr::VertexArray) {
+        self.operation(|device| device.vertex_arrays.bind(array));
     }
     fn draw_triangles_u32(&mut self, _: i32, count: i32) {
         if count != 0 {
@@ -593,7 +601,7 @@ impl wr::GpuBackend for RenderDevice {
         }
     }
     fn echo_driver_messages(&self) {}
-    fn report_memory(&self, _: &MallocSizeOfOps, _: *mut c_void) -> MemoryReport {
+    fn report_memory(&self) -> MemoryReport {
         MemoryReport {
             depth_target_textures: self.textures.depth_bytes(),
             ..MemoryReport::default()

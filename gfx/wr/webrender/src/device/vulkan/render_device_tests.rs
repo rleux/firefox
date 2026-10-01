@@ -98,14 +98,23 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
         .state(&program)
         .unwrap()
         .set_transform(&Transform3D::ortho(0.0, 2.0, 0.0, 1.0, -1.0, 1.0));
-    let mut vao = device.vertex_arrays.create(&desc::SCALE, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::SCALE, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
-        .update_instances(
-            &vao,
+        .write_buffer(
+            &mut instances,
             &floats(&[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0]),
-            36,
-            None,
         )
         .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
@@ -127,6 +136,8 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
     device.textures.delete(&mut source).unwrap();
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
     device.end_frame().unwrap();
     let output = device.textures.output().unwrap();
@@ -143,16 +154,25 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
     device.begin_frame().unwrap();
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::CLEAR, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::CLEAR, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
-        .update_instances(
-            &vao,
+        .write_buffer(
+            &mut instances,
             &floats(&[
                 -1.0, -1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, -1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0,
             ]),
-            32,
-            None,
         )
         .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
@@ -164,7 +184,7 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
     device.draw_instanced(1, 1).unwrap();
     device
         .vertex_arrays
-        .update_range(vao.instance_vbo_id(), 48, &floats(&[0.0, 0.0, 1.0, 1.0]))
+        .update_range(&instances, 48, &floats(&[0.0, 0.0, 1.0, 1.0]))
         .unwrap();
     scissor(&device, 1);
     device.draw_instanced(1, 1).unwrap();
@@ -173,6 +193,8 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
         .unwrap();
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
     device.end_frame().unwrap();
     device.submissions.wait().unwrap();
@@ -203,15 +225,24 @@ fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
         .state(&program)
         .unwrap()
         .set_transform(&Transform3D::ortho(0.0, 2.0, 0.0, 1.0, -1.0, 1.0));
-    let mut vao = device.vertex_arrays.create(&desc::SCALE, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::SCALE, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
     device
         .vertex_arrays
-        .update_instances(
-            &vao,
+        .write_buffer(
+            &mut instances,
             &floats(&[0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0]),
-            36,
-            None,
         )
         .unwrap();
     assert!(device.draw_instanced(0, 1).is_err());
@@ -228,6 +259,8 @@ fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
     assert!(device.draw_instanced(0, 1).is_err());
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
     device.end_frame().unwrap();
     device.submissions.wait().unwrap();

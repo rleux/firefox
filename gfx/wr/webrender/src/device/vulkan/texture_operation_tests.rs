@@ -114,14 +114,23 @@ fn target_blits_preserve_bound_program_pass_and_scissor() {
         .unwrap();
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::CLEAR, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::CLEAR, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
-        .update_instances(
-            &vao,
+        .write_buffer(
+            &mut instances,
             &floats(&[-1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
-            32,
-            None,
         )
         .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
@@ -168,6 +177,8 @@ fn target_blits_preserve_bound_program_pass_and_scissor() {
     device.textures.delete(&mut target).unwrap();
     device.programs.delete(&mut program).unwrap();
     device.vertex_arrays.delete(&mut vao).unwrap();
+    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
+    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 

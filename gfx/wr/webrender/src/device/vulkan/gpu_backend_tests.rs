@@ -56,6 +56,82 @@ fn setup() -> (wr::Device, Rc<Texture>) {
     )
 }
 
+fn device_options() -> wr::DeviceOptions {
+    wr::DeviceOptions {
+        crash_annotator: None,
+        resource_override_path: None,
+        use_optimized_shaders: false,
+        upload_method: wr::UploadMethod::PixelBuffer(wr::VertexUsageHint::Stream),
+        batched_upload_threshold: 0,
+        cached_programs: None,
+        allow_texture_swizzling: false,
+        dump_shader_source: None,
+        surface_origin_is_top_left: true,
+    }
+}
+
+#[test]
+fn vulkan_construction_rejects_runtime_source_options_before_opening_a_device() {
+    for dump in [false, true] {
+        let mut options = device_options();
+        if dump {
+            options.dump_shader_source = Some("ps_clear".into());
+        } else {
+            options.resource_override_path = Some("unused-shader-directory".into());
+        }
+        let error = wr::Device::new(wr::GpuBackendConfig::Vulkan(Options::default()), options)
+            .err()
+            .unwrap();
+        assert!(error.contains("shader source"));
+    }
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn public_device_constructor_selects_vulkan_and_propagates_adapter_errors() {
+    validation_logging();
+    let mut device = wr::Device::new(
+        wr::GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            ..Default::default()
+        }),
+        device_options(),
+    )
+    .unwrap();
+    eprintln!("Vulkan adapter: {:?}", device.api_info());
+    assert_eq!(device.api_info().kind, wr::GraphicsApi::Vulkan);
+    device.begin_frame();
+    let mut descriptor = pass();
+    descriptor.color_load = wr::LoadOp::Clear([0.0, 1.0, 0.0, 1.0]);
+    device.begin_render_pass(&descriptor);
+    device.end_render_pass(StoreOp::Store);
+    device.end_frame();
+    assert!(device.failure().is_none());
+    let output = device.vulkan_test_output().unwrap();
+    assert_eq!(
+        output
+            .readback(DeviceIntRect::from_size(DeviceIntSize::new(2, 1)))
+            .unwrap()
+            .wait()
+            .unwrap(),
+        [0, 255, 0, 255].repeat(2)
+    );
+    device.begin_frame();
+    device.deinit();
+    device.end_frame();
+    let error = wr::Device::new(
+        wr::GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            adapter_name: Some("nonexistent-vulkan-test-adapter".into()),
+        }),
+        device_options(),
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("nonexistent-vulkan-test-adapter"));
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
 fn pass() -> RenderPassDescriptor {
     RenderPassDescriptor {
         target: DrawTarget::new_default(DeviceIntSize::new(2, 1), true),
@@ -88,18 +164,20 @@ fn shared_device_and_upload_pool_render_and_recycle_vulkan_resources() {
         None,
     );
     let mut program = device.create_program("cs_scale", &["TEXTURE_2D"]).unwrap();
-    device.link_program(&mut program, &desc::SCALE).unwrap();
-    wr::GpuBackend::bind_shader_samplers(
+    wr::GpuBackend::link_program(
         &mut *device,
-        &program,
+        &mut program,
+        &desc::SCALE,
         &[("sColor0", wr::TextureSlot(0))],
-    );
-    let vao = device.create_vao(&desc::SCALE, 1);
-    device.update_vao_instances(
-        &vao,
+    )
+    .unwrap();
+    let vertices = device.create_buffer(wr::BufferKind::Vertex);
+    let mut instances = device.create_buffer(wr::BufferKind::Vertex);
+    let vao = device.create_vertex_array(&desc::SCALE, &vertices, Some(&instances), None, 1);
+    device.write_buffer(
+        &mut instances,
         &[[0.0f32, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0]],
         wr::VertexUsageHint::Stream,
-        None,
     );
     let mut pool = wr::UploadBufferPool::new(&mut device, 256);
     let full = DeviceIntRect::from_size(DeviceIntSize::new(2, 1));
@@ -126,7 +204,7 @@ fn shared_device_and_upload_pool_render_and_recycle_vulkan_resources() {
         pool.end_frame(&mut device);
         device.copy_texture_sub_region(&source, 0, 0, &copied, 0, 0, 2, 1);
         device.begin_render_pass(&pass());
-        device.bind_vao(&vao);
+        device.bind_vertex_array(&vao);
         device.bind_texture(wr::TextureSlot(0), &copied, Swizzle::default());
         device.bind_program(&program);
         device.set_uniforms(&program, &Transform3D::ortho(0.0, 2.0, 0.0, 1.0, -1.0, 1.0));
@@ -151,7 +229,9 @@ fn shared_device_and_upload_pool_render_and_recycle_vulkan_resources() {
     device.delete_texture(source);
     device.delete_texture(copied);
     device.delete_program(program);
-    device.delete_vao(vao);
+    device.delete_vertex_array(vao);
+    device.delete_buffer(vertices);
+    device.delete_buffer(instances);
     pool.deinit(&mut device);
     device.deinit();
     device.end_frame();
@@ -188,12 +268,14 @@ fn shared_backend_reports_failures_and_allows_cleanup() {
     assert_eq!(capture.get_reserved_size(), 16);
     let failure = device.failure().unwrap().to_owned();
     assert!(failure.contains("capture readback"));
-    assert!(device.link_program(&mut unlinked, &desc::SCALE).is_err());
+    assert!(wr::GpuBackend::link_program(&mut *device, &mut unlinked, &desc::SCALE, &[]).is_err());
     assert_eq!(unlinked.id, 0);
     device.delete_program(unlinked);
     assert!(!device.take_out_of_memory_error());
     assert!(device.map_transfer_buffer(&capture).is_none());
-    let vao = device.create_vao(&desc::SCALE, 1);
+    let vertices = device.create_buffer(wr::BufferKind::Vertex);
+    let mut instances = device.create_buffer(wr::BufferKind::Vertex);
+    let vao = device.create_vertex_array(&desc::SCALE, &vertices, Some(&instances), None, 1);
     assert_eq!(vao.instance_stride(), 36);
     let mut upload = device.create_transfer_buffer();
     assert!(device
@@ -202,7 +284,9 @@ fn shared_backend_reports_failures_and_allows_cleanup() {
     assert_eq!(device.failure(), Some(failure.as_str()));
     device.delete_transfer_buffer(upload);
     device.delete_transfer_buffer(capture);
-    device.delete_vao(vao);
+    device.delete_vertex_array(vao);
+    device.delete_buffer(vertices);
+    device.delete_buffer(instances);
     device.delete_texture(texture);
     assert_eq!(device.textures_deleted(), 1);
     device.deinit();

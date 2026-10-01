@@ -43,6 +43,8 @@ pub use self::upload::*;
 pub enum GpuBackendConfig {
     /// OpenGL or OpenGL ES.
     Gl(GlBackendConfig),
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    Vulkan(vulkan::Options),
 }
 
 /// What the GL backend needs from the embedder.
@@ -105,6 +107,11 @@ pub trait GpuBackend {
 
     /// A permanent backend failure that prevents further rendering.
     fn failure(&self) -> Option<&str> {
+        None
+    }
+
+    #[cfg(all(test, feature = "vulkan", wr_vulkan_shaders, any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    fn vulkan_test_output(&self) -> Option<Rc<vulkan::Texture>> {
         None
     }
 
@@ -521,16 +528,32 @@ impl DerefMut for Device {
 }
 
 impl Device {
-    pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Device {
+    pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Result<Device, String> {
         let backend: Box<dyn GpuBackend> = match config {
             GpuBackendConfig::Gl(config) => Box::new(GlDevice::new(config, options)),
+            #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+            GpuBackendConfig::Vulkan(config) => {
+                #[cfg(wr_vulkan_shaders)]
+                {
+                    if options.resource_override_path.is_some() || options.dump_shader_source.is_some() {
+                        return Err("Vulkan runtime shader source overrides and dumps are unsupported".into());
+                    }
+                    let owner = Rc::new(vulkan::Device::new(&config)?);
+                    Box::new(vulkan::RenderDevice::new(&owner)?)
+                }
+                #[cfg(not(wr_vulkan_shaders))]
+                {
+                    let _ = config;
+                    return Err("Vulkan shaders were not built".into());
+                }
+            }
         };
-        Device {
+        Ok(Device {
             backend,
             pending_state: RenderState::default(),
             #[cfg(debug_assertions)]
             pipeline_bound: false,
-        }
+        })
     }
 
     pub fn begin_frame(&mut self) -> GpuFrameId {

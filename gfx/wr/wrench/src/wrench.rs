@@ -370,7 +370,7 @@ impl Wrench {
                     dump_shader_source: opts.dump_shader_source.clone(),
                     surface_origin_is_top_left: opts.surface_origin_is_top_left,
                 },
-            );
+            ).expect("Creating the OpenGL shader device");
             device.begin_frame();
             let mut shaders = webrender::Shaders::new(&mut device, &opts).unwrap();
             let precache_flags = if precache_shaders {

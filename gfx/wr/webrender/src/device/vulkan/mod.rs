@@ -19,6 +19,8 @@ mod render_pass;
 #[cfg(wr_vulkan_shaders)]
 mod render_device;
 #[cfg(wr_vulkan_shaders)]
+pub(super) use self::render_device::RenderDevice;
+#[cfg(wr_vulkan_shaders)]
 mod texture_blit;
 mod pipeline;
 mod program;
@@ -217,4 +219,4 @@ fn select_adapter(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
