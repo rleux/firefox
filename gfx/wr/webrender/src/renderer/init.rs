@@ -516,11 +516,12 @@ pub fn create_webrender_instance(
     let max_primitive_instance_count =
         WebRenderOptions::MAX_INSTANCE_BUFFER_SIZE / mem::size_of::<PrimitiveInstanceData>();
 
-    // The shared instance buffer requires base_instance support to ensure
-    // instance data can be read from the correct offset within the buffer.
+    // The shared instance buffer requires base_instance support. Vulkan uses
+    // pooled per-draw uploads to avoid copying the arena for each retained draw.
     let use_shared_instance_buffer = options.enable_shared_instance_buffer
         && options.enable_instancing
-        && device.get_capabilities().supports_base_instance;
+        && device.get_capabilities().supports_base_instance
+        && device.api_info().kind != crate::device::GraphicsApi::Vulkan;
 
     let vaos = vertex::RendererVAOs::new(
         &mut device,
