@@ -40,6 +40,64 @@ struct XSetWindowAttributes {
     cursor: c_ulong,
 }
 
+#[test]
+#[ignore = "Requires 24-bit Xvfb, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_consecutive_passes_order_color_and_depth_writes() {
+    use crate::device::wgpu::{Texture, TextureFilter};
+    use crate::device::wgpu::draw::{DrawPass, tests::synchronization::record_overlapping_passes};
+    use api::units::DeviceIntPoint;
+
+    validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(window.clone()),
+            validation: true,
+            ..Default::default()
+        }).unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    swapchain.configure([64, 48], SurfaceOptions::default()).unwrap();
+    let depth = Texture::new(
+        &device, 64, 48, wgt::TextureFormat::Depth32Float, TextureFilter::Nearest, true,
+    ).unwrap();
+    let target = swapchain.acquire().unwrap().unwrap().into_target().unwrap();
+    record_overlapping_passes(
+        &DrawPass {
+            target: &target,
+            origin: DeviceIntPoint::zero(),
+            viewport: None,
+            depth: Some(&depth),
+            clear_color: None,
+            clear_depth: None,
+            depth_range: 0.0..1.0,
+        },
+        &mut queue.recording().unwrap(),
+    );
+    assert!(matches!(
+        target.present().unwrap(),
+        PresentationStatus::Presented { .. }
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if window.pixels([64, 48]).iter().all(|&pixel| {
+            ((pixel >> 16) as u8).abs_diff(128) <= 1
+                && ((pixel >> 8) as u8).abs_diff(128) <= 1
+                && pixel as u8 == 0
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Presented attachment pixels did not match"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    drop(swapchain);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
 impl X11Window {
     fn pixels(&self, size: [u32; 2]) -> Vec<c_ulong> {
         unsafe {
@@ -615,5 +673,203 @@ fn swapchain_presentation_displays_directly_rendered_pixels() {
     drop(swapchain);
     drop(queue);
     drop(device);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires 24-bit Xvfb, Vulkan shaders, a presentation-capable adapter and validation"]
+fn swapchain_attachment_uses_webrender_draw_pass_and_tracks_abandonment() {
+    use crate::device::wgpu::{
+        Buffer,
+        draw::{ColorAttachment, DrawBatch, DrawPass},
+        pipeline::DrawPipeline,
+        shader::select_draw_shader,
+    };
+    use crate::device::RenderState;
+    use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
+    use euclid::default::Transform3D;
+
+    validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(window.clone()),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    let full = |size: [u32; 2]| {
+        DeviceIntRect::from_size(DeviceIntSize::new(size[0] as i32, size[1] as i32))
+    };
+    swapchain
+        .configure([64, 48], SurfaceOptions::default())
+        .unwrap();
+    {
+        let target = swapchain.acquire().unwrap().unwrap().into_target().unwrap();
+        let pass = DrawPass {
+            target: &target,
+            origin: DeviceIntPoint::zero(),
+            viewport: None,
+            depth: None,
+            clear_color: None,
+            clear_depth: None,
+            depth_range: 0.0..1.0,
+        };
+        let other_queue = upload_queue(&device);
+        assert!(pass
+            .clear_rect(
+                &mut other_queue.recording().unwrap(),
+                full([64, 48]),
+                Some([0.0, 0.0, 1.0, 1.0]),
+                None
+            )
+            .is_err());
+        pass.clear_rect(
+            &mut queue.recording().unwrap(),
+            full([64, 48]),
+            Some([0.0, 0.0, 1.0, 1.0]),
+            None,
+        )
+        .unwrap();
+        queue.discard_recording();
+        assert!(target.present().unwrap_err().contains("uninitialized"));
+    }
+    assert!(swapchain.configuration().is_none());
+    assert!(!device.is_lost());
+    let quad = Buffer::new(
+        &device,
+        &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
+        wgt::BufferUses::VERTEX,
+    )
+    .unwrap();
+    for size in [[64, 48], [32, 24]] {
+        window.resize(size);
+        swapchain
+            .configure(size, SurfaceOptions::default())
+            .unwrap();
+        let target = swapchain.acquire().unwrap().unwrap().into_target().unwrap();
+        let pipeline = DrawPipeline::new(
+            &device,
+            select_draw_shader("ps_clear", &[], false).unwrap(),
+            (&target).format(),
+            false,
+            RenderState::default(),
+        )
+        .unwrap();
+        {
+            let pass = DrawPass {
+                target: &target,
+                origin: DeviceIntPoint::zero(),
+                viewport: None,
+                depth: None,
+                clear_color: None,
+                clear_depth: None,
+                depth_range: 0.0..1.0,
+            };
+            pass.clear_rect(
+                &mut queue.recording().unwrap(),
+                full(size),
+                Some([0.0, 0.0, 1.0, 1.0]),
+                None,
+            )
+            .unwrap();
+            queue.create_fence().unwrap();
+            let values = [
+                8.0f32,
+                8.0,
+                (size[0] - 8) as f32,
+                (size[1] - 8) as f32,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+            ];
+            let bytes: Vec<_> = values
+                .iter()
+                .flat_map(|value| value.to_ne_bytes())
+                .collect();
+            let projection = pass.projection(&Transform3D::ortho(
+                0.0,
+                size[0] as f32,
+                0.0,
+                size[1] as f32,
+                -1.0,
+                1.0,
+            ));
+            pass.record_batches(
+                &mut queue.recording().unwrap(),
+                &queue,
+                &quad,
+                None,
+                &[DrawBatch {
+                    pipeline: &pipeline,
+                    projection: Some(&projection),
+                    textures: &[],
+                    buffers: &[],
+                    instances: &bytes,
+                    instance_count: 1,
+                    scissor: full(size),
+                }],
+            )
+            .unwrap();
+            pass.clear_rect(
+                &mut queue.recording().unwrap(),
+                DeviceIntRect::from_origin_and_size(
+                    DeviceIntPoint::new(2, 2),
+                    DeviceIntSize::new(4, 4),
+                ),
+                Some([1.0, 0.0, 0.0, 1.0]),
+                None,
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            target.present().unwrap(),
+            PresentationStatus::Presented { .. }
+        ));
+        let expected: Vec<_> = (0..size[1])
+            .flat_map(|y| {
+                (0..size[0]).map(move |x| {
+                    if (2..6).contains(&x) && (2..6).contains(&y) {
+                        0xff0000
+                    } else if (8..size[0] - 8).contains(&x) && (8..size[1] - 8).contains(&y) {
+                        0x00ff00
+                    } else {
+                        0x0000ff
+                    }
+                })
+            })
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let actual = window.pixels(size);
+            if actual == expected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Swapchain draw mismatch: {:?}",
+                actual.iter().zip(&expected).position(|(a, b)| a != b)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    queue.wait().unwrap();
+    swapchain
+        .configure([32, 24], SurfaceOptions::default())
+        .unwrap();
+    std::mem::forget(swapchain.acquire().unwrap().unwrap().into_target().unwrap());
+    assert!(swapchain
+        .configure([0, 0], SurfaceOptions::default())
+        .is_err());
+    let weak = Rc::downgrade(&device);
+    drop(swapchain);
+    drop(queue);
+    drop(quad);
+    drop(device);
+    assert!(weak.upgrade().is_none());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
