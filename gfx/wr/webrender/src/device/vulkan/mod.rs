@@ -18,6 +18,7 @@ mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
 pub use self::window_surface::SurfaceWindow;
+mod swapchain;
 mod draw;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]
@@ -71,7 +72,7 @@ pub struct Device {
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: hal::vulkan::Adapter,
-    surface: Option<window_surface::WindowSurface>,
+    surface: Cell<Option<window_surface::WindowSurface>>,
     _instance: hal::vulkan::Instance,
 }
 
@@ -189,7 +190,7 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: exposed.adapter,
-            surface,
+            surface: Cell::new(surface),
             _instance: instance,
         })
     }
