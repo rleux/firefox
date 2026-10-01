@@ -99,6 +99,11 @@ impl wr::GpuBackend for RenderDevice {
     fn present_result(&self) -> Option<wr::PresentResult> {
         self.swapchain.as_ref().and_then(Swapchain::present_result)
     }
+    fn gpu_submission_status(&mut self) -> Result<Option<wr::GpuSubmissionStatus>, String> {
+        self.operation(|device| device.submissions.status())
+            .map(Some)
+            .ok_or_else(|| self.failure().unwrap().to_owned())
+    }
     #[cfg(test)]
     fn wgpu_test_output(&self) -> Option<Rc<Texture>> {
         self.textures.output()

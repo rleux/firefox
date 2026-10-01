@@ -129,6 +129,12 @@ pub trait GpuBackend {
         None
     }
 
+    /// Polls queue completion without submitting or waiting. None means the
+    /// caller manages GPU completion outside this backend.
+    fn gpu_submission_status(&mut self) -> Result<Option<GpuSubmissionStatus>, String> {
+        Ok(None)
+    }
+
     #[cfg(all(test, feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn wgpu_test_output(&self) -> Option<Rc<wgpu::Texture>> {
         None
