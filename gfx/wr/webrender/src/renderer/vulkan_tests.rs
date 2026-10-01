@@ -8,9 +8,12 @@ use crate::device::wgpu::{
     Options,
     tests::{validation_logging, ERRORS},
 };
-use crate::render_api::Transaction;
+use crate::render_api::{RenderApi, Transaction};
 use api::*;
 use std::sync::{mpsc, atomic::Ordering};
+
+#[path = "vulkan_image_tests.rs"]
+mod images;
 
 struct Notice(mpsc::Sender<()>);
 
@@ -22,6 +25,26 @@ impl RenderNotifier for Notice {
     fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {
         let _ = self.0.send(());
     }
+}
+
+fn renderer() -> (Renderer, RenderApi, mpsc::Receiver<()>) {
+    validation_logging();
+    let (tx, rx) = mpsc::channel();
+    let (renderer, sender) = crate::create_webrender_instance(
+        GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            ..Default::default()
+        }),
+        Box::new(Notice(tx)),
+        crate::WebRenderOptions {
+            enable_subpixel_aa: false,
+            enable_debugger: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    (renderer, sender.create_api(), rx)
 }
 
 #[test]
