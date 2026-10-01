@@ -23,9 +23,18 @@ fn frames_reset_bindings_and_counters_without_reallocating_output() {
     assert_eq!(texture.last_frame_used(), GpuFrameId::new(1));
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
-    let mut vertices = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut instances = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::CLEAR, &vertices, Some(&instances), None, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::CLEAR, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
         .write_buffer(

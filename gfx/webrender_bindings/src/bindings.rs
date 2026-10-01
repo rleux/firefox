@@ -1453,7 +1453,7 @@ fn wr_device_new(gl_context: *mut c_void, pc: Option<&mut WrProgramCache>) -> De
             dump_shader_source: None,
             surface_origin_is_top_left: false,
         },
-    )
+    ).expect("Creating the OpenGL WebRender device")
 }
 
 extern "C" {

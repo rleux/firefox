@@ -16,6 +16,7 @@ mod draw;
 mod clear;
 mod render_pass;
 mod render_device;
+pub(super) use self::render_device::RenderDevice;
 mod texture_blit;
 mod pipeline;
 mod program;
@@ -127,4 +128,4 @@ fn select_adapter<'a>(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

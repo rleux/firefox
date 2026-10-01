@@ -96,7 +96,10 @@ impl wr::GpuBackend for RenderDevice {
     fn failure(&self) -> Option<&str> {
         RenderDevice::failure(self)
     }
-
+    #[cfg(test)]
+    fn wgpu_test_output(&self) -> Option<Rc<Texture>> {
+        self.textures.output()
+    }
     fn blend_barrier(&self) {}
     fn shader_feature_flags(&self) -> ShaderFeatureFlags {
         self.properties.shader_feature_flags()
