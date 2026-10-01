@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::draw::{ColorAttachment, Draw, DrawPass, PassCommand};
+use super::swapchain::{SurfacePassTarget, SurfaceView, Swapchain};
 use super::texture_store::TextureStore;
 use super::{hal, wgt, Buffer, Device, Recording, Texture};
 use api::units::{DeviceIntPoint, DeviceIntRect, FramebufferIntRect};
@@ -11,7 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 struct ActivePass {
-    color: Rc<Texture>,
+    target: ActiveTarget,
     depth: Option<Rc<Texture>>,
     bounds: DeviceIntRect,
     viewport: Option<DeviceIntRect>,
@@ -20,14 +21,20 @@ struct ActivePass {
     pending: RefCell<Vec<PassCommand>>,
 }
 
+enum ActiveTarget {
+    Texture(Rc<Texture>),
+    Surface(SurfacePassTarget),
+    Skipped,
+}
+
 pub(super) struct DrawingPass<'a> {
-    pass: DrawPass<'a>,
+    pass: DrawPass<'a, PassTarget<'a>>,
     scissor: DeviceIntRect,
     pending: &'a RefCell<Vec<PassCommand>>,
 }
 
 impl DrawingPass<'_> {
-    pub fn pass(&self) -> &DrawPass<'_> {
+    pub fn pass(&self) -> &DrawPass<'_, PassTarget<'_>> {
         &self.pass
     }
 
@@ -42,12 +49,14 @@ impl DrawingPass<'_> {
 
 pub(super) enum PassTarget<'a> {
     Texture(&'a Rc<Texture>),
+    Surface(SurfaceView<'a>),
 }
 
 impl PassTarget<'_> {
     fn invalidate(&self, commands: &mut Recording<'_>) -> Result<(), String> {
         match self {
             Self::Texture(texture) => texture.invalidate(commands),
+            Self::Surface(surface) => surface.invalidate(commands),
         }
     }
 }
@@ -56,61 +65,75 @@ impl ColorAttachment for PassTarget<'_> {
     fn owner(&self) -> &Rc<Device> {
         match self {
             Self::Texture(texture) => ColorAttachment::owner(texture),
+            Self::Surface(surface) => surface.owner(),
         }
     }
     fn size(&self) -> wgt::Extent3d {
         match self {
             Self::Texture(texture) => ColorAttachment::size(texture),
+            Self::Surface(surface) => surface.size(),
         }
     }
     fn format(&self) -> wgt::TextureFormat {
         match self {
             Self::Texture(texture) => ColorAttachment::format(texture),
+            Self::Surface(surface) => surface.format(),
         }
     }
     fn target_view(&self) -> Option<&dyn hal::DynTextureView> {
         match self {
             Self::Texture(texture) => ColorAttachment::target_view(texture),
+            Self::Surface(surface) => surface.target_view(),
         }
     }
     fn initialized(&self) -> bool {
         match self {
             Self::Texture(texture) => ColorAttachment::initialized(texture),
+            Self::Surface(surface) => surface.initialized(),
         }
     }
     fn validate_recording(&self, commands: &Recording<'_>) -> Result<(), String> {
         match self {
             Self::Texture(texture) => ColorAttachment::validate_recording(texture, commands),
+            Self::Surface(surface) => surface.validate_recording(commands),
         }
     }
     fn prepare(&self, commands: &mut Recording<'_>) -> Result<(), String> {
         match self {
             Self::Texture(texture) => ColorAttachment::prepare(texture, commands),
+            Self::Surface(surface) => surface.prepare(commands),
         }
     }
     fn initialize(&self, commands: &mut Recording<'_>) -> Result<(), String> {
         match self {
             Self::Texture(texture) => ColorAttachment::initialize(texture, commands),
+            Self::Surface(surface) => surface.initialize(commands),
         }
     }
     fn is_sampled_by(&self, sample: &Texture) -> bool {
         match self {
             Self::Texture(texture) => ColorAttachment::is_sampled_by(texture, sample),
+            Self::Surface(surface) => surface.is_sampled_by(sample),
         }
     }
 }
 
 impl ActivePass {
-    fn draw_pass(&self) -> DrawPass<'_> {
-        DrawPass {
-            target: &self.color,
+    fn draw_pass(&self) -> Option<DrawPass<'_, PassTarget<'_>>> {
+        let target = match &self.target {
+            ActiveTarget::Texture(color) => PassTarget::Texture(color),
+            ActiveTarget::Surface(surface) => PassTarget::Surface(surface.view()),
+            ActiveTarget::Skipped => return None,
+        };
+        Some(DrawPass {
+            target,
             origin: DeviceIntPoint::zero(),
             viewport: self.viewport,
             depth: self.depth.as_ref(),
             clear_color: None,
             clear_depth: None,
             depth_range: 0.0..1.0,
-        }
+        })
     }
 }
 
@@ -133,13 +156,13 @@ impl RenderPassState {
         }
     }
 
-    pub fn drawing_pass(&self) -> Result<DrawingPass<'_>, String> {
+    pub fn drawing_pass(&self) -> Result<Option<DrawingPass<'_>>, String> {
         let active = self.active.as_ref().ok_or("No Vulkan render pass is active")?;
-        Ok(DrawingPass {
-            pass: active.draw_pass(),
+        Ok(active.draw_pass().map(|pass| DrawingPass {
+            pass,
             scissor: self.clip_scissor(active.bounds),
             pending: &active.pending,
-        })
+        }))
     }
 
     pub fn discard(&mut self) {
@@ -158,6 +181,7 @@ impl RenderPassState {
         commands: &mut Recording<'_>,
         textures: &mut TextureStore,
         descriptor: &RenderPassDescriptor,
+        swapchain: Option<&Swapchain>,
     ) -> Result<(), String> {
         if self.active.is_some() {
             return Err("A Vulkan render pass is already active".into());
@@ -165,10 +189,20 @@ impl RenderPassState {
         if descriptor.target.is_default() && matches!(descriptor.depth_load, LoadOp::Clear(_)) {
             return Err("Vulkan default target has no depth attachment".into());
         }
-        let (color, depth, viewport) = textures.draw_target(descriptor.target)?;
+        let (target, depth, viewport) = match swapchain.filter(|_| descriptor.target.is_default()) {
+            Some(swapchain) => {
+                let (_, viewport) = TextureStore::default_target_viewport(descriptor.target)?;
+                let target = swapchain.pass_target().map_or(ActiveTarget::Skipped, ActiveTarget::Surface);
+                (target, None, Some(viewport))
+            }
+            None => {
+                let (color, depth, viewport) = textures.draw_target(descriptor.target)?;
+                (ActiveTarget::Texture(color), depth, viewport)
+            }
+        };
         let dimensions = descriptor.target.dimensions();
         let active = ActivePass {
-            color,
+            target,
             depth,
             bounds: DeviceIntRect::from_size(dimensions),
             viewport,
@@ -177,7 +211,9 @@ impl RenderPassState {
             pending: RefCell::new(std::mem::take(&mut self.spare_commands)),
         };
         let pass = active.draw_pass();
-        pass.validate(commands)?;
+        if let Some(pass) = &pass {
+            pass.validate(commands)?;
+        }
         match descriptor.depth_load {
             LoadOp::Clear(value) if active.depth.is_some() && (0.0..=1.0).contains(&value) => {
                 ()
@@ -191,7 +227,9 @@ impl RenderPassState {
                 .map_or(true, |viewport| viewport == active.bounds)
         {
             if descriptor.color_load == LoadOp::DontCare {
-                pass.target.invalidate(commands)?;
+                if let Some(pass) = &pass {
+                    pass.target.invalidate(commands)?;
+                }
             }
             if descriptor.depth_load == LoadOp::DontCare {
                 if let Some(depth) = &active.depth {
@@ -205,8 +243,11 @@ impl RenderPassState {
         Ok(())
     }
 
-    pub fn draw_pass(&self) -> Result<DrawPass<'_>, String> {
-        Ok(self.active.as_ref().ok_or("No render pass is active")?.draw_pass())
+    pub fn draw_pass(&self) -> Result<Option<DrawPass<'_, PassTarget<'_>>>, String> {
+        Ok(self.active
+            .as_ref()
+            .ok_or("No Vulkan render pass is active")?
+            .draw_pass())
     }
 
     #[cfg(test)]
@@ -257,7 +298,7 @@ impl RenderPassState {
         if depth.map_or(false, |value| !(0.0..=1.0).contains(&value)) {
             return Err("Invalid render-pass depth clear".into());
         }
-        { let pass = active.draw_pass();
+        if let Some(pass) = active.draw_pass() {
             if depth.is_some() && pass.depth.is_none() {
                 return Err("Depth clear requires an attachment".into());
             }
@@ -277,7 +318,10 @@ impl RenderPassState {
         depth_store: StoreOp,
     ) -> Result<(), String> {
         let Some(active) = &self.active else { return Ok(()) };
-        let mut pass = active.draw_pass();
+        let Some(mut pass) = active.draw_pass() else {
+            active.pending.borrow_mut().clear();
+            return Ok(());
+        };
         let full = active.viewport.map_or(true, |viewport| viewport == active.bounds)
             && active.bounds.width() as u32 == pass.target.size().width
             && active.bounds.height() as u32 == pass.target.size().height;

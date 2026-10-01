@@ -87,6 +87,32 @@ impl TextureStore {
         self.output.clone()
     }
 
+    pub fn default_target_viewport(
+        target: DrawTarget,
+    ) -> Result<(DeviceIntSize, DeviceIntRect), String> {
+        let DrawTarget::Default {
+            rect,
+            total_size,
+            surface_origin_is_top_left,
+        } = target
+        else {
+            return Err("Expected a default Vulkan target".into());
+        };
+        // A resize can leave the frame's viewport larger than the current window.
+        if !surface_origin_is_top_left
+            || rect.min.x < 0
+            || rect.min.y < 0
+            || rect.max.x <= rect.min.x
+            || rect.max.y <= rect.min.y
+            || total_size.width <= 0
+            || total_size.height <= 0
+        {
+            return Err("Invalid Vulkan default-target viewport or orientation".into());
+        }
+        let dimensions = total_size.cast_unit();
+        Ok((dimensions, rect.cast_unit()))
+    }
+
     pub fn draw_target(
         &mut self,
         target: DrawTarget,
@@ -100,28 +126,13 @@ impl TextureStore {
                 let (color, depth) = self.render_target(texture, with_depth)?;
                 (color, depth, dimensions, None)
             }
-            DrawTarget::Default {
-                rect,
-                total_size,
-                surface_origin_is_top_left,
-            } => {
-                // A resize can leave the frame's viewport larger than the current window.
-                if !surface_origin_is_top_left
-                    || rect.min.x < 0
-                    || rect.min.y < 0
-                    || rect.max.x <= rect.min.x
-                    || rect.max.y <= rect.min.y
-                    || total_size.width <= 0
-                    || total_size.height <= 0
-                {
-                    return Err("Invalid Vulkan default-target viewport or orientation".into());
-                }
-                let dimensions = total_size.cast_unit();
+            DrawTarget::Default { .. } => {
+                let (dimensions, rect) = Self::default_target_viewport(target)?;
                 (
                     self.default_target(dimensions)?,
                     None,
                     dimensions,
-                    Some(rect.cast_unit()),
+                    Some(rect),
                 )
             }
             DrawTarget::NativeSurface { .. } => {

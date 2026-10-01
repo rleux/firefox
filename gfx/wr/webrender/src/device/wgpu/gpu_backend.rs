@@ -96,6 +96,9 @@ impl wr::GpuBackend for RenderDevice {
     fn failure(&self) -> Option<&str> {
         RenderDevice::failure(self)
     }
+    fn present_result(&self) -> Option<wr::PresentResult> {
+        self.swapchain.as_ref().and_then(Swapchain::present_result)
+    }
     #[cfg(test)]
     fn wgpu_test_output(&self) -> Option<Rc<Texture>> {
         self.textures.output()
@@ -571,6 +574,7 @@ impl wr::GpuBackend for RenderDevice {
     }
     fn deinit(&mut self) {
         self.passes.discard();
+        self.swapchain.take();
         let result = self.submissions.wait();
         self.record_result(result);
         let result = self.submissions.trim();

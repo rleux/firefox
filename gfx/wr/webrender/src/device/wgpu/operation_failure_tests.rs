@@ -109,3 +109,83 @@ fn submitted_work_and_cleanup_survive_a_later_adapter_failure() {
     replacement.submissions.wait().unwrap();
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn active_window_pass_releases_its_image_before_failure_deinit_or_drop() {
+    use crate::device::GpuBackend;
+    use crate::device::wgpu::X11Window;
+
+    validation_logging();
+    for exit in 0..3 {
+        let owner = Rc::new(Device::new(&Options {
+            window: Some(Rc::new(unsafe { X11Window::new() })),
+            validation: true,
+            ..Default::default()
+        }).unwrap());
+        let mut device = RenderDevice::new(&owner).unwrap();
+        device.begin_frame().unwrap();
+        let mut desc = descriptor();
+        desc.target = DrawTarget::new_default(DeviceIntSize::new(64, 48), true);
+        device.begin_render_pass(&desc).unwrap();
+        device.clear_target(Some([0.0, 1.0, 0.0, 1.0]), None, None).unwrap();
+        assert!(device.passes.is_active());
+        match exit {
+            0 => {
+                assert!(device.operation::<()>(|_| Err("injected failure".into())).is_none());
+                assert_eq!(device.failure(), Some("injected failure"));
+                assert!(!device.passes.is_active());
+                GpuBackend::deinit(&mut device);
+            }
+            1 => {
+                GpuBackend::deinit(&mut device);
+                assert!(!device.passes.is_active());
+            }
+            _ => (),
+        }
+        drop(device);
+        assert!(!owner.is_lost());
+    }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn skipped_window_pass_ignores_draws_and_recovers_next_frame() {
+    use crate::device::{GpuBackend, PresentResult};
+    use crate::device::wgpu::{X11Window, hal, surface_testing};
+
+    validation_logging();
+    let owner = Rc::new(Device::new(&Options {
+        window: Some(Rc::new(unsafe { X11Window::new() })),
+        validation: true,
+        ..Default::default()
+    }).unwrap());
+    let mut device = RenderDevice::new(&owner).unwrap();
+    let mut desc = descriptor();
+    desc.target = DrawTarget::new_default(DeviceIntSize::new(64, 48), true);
+    for skipped in [true, false] {
+        if skipped {
+            surface_testing::fail_acquire(hal::SurfaceError::Timeout);
+        }
+        device.begin_frame().unwrap();
+        device.begin_render_pass(&desc).unwrap();
+        if skipped {
+            device.draw_instanced(0, 1).unwrap();
+        } else {
+            assert!(device.draw_instanced(0, 1).is_err());
+        }
+        device.clear_target(Some([0.0, 1.0, 0.0, 1.0]), None, None).unwrap();
+        device.end_render_pass(StoreOp::Store).unwrap();
+        device.end_frame().unwrap();
+        assert_eq!(GpuBackend::present_result(&device), Some(if skipped {
+            PresentResult::Retry
+        } else {
+            PresentResult::Presented
+        }));
+    }
+    GpuBackend::deinit(&mut device);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
