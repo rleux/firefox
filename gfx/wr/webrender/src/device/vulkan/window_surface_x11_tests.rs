@@ -6,7 +6,7 @@ use super::*;
 use crate::device::vulkan::{
     hal, wgt, Device, Options, SurfaceOptions,
     resources::Owned,
-    swapchain::Swapchain,
+    swapchain::{PresentationStatus, Swapchain},
     tests::{upload_queue, validation_logging, ERRORS},
 };
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
@@ -41,6 +41,51 @@ struct XSetWindowAttributes {
 }
 
 impl X11Window {
+    fn pixels(&self, size: [u32; 2]) -> Vec<c_ulong> {
+        unsafe {
+            let get_image = self
+                .library
+                .get::<unsafe extern "C" fn(
+                    *mut c_void,
+                    c_ulong,
+                    c_int,
+                    c_int,
+                    c_uint,
+                    c_uint,
+                    c_ulong,
+                    c_int,
+                ) -> *mut c_void>(b"XGetImage\0")
+                .unwrap();
+            let get_pixel = self
+                .library
+                .get::<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_ulong>(b"XGetPixel\0")
+                .unwrap();
+            let destroy = self
+                .library
+                .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"XDestroyImage\0")
+                .unwrap();
+            let image = get_image(
+                self.display.as_ptr(),
+                self.window,
+                0,
+                0,
+                size[0],
+                size[1],
+                !0,
+                2,
+            );
+            assert!(!image.is_null());
+            let mut pixels = Vec::new();
+            for y in 0..size[1] {
+                for x in 0..size[0] {
+                    pixels.push(get_pixel(image, x as c_int, y as c_int) & 0x00ff_ffff);
+                }
+            }
+            destroy(image);
+            pixels
+        }
+    }
+
     fn resize(&self, size: [u32; 2]) {
         unsafe {
             self.library
@@ -430,6 +475,142 @@ fn swapchain_submissions_clear_the_acquired_image_with_queue_fences() {
         queue.recording().unwrap();
         queue.wait().unwrap();
     }
+    drop(swapchain);
+    drop(queue);
+    drop(device);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires 24-bit Xvfb, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_presentation_displays_directly_rendered_pixels() {
+    validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(window.clone()),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    let mut views = Vec::new();
+    for size in [[64, 48], [32, 24]] {
+        window.resize(size);
+        swapchain
+            .configure(size, SurfaceOptions::default())
+            .unwrap();
+        for rgb in [[255u8, 0, 0], [0, 255, 0], [0, 0, 255], [64, 128, 192]] {
+            let image = swapchain.acquire().unwrap().unwrap();
+            let config = image.configuration();
+            let range = wgt::ImageSubresourceRange {
+                mip_level_count: Some(1),
+                array_layer_count: Some(1),
+                ..Default::default()
+            };
+            let view = Rc::new(Owned::new(
+                &device,
+                unsafe {
+                    device
+                        .raw_device()
+                        .create_texture_view(
+                            image.texture(),
+                            &hal::TextureViewDescriptor {
+                                label: Some("WR presented image test"),
+                                format: config.format,
+                                swizzle: Default::default(),
+                                dimension: wgt::TextureViewDimension::D2,
+                                usage: wgt::TextureUses::COLOR_TARGET,
+                                range: range.clone(),
+                            },
+                        )
+                        .unwrap()
+                },
+                hal::vulkan::Device::destroy_texture_view,
+            ));
+            views.push(Rc::downgrade(&view));
+            let mut commands = queue.recording().unwrap();
+            unsafe {
+                commands
+                    .encoder()
+                    .transition_textures(std::iter::once(hal::TextureBarrier {
+                        queue_family_ownership_transfer: None,
+                        texture: image.texture(),
+                        range: range.clone(),
+                        usage: hal::StateTransition {
+                            from: wgt::TextureUses::UNINITIALIZED,
+                            to: wgt::TextureUses::COLOR_TARGET,
+                        },
+                    }));
+                commands
+                    .encoder()
+                    .begin_render_pass(&hal::RenderPassDescriptor {
+                        label: Some("WR direct presentation test"),
+                        extent: config.extent,
+                        sample_count: 1,
+                        color_attachments: &[Some(hal::ColorAttachment {
+                            target: hal::Attachment {
+                                view: &view,
+                                usage: wgt::TextureUses::COLOR_TARGET,
+                            },
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
+                            clear_value: wgt::Color {
+                                r: f64::from(rgb[0]) / 255.0,
+                                g: f64::from(rgb[1]) / 255.0,
+                                b: f64::from(rgb[2]) / 255.0,
+                                a: 1.0,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        multiview_mask: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .unwrap();
+                commands.encoder().end_render_pass();
+                commands
+                    .encoder()
+                    .transition_textures(std::iter::once(hal::TextureBarrier {
+                        queue_family_ownership_transfer: None,
+                        texture: image.texture(),
+                        range,
+                        usage: hal::StateTransition {
+                            from: wgt::TextureUses::COLOR_TARGET,
+                            to: wgt::TextureUses::PRESENT,
+                        },
+                    }));
+            }
+            commands.keep(view);
+            drop(commands);
+            assert!(matches!(
+                unsafe { image.present() }.unwrap(),
+                PresentationStatus::Presented { .. }
+            ));
+            assert!(queue.has_pending_work());
+            let expected = (c_ulong::from(rgb[0]) << 16)
+                | (c_ulong::from(rgb[1]) << 8)
+                | c_ulong::from(rgb[2]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let pixels = window.pixels(size);
+                if pixels.iter().all(|&pixel| pixel == expected) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Expected {expected:#x}, got {:?}",
+                    &pixels[..8]
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    queue.wait().unwrap();
+    assert!(views.iter().all(|view| view.upgrade().is_none()));
     drop(swapchain);
     drop(queue);
     drop(device);

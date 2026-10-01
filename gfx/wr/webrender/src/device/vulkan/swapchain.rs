@@ -19,6 +19,15 @@ pub(super) struct AcquiredImage<'a> {
     swapchain: &'a mut Swapchain,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PresentationStatus {
+    Presented { suboptimal: bool },
+    Timeout,
+    Occluded,
+    Outdated,
+    Lost,
+}
+
 impl Swapchain {
     pub fn new(queue: &Rc<SubmissionQueue>) -> Option<Self> {
         queue.owner().surface.take().map(|surface| Self {
@@ -127,6 +136,35 @@ impl AcquiredImage<'_> {
 
     pub fn discard(self) -> Result<(), String> {
         self.swapchain.discard_acquired()
+    }
+
+    /// # Safety
+    /// Queued commands must initialize the image and leave it in PRESENT usage.
+    pub unsafe fn present(self) -> Result<PresentationStatus, String> {
+        self.swapchain.queue.submit_surface()?;
+        let image = self.swapchain.acquired.take().unwrap();
+        let image =
+            Rc::try_unwrap(image).unwrap_or_else(|_| unreachable!("Acquired image still borrowed"));
+        let owner = self.swapchain.queue.owner();
+        let result = owner
+            .open
+            .queue
+            .present(&self.swapchain.surface.raw, image.texture);
+        match result {
+            Ok(()) => Ok(PresentationStatus::Presented {
+                suboptimal: image.suboptimal,
+            }),
+            Err(hal::SurfaceError::Timeout) => Ok(PresentationStatus::Timeout),
+            Err(hal::SurfaceError::Occluded) => Ok(PresentationStatus::Occluded),
+            Err(hal::SurfaceError::Outdated) => Ok(PresentationStatus::Outdated),
+            Err(hal::SurfaceError::Lost) => Ok(PresentationStatus::Lost),
+            Err(error) => {
+                if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
+                    owner.lost.set(true);
+                }
+                Err(format!("Presenting Vulkan swapchain image: {error}"))
+            }
+        }
     }
 }
 
