@@ -1553,6 +1553,8 @@ impl Renderer {
     /// A Frame is supplied by calling [`generate_frame()`][webrender_api::Transaction::generate_frame].
     /// buffer_age is the age of the current backbuffer. It is only relevant if partial present
     /// is active, otherwise 0 should be passed here.
+    /// Callers using backend presentation must handle RenderResults::present_result,
+    /// including scheduling retries when no new frame is generated.
     pub fn render(
         &mut self,
         device_size: DeviceIntSize,
@@ -2010,6 +2012,10 @@ impl Renderer {
         self.staging_texture_pool.end_frame(&mut self.device);
         self.texture_upload_buffer_pool.end_frame(&mut self.device);
         self.device.end_frame();
+        results.present_result = self.device.present_result();
+        if matches!(results.present_result, Some(result) if result != crate::PresentResult::Presented) {
+            self.force_redraw = true;
+        }
 
         if debug_overlay.is_some() {
             self.last_time = current_time;
@@ -4488,6 +4494,10 @@ impl RendererStats {
 /// some non-repr(C) data.
 #[derive(Debug, Default)]
 pub struct RenderResults {
+    /// Backend presentation outcome. Callers must schedule retries as indicated;
+    /// None leaves presentation to the caller or indicates no window rendering.
+    pub present_result: Option<crate::PresentResult>,
+
     /// Statistics about the frame that was rendered.
     pub stats: RendererStats,
 

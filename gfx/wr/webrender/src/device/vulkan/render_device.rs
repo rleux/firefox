@@ -5,6 +5,7 @@
 use super::program_store::ProgramStore;
 use super::renderer_properties::RendererProperties;
 use super::render_pass::RenderPassState;
+use super::swapchain::Swapchain;
 use super::texture_store::TextureStore;
 use super::texture_blit::{TextureBlit, TextureBlitter};
 use super::vertex_array::VertexArrayStore;
@@ -29,7 +30,8 @@ pub(in crate::device) struct RenderDevice {
     pub vertex_arrays: VertexArrayStore,
     pub uploads: UploadBuffers,
     pub passes: RenderPassState,
-    pub submissions: SubmissionQueue,
+    pub submissions: Rc<SubmissionQueue>,
+    swapchain: Option<Swapchain>,
     quad: Rc<Buffer>,
     samplers: Rc<Samplers>,
     fallback: Rc<Texture>,
@@ -43,7 +45,8 @@ pub(in crate::device) struct RenderDevice {
 impl RenderDevice {
     pub fn new(owner: &Rc<Device>) -> Result<Self, String> {
         let pool = Rc::new(BufferPool::new(owner));
-        let submissions = SubmissionQueue::new(&pool, 2)?;
+        let submissions = Rc::new(SubmissionQueue::new(&pool, 2)?);
+        let swapchain = Swapchain::new(&submissions);
         let quad = Buffer::new(
             owner,
             &[0, 0, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0],
@@ -74,6 +77,7 @@ impl RenderDevice {
             uploads: UploadBuffers::new(&pool),
             passes: RenderPassState::default(),
             submissions,
+            swapchain,
             quad,
             samplers,
             fallback,
@@ -106,6 +110,9 @@ impl RenderDevice {
             Err(error) => {
                 self.failure.get_or_insert(error);
                 self.submissions.discard_recording();
+                if let Some(swapchain) = &mut self.swapchain {
+                    let _ = swapchain.discard_acquired();
+                }
                 None
             }
         }
@@ -237,6 +244,9 @@ impl RenderDevice {
         target_rect: FramebufferIntRect,
         filter: TextureFilter,
     ) -> Result<(), String> {
+        if self.swapchain.is_some() && target.is_default() {
+            return Err("Vulkan window output requires direct rendering".into());
+        }
         let source = self.textures.read_target(source)?;
         let (target, _, _) = self.textures.draw_target(target)?;
         self.prepare_blitter(&target)?;
@@ -270,6 +280,9 @@ impl RenderDevice {
                 .ok_or("Vulkan frame identifier overflow")?,
         );
         self.submissions.poll()?;
+        if let Some(swapchain) = &mut self.swapchain {
+            swapchain.begin_frame();
+        }
         self.textures.begin_frame(frame);
         self.programs.unbind();
         self.vertex_arrays.unbind();
@@ -282,6 +295,9 @@ impl RenderDevice {
         if !self.inside_frame || self.passes.is_active() {
             return Err("Vulkan frame must be active with no unfinished render pass".into());
         }
+        if let Some(swapchain) = &mut self.swapchain {
+            swapchain.finish_target()?;
+        }
         let serial = self.submissions.submit()?;
         self.inside_frame = false;
         Ok(serial)
@@ -291,20 +307,30 @@ impl RenderDevice {
         if !self.inside_frame {
             return Err("Vulkan render pass requires an active frame".into());
         }
+        if self.passes.is_active() {
+            return Err("A Vulkan render pass is already active".into());
+        }
+        if descriptor.target.is_default() {
+            if let Some(swapchain) = &mut self.swapchain {
+                let (size, _) = TextureStore::default_target_viewport(descriptor.target)?;
+                swapchain.prepare_target([size.width as u32, size.height as u32])?;
+            }
+        }
         self.passes.begin(
             &mut self.submissions.recording()?,
             &mut self.textures,
             descriptor,
+            self.swapchain.as_ref(),
         )
     }
 
     pub fn bind_pipeline(&mut self, program: &Program, state: RenderState) -> Result<bool, String> {
-        self.programs
-            .bind_pipeline(program, state, &self.passes.draw_pass()?)
+        let Some(pass) = self.passes.draw_pass(self.swapchain.as_ref())? else { return Ok(false) };
+        self.programs.bind_pipeline(program, state, &pass)
     }
 
     pub fn draw_instanced(&self, base: u32, count: u32) -> Result<(), String> {
-        let pass = self.passes.draw_pass()?;
+        let Some(pass) = self.passes.draw_pass(self.swapchain.as_ref())? else { return Ok(()) };
         let Some(instances) = self.vertex_arrays.instances(base, count)? else {
             return Ok(());
         };
@@ -330,12 +356,12 @@ impl RenderDevice {
         rect: Option<FramebufferIntRect>,
     ) -> Result<(), String> {
         self.passes
-            .clear(&mut self.submissions.recording()?, color, depth, rect)
+            .clear(&mut self.submissions.recording()?, color, depth, rect, self.swapchain.as_ref())
     }
 
     pub fn end_render_pass(&mut self, depth_store: StoreOp) -> Result<(), String> {
         self.passes
-            .end(&mut self.submissions.recording()?, depth_store)
+            .end(&mut self.submissions.recording()?, depth_store, self.swapchain.as_ref())
     }
 }
 

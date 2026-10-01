@@ -87,4 +87,4 @@ fn android_handles_require_a_matching_display() {
 
 #[cfg(all(target_os = "linux", feature = "debugger"))]
 #[path = "window_surface_x11_tests.rs"]
-mod x11;
+pub(in crate::device::vulkan) mod x11;

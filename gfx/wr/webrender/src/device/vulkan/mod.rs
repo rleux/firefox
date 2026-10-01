@@ -18,7 +18,11 @@ mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
 pub use self::window_surface::SurfaceWindow;
+#[cfg(all(test, target_os = "linux", feature = "debugger"))]
+pub(crate) use self::window_surface::tests::x11::X11Window;
 mod swapchain;
+#[cfg(test)]
+pub(crate) use self::swapchain::testing as surface_testing;
 mod draw;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]

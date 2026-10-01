@@ -555,6 +555,11 @@ pub fn create_webrender_instance(
 
     let compositor_kind = match options.compositor_config {
         CompositorConfig::Draw { max_partial_present_rects, draw_previous_partial_present_regions, .. } => {
+            let max_partial_present_rects = if device.api_info().kind == crate::device::GraphicsApi::Vulkan {
+                0
+            } else {
+                max_partial_present_rects
+            };
             CompositorKind::Draw { max_partial_present_rects, draw_previous_partial_present_regions }
         }
         CompositorConfig::Native { ref compositor } => {

@@ -13,7 +13,7 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::atomic::Ordering;
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
-struct X11Window {
+pub(crate) struct X11Window {
     library: libloading::Library,
     display: NonNull<c_void>,
     window: c_ulong,
@@ -38,6 +38,46 @@ struct XSetWindowAttributes {
     override_redirect: c_int,
     colormap: c_ulong,
     cursor: c_ulong,
+}
+
+#[test]
+#[ignore = "Requires 24-bit Xvfb, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_skips_all_window_passes_after_acquisition_failure() {
+    use crate::device::vulkan::surface_testing;
+    use crate::PresentResult;
+
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(Rc::new(unsafe { X11Window::new() })),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    for (error, expected) in [
+        (hal::SurfaceError::Timeout, PresentResult::Retry),
+        (hal::SurfaceError::Outdated, PresentResult::Retry),
+        (hal::SurfaceError::Occluded, PresentResult::Occluded),
+    ] {
+        swapchain.begin_frame();
+        surface_testing::fail_acquire(error);
+        assert!(!swapchain.prepare_target([64, 48]).unwrap());
+        assert!(!swapchain.prepare_target([64, 48]).unwrap());
+        swapchain.finish_target().unwrap();
+        assert_eq!(swapchain.present_result(), Some(expected));
+        assert!(swapchain.current_target().is_none());
+
+        swapchain.begin_frame();
+        assert_eq!(swapchain.present_result(), None);
+        assert!(swapchain.prepare_target([64, 48]).unwrap());
+        assert!(swapchain.current_target().is_some());
+        swapchain.discard_acquired().unwrap();
+    }
+    drop(swapchain);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -99,7 +139,16 @@ fn swapchain_consecutive_passes_order_color_and_depth_writes() {
 }
 
 impl X11Window {
-    fn pixels(&self, size: [u32; 2]) -> Vec<c_ulong> {
+    pub(crate) fn clear(&self) {
+        unsafe {
+            self.library.get::<unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int>(b"XClearWindow\0")
+                .unwrap()(self.display.as_ptr(), self.window);
+            self.library.get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
+                .unwrap()(self.display.as_ptr(), 0);
+        }
+    }
+
+    pub(crate) fn pixels(&self, size: [u32; 2]) -> Vec<c_ulong> {
         unsafe {
             let get_image = self
                 .library
@@ -144,7 +193,7 @@ impl X11Window {
         }
     }
 
-    fn resize(&self, size: [u32; 2]) {
+    pub(crate) fn resize(&self, size: [u32; 2]) {
         unsafe {
             self.library
                 .get::<unsafe extern "C" fn(*mut c_void, c_ulong, c_uint, c_uint) -> c_int>(
@@ -157,7 +206,7 @@ impl X11Window {
         }
     }
 
-    unsafe fn new() -> Self {
+    pub(crate) unsafe fn new() -> Self {
         let library = libloading::Library::new("libX11.so.6").unwrap();
         let open = library
             .get::<unsafe extern "C" fn(*const c_char) -> *mut c_void>(b"XOpenDisplay\0")
@@ -267,26 +316,29 @@ fn window_surface_selects_present_adapter_and_retains_window() {
         let device = Rc::new(Device::new(&options).unwrap());
         let surface = device.surface.take().unwrap();
         let caps = unsafe { device.adapter.surface_capabilities(&surface.raw) }.unwrap();
-        assert_eq!(surface.options.vsync, vsync);
         device.surface.set(Some(surface));
         let queue = Rc::new(upload_queue(&device));
         let mut swapchain = Swapchain::new(&queue).unwrap();
         assert!(Swapchain::new(&queue).is_none());
-        swapchain
-            .configure([64, 48], options.surface_options)
-            .unwrap();
-        let config = swapchain.configuration().unwrap();
         let expected_mode = if !vsync && caps.present_modes.contains(&wgt::PresentMode::Immediate) {
             wgt::PresentMode::Immediate
         } else {
             wgt::PresentMode::Fifo
         };
+        swapchain.begin_frame();
+        assert!(swapchain.prepare_target([64, 48]).unwrap());
+        let config = swapchain.configuration().unwrap();
         assert_eq!(config.present_mode, expected_mode);
         assert_eq!(config.usage, wgt::TextureUses::COLOR_TARGET);
         assert!(matches!(
             config.format,
             wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm
         ));
+        swapchain.discard_acquired().unwrap();
+        window.resize([32, 24]);
+        swapchain.begin_frame();
+        assert!(swapchain.prepare_target([32, 24]).unwrap());
+        assert_eq!(swapchain.configuration().unwrap().present_mode, expected_mode);
         assert!(Device::new(&Options {
             adapter_name: Some("no such Vulkan adapter".into()),
             ..options
