@@ -14,6 +14,14 @@ use std::sync::{mpsc, atomic::Ordering};
 
 #[path = "vulkan_image_tests.rs"]
 mod images;
+#[path = "vulkan_clip_tests.rs"]
+mod clips;
+#[path = "vulkan_filter_tests.rs"]
+mod filters;
+#[path = "vulkan_blend_tests.rs"]
+mod blends;
+#[path = "vulkan_glyph_tests.rs"]
+mod glyphs;
 
 struct Notice(mpsc::Sender<()>);
 
