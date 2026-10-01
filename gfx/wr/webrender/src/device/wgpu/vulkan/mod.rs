@@ -29,6 +29,14 @@ impl Device {
                 return Err("Adapter name must not be empty".into());
             }
         }
+        let display = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window.display_handle()
+                    .map_err(|error| format!("Getting Vulkan display handle: {error}"))
+            })
+            .transpose()?;
         if options.validation {
             let entry = unsafe { ash::Entry::load() }
                 .map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -53,19 +61,39 @@ impl Device {
                 memory_budget_thresholds: Default::default(),
                 backend_options: Default::default(),
                 telemetry: None,
-                display: None,
+                display,
             })
         }
         .map_err(|error| format!("Initializing Vulkan: {error:?}"))?;
         if !supports_shader_api_version(instance.shared_instance().instance_api_version()) {
             return Err("WebRender shaders require a Vulkan 1.1 instance".into());
         }
+        let surface = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window_surface::WindowSurface::new(
+                    &instance,
+                    window,
+                    display.unwrap().as_raw(),
+                    options.surface_options,
+                )
+            })
+            .transpose()?;
         let mut adapters = unsafe { instance.enumerate_adapters(None) };
         adapters.retain(|adapter| {
             supports_shader_api_version(adapter.adapter.physical_device_capabilities().properties().api_version)
         });
         if adapters.is_empty() {
             return Err("No Vulkan 1.1 adapters available for WebRender shaders".into());
+        }
+        if let Some(surface) = &surface {
+            adapters.retain(|adapter| unsafe {
+                hal::DynAdapter::surface_capabilities(&adapter.adapter, surface.raw.as_ref()).is_some()
+            });
+            if adapters.is_empty() {
+                return Err("No Vulkan adapters can present to the window surface".into());
+            }
         }
         let requested = options.adapter_name.as_deref().map(str::to_lowercase);
         let index = select_adapter(
@@ -130,6 +158,7 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
+            surface,
             instance: Box::new(instance),
         })
     }
