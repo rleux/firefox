@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::bindings::DrawBindings;
-use super::draw::{upload_projection, DrawBatch, DrawPass};
+use super::draw::{upload_projection, ColorAttachment, DrawBatch, DrawPass};
 use super::pipeline::DrawPipeline;
 use super::{Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::DeviceIntRect;
@@ -73,10 +73,10 @@ impl ProgramState {
         self.transform.set(*transform);
     }
 
-    pub fn resolve(
+    pub fn resolve<T: ColorAttachment>(
         &self,
         pipeline: &Rc<DrawPipeline>,
-        pass: &DrawPass<'_>,
+        pass: &DrawPass<'_, T>,
         slots: &[Option<ShaderResource>],
         fallback: Option<&Rc<Texture>>,
     ) -> Result<ResolvedProgram, String> {

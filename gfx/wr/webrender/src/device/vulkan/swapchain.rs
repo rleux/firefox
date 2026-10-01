@@ -8,11 +8,16 @@ use std::rc::Rc;
 use std::borrow::Borrow;
 use wgpu_hal::{Adapter as _, Queue as _, Surface as _};
 
+#[path = "swapchain_target.rs"]
+mod target;
+
 pub(super) struct Swapchain {
     surface: WindowSurface,
     queue: Rc<SubmissionQueue>,
     config: Option<hal::SurfaceConfiguration>,
     acquired: Option<Rc<hal::AcquiredSurfaceTexture<hal::api::Vulkan>>>,
+    // Keep views owned here even if a target guard is forgotten.
+    target: Option<Rc<target::AttachmentResources>>,
 }
 
 pub(super) struct AcquiredImage<'a> {
@@ -35,6 +40,7 @@ impl Swapchain {
             queue: queue.clone(),
             config: None,
             acquired: None,
+            target: None,
         })
     }
 
@@ -104,6 +110,7 @@ impl Swapchain {
     }
 
     fn discard_acquired(&mut self) -> Result<(), String> {
+        self.target.take();
         let Some(image) = self.acquired.take() else {
             return Ok(());
         };
@@ -142,6 +149,7 @@ impl AcquiredImage<'_> {
     /// Queued commands must initialize the image and leave it in PRESENT usage.
     pub unsafe fn present(self) -> Result<PresentationStatus, String> {
         self.swapchain.queue.submit_surface()?;
+        self.swapchain.target.take();
         let image = self.swapchain.acquired.take().unwrap();
         let image =
             Rc::try_unwrap(image).unwrap_or_else(|_| unreachable!("Acquired image still borrowed"));

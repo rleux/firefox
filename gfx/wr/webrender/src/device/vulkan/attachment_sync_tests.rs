@@ -5,11 +5,11 @@
 use super::*;
 use crate::device::{BlendMode, DepthFunction};
 
-pub(in crate::device::vulkan) fn record_overlapping_passes(
-    pass: &DrawPass<'_>,
+pub(in crate::device::vulkan) fn record_overlapping_passes<T: ColorAttachment + Copy>(
+    pass: &DrawPass<'_, T>,
     commands: &mut Recording<'_>,
 ) {
-    let owner = &pass.target.raw.owner;
+    let owner = pass.target.owner();
     let quad = quad(owner);
     quad.transition(commands, wgt::BufferUses::VERTEX).unwrap();
     let shader = crate::device::vulkan::shader::select_draw_shader("ps_clear", &[], false).unwrap();

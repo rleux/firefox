@@ -4,7 +4,7 @@
 
 use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
-use super::{hal, wgt, Buffer, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
+use super::{hal, wgt, Buffer, Device, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntPoint, DeviceIntRect};
 use ash::vk;
 use euclid::default::Transform3D;
@@ -46,8 +46,50 @@ pub(super) struct DrawBatch<'a> {
     pub scissor: DeviceIntRect,
 }
 
-pub(super) struct DrawPass<'a> {
-    pub target: &'a Rc<Texture>,
+pub(super) trait ColorAttachment {
+    fn owner(&self) -> &Rc<Device>;
+    fn size(&self) -> wgt::Extent3d;
+    fn format(&self) -> wgt::TextureFormat;
+    fn target_view(&self) -> Option<&hal::vulkan::TextureView>;
+    fn initialized(&self) -> bool;
+    fn validate_recording(&self, commands: &Recording<'_>) -> Result<(), String>;
+    fn prepare(&self, commands: &mut Recording<'_>) -> Result<(), String>;
+    fn initialize(&self, commands: &mut Recording<'_>) -> Result<(), String>;
+    fn is_sampled_by(&self, texture: &Texture) -> bool;
+}
+
+impl ColorAttachment for &Rc<Texture> {
+    fn owner(&self) -> &Rc<Device> {
+        &self.raw.owner
+    }
+    fn size(&self) -> wgt::Extent3d {
+        Texture::size(self)
+    }
+    fn format(&self) -> wgt::TextureFormat {
+        Texture::format(self)
+    }
+    fn target_view(&self) -> Option<&hal::vulkan::TextureView> {
+        Texture::target_view(self)
+    }
+    fn initialized(&self) -> bool {
+        Texture::initialized(self)
+    }
+    fn validate_recording(&self, commands: &Recording<'_>) -> Result<(), String> {
+        commands.recording_id(&self.raw.owner).map(|_| ())
+    }
+    fn prepare(&self, commands: &mut Recording<'_>) -> Result<(), String> {
+        Texture::transition(self, commands, wgt::TextureUses::COLOR_TARGET)
+    }
+    fn initialize(&self, commands: &mut Recording<'_>) -> Result<(), String> {
+        Texture::initialize(self, commands)
+    }
+    fn is_sampled_by(&self, texture: &Texture) -> bool {
+        texture.samples_attachment(self)
+    }
+}
+
+pub(super) struct DrawPass<'a, T: ColorAttachment = &'a Rc<Texture>> {
+    pub target: T,
     /// Logical pixel coordinate at the attachment's top-left.
     pub origin: DeviceIntPoint,
     /// Attachment-local viewport; None uses the full attachment.
@@ -58,7 +100,7 @@ pub(super) struct DrawPass<'a> {
     pub depth_range: Range<f32>,
 }
 
-impl DrawPass<'_> {
+impl<T: ColorAttachment> DrawPass<'_, T> {
     pub fn clear_rect(
         &self,
         commands: &mut Recording<'_>,
@@ -103,8 +145,7 @@ impl DrawPass<'_> {
         }
         self.record_pass(commands, |encoder| unsafe {
             self.target
-                .raw
-                .owner
+                .owner()
                 .open
                 .device
                 .raw_device()
@@ -171,7 +212,7 @@ impl DrawPass<'_> {
         samplers: Option<&Rc<Samplers>>,
         batches: &[DrawBatch<'_>],
     ) -> Result<(), String> {
-        let owner = &self.target.raw.owner;
+        let owner = self.target.owner();
         commands.recording_id(owner)?;
         let full = self.bounds()?;
         let active: Vec<_> = batches
@@ -238,7 +279,7 @@ impl DrawPass<'_> {
         draws: &[Draw],
     ) -> Result<(), String> {
         let full = self.validate(commands)?;
-        let owner = &self.target.raw.owner;
+        let owner = self.target.owner();
         let size = self.target.size();
         let viewport = self.viewport.unwrap_or_else(|| {
             DeviceIntRect::from_size(api::units::DeviceIntSize::new(
@@ -278,7 +319,7 @@ impl DrawPass<'_> {
                 .ok_or("Draw instance range overflow")?;
             let instances = draw.instances.vertex_binding(draw.instance_offset, bytes)?;
             for texture in draw.bindings.textures() {
-                if texture.samples_attachment(self.target)
+                if self.target.is_sampled_by(texture)
                     || self
                         .depth
                         .map_or(false, |depth| texture.samples_attachment(depth))
@@ -341,8 +382,8 @@ impl DrawPass<'_> {
     }
 
     pub(super) fn validate(&self, commands: &Recording<'_>) -> Result<DeviceIntRect, String> {
-        let owner = &self.target.raw.owner;
-        commands.recording_id(owner)?;
+        let owner = self.target.owner();
+        self.target.validate_recording(commands)?;
         let size = self.target.size();
         if let Some(rect) = self.viewport {
             if rect.min.x < 0
@@ -398,8 +439,7 @@ impl DrawPass<'_> {
     ) -> Result<(), String> {
         let size = self.target.size();
         let target_view = self.target.target_view().unwrap();
-        self.target
-            .transition(commands, wgt::TextureUses::COLOR_TARGET)?;
+        self.target.prepare(commands)?;
         if let Some(depth) = self.depth {
             depth.transition(commands, wgt::TextureUses::DEPTH_WRITE)?;
         }
@@ -431,7 +471,7 @@ impl DrawPass<'_> {
                         depth_read_only: false,
                         stencil_read_only: true,
                         target: hal::Attachment {
-                            view: depth.target_view().unwrap(),
+                            view: Texture::target_view(depth).unwrap(),
                             usage: wgt::TextureUses::DEPTH_WRITE,
                         },
                         depth_ops: ops(depth.initialized(), self.clear_depth.is_some()),
