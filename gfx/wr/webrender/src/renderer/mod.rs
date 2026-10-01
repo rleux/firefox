@@ -877,6 +877,7 @@ pub enum RendererError {
     MaxTextureSize,
     SoftwareRasterizer,
     OutOfMemory,
+    Device(String),
 }
 
 /// Flatten a shader build failure into the per-line diagnostics the debugger
@@ -2298,6 +2299,11 @@ impl Renderer {
     fn check_device_errors(&mut self) {
         if self.device.take_out_of_memory_error() {
             self.renderer_errors.push(RendererError::OutOfMemory);
+        }
+        if let Some(error) = self.device.failure() {
+            if !self.renderer_errors.iter().any(|error| matches!(error, RendererError::Device(_))) {
+                self.renderer_errors.push(RendererError::Device(error.to_owned()));
+            }
         }
     }
 
