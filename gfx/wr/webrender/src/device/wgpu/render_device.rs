@@ -96,10 +96,16 @@ impl RenderDevice {
         if self.failure.is_some() {
             return None;
         }
-        match operation(self) {
+        let result = operation(self);
+        self.record_result(result)
+    }
+
+    fn record_result<T>(&mut self, result: Result<T, String>) -> Option<T> {
+        match result {
             Ok(value) => Some(value),
             Err(error) => {
-                self.failure = Some(error);
+                self.failure.get_or_insert(error);
+                self.passes.discard();
                 self.submissions.discard_recording();
                 None
             }
@@ -348,6 +354,9 @@ impl RenderDevice {
             .end(&mut self.submissions.recording()?, depth_store)
     }
 }
+
+#[path = "gpu_backend.rs"]
+mod backend;
 
 #[cfg(test)]
 #[path = "render_device_tests.rs"]

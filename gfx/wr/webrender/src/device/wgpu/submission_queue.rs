@@ -239,7 +239,6 @@ impl SubmissionQueue {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(in crate::device::wgpu) fn upload_pool(&self) -> &Rc<BufferPool> {
         &self.pool
     }

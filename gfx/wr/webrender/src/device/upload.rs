@@ -244,6 +244,7 @@ impl UploadBufferPool {
             }
         }
         // There is no need to delete orphaned PBOs on memory pressure.
+        device.trim_upload_buffers();
     }
 
     /// Generates a memory report.
@@ -354,7 +355,7 @@ impl<'a> TextureUploader<'a> {
         let (dst_size, dst_stride) = device.required_upload_size_and_stride(
             size,
             format,
-        );
+        )?;
 
         // Find a pixel buffer with enough space remaining, creating a new one if required.
         let buffer_index = self.buffers.iter().position(|buffer| {
