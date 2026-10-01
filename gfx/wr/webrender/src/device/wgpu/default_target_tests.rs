@@ -79,12 +79,12 @@ fn resized_default_targets_clip_stale_viewports_without_scaling() {
         {
             let mut commands = queue.recording().unwrap();
             state
-                .begin(&mut commands, &mut textures, &desc)
+                .begin(&mut commands, &mut textures, &desc, None)
                 .unwrap();
             state.set_scissor_rect(viewport.cast_unit());
             state.enable_scissor();
             state.flush(&mut commands, StoreOp::Store).unwrap();
-            let pass = state.draw_pass().unwrap();
+            let pass = state.draw_pass().unwrap().unwrap();
             let projection = pass.projection(&Transform3D::ortho(
                 0.0, vw as f32, 0.0, vh as f32, -1.0, 1.0,
             ));
@@ -145,28 +145,27 @@ fn default_output_reuses_storage_and_retains_previous_size() {
     desc.color_load = LoadOp::Clear([0.0, 0.0, 1.0, 1.0]);
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
-        assert!(state.draw_pass().unwrap().depth.is_none());
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
+        assert!(state.draw_pass().unwrap().unwrap().depth.is_none());
         state.end(&mut commands, StoreOp::Discard).unwrap();
     }
     let old = textures.output().unwrap();
     desc.color_load = LoadOp::Load;
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
-        assert!(Rc::ptr_eq(&old, state.draw_pass().unwrap().target));
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
+        assert!(matches!(state.draw_pass().unwrap().unwrap().target, PassTarget::Texture(texture) if Rc::ptr_eq(&old, texture)));
         state
             .clear(
                 &mut commands,
                 Some([1.0, 0.0, 0.0, 1.0]),
                 None,
-                Some(left().cast_unit()),
-            )
+                Some(left().cast_unit()))
             .unwrap();
         state.end(&mut commands, StoreOp::Store).unwrap();
         let mut owned = descriptor(&handle, false);
         owned.color_load = LoadOp::Clear([0.0, 1.0, 0.0, 1.0]);
-        state.begin(&mut commands, &mut textures, &owned).unwrap();
+        state.begin(&mut commands, &mut textures, &owned, None).unwrap();
         state.end(&mut commands, StoreOp::Store).unwrap();
     }
     assert!(Rc::ptr_eq(&old, &textures.output().unwrap()));
@@ -182,7 +181,7 @@ fn default_output_reuses_storage_and_retains_previous_size() {
     resized.color_load = LoadOp::Clear([1.0, 1.0, 0.0, 1.0]);
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &resized).unwrap();
+        state.begin(&mut commands, &mut textures, &resized, None).unwrap();
         state.end(&mut commands, StoreOp::Store).unwrap();
     }
     let output = textures.output().unwrap();
@@ -233,7 +232,7 @@ fn default_viewport_places_draws_without_discarding_other_pixels() {
     desc.color_load = LoadOp::Clear([1.0, 0.0, 0.0, 1.0]);
     let draw = |state: &RenderPassState, commands: &mut Recording<'_>, color: [f32; 4]| {
         state.flush(commands, StoreOp::Store).unwrap();
-        let pass = state.draw_pass().unwrap();
+        let pass = state.draw_pass().unwrap().unwrap();
         assert_eq!(pass.viewport, Some(viewport));
         let projection = pass.projection(&Transform3D::identity());
         let data: Vec<_> = [-1.0f32, -1.0, 1.0, 1.0]
@@ -260,13 +259,13 @@ fn default_viewport_places_draws_without_discarding_other_pixels() {
     };
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         draw(&state, &mut commands, [0.0, 1.0, 0.0, 1.0]);
         state.end(&mut commands, StoreOp::Store).unwrap();
         desc.color_load = LoadOp::DontCare;
         desc.render_area = Some(DeviceIntRect::from_size(DeviceIntSize::new(4, 3)));
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
-        assert!(state.draw_pass().unwrap().target.initialized());
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
+        assert!(state.draw_pass().unwrap().unwrap().target.initialized());
         state.set_scissor_rect(
             DeviceIntRect::from_origin_and_size(
                 DeviceIntPoint::new(1, 1),
@@ -309,7 +308,7 @@ fn invalid_default_targets_preserve_output_and_bindings() {
     let mut commands = queue.recording().unwrap();
     let mut invalid = default_descriptor(2, 2);
     invalid.depth_load = LoadOp::Clear(1.0);
-    assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
+    assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
     for viewport in [
         DeviceIntRect::zero(),
         DeviceIntRect::from_origin_and_size(DeviceIntPoint::new(-1, 0), DeviceIntSize::new(2, 2)),
@@ -332,7 +331,7 @@ fn invalid_default_targets_preserve_output_and_bindings() {
         if let DrawTarget::Default { ref mut rect, .. } = invalid.target {
             *rect = viewport.cast_unit();
         }
-        assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
+        assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
     }
     for size in [
         DeviceIntSize::new(0, 2),
@@ -343,14 +342,14 @@ fn invalid_default_targets_preserve_output_and_bindings() {
         if let DrawTarget::Default { ref mut total_size, .. } = invalid.target {
             *total_size = size.cast_unit();
         }
-        assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
+        assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
     }
     assert!(state.draw_pass().is_err());
     assert!(Rc::ptr_eq(&output, &textures.output().unwrap()));
     assert!(textures.bindings()[0].is_some());
     let valid = default_descriptor(2, 2);
-    state.begin(&mut commands, &mut textures, &valid).unwrap();
-    let mut pass = state.draw_pass().unwrap();
+    state.begin(&mut commands, &mut textures, &valid, None).unwrap();
+    let mut pass = state.draw_pass().unwrap().unwrap();
     pass.viewport = Some(DeviceIntRect::zero());
     assert!(pass
         .clear_rect(&mut commands, left(), Some([1.0; 4]), None)

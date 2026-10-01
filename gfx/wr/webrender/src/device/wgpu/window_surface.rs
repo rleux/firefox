@@ -76,4 +76,4 @@ fn validate_android(display: Display, window: Window) -> Result<(), String> {
 
 #[cfg(test)]
 #[path = "window_surface_tests.rs"]
-mod tests;
+pub(super) mod tests;

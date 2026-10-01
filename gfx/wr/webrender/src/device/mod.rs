@@ -70,6 +70,19 @@ impl GlBackendConfig {
     }
 }
 
+/// Outcome of presentation performed by the GPU backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentResult {
+    /// The frame was submitted for presentation, not necessarily displayed yet.
+    Presented,
+    /// Schedule another render on the next refresh, even without a new scene.
+    Retry,
+    /// Retry when the window becomes visible; do not continuously redraw.
+    Occluded,
+    /// Refresh the window size before rendering again.
+    SizeMismatch,
+}
+
 /// A graphics API backend. Resources are created and destroyed through it,
 /// and all drawing happens inside a render pass with a pipeline bound.
 ///
@@ -107,6 +120,12 @@ pub trait GpuBackend {
 
     /// A permanent backend failure that prevents further rendering.
     fn failure(&self) -> Option<&str> {
+        None
+    }
+
+    /// Presentation outcome for the last frame, or None if the backend did not
+    /// attempt presentation (including backends whose caller presents).
+    fn present_result(&self) -> Option<PresentResult> {
         None
     }
 
