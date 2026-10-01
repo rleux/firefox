@@ -10,7 +10,7 @@ edition = "2018"
 
 [features]
 default = ["static_freetype"]
-vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
+vulkan = ["dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:raw-window-handle", "dep:webrender_shader_build", "webrender_build/vulkan"]
 vulkan-naga = ["vulkan", "webrender_shader_build/naga"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -76,6 +76,7 @@ base64 = { optional=true, version="0.22" }
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8", optional = true, default-features = false, features = ["vulkan"] }
 wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4f4dc63098fae64a0e6d1d3dc6f4f328da8fd5c8", optional = true, default-features = false, features = ["std"] }
 ash = { version = "0.38", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
 
 [dev-dependencies]
 mozangle = "0.5.2"

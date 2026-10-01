@@ -16,6 +16,8 @@ pub mod shaders {
 mod bindings;
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
+mod window_surface;
+pub use self::window_surface::SurfaceWindow;
 mod draw;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]
@@ -55,6 +57,8 @@ pub use self::buffer_pool::BufferPool;
 pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
+    pub window: Option<std::rc::Rc<dyn SurfaceWindow>>,
+    pub surface_options: SurfaceOptions,
 }
 
 /// An opened Vulkan adapter, device and queue.
@@ -67,11 +71,20 @@ pub struct Device {
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: hal::vulkan::Adapter,
+    surface: Option<window_surface::WindowSurface>,
     _instance: hal::vulkan::Instance,
 }
 
 impl Device {
     pub fn new(options: &Options) -> Result<Self, String> {
+        let display = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window.display_handle()
+                    .map_err(|error| format!("Getting Vulkan display handle: {error}"))
+            })
+            .transpose()?;
         if options.validation {
             let entry = unsafe { ash::Entry::load() }
                 .map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -96,11 +109,31 @@ impl Device {
                 memory_budget_thresholds: Default::default(),
                 backend_options: Default::default(),
                 telemetry: None,
-                display: None,
+                display,
             })
         }
         .map_err(|error| format!("Initializing Vulkan: {error:?}"))?;
+        let surface = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window_surface::WindowSurface::new(
+                    &instance,
+                    window,
+                    display.unwrap().as_raw(),
+                    options.surface_options,
+                )
+            })
+            .transpose()?;
         let mut adapters = unsafe { instance.enumerate_adapters(None) };
+        if let Some(surface) = &surface {
+            adapters.retain(|adapter| unsafe {
+                adapter.adapter.surface_capabilities(&surface.raw).is_some()
+            });
+            if adapters.is_empty() {
+                return Err("No Vulkan adapters can present to the window surface".into());
+            }
+        }
         let names: Vec<_> = adapters
             .iter()
             .map(|adapter| (adapter.info.name.as_str(), adapter.info.device_type))
@@ -156,6 +189,7 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: exposed.adapter,
+            surface,
             _instance: instance,
         })
     }
