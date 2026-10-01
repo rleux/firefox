@@ -480,6 +480,16 @@ pub struct MappedTransferBuffer<'a> {
 #[derive(Debug)]
 pub struct Fence(pub(super) usize);
 
+/// Submission counters local to one renderer's GPU queue. Zero denotes no work.
+/// Completion covers GPU commands, not display presentation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuSubmissionStatus {
+    /// Highest submission handed to the queue.
+    pub submitted: u64,
+    /// All submissions through this value have finished executing.
+    pub completed: u64,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum FenceStatus {
     Signaled,

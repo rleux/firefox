@@ -77,6 +77,47 @@ fn upload_copy(
 
 #[test]
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn queue_status_excludes_unsubmitted_and_discarded_work() {
+    let device = device();
+    let queue = SubmissionQueue::new(&Rc::new(BufferPool::new(&device)), 2).unwrap();
+    let empty = GpuSubmissionStatus {
+        submitted: 0,
+        completed: 0,
+    };
+    assert_eq!(queue.status().unwrap(), empty);
+    let _first = upload_copy(&queue, &[17; 8]);
+    assert_eq!(queue.status().unwrap(), empty);
+    let first = queue.submit().unwrap();
+    let status = queue.status().unwrap();
+    assert_eq!(status.submitted, first);
+    assert!(status.completed <= first);
+    queue.wait_for(first).unwrap();
+    let complete = GpuSubmissionStatus {
+        submitted: first,
+        completed: first,
+    };
+    assert_eq!(queue.status().unwrap(), complete);
+
+    let _discarded = upload_copy(&queue, &[23; 8]);
+    assert_eq!(queue.status().unwrap(), complete);
+    queue.discard_recording();
+    assert_eq!(queue.status().unwrap(), complete);
+    let _last = upload_copy(&queue, &[37; 8]);
+    let last = queue.submit().unwrap();
+    assert!(last > first + 1);
+    queue.wait_for(last).unwrap();
+    assert_eq!(queue.status().unwrap(), GpuSubmissionStatus {
+        submitted: last,
+        completed: last,
+    });
+    device.lost.set(true);
+    assert!(queue.status().is_err());
+    device.lost.set(false);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn queue_batches_copies_and_reuses_completed_uploads() {
     let device = device();
     let pool = Rc::new(BufferPool::new(&device));

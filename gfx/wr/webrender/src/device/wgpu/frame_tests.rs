@@ -107,6 +107,9 @@ fn frame_boundaries_reject_nesting_and_unfinished_passes() {
     device.fallback.raw.owner.lost.set(true);
     assert_eq!(device.submissions.poll_fence(&fence), FenceStatus::Error);
     assert!(device.submissions.create_fence().is_err());
+    assert!(crate::device::GpuBackend::gpu_submission_status(&mut device).is_err());
+    assert!(device.failure().is_some());
     device.fallback.raw.owner.lost.set(false);
+    assert!(crate::device::GpuBackend::gpu_submission_status(&mut device).is_err());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
