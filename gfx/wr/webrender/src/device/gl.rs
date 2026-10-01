@@ -3879,7 +3879,7 @@ impl GpuBackend for GlDevice {
 
     /// Returns the size and stride in bytes required to upload an area of pixels
     /// of the specified size, to a texture of the specified format.
-    fn required_upload_size_and_stride(&self, size: DeviceIntSize, format: ImageFormat) -> (usize, usize) {
+    fn required_upload_size_and_stride(&mut self, size: DeviceIntSize, format: ImageFormat) -> Result<(usize, usize), String> {
         assert!(size.width >= 0);
         assert!(size.height >= 0);
 
@@ -3895,7 +3895,7 @@ impl GpuBackend for GlDevice {
         // optimally aligned.
         let dst_size = dst_stride * size.height as usize;
 
-        (dst_size, dst_stride)
+        Ok((dst_size, dst_stride))
     }
 }
 

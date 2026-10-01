@@ -323,7 +323,7 @@ pub trait GpuBackend {
 
     /// Returns the size and stride in bytes required to upload an area of pixels
     /// of the specified size, to a texture of the specified format.
-    fn required_upload_size_and_stride(&self, size: DeviceIntSize, format: ImageFormat) -> (usize, usize);
+    fn required_upload_size_and_stride(&mut self, size: DeviceIntSize, format: ImageFormat) -> Result<(usize, usize), String>;
 
     /// Allocates `size` bytes of storage for an upload buffer and maps it for
     /// writing. A `persistent` mapping stays valid across flushes, and needs

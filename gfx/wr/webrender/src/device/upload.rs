@@ -354,7 +354,7 @@ impl<'a> TextureUploader<'a> {
         let (dst_size, dst_stride) = device.required_upload_size_and_stride(
             size,
             format,
-        );
+        )?;
 
         // Find a pixel buffer with enough space remaining, creating a new one if required.
         let buffer_index = self.buffers.iter().position(|buffer| {
