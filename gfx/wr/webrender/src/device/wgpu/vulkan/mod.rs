@@ -29,6 +29,14 @@ impl Device {
                 return Err("Adapter name must not be empty".into());
             }
         }
+        let display = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window.display_handle()
+                    .map_err(|error| format!("Getting Vulkan display handle: {error}"))
+            })
+            .transpose()?;
         if options.validation {
             let entry = unsafe { ash::Entry::load() }
                 .map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -53,11 +61,31 @@ impl Device {
                 memory_budget_thresholds: Default::default(),
                 backend_options: Default::default(),
                 telemetry: None,
-                display: None,
+                display,
             })
         }
         .map_err(|error| format!("Initializing Vulkan: {error:?}"))?;
+        let surface = options
+            .window
+            .as_ref()
+            .map(|window| {
+                window_surface::WindowSurface::new(
+                    &instance,
+                    window,
+                    display.unwrap().as_raw(),
+                    options.surface_options,
+                )
+            })
+            .transpose()?;
         let mut adapters = unsafe { instance.enumerate_adapters(None) };
+        if let Some(surface) = &surface {
+            adapters.retain(|adapter| unsafe {
+                hal::DynAdapter::surface_capabilities(&adapter.adapter, surface.raw.as_ref()).is_some()
+            });
+            if adapters.is_empty() {
+                return Err("No Vulkan adapters can present to the window surface".into());
+            }
+        }
         let requested = options.adapter_name.as_deref().map(str::to_lowercase);
         let index = select_adapter(
             adapters.iter().map(|adapter| (adapter.info.name.as_str(), adapter.info.device_type)),
@@ -121,6 +149,7 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
+            surface,
             instance: Box::new(instance),
         })
     }

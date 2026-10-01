@@ -123,6 +123,7 @@ fn public_device_constructor_selects_vulkan_and_propagates_adapter_errors() {
         wr::GpuBackendConfig::Vulkan(Options {
             validation: true,
             adapter_name: Some(" ".into()),
+            ..Default::default()
         }),
         device_options(),
     )
