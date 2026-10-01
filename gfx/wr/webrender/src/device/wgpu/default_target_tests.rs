@@ -297,7 +297,7 @@ fn default_viewport_places_draws_without_discarding_other_pixels() {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn invalid_default_targets_preserve_output_and_bindings() {
     let (mut textures, mut handle, queue) = setup(false);
-    let owner = textures.image(&handle).unwrap().raw.owner.clone();
+    let owner = queue.owner();
     let output = textures.default_target(DeviceIntSize::new(2, 2)).unwrap();
     assert!(textures.default_target(DeviceIntSize::new(0, 2)).is_err());
     assert!(textures.default_target(DeviceIntSize::new(-1, 2)).is_err());
