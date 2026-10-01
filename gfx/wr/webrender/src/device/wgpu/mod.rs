@@ -12,6 +12,8 @@ pub mod shaders {
 
 mod bindings;
 mod binding_cache;
+mod surface_config;
+pub use self::surface_config::SurfaceOptions;
 mod draw;
 mod clear;
 mod render_pass;
