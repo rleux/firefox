@@ -73,7 +73,7 @@ fn adapter_name_validation_precedes_device_initialization() {
     }
 }
 
-pub(super) static ERRORS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ERRORS: AtomicUsize = AtomicUsize::new(0);
 struct TestLogger;
 
 impl log::Log for TestLogger {
@@ -91,7 +91,7 @@ impl log::Log for TestLogger {
     fn flush(&self) {}
 }
 
-pub(super) fn validation_logging() {
+pub(crate) fn validation_logging() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         log::set_logger(&TestLogger).unwrap();

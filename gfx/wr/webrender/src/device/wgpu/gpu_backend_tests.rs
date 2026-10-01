@@ -56,6 +56,82 @@ fn setup() -> (wr::Device, Rc<Texture>) {
     )
 }
 
+fn device_options() -> wr::DeviceOptions {
+    wr::DeviceOptions {
+        crash_annotator: None,
+        resource_override_path: None,
+        use_optimized_shaders: false,
+        upload_method: wr::UploadMethod::PixelBuffer(wr::VertexUsageHint::Stream),
+        batched_upload_threshold: 0,
+        cached_programs: None,
+        allow_texture_swizzling: false,
+        dump_shader_source: None,
+        surface_origin_is_top_left: true,
+    }
+}
+
+#[test]
+fn vulkan_construction_rejects_runtime_source_options_before_opening_a_device() {
+    for dump in [false, true] {
+        let mut options = device_options();
+        if dump {
+            options.dump_shader_source = Some("ps_clear".into());
+        } else {
+            options.resource_override_path = Some("unused-shader-directory".into());
+        }
+        let error = wr::Device::new(wr::GpuBackendConfig::Vulkan(Options::default()), options)
+            .err()
+            .unwrap();
+        assert!(error.contains("shader source"));
+    }
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn public_device_constructor_selects_vulkan_and_propagates_adapter_errors() {
+    validation_logging();
+    let mut device = wr::Device::new(
+        wr::GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            ..Default::default()
+        }),
+        device_options(),
+    )
+    .unwrap();
+    eprintln!("Vulkan adapter: {:?}", device.api_info());
+    assert_eq!(device.api_info().kind, wr::GraphicsApi::Vulkan);
+    device.begin_frame();
+    let mut descriptor = pass();
+    descriptor.color_load = wr::LoadOp::Clear([0.0, 1.0, 0.0, 1.0]);
+    device.begin_render_pass(&descriptor);
+    device.end_render_pass(StoreOp::Store);
+    device.end_frame();
+    assert!(device.failure().is_none());
+    let output = device.wgpu_test_output().unwrap();
+    assert_eq!(
+        output
+            .readback(DeviceIntRect::from_size(DeviceIntSize::new(2, 1)))
+            .unwrap()
+            .wait()
+            .unwrap(),
+        [0, 255, 0, 255].repeat(2)
+    );
+    device.begin_frame();
+    device.deinit();
+    device.end_frame();
+    let error = wr::Device::new(
+        wr::GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            adapter_name: Some(" ".into()),
+        }),
+        device_options(),
+    )
+    .err()
+    .unwrap();
+    assert!(error.contains("Adapter name must not be empty"));
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
 fn pass() -> RenderPassDescriptor {
     RenderPassDescriptor {
         target: DrawTarget::new_default(DeviceIntSize::new(2, 1), true),

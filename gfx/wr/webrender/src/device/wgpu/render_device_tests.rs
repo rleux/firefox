@@ -98,9 +98,18 @@ fn draw_device_orders_texture_updates_between_instanced_draws() {
         .state(&program)
         .unwrap()
         .set_transform(&Transform3D::ortho(0.0, 2.0, 0.0, 1.0, -1.0, 1.0));
-    let mut vertices = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut instances = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::SCALE, &vertices, Some(&instances), None, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::SCALE, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
         .write_buffer(
@@ -203,8 +212,6 @@ fn draw_device_preserves_instance_versions_and_clear_order() {
     device.vertex_arrays.delete(&mut vao).unwrap();
     device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
     device.vertex_arrays.delete_buffer(&mut instances).unwrap();
-    device.vertex_arrays.delete_buffer(&mut vertices).unwrap();
-    device.vertex_arrays.delete_buffer(&mut instances).unwrap();
     device.end_render_pass(StoreOp::Store).unwrap();
     {
         use super::super::tests::Command;
@@ -249,9 +256,18 @@ fn draw_device_validates_state_and_supplies_unbound_color_fallback() {
         .state(&program)
         .unwrap()
         .set_transform(&Transform3D::ortho(0.0, 2.0, 0.0, 1.0, -1.0, 1.0));
-    let mut vertices = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut instances = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::SCALE, &vertices, Some(&instances), None, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::SCALE, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device.vertex_arrays.bind(&vao).unwrap();
     device
         .vertex_arrays

@@ -372,7 +372,7 @@ pub fn create_webrender_instance(
             dump_shader_source: options.dump_shader_source.take(),
             surface_origin_is_top_left: options.surface_origin_is_top_left,
         },
-    );
+    ).map_err(RendererError::Device)?;
 
     let color_cache_formats = device.preferred_color_formats();
     let swizzle_settings = device.swizzle_settings();
