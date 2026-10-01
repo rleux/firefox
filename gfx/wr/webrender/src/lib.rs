@@ -236,6 +236,7 @@ pub use crate::device::{UploadMethod, VertexUsageHint, get_unoptimized_shader_so
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, ShaderError};
 pub use crate::device::{Device, DeviceOptions, GlBackendConfig, GpuBackendConfig, GraphicsApi, GraphicsApiInfo};
 pub use crate::device::PresentResult;
+pub use crate::device::GpuSubmissionStatus;
 #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
 pub use crate::device::vulkan;
 pub use crate::profiler::{ProfilerHooks, ProfileCounterValue, set_profiler_hooks};

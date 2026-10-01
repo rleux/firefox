@@ -57,6 +57,13 @@ fn render_display_list(enable_shared_instance_buffer: bool) {
     .unwrap();
     assert!(!renderer.use_shared_instance_buffer);
     assert!(renderer.vaos.shared_instance_buffer.is_none());
+    let initial = renderer.gpu_submission_status().unwrap().unwrap();
+    renderer.render(DeviceIntSize::new(32, 32), 0).unwrap();
+    assert_eq!(
+        renderer.gpu_submission_status().unwrap().unwrap().submitted,
+        initial.submitted,
+    );
+    let mut previous_submission = initial.submitted;
     let mut api = sender.create_api();
     let size = DeviceIntSize::new(32, 32);
     let document = api.add_document(size);
@@ -86,12 +93,19 @@ fn render_display_list(enable_shared_instance_buffer: bool) {
         rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         renderer.update();
         assert_eq!(renderer.render(size, 0).unwrap().present_result, None);
+        let status = renderer.gpu_submission_status().unwrap().unwrap();
+        assert!(status.submitted > previous_submission);
+        assert!(status.completed <= status.submitted);
+        previous_submission = status.submitted;
         let output = renderer.device.vulkan_test_output().unwrap();
         let pixels = output
             .readback(DeviceIntRect::from_size(size))
             .unwrap()
             .wait()
             .unwrap();
+        let complete = renderer.gpu_submission_status().unwrap().unwrap();
+        assert_eq!(complete.submitted, status.submitted);
+        assert_eq!(complete.completed, status.submitted);
         for (index, pixel) in pixels.chunks_exact(4).enumerate() {
             if (8..24).contains(&(index % 32)) && (8..24).contains(&(index / 32)) {
                 let expected = if epoch == 0 {

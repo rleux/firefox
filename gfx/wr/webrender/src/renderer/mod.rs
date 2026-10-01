@@ -1548,6 +1548,17 @@ impl Renderer {
         self.force_redraw = true;
     }
 
+    /// Polls GPU command completion without submitting work or waiting for it.
+    /// After a successful render(), callers can associate their frame ID with `submitted`
+    /// and release its GPU resources once `completed` reaches that value.
+    /// Counters belong to this Renderer; discard the mapping on recreation.
+    /// None means completion is managed by the caller (as with OpenGL).
+    pub fn gpu_submission_status(
+        &mut self,
+    ) -> Result<Option<crate::GpuSubmissionStatus>, RendererError> {
+        self.device.gpu_submission_status().map_err(RendererError::Device)
+    }
+
     /// Renders the current frame.
     ///
     /// A Frame is supplied by calling [`generate_frame()`][webrender_api::Transaction::generate_frame].
