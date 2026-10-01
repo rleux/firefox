@@ -5,6 +5,7 @@
 use super::*;
 use crate::device::wgpu::{
     wgt, Device, Options, SurfaceOptions,
+    swapchain::Swapchain,
     tests::{validation_logging, ERRORS},
 };
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
@@ -39,6 +40,19 @@ struct XSetWindowAttributes {
 }
 
 impl X11Window {
+    fn resize(&self, size: [u32; 2]) {
+        unsafe {
+            self.library
+                .get::<unsafe extern "C" fn(*mut c_void, c_ulong, c_uint, c_uint) -> c_int>(
+                    b"XResizeWindow\0",
+                )
+                .unwrap()(self.display.as_ptr(), self.window, size[0], size[1]);
+            self.library
+                .get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
+                .unwrap()(self.display.as_ptr(), 0);
+        }
+    }
+
     unsafe fn new() -> Self {
         let library = libloading::Library::new("libX11.so.6").unwrap();
         let open = library
@@ -146,13 +160,17 @@ fn window_surface_selects_present_adapter_and_retains_window() {
             },
             ..Default::default()
         };
-        let device = Device::new(&options).unwrap();
-        let surface = device.surface.as_ref().unwrap();
-        assert_eq!(surface.options.vsync, vsync);
+        let device = Rc::new(Device::new(&options).unwrap());
+        let surface = device.surface.take().unwrap();
         let caps = unsafe { device.adapter.surface_capabilities(surface.raw.as_ref()) }.unwrap();
-        let config = device
-            .surface_configuration(&caps, [64, 48], options.surface_options)
+        assert_eq!(surface.options.vsync, vsync);
+        device.surface.set(Some(surface));
+        let mut swapchain = Swapchain::new(&device).unwrap();
+        assert!(Swapchain::new(&device).is_none());
+        swapchain
+            .configure([64, 48], options.surface_options)
             .unwrap();
+        let config = swapchain.configuration().unwrap();
         let expected_mode = if !vsync && caps.present_modes.contains(&wgt::PresentMode::Immediate) {
             wgt::PresentMode::Immediate
         } else {
@@ -172,8 +190,61 @@ fn window_surface_selects_present_adapter_and_retains_window() {
         drop(window);
         assert!(weak.upgrade().is_some());
         drop(device);
+        assert!(weak.upgrade().is_some());
+        drop(swapchain);
         assert!(weak.upgrade().is_none());
     }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_configuration_resizes_suspends_and_preserves_valid_state() {
+    validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(window.clone()),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let mut swapchain = Swapchain::new(&device).unwrap();
+    let options = SurfaceOptions::default();
+    assert!(swapchain.configuration().is_none());
+    for size in [
+        [64, 48],
+        [48, 32],
+        [0, 48],
+        [32, 24],
+        [32, 0],
+        [0, 0],
+        [64, 48],
+    ] {
+        if !size.contains(&0) {
+            window.resize(size);
+        }
+        swapchain.configure(size, options).unwrap();
+        if size.contains(&0) {
+            assert!(swapchain.configuration().is_none());
+        } else {
+            let config = swapchain.configuration().unwrap();
+            assert_eq!(config.usage, wgt::TextureUses::COLOR_TARGET);
+            assert_eq!([config.extent.width, config.extent.height], size);
+        }
+    }
+    let before = swapchain.configuration().unwrap().clone();
+    assert!(swapchain.configure([u32::MAX, 48], options).is_err());
+    let after = swapchain.configuration().unwrap();
+    assert_eq!(before.extent, after.extent);
+    assert_eq!(before.format, after.format);
+    assert!(!device.is_lost());
+    device.lost.set(true);
+    assert!(swapchain.configure([64, 48], options).is_err());
+    assert_eq!(swapchain.configuration().unwrap().extent, before.extent);
+    drop(swapchain);
+    drop(device);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 
