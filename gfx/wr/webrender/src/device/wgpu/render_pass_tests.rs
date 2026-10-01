@@ -78,7 +78,7 @@ fn pass_load_clears_apply_once_even_without_draws() {
     state.enable_scissor();
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         assert_eq!(
             state.scissor_rect().unwrap(),
             DeviceIntRect::from_size(DeviceIntSize::new(2, 2))
@@ -90,7 +90,7 @@ fn pass_load_clears_apply_once_even_without_draws() {
     desc.color_load = LoadOp::Load;
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         textures.delete(&mut handle).unwrap();
         state.set_scissor_rect(left().cast_unit());
         state.enable_scissor();
@@ -108,8 +108,7 @@ fn pass_load_clears_apply_once_even_without_draws() {
                         DeviceIntSize::new(1, 1),
                     )
                     .cast_unit(),
-                ),
-            )
+                ))
             .unwrap();
         state.end(&mut commands, StoreOp::Store).unwrap();
     }
@@ -148,7 +147,7 @@ fn partial_or_unspecified_pass_areas_preserve_cached_pixels() {
         let full = area == Some(DeviceIntRect::from_size(DeviceIntSize::new(2, 2)));
         {
             let mut commands = queue.recording().unwrap();
-            state.begin(&mut commands, &mut textures, &desc).unwrap();
+            state.begin(&mut commands, &mut textures, &desc, None).unwrap();
             assert_eq!(image.initialized(), !full);
             state
                 .clear(
@@ -212,7 +211,7 @@ fn depth_store_and_abandoned_discards_track_attachment_contents() {
         .collect();
     let probe = |state: &RenderPassState, commands: &mut Recording<'_>| {
         state.flush(commands, StoreOp::Store).unwrap();
-        let mut pass = state.draw_pass().unwrap();
+        let mut pass = state.draw_pass().unwrap().unwrap();
         pass.depth_range = 0.0..0.5;
         let projection = pass.projection(&Transform3D::identity());
         pass.record_batches(
@@ -238,7 +237,7 @@ fn depth_store_and_abandoned_discards_track_attachment_contents() {
     desc.depth_load = LoadOp::Clear(0.25);
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         probe(&state, &mut commands);
         state.end(&mut commands, StoreOp::Store).unwrap();
     }
@@ -250,7 +249,7 @@ fn depth_store_and_abandoned_discards_track_attachment_contents() {
     desc.render_area = Some(DeviceIntRect::from_size(DeviceIntSize::new(2, 2)));
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         assert!(!image.initialized() && !depth.initialized());
         state.end(&mut commands, StoreOp::Discard).unwrap();
     }
@@ -261,14 +260,14 @@ fn depth_store_and_abandoned_discards_track_attachment_contents() {
     desc.depth_load = LoadOp::Load;
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         state.end(&mut commands, StoreOp::Discard).unwrap();
     }
     queue.wait().unwrap();
     assert!(image.initialized() && !depth.initialized());
     {
         let mut commands = queue.recording().unwrap();
-        state.begin(&mut commands, &mut textures, &desc).unwrap();
+        state.begin(&mut commands, &mut textures, &desc, None).unwrap();
         probe(&state, &mut commands);
         state.end(&mut commands, StoreOp::Store).unwrap();
     }
@@ -293,7 +292,7 @@ fn pass_errors_preserve_bindings_and_active_state() {
     for value in [0.5, -1.0, f32::NAN] {
         let mut invalid = desc;
         invalid.depth_load = LoadOp::Clear(value);
-        assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
+        assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
         assert!(state.draw_pass().is_err());
         assert!(textures.bindings()[0].is_some());
     }
@@ -304,13 +303,13 @@ fn pass_errors_preserve_bindings_and_active_state() {
     {
         dimensions.width += 1;
     }
-    assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
+    assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
     invalid.target = DrawTarget::new_default(DeviceIntSize::new(2, 2), false);
-    assert!(state.begin(&mut commands, &mut textures, &invalid).is_err());
-    state.begin(&mut commands, &mut textures, &desc).unwrap();
+    assert!(state.begin(&mut commands, &mut textures, &invalid, None).is_err());
+    state.begin(&mut commands, &mut textures, &desc, None).unwrap();
     assert!(textures.bindings()[0].is_none());
     assert!(textures.bindings()[5].is_some());
-    assert!(state.begin(&mut commands, &mut textures, &desc).is_err());
+    assert!(state.begin(&mut commands, &mut textures, &desc, None).is_err());
     state.set_scissor_rect(
         DeviceIntRect::from_origin_and_size(DeviceIntPoint::new(-1, 0), DeviceIntSize::new(2, 3))
             .cast_unit(),
@@ -349,7 +348,7 @@ fn scoped_clears_share_uniform_storage_and_preserve_order() {
         owner.trace.borrow_mut().clear();
         {
             let mut commands = queue.recording().unwrap();
-            state.begin(&mut commands, &mut textures, &desc).unwrap();
+            state.begin(&mut commands, &mut textures, &desc, None).unwrap();
             for i in 0..count {
                 state.clear(&mut commands, Some([0.0, i as f32 / (count - 1) as f32, 1.0, 1.0]),
                     None, (i != 0).then(|| left().cast_unit())).unwrap();

@@ -184,6 +184,7 @@ fn shared_depth_preserves_clears_and_submission_lifetimes() {
                         LoadOp::DontCare
                     },
                 },
+                None,
             )
             .unwrap();
         if !full {
@@ -197,7 +198,7 @@ fn shared_depth_preserves_clears_and_submission_lifetimes() {
                 .unwrap();
         }
         state.flush(&mut commands, StoreOp::Store).unwrap();
-        let mut pass = state.draw_pass().unwrap();
+        let mut pass = state.draw_pass().unwrap().unwrap();
         pass.depth_range = 0.0..0.5;
         let projection = pass.projection(&Transform3D::identity());
         let instances: Vec<_> = IntoIterator::into_iter([-1.0f32, -1.0, 1.0, 1.0])
