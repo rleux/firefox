@@ -103,6 +103,11 @@ pub trait GpuBackend {
     /// out-of-memory condition.
     fn take_out_of_memory_error(&self) -> bool;
 
+    /// A permanent backend failure that prevents further rendering.
+    fn failure(&self) -> Option<&str> {
+        None
+    }
+
     /// Orders reads of the framebuffer by subsequent advanced blend draws
     /// after preceding writes to the same pixels.
     fn blend_barrier(&self);
