@@ -880,6 +880,10 @@ pub enum RendererError {
     Device(String),
 }
 
+#[cfg(all(test, feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+#[path = "vulkan_tests.rs"]
+mod vulkan_tests;
+
 /// Flatten a shader build failure into the per-line diagnostics the debugger
 /// client reports. A log that no driver pattern matched yields a single
 /// location-less diagnostic carrying the log itself.

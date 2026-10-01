@@ -114,9 +114,18 @@ fn target_blits_preserve_bound_program_pass_and_scissor() {
         .unwrap();
     let mut program = device.programs.create("ps_clear", &[], false).unwrap();
     device.programs.link(&mut program, &desc::CLEAR).unwrap();
-    let mut vertices = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut instances = device.vertex_arrays.create_buffer(crate::device::BufferKind::Vertex).unwrap();
-    let mut vao = device.vertex_arrays.create(&desc::CLEAR, &vertices, Some(&instances), None, 1).unwrap();
+    let mut vertices = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut instances = device
+        .vertex_arrays
+        .create_buffer(crate::device::BufferKind::Vertex)
+        .unwrap();
+    let mut vao = device
+        .vertex_arrays
+        .create(&desc::CLEAR, &vertices, Some(&instances), None, 1)
+        .unwrap();
     device
         .vertex_arrays
         .write_buffer(

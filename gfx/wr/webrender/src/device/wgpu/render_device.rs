@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::rc::Rc;
 
-pub(super) struct RenderDevice {
+pub(in crate::device) struct RenderDevice {
     pub properties: RendererProperties,
     pub programs: ProgramStore,
     pub textures: TextureStore,
