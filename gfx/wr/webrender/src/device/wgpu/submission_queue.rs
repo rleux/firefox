@@ -4,7 +4,7 @@
 
 use super::{hal, Owned, Recording, Submission, SubmissionBorrow, SubmissionState};
 use super::super::{wgt, Buffer, BufferPool, Device};
-use crate::device::{Fence, FenceStatus};
+use crate::device::{Fence, FenceStatus, GpuSubmissionStatus};
 use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::convert::TryFrom;
@@ -226,6 +226,17 @@ impl SubmissionQueue {
         let mut state = self.state.borrow_mut();
         Self::retire(&mut state, false)?;
         Ok(state.completed)
+    }
+
+    pub fn status(&self) -> Result<GpuSubmissionStatus, String> {
+        if self.pool.owner.is_lost() {
+            return Err("Vulkan device requires recreation".into());
+        }
+        let completed = self.poll()?;
+        Ok(GpuSubmissionStatus {
+            submitted: self.state.borrow().submitted,
+            completed,
+        })
     }
 
     pub fn create_fence(&self) -> Result<Fence, String> {
