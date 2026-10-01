@@ -3,13 +3,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::{hal, Owned, Recording, Submission, SubmissionBorrow};
-use super::super::{wgt, Buffer, BufferPool};
+use super::super::{wgt, Buffer, BufferPool, Device};
 use crate::device::{Fence, FenceStatus};
 use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::convert::TryFrom;
-use std::rc::Rc;
-use wgpu_hal::Device as _;
+use std::rc::{Rc, Weak};
+use wgpu_hal::{Device as _, Surface as _};
 
 #[path = "instance_buffers.rs"]
 mod instances;
@@ -27,6 +27,7 @@ struct QueueState {
 pub struct SubmissionQueue {
     pool: Rc<BufferPool>,
     fence: Rc<Owned<hal::vulkan::Fence>>,
+    surface: RefCell<Weak<hal::AcquiredSurfaceTexture<hal::api::Vulkan>>>,
     state: RefCell<QueueState>,
     limit: usize,
     #[cfg(test)]
@@ -45,6 +46,10 @@ impl Drop for RecycleUpload {
 }
 
 impl SubmissionQueue {
+    pub(in crate::device::vulkan) fn owner(&self) -> &Rc<Device> {
+        &self.pool.owner
+    }
+
     pub fn new(pool: &Rc<BufferPool>, limit: usize) -> Result<Self, String> {
         if limit == 0 || pool.owner.is_lost() {
             return Err("Invalid Vulkan submission limit or lost device".into());
@@ -58,6 +63,7 @@ impl SubmissionQueue {
                 fence,
                 hal::vulkan::Device::destroy_fence,
             )),
+            surface: RefCell::new(Weak::new()),
             state: RefCell::new(QueueState {
                 active: None,
                 pending: VecDeque::new(),
@@ -144,12 +150,52 @@ impl SubmissionQueue {
     }
 
     pub fn submit(&self) -> Result<u64, String> {
+        let surface = self.surface.borrow().upgrade();
+        match surface.as_ref() {
+            Some(image) => unsafe { self.submit_with_surfaces(&[&image.texture]) },
+            None => unsafe { self.submit_with_surfaces(&[]) },
+        }
+    }
+
+    /// # Safety
+    /// The surface must be configured on this device, have no acquired image,
+    /// and remain valid until the returned image is presented or discarded.
+    pub(in crate::device::vulkan) unsafe fn acquire_surface(
+        &self,
+        surface: &hal::vulkan::Surface,
+    ) -> Result<Rc<hal::AcquiredSurfaceTexture<hal::api::Vulkan>>, hal::SurfaceError> {
+        let mut registered = self.surface.borrow_mut();
+        if registered.upgrade().is_some() {
+            return Err(hal::SurfaceError::Other(
+                "Vulkan queue already has an acquired image",
+            ));
+        }
+        let image = Rc::new(surface.acquire_texture(
+            Some(std::time::Duration::from_millis(100)),
+            &self.fence,
+        )?);
+        *registered = Rc::downgrade(&image);
+        Ok(image)
+    }
+
+    pub(in crate::device::vulkan) fn submit_surface(&self) -> Result<u64, String> {
+        if self.surface.borrow().upgrade().is_none() {
+            return Err("Vulkan queue has no acquired image".into());
+        }
+        drop(self.recording()?);
+        self.submit()
+    }
+
+    unsafe fn submit_with_surfaces(
+        &self,
+        surfaces: &[&hal::vulkan::SurfaceTexture],
+    ) -> Result<u64, String> {
         if self.pool.owner.is_lost() {
             return Err("Vulkan device requires recreation".into());
         }
         let mut state = self.state.borrow_mut();
         if let Some(mut active) = state.active.take() {
-            active.submit().map_err(|error| {
+            active.submit_with_surfaces(surfaces).map_err(|error| {
                 self.pool.owner.lost.set(true);
                 error
             })?;

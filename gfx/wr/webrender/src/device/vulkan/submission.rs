@@ -165,6 +165,13 @@ impl Submission {
     }
 
     pub fn submit(&mut self) -> Result<(), String> {
+        unsafe { self.submit_with_surfaces(&[]) }
+    }
+
+    unsafe fn submit_with_surfaces(
+        &mut self,
+        surfaces: &[&hal::vulkan::SurfaceTexture],
+    ) -> Result<(), String> {
         if self.owner.is_lost() {
             return Err("Vulkan device requires recreation".into());
         }
@@ -189,7 +196,7 @@ impl Submission {
                 .queue
                 .submit(
                     &[self.buffer.as_ref().unwrap()],
-                    &[],
+                    surfaces,
                     (&self.fence, self.fence_value),
                 )
                 .map_err(|error| {

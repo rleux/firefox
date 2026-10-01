@@ -4,13 +4,14 @@
 
 use super::*;
 use crate::device::vulkan::{
-    wgt, Device, Options, SurfaceOptions,
+    hal, wgt, Device, Options, SurfaceOptions,
+    resources::Owned,
     swapchain::Swapchain,
-    tests::{validation_logging, ERRORS},
+    tests::{upload_queue, validation_logging, ERRORS},
 };
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::atomic::Ordering;
-use wgpu_hal::Adapter as _;
+use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
 struct X11Window {
     library: libloading::Library,
@@ -165,8 +166,9 @@ fn window_surface_selects_present_adapter_and_retains_window() {
         let caps = unsafe { device.adapter.surface_capabilities(&surface.raw) }.unwrap();
         assert_eq!(surface.options.vsync, vsync);
         device.surface.set(Some(surface));
-        let mut swapchain = Swapchain::new(&device).unwrap();
-        assert!(Swapchain::new(&device).is_none());
+        let queue = Rc::new(upload_queue(&device));
+        let mut swapchain = Swapchain::new(&queue).unwrap();
+        assert!(Swapchain::new(&queue).is_none());
         swapchain
             .configure([64, 48], options.surface_options)
             .unwrap();
@@ -210,7 +212,8 @@ fn swapchain_configuration_resizes_suspends_and_preserves_valid_state() {
         })
         .unwrap(),
     );
-    let mut swapchain = Swapchain::new(&device).unwrap();
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
     let options = SurfaceOptions::default();
     assert!(swapchain.configuration().is_none());
     for size in [
@@ -264,5 +267,171 @@ fn window_surface_rejects_present_incompatible_adapter() {
     drop(options);
     drop(window);
     assert!(weak.upgrade().is_none());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_acquisition_discards_and_drains_the_shared_queue() {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(Rc::new(unsafe { X11Window::new() })),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    assert!(swapchain.acquire().unwrap().is_none());
+    for explicit in [false, true, false, true] {
+        swapchain
+            .configure([64, 48], SurfaceOptions::default())
+            .unwrap();
+        let marker = Rc::new(());
+        queue.recording().unwrap().keep(marker.clone());
+        let image = swapchain.acquire().unwrap().unwrap();
+        if explicit {
+            image.discard().unwrap();
+        } else {
+            drop(image);
+        }
+        assert_eq!(Rc::strong_count(&marker), 1);
+        assert!(!queue.has_pending_work());
+        assert!(swapchain.configuration().is_none());
+        assert!(swapchain.acquire().unwrap().is_none());
+    }
+    swapchain
+        .configure([64, 48], SurfaceOptions::default())
+        .unwrap();
+    std::mem::forget(swapchain.acquire().unwrap().unwrap());
+    assert!(swapchain.acquire().is_err());
+    assert!(swapchain
+        .configure([0, 0], SurfaceOptions::default())
+        .is_err());
+    drop(swapchain);
+    drop(queue);
+    drop(device);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn swapchain_submissions_clear_the_acquired_image_with_queue_fences() {
+    validation_logging();
+    let device = Rc::new(
+        Device::new(&Options {
+            window: Some(Rc::new(unsafe { X11Window::new() })),
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    for _ in 0..3 {
+        swapchain
+            .configure([64, 48], SurfaceOptions::default())
+            .unwrap();
+        let image = swapchain.acquire().unwrap().unwrap();
+        let config = image.configuration();
+        let range = wgt::ImageSubresourceRange {
+            mip_level_count: Some(1),
+            array_layer_count: Some(1),
+            ..Default::default()
+        };
+        let view = Rc::new(Owned::new(
+            &device,
+            unsafe {
+                device
+                    .raw_device()
+                    .create_texture_view(
+                        image.texture(),
+                        &hal::TextureViewDescriptor {
+                            label: Some("WR acquired image test"),
+                            format: config.format,
+                            swizzle: Default::default(),
+                            dimension: wgt::TextureViewDimension::D2,
+                            usage: wgt::TextureUses::COLOR_TARGET,
+                            range: range.clone(),
+                        },
+                    )
+                    .unwrap()
+            },
+            hal::vulkan::Device::destroy_texture_view,
+        ));
+        let weak = Rc::downgrade(&view);
+        for step in 0..3 {
+            let mut commands = queue.recording().unwrap();
+            unsafe {
+                commands
+                    .encoder()
+                    .transition_textures(std::iter::once(hal::TextureBarrier {
+                        queue_family_ownership_transfer: None,
+                        texture: image.texture(),
+                        range: range.clone(),
+                        usage: hal::StateTransition {
+                            from: if step == 0 {
+                                wgt::TextureUses::UNINITIALIZED
+                            } else {
+                                wgt::TextureUses::COLOR_TARGET
+                            },
+                            to: wgt::TextureUses::COLOR_TARGET,
+                        },
+                    }));
+                commands
+                    .encoder()
+                    .begin_render_pass(&hal::RenderPassDescriptor {
+                        label: Some("WR direct swapchain clear"),
+                        extent: config.extent,
+                        sample_count: 1,
+                        color_attachments: &[Some(hal::ColorAttachment {
+                            target: hal::Attachment {
+                                view: &view,
+                                usage: wgt::TextureUses::COLOR_TARGET,
+                            },
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: hal::AttachmentOps::LOAD_CLEAR | hal::AttachmentOps::STORE,
+                            clear_value: wgt::Color {
+                                r: step as f64 * 0.5,
+                                g: 0.5,
+                                b: 0.0,
+                                a: 1.0,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        multiview_mask: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    .unwrap();
+                commands.encoder().end_render_pass();
+            }
+            commands.keep(view.clone());
+            drop(commands);
+            match step {
+                0 => {
+                    queue.submit().unwrap();
+                }
+                1 => {
+                    queue.create_fence().unwrap();
+                }
+                _ => {
+                    queue.wait().unwrap();
+                }
+            }
+        }
+        drop(view);
+        assert!(weak.upgrade().is_none());
+        image.discard().unwrap();
+        assert!(swapchain.configuration().is_none());
+        queue.recording().unwrap();
+        queue.wait().unwrap();
+    }
+    drop(swapchain);
+    drop(queue);
+    drop(device);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
