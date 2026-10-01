@@ -217,6 +217,13 @@ impl Submission {
     }
 
     pub fn submit(&mut self) -> Result<(), String> {
+        unsafe { self.submit_with_surfaces(&[]) }
+    }
+
+    unsafe fn submit_with_surfaces(
+        &mut self,
+        surfaces: &[&dyn hal::DynSurfaceTexture],
+    ) -> Result<(), String> {
         let data = &mut self.data;
         if data.owner.is_lost() {
             return Err("Vulkan device requires recreation".into());
@@ -236,7 +243,7 @@ impl Submission {
             data.owner.lost.set(true);
             return Err("Injected end-encoding failure".into());
         }
-        let buffer = unsafe { data.encoder.end_encoding() }.map_err(|error| {
+        let buffer = data.encoder.end_encoding().map_err(|error| {
             data.owner.lost.set(true);
             format!("Finishing submission: {error:?}")
         })?;
@@ -245,9 +252,9 @@ impl Submission {
         };
         self.state = SubmissionState::Unconfirmed { id, buffer };
         let SubmissionState::Unconfirmed { buffer, .. } = &self.state else { unreachable!() };
-        let result = unsafe { data.owner.open.queue.submit(
-            &[&**buffer], &[], (&**data.fence, data.fence_value),
-        ) };
+        let result = data.owner.open.queue.submit(
+            &[&**buffer], surfaces, (&**data.fence, data.fence_value),
+        );
         #[cfg(test)]
         let result = if self.failure == Some(FailurePoint::AfterSubmit) {
             result.and(Err(hal::DeviceError::Lost))
