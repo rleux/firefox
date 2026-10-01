@@ -27,11 +27,22 @@ impl RenderNotifier for Notice {
 #[test]
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn vulkan_renderer_draws_a_display_list_through_device_construction() {
+    render_display_list(false);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn vulkan_renderer_uses_pooled_uploads_when_shared_instances_are_requested() {
+    render_display_list(true);
+}
+
+fn render_display_list(enable_shared_instance_buffer: bool) {
     validation_logging();
     let (tx, rx) = mpsc::channel();
     let options = crate::WebRenderOptions {
         enable_subpixel_aa: false,
         enable_debugger: false,
+        enable_shared_instance_buffer,
         ..Default::default()
     };
     let (mut renderer, sender) = crate::create_webrender_instance(
@@ -44,6 +55,8 @@ fn vulkan_renderer_draws_a_display_list_through_device_construction() {
         None,
     )
     .unwrap();
+    assert!(!renderer.use_shared_instance_buffer);
+    assert!(renderer.vaos.shared_instance_buffer.is_none());
     let mut api = sender.create_api();
     let size = DeviceIntSize::new(32, 32);
     let document = api.add_document(size);
