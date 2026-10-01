@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::draw::DrawPass;
+use super::draw::{ColorAttachment, DrawPass};
 use super::pipeline::DrawPipeline;
 use super::program::{ProgramState, ResolvedProgram, ShaderResource};
 use super::shader::{draw_vertex_descriptor, select_draw_shader};
@@ -165,11 +165,11 @@ impl ProgramStore {
         Ok(changed)
     }
 
-    pub fn bind_pipeline(
+    pub fn bind_pipeline<T: ColorAttachment>(
         &mut self,
         program: &Program,
         state: RenderState,
-        pass: &DrawPass<'_>,
+        pass: &DrawPass<'_, T>,
     ) -> Result<bool, String> {
         let shader = self.state(program)?.shader();
         if self.bound == Some(program.id) {
@@ -186,7 +186,7 @@ impl ProgramStore {
             Some((_, pipeline)) => pipeline.clone(),
             None => {
                 let pipeline = DrawPipeline::new(
-                    &pass.target.raw.owner,
+                    pass.target.owner(),
                     shader,
                     pass.target.format(),
                     pass.depth.is_some(),
@@ -201,15 +201,18 @@ impl ProgramStore {
         Ok(true)
     }
 
-    fn compatible(pipeline: &DrawPipeline, pass: &DrawPass<'_>) -> bool {
-        Rc::ptr_eq(&pipeline.raw.owner, &pass.target.raw.owner)
+    fn compatible<T: ColorAttachment>(
+        pipeline: &DrawPipeline,
+        pass: &DrawPass<'_, T>,
+    ) -> bool {
+        Rc::ptr_eq(&pipeline.raw.owner, pass.target.owner())
             && pipeline.format == pass.target.format()
             && pipeline.has_depth == pass.depth.is_some()
     }
 
-    pub fn resolve_current(
+    pub fn resolve_current<T: ColorAttachment>(
         &self,
-        pass: &DrawPass<'_>,
+        pass: &DrawPass<'_, T>,
         slot_resource: impl FnMut(usize) -> Option<Option<ShaderResource>>,
         fallback: Option<&Rc<Texture>>,
     ) -> Result<ResolvedProgram, String> {
