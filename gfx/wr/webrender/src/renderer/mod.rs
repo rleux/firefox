@@ -1559,6 +1559,18 @@ impl Renderer {
         self.device.gpu_submission_status().map_err(RendererError::Device)
     }
 
+    /// Pause presentation and drain GPU work before the embedder hides the window.
+    /// Rendering while paused can update caches but does not acquire window images.
+    /// Resuming redraws the cached scene; the native window must remain alive.
+    /// Replacing the native window requires recreating the Renderer.
+    pub fn set_surface_paused(&mut self, paused: bool) -> Result<(), RendererError> {
+        self.device.set_surface_paused(paused).map_err(RendererError::Device)?;
+        if !paused {
+            self.force_redraw();
+        }
+        Ok(())
+    }
+
     /// Renders the current frame.
     ///
     /// A Frame is supplied by calling [`generate_frame()`][webrender_api::Transaction::generate_frame].
