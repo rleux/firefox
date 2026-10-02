@@ -184,6 +184,9 @@ fn vulkan_window_renderer_presents_display_lists_without_an_output_texture() {
     ));
     let mut api = sender.create_api();
     let document = api.add_document(DeviceIntSize::new(64, 48));
+    renderer.set_surface_paused(true).unwrap();
+    renderer.set_surface_paused(true).unwrap();
+    renderer.set_surface_paused(false).unwrap();
     assert_eq!(
         renderer.render(DeviceIntSize::new(64, 48), 0).unwrap().present_result,
         None,
@@ -267,6 +270,39 @@ fn vulkan_window_renderer_presents_display_lists_without_an_output_texture() {
         assert!(renderer.device.vulkan_test_output().is_none());
         wait_for_pixels();
 
+        renderer.set_surface_paused(true).unwrap();
+        let status = renderer.gpu_submission_status().unwrap().unwrap();
+        assert_eq!(status.submitted, status.completed);
+        window.clear();
+        for _ in 0..2 {
+            assert_eq!(
+                renderer.render(device_size, 0).unwrap().present_result,
+                Some(PresentResult::Occluded),
+            );
+            assert!(window.pixels(size).iter().all(|&pixel| pixel == 0));
+        }
+        let resized = [size[0] + 4, size[1] + 4];
+        window.resize(resized);
+        let resized = DeviceIntSize::new(resized[0] as i32, resized[1] as i32);
+        assert_eq!(
+            renderer.render(resized, 0).unwrap().present_result,
+            Some(PresentResult::Occluded),
+        );
+        renderer.set_surface_paused(true).unwrap();
+        renderer.set_surface_paused(false).unwrap();
+        assert_eq!(
+            renderer.render(resized, 0).unwrap().present_result,
+            Some(PresentResult::Presented),
+        );
+        window.resize(size);
+        renderer.set_surface_paused(false).unwrap();
+        assert!(renderer.force_redraw);
+        assert_eq!(
+            renderer.render(device_size, 0).unwrap().present_result,
+            Some(PresentResult::Presented),
+        );
+        wait_for_pixels();
+
         if epoch == 3 {
             for acquire in [true, false] {
                 for (error, expected) in [
@@ -331,6 +367,8 @@ fn vulkan_window_renderer_presents_display_lists_without_an_output_texture() {
             assert!(errors.iter().any(|error| {
                 matches!(error, RendererError::Device(message) if message.contains("surface was lost"))
             }));
+            assert!(renderer.set_surface_paused(true).is_err());
+            assert!(renderer.set_surface_paused(false).is_err());
         }
     }
     api.delete_document(document);

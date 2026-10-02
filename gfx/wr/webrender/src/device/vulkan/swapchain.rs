@@ -21,6 +21,7 @@ pub(super) struct Swapchain {
     // Keep views owned here even if a target guard is forgotten.
     target: Option<Rc<target::AttachmentResources>>,
     reconfigure: bool,
+    paused: bool,
     present_result: Option<PresentResult>,
 }
 
@@ -46,6 +47,7 @@ impl Swapchain {
             acquired: None,
             target: None,
             reconfigure: false,
+            paused: false,
             present_result: None,
         })
     }
@@ -128,7 +130,20 @@ impl Swapchain {
         Ok(true)
     }
 
+    pub fn set_paused(&mut self, paused: bool) -> Result<(), String> {
+        if paused {
+            self.configure([0, 0], self.surface.options)?;
+        }
+        self.paused = paused;
+        self.present_result = None;
+        Ok(())
+    }
+
     pub fn prepare_target(&mut self, size: [u32; 2]) -> Result<bool, String> {
+        if self.paused {
+            self.present_result = Some(PresentResult::Occluded);
+            return Ok(false);
+        }
         if self.target.is_some() {
             let extent = self.config.as_ref().unwrap().extent;
             if [extent.width, extent.height] != size {

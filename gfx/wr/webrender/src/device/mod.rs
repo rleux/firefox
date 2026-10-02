@@ -135,6 +135,12 @@ pub trait GpuBackend {
         Ok(None)
     }
 
+    /// Stops backend presentation and releases swapchain images until resumed.
+    /// Callers managing presentation themselves keep ownership of this lifecycle.
+    fn set_surface_paused(&mut self, _paused: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     #[cfg(all(test, feature = "vulkan", wr_vulkan_shaders, any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn vulkan_test_output(&self) -> Option<Rc<vulkan::Texture>> {
         None
