@@ -32,8 +32,11 @@ features = ["capture", "serialize_program", "gecko", "sw_compositor"]
 
 [features]
 debugger = ["webrender/debugger"]
-vulkan = ["webrender/vulkan"]
+vulkan = ["webrender/vulkan", "dep:raw-window-handle"]
 vulkan-naga = ["vulkan", "webrender/vulkan-naga"]
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dependencies]
+raw-window-handle = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dwrote = "0.11.5"
