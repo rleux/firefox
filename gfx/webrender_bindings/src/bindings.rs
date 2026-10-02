@@ -36,6 +36,7 @@ use moz2d_renderer::Moz2dBlobImageHandler;
 use nsstring::nsAString;
 use program_cache::{remove_disk_cache, WrProgramCache};
 use tracy_rs::register_thread_with_profiler;
+use vulkan::WrVulkanConfig;
 use webrender::render_backend_pool::{PoolMemberSetup, RenderBackendPool};
 use webrender::sw_compositor::SwCompositor;
 use webrender::{
@@ -647,6 +648,70 @@ pub extern "C" fn wr_renderer_set_target_frame_publish_id(renderer: &mut Rendere
     renderer.set_target_frame_publish_id(publish_id);
 }
 
+#[repr(C)]
+pub enum WrGpuSubmissionResult {
+    Unavailable,
+    Available,
+    Failed,
+}
+
+/// Polls without submitting or waiting; unavailable or failed queries zero the output.
+#[no_mangle]
+pub extern "C" fn wr_renderer_gpu_submission_status(
+    renderer: &mut Renderer,
+    out_status: &mut webrender::GpuSubmissionStatus,
+) -> WrGpuSubmissionResult {
+    *out_status = webrender::GpuSubmissionStatus {
+        submitted: 0,
+        completed: 0,
+    };
+    match renderer.gpu_submission_status() {
+        Ok(Some(status)) => {
+            *out_status = status;
+            WrGpuSubmissionResult::Available
+        },
+        Ok(None) => WrGpuSubmissionResult::Unavailable,
+        Err(error) => {
+            error!("Failed to query GPU submission status: {:?}", error);
+            WrGpuSubmissionResult::Failed
+        },
+    }
+}
+
+/// Retry schedules another refresh; Occluded waits for visibility or resume.
+/// SizeMismatch requires updated window dimensions before retrying.
+#[repr(C)]
+pub enum WrPresentResult {
+    NotAttempted,
+    Presented,
+    Retry,
+    Occluded,
+    SizeMismatch,
+}
+
+#[no_mangle]
+pub extern "C" fn wr_renderer_set_surface_paused(renderer: &mut Renderer, paused: bool) -> bool {
+    renderer
+        .set_surface_paused(paused)
+        .map_err(|error| {
+            error!("Failed to change surface state: {:?}", error);
+        })
+        .is_ok()
+}
+
+/// None detaches the window. Replacement preserves pause state; validation is fixed at creation.
+#[no_mangle]
+pub unsafe extern "C" fn wr_renderer_set_wgpu_surface(
+    renderer: &mut Renderer,
+    config: Option<&WrVulkanConfig>,
+) -> bool {
+    ::vulkan::set_surface(renderer, config)
+        .map_err(|error| {
+            error!("Failed to replace Vulkan surface: {}", error);
+        })
+        .is_ok()
+}
+
 #[no_mangle]
 pub extern "C" fn wr_renderer_render(
     renderer: &mut Renderer,
@@ -656,12 +721,21 @@ pub extern "C" fn wr_renderer_render(
     out_stats: &mut RendererStats,
     out_dirty_rects: &mut ThinVec<DeviceIntRect>,
     out_did_rasterize: &mut bool,
+    out_present_result: &mut WrPresentResult,
 ) -> bool {
+    *out_present_result = WrPresentResult::NotAttempted;
     match renderer.render(DeviceIntSize::new(width, height), buffer_age) {
         Ok(results) => {
             *out_stats = results.stats;
             out_dirty_rects.extend(results.dirty_rects);
             *out_did_rasterize = results.did_rasterize_any_tile;
+            *out_present_result = match results.present_result {
+                None => WrPresentResult::NotAttempted,
+                Some(webrender::PresentResult::Presented) => WrPresentResult::Presented,
+                Some(webrender::PresentResult::Retry) => WrPresentResult::Retry,
+                Some(webrender::PresentResult::Occluded) => WrPresentResult::Occluded,
+                Some(webrender::PresentResult::SizeMismatch) => WrPresentResult::SizeMismatch,
+            };
             true
         },
         Err(errors) => {
@@ -1439,7 +1513,8 @@ fn wr_device_new(gl_context: *mut c_void, pc: Option<&mut WrProgramCache>) -> De
             dump_shader_source: None,
             surface_origin_is_top_left: false,
         },
-    ).expect("Creating the OpenGL WebRender device")
+    )
+    .expect("Creating the OpenGL WebRender device")
 }
 
 extern "C" {
@@ -2107,7 +2182,57 @@ pub extern "C" fn wr_glyph_raster_thread_delete(thread: *mut WrGlyphRasterThread
     thread.0.shut_down();
 }
 
-// Call MakeCurrent before this.
+fn window_backend_config(
+    swgl_context: *mut c_void,
+    gl_context: *mut c_void,
+    vulkan_config: Option<&WrVulkanConfig>,
+    panic_on_gl_error: bool,
+) -> Result<(GpuBackendConfig, Option<swgl::Context>), String> {
+    if let Some(config) = vulkan_config {
+        if !static_prefs::pref!("gfx.webrender.vulkan") {
+            return Err("Vulkan requires gfx.webrender.vulkan to be enabled".into());
+        }
+        return unsafe { ::vulkan::create_backend(config) }.map(|backend| (backend, None));
+    }
+
+    let (gl, sw_gl) = if !swgl_context.is_null() {
+        let ctx = swgl::Context::from(swgl_context);
+        ctx.make_current();
+        (Rc::new(ctx) as Rc<dyn gl::Gl>, Some(ctx))
+    } else {
+        if gl_context.is_null() {
+            return Err("Native GL context required when not using SWGL or Vulkan".into());
+        }
+        let gl = unsafe {
+            if is_glcontext_gles(gl_context) {
+                gl::GlesFns::load_with(|symbol| get_proc_address(gl_context, symbol))
+            } else {
+                gl::GlFns::load_with(|symbol| get_proc_address(gl_context, symbol))
+            }
+        };
+        (gl, None)
+    };
+    info!("WebRender - OpenGL version new {}", gl.get_string(gl::VERSION));
+    Ok((
+        GpuBackendConfig::Gl(GlBackendConfig {
+            panic_on_error: panic_on_gl_error,
+            ..GlBackendConfig::new(gl)
+        }),
+        sw_gl,
+    ))
+}
+
+fn window_creation_failed(out_err: &mut *mut c_char, error: String) -> bool {
+    warn!("Failed to create a Renderer: {}", error);
+    let msg = CString::new(format!("wr_window_new: {}", error)).unwrap();
+    unsafe {
+        gfx_critical_note(msg.as_ptr());
+    }
+    *out_err = msg.into_raw();
+    false
+}
+
+// Call MakeCurrent before this when using GL.
 #[no_mangle]
 pub extern "C" fn wr_window_new(
     window_id: WrWindowId,
@@ -2120,6 +2245,7 @@ pub extern "C" fn wr_window_new(
     allow_scissored_cache_clears: bool,
     swgl_context: *mut c_void,
     gl_context: *mut c_void,
+    vulkan_config: Option<&WrVulkanConfig>,
     surface_origin_is_top_left: bool,
     program_cache: Option<&mut WrProgramCache>,
     shaders: Option<&mut WrShaders>,
@@ -2156,27 +2282,24 @@ pub extern "C" fn wr_window_new(
     // Ensure the WR profiler callbacks are hooked up to the Gecko profiler.
     set_profiler_hooks(Some(&PROFILER_HOOKS));
 
-    let software = !swgl_context.is_null();
-    let (gl, sw_gl) = if software {
-        let ctx = swgl::Context::from(swgl_context);
-        ctx.make_current();
-        (Rc::new(ctx) as Rc<dyn gl::Gl>, Some(ctx))
-    } else {
-        let gl = unsafe {
-            if gl_context.is_null() {
-                panic!("Native GL context required when not using SWGL!");
-            } else if is_glcontext_gles(gl_context) {
-                gl::GlesFns::load_with(|symbol| get_proc_address(gl_context, symbol))
-            } else {
-                gl::GlFns::load_with(|symbol| get_proc_address(gl_context, symbol))
-            }
-        };
-        (gl, None)
+    *out_handle = ptr::null_mut();
+    *out_renderer = ptr::null_mut();
+    *out_err = ptr::null_mut();
+
+    if vulkan_config.is_some() {
+        let has_gl_state =
+            !swgl_context.is_null() || !gl_context.is_null() || program_cache.is_some() || shaders.is_some();
+        let has_compositor_callbacks = use_native_compositor || use_layer_compositor || use_partial_present;
+        if has_gl_state || has_compositor_callbacks {
+            return window_creation_failed(out_err, "Vulkan requires direct rendering without GL/SWGL state".into());
+        }
+    }
+
+    let (backend, sw_gl) = match window_backend_config(swgl_context, gl_context, vulkan_config, panic_on_gl_error) {
+        Ok(config) => config,
+        Err(error) => return window_creation_failed(out_err, error),
     };
-
-    let version = gl.get_string(gl::VERSION);
-
-    info!("WebRender - OpenGL version new {}", version);
+    let software = sw_gl.is_some();
 
     let workers = unsafe { Arc::clone(&(*thread_pool).workers) };
     let workers_low_priority = unsafe {
@@ -2208,10 +2331,10 @@ pub extern "C" fn wr_window_new(
         ColorF::new(0.0, 0.0, 0.0, 0.0)
     };
 
-    let compositor_config = if software {
+    let compositor_config = if let Some(sw_gl) = sw_gl {
         CompositorConfig::Native {
             compositor: Box::new(SwCompositor::new(
-                sw_gl.unwrap(),
+                sw_gl,
                 Box::new(WrCompositor(compositor)),
                 use_native_compositor,
             )),
@@ -2340,21 +2463,9 @@ pub extern "C" fn wr_window_new(
 
     let window_size = DeviceIntSize::new(window_width, window_height);
     let notifier = Box::new(CppNotifier { window_id });
-    let backend = GpuBackendConfig::Gl(GlBackendConfig {
-        panic_on_error: panic_on_gl_error,
-        ..GlBackendConfig::new(gl)
-    });
     let (renderer, sender) = match create_webrender_instance(backend, notifier, opts, shaders.map(|sh| &sh.shaders)) {
-        Ok((renderer, sender)) => (renderer, sender),
-        Err(e) => {
-            warn!(" Failed to create a Renderer: {:?}", e);
-            let msg = CString::new(format!("wr_window_new: {:?}", e)).unwrap();
-            unsafe {
-                gfx_critical_note(msg.as_ptr());
-            }
-            *out_err = msg.into_raw();
-            return false;
-        },
+        Ok(result) => result,
+        Err(error) => return window_creation_failed(out_err, format!("{:?}", error)),
     };
 
     unsafe {
