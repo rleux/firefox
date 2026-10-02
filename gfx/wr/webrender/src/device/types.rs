@@ -482,6 +482,7 @@ pub struct Fence(pub(super) usize);
 
 /// Submission counters local to one renderer's GPU queue. Zero denotes no work.
 /// Completion covers GPU commands, not display presentation.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuSubmissionStatus {
     /// Highest submission handed to the queue.

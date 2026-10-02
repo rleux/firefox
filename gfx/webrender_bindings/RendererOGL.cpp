@@ -238,9 +238,10 @@ RenderedFrameId RendererOGL::UpdateAndRender(
 
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
+  WrPresentResult presentResult;
   bool rendered =
       wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
-                         aOutStats, &dirtyRects, &didRasterize);
+                         aOutStats, &dirtyRects, &didRasterize, &presentResult);
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.

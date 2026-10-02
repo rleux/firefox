@@ -291,7 +291,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 aWindowId, aSize.width, aSize.height,
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
                 supportLowPriorityThreadpool, gfx::gfxVars::UseGLSwizzle(),
-                gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl,
+                gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl, nullptr,
                 compositor->SurfaceOriginIsTopLeft(), progCache, shaders,
                 renderThread->ThreadPool().Raw(),
                 renderThread->ThreadPoolLP().Raw(),
