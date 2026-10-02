@@ -104,6 +104,21 @@ impl wr::GpuBackend for RenderDevice {
             .map(Some)
             .ok_or_else(|| self.failure().unwrap().to_owned())
     }
+    fn set_surface_paused(&mut self, paused: bool) -> Result<(), String> {
+        self.operation(|device| {
+            if device.inside_frame {
+                return Err("Cannot change Vulkan surface state during a frame".into());
+            }
+            device.submissions.status()?;
+            if let Some(swapchain) = &mut device.swapchain {
+                if paused {
+                    device.submissions.wait()?;
+                }
+                swapchain.set_paused(paused)?;
+            }
+            Ok(())
+        }).ok_or_else(|| self.failure().unwrap().to_owned())
+    }
     #[cfg(test)]
     fn wgpu_test_output(&self) -> Option<Rc<Texture>> {
         self.textures.output()
