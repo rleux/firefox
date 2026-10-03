@@ -18,6 +18,12 @@ if CONFIG["MOZ_TSAN"]:
 if CONFIG["MOZ_WEBRENDER_DEBUGGER"]:
     gkrust_features += ["webrender_debugger"]
 
+if CONFIG["MOZ_WEBRENDER_VULKAN"]:
+    if CONFIG["MOZ_WEBRENDER_VULKAN_SHADER_COMPILER"] == "naga":
+        gkrust_features += ["webrender_vulkan_naga"]
+    else:
+        gkrust_features += ["webrender_vulkan"]
+
 if CONFIG["MOZ_PULSEAUDIO"]:
     gkrust_features += ["cubeb_pulse_rust"]
 

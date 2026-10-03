@@ -1297,6 +1297,36 @@ def webrender_debugger(value):
 set_config("MOZ_WEBRENDER_DEBUGGER", webrender_debugger)
 set_define("MOZ_WEBRENDER_DEBUGGER", webrender_debugger)
 
+option(
+    "--enable-webrender-vulkan",
+    nargs=1,
+    choices=("glslang", "naga"),
+    help="Build the WebRender Vulkan backend with the selected shader compiler",
+)
+
+
+@depends("--enable-webrender-vulkan", target)
+def webrender_vulkan_shader_compiler(value, target):
+    if value:
+        if target.os not in ("WINNT", "Android") and not (
+            target.os == "GNU" and target.kernel == "Linux"
+        ):
+            die(
+                "The WebRender Vulkan backend is only supported on Linux, Windows and Android"
+            )
+        return value[0]
+
+
+@depends(webrender_vulkan_shader_compiler)
+def webrender_vulkan(compiler):
+    if compiler:
+        return True
+
+
+set_config("MOZ_WEBRENDER_VULKAN", webrender_vulkan)
+set_define("MOZ_WEBRENDER_VULKAN", webrender_vulkan)
+set_config("MOZ_WEBRENDER_VULKAN_SHADER_COMPILER", webrender_vulkan_shader_compiler)
+
 # Additional system headers defined at the application level
 # ==============================================================
 

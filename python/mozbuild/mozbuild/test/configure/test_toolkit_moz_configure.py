@@ -15,6 +15,47 @@ from mozbuild.configure.util import Version
 
 
 class TestToolkitMozConfigure(BaseConfigureTest):
+    def test_webrender_vulkan(self):
+        def get_values(args, target):
+            sandbox = self.get_sandbox({}, {}, args + ["--target=" + target])
+            return (
+                sandbox._value_for(sandbox["webrender_vulkan"]),
+                sandbox._value_for(sandbox["webrender_vulkan_shader_compiler"]),
+            )
+
+        supported = (
+            "x86_64-pc-linux-gnu",
+            "x86_64-pc-windows-msvc",
+            "aarch64-linux-android",
+        )
+        unsupported = (
+            "aarch64-apple-darwin",
+            "aarch64-apple-ios",
+            "x86_64-unknown-freebsd",
+        )
+        for target in supported + unsupported:
+            for args in ([], ["--disable-webrender-vulkan"]):
+                with self.subTest(target=target, args=args):
+                    self.assertEqual(get_values(args, target), (None, None))
+
+        for compiler in ("glslang", "naga"):
+            args = ["--enable-webrender-vulkan=" + compiler]
+            for target in supported:
+                with self.subTest(compiler=compiler, target=target):
+                    self.assertEqual(get_values(args, target), (True, compiler))
+            for target in unsupported:
+                with self.subTest(compiler=compiler, target=target):
+                    with self.assertRaises(SystemExit):
+                        get_values(args, target)
+
+        for option in (
+            "--enable-webrender-vulkan",
+            "--enable-webrender-vulkan=unknown",
+        ):
+            with self.subTest(option=option):
+                with self.assertRaises(InvalidOptionError):
+                    get_values([option], supported[0])
+
     def test_moz_configure_options(self):
         def get_value_for(args=[], environ={}, mozconfig=""):
             sandbox = self.get_sandbox({}, {}, args, environ, mozconfig)
