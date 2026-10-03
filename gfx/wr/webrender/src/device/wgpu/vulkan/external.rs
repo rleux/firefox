@@ -43,15 +43,29 @@ pub(super) fn open_adapter(
     if instance.instance_api_version() >= vk::API_VERSION_1_1
         && caps.properties().api_version >= vk::API_VERSION_1_1
         && caps.supports_extension(ash::khr::external_semaphore_fd::NAME)
+        && (caps.properties().api_version >= vk::API_VERSION_1_2
+            || caps.supports_extension(ash::khr::timeline_semaphore::NAME))
         && memory_supported
     {
+        let mut timeline_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
         unsafe {
-            instance.raw_instance().get_physical_device_external_semaphore_properties(
+            instance.raw_instance().get_physical_device_features2(
                 adapter.adapter.raw_physical_device(),
-                &vk::PhysicalDeviceExternalSemaphoreInfo::default()
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
-                &mut semaphore,
+                &mut vk::PhysicalDeviceFeatures2::default().push_next(&mut timeline_features),
             );
+        }
+        if timeline_features.timeline_semaphore == vk::TRUE {
+            let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE);
+            unsafe {
+                instance.raw_instance().get_physical_device_external_semaphore_properties(
+                    adapter.adapter.raw_physical_device(),
+                    &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
+                        .push_next(&mut timeline),
+                    &mut semaphore,
+                );
+            }
         }
     }
     let supported = supports_dma_buf(memory_supported, semaphore.external_semaphore_features);
@@ -83,7 +97,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dma_buf_requires_bidirectional_sync_file_support() {
+    fn dma_buf_requires_bidirectional_timeline_support() {
         let import = vk::ExternalSemaphoreFeatureFlags::IMPORTABLE;
         let export = vk::ExternalSemaphoreFeatureFlags::EXPORTABLE;
         assert!(!supports_dma_buf(true, vk::ExternalSemaphoreFeatureFlags::empty()));
@@ -94,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires Vulkan DMA-BUF and sync-file support"]
+    #[ignore = "Requires Vulkan DMA-BUF and external timeline support"]
     fn dma_buf_device_enables_memory_and_sync_extensions() {
         let device = super::super::Device::new(&super::super::Options {
             validation: true,

@@ -49,6 +49,8 @@ struct SubmissionData {
     resources: FastHashMap<*const (), Rc<dyn Any>>,
     uploads: Vec<queue::RecycleUpload>,
     bindings: BindingCache,
+    #[cfg(target_os = "linux")]
+    external_sync: super::timeline::SubmissionSync,
 }
 
 /// Exclusive access to an open submission; releasing this borrow does not submit it.
@@ -91,6 +93,23 @@ impl SubmissionBorrow<'_> {
 }
 
 impl Recording<'_> {
+    #[cfg(target_os = "linux")]
+    pub fn wait_timeline(
+        &mut self, timeline: &Rc<super::SharedTimeline>, value: u64,
+    ) -> Result<(), String> {
+        let submission = &mut *self.submission;
+        submission.external_sync.wait(&submission.owner, timeline, value)
+    }
+
+    /// Publish the value to consumers only after successful submission.
+    #[cfg(target_os = "linux")]
+    pub fn signal_timeline(
+        &mut self, timeline: &Rc<super::SharedTimeline>, value: u64,
+    ) -> Result<(), String> {
+        let submission = &mut *self.submission;
+        submission.external_sync.signal(&submission.owner, timeline, value)
+    }
+
     pub fn encoder(&mut self) -> &mut dyn hal::DynCommandEncoder {
         self.submission.encoder.as_mut()
     }
@@ -184,6 +203,8 @@ impl Submission {
                 resources: FastHashMap::default(),
                 uploads: Vec::new(),
                 bindings: BindingCache::default(),
+                #[cfg(target_os = "linux")]
+                external_sync: super::timeline::SubmissionSync::default(),
             },
             state: SubmissionState::Recording { id: Rc::new(()) },
             #[cfg(test)]
@@ -231,6 +252,8 @@ impl Submission {
         if !matches!(self.state, SubmissionState::Recording { .. }) {
             return Err("Submission has already been attempted".into());
         }
+        #[cfg(target_os = "linux")]
+        data.external_sync.validate()?;
         for buffer in &data.uniform_writes {
             buffer.flush_uniform_writes();
         }
@@ -251,6 +274,8 @@ impl Submission {
             unreachable!()
         };
         self.state = SubmissionState::Unconfirmed { id, buffer };
+        #[cfg(target_os = "linux")]
+        let staged = data.external_sync.stage(data.owner.open.queue.as_ref())?;
         let SubmissionState::Unconfirmed { buffer, .. } = &self.state else { unreachable!() };
         let result = data.owner.open.queue.submit(
             &[&**buffer], surfaces, (&**data.fence, data.fence_value),
@@ -261,6 +286,8 @@ impl Submission {
         } else {
             result
         };
+        #[cfg(target_os = "linux")]
+        drop(staged);
         result.map_err(|error| {
             data.owner.lost.set(true);
             format!("Submitting commands: {error:?}")
@@ -270,6 +297,8 @@ impl Submission {
         };
         self.state = SubmissionState::Submitted { buffer };
         data.uniform_writes.clear();
+        #[cfg(target_os = "linux")]
+        data.external_sync.submitted();
         for commit in data.commits.drain(..) {
             commit();
         }
@@ -287,6 +316,8 @@ impl Submission {
         data.resources.clear();
         data.uniform_writes.clear();
         data.uploads.clear();
+        #[cfg(target_os = "linux")]
+        data.external_sync.clear();
     }
 
     pub fn poll(&mut self) -> Result<bool, String> {
