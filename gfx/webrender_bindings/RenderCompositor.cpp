@@ -15,6 +15,7 @@
 #include "mozilla/webrender/RenderCompositorLayersSWGL.h"
 #include "mozilla/webrender/RenderCompositorOGL.h"
 #include "mozilla/webrender/RenderCompositorSWGL.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/widget/CompositorWidget.h"
 
 #ifdef MOZ_WIDGET_ANDROID
@@ -240,6 +241,10 @@ UniquePtr<RenderCompositor> RenderCompositor::Create(
     }
 #endif
     return RenderCompositorSWGL::Create(aWidget, aError);
+  }
+
+  if (RenderCompositorVulkan::IsRequested()) {
+    return RenderCompositorVulkan::Create(aWidget, aError);
   }
 
 #ifdef XP_WIN

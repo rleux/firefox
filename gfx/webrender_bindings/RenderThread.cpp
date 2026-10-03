@@ -28,6 +28,7 @@
 #include "mozilla/layers/SyncObject.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/layers/WebRenderBridgeParent.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/webrender/RendererOGL.h"
 #include "mozilla/widget/CompositorWidget.h"
@@ -1330,8 +1331,9 @@ void RenderThread::InitDeviceTask() {
 
   const auto start = TimeStamp::Now();
 
-  if (gfx::gfxVars::UseSoftwareWebRender()) {
-    // Ensure we don't instantiate any shared GL context when SW-WR is used.
+  if (gfx::gfxVars::UseSoftwareWebRender() ||
+      RenderCompositorVulkan::IsRequested()) {
+    // Ensure we don't instantiate shared GL for SW-WR or Vulkan.
     return;
   }
 
@@ -1513,7 +1515,8 @@ gl::GLContext* RenderThread::SingletonGL(nsACString& aError) {
     CreateSingletonGL(aError);
     mShaders = nullptr;
   }
-  if (mSingletonGL && mSingletonGLIsForHardwareWebRender && !mShaders) {
+  if (mSingletonGL && mSingletonGLIsForHardwareWebRender && !mShaders &&
+      !RenderCompositorVulkan::IsRequested()) {
     mShaders =
         std::make_unique<WebRenderShaders>(mSingletonGL, mProgramCache.get());
   }
