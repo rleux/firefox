@@ -97,6 +97,9 @@ class VulkanFrameTracker {
 
 class RenderCompositorVulkan final : public RenderCompositor {
  public:
+  static UniquePtr<RenderCompositor> Create(
+      const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError);
+
   RenderCompositorVulkan(const RefPtr<widget::CompositorWidget>& aWidget,
                          const WrVulkanConfig& aConfig);
   ~RenderCompositorVulkan() override;
@@ -138,6 +141,12 @@ class RenderCompositorVulkan final : public RenderCompositor {
   base::RepeatingTimer<RenderCompositorVulkan> mCompletionTimer;
   bool mPaused = false;
   bool mFailed = false;
+#ifdef MOZ_WIDGET_ANDROID
+  bool mValidation = false;
+  bool mVsync = true;
+  bool mTransparent = false;
+  bool mHandlingNewSurfaceError = false;
+#endif
 };
 
 }  // namespace mozilla::wr
