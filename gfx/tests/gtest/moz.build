@@ -25,6 +25,7 @@ UNIFIED_SOURCES += [
     "TestPolygon.cpp",
     "TestQcms.cpp",
     "TestRegion.cpp",
+    "TestRenderExternalBuffer.cpp",
     "TestSkipChars.cpp",
     "TestSwizzle.cpp",
     "TestTextures.cpp",
