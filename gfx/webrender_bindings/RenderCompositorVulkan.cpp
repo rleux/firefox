@@ -9,6 +9,10 @@
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
 
+#ifdef XP_WIN
+#  include "mozilla/widget/WinCompositorWidget.h"
+#endif
+
 #ifdef MOZ_WIDGET_ANDROID
 #  include <android/native_window.h>
 #  include <android/native_window_jni.h>
@@ -30,6 +34,36 @@ bool RenderCompositorVulkan::IsRequested() {
   return gfx::gfxVars::UseWebRenderVulkan() &&
          !gfx::gfxVars::UseSoftwareWebRender();
 }
+
+#ifdef XP_WIN
+static Maybe<OwnedVulkanConfig> AcquireWindowsSurface(
+    widget::CompositorWidget* aWidget, bool aValidation, bool aVsync) {
+  auto* windows = aWidget ? aWidget->AsWindows() : nullptr;
+  if (!windows ||
+      windows->TransparencyModeIs(widget::TransparencyMode::Transparent)) {
+    return Nothing();
+  }
+  auto window = windows->GetCompositorHwnd();
+  auto instance = window ? ::GetWindowLongPtrW(window, GWLP_HINSTANCE) : 0;
+  if (!instance) {
+    return Nothing();
+  }
+  WrVulkanConfig config{
+      WrWindowHandle::Win32(window, reinterpret_cast<void*>(instance)),
+      {aWidget,
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->AddRef();
+       },
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->Release();
+       }},
+      {},
+      aValidation,
+      aVsync,
+      false};
+  return Some(OwnedVulkanConfig(config));
+}
+#endif
 
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
 class VulkanX11Display final {
@@ -110,6 +144,14 @@ static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
 
 UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
     const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
+#ifdef XP_WIN
+  auto config = AcquireWindowsSurface(aWidget, false, true);
+  if (!config) {
+    aError.AssignLiteral("RcVulkan(Windows surface)");
+    return nullptr;
+  }
+  return MakeUnique<RenderCompositorVulkan>(aWidget, config->Raw());
+#endif
 #ifdef MOZ_WIDGET_ANDROID
   if (aWidget && aWidget->AsAndroid()) {
     WrVulkanConfig config{
@@ -223,7 +265,18 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
 }
 
 bool RenderCompositorVulkan::BeginFrame() {
-  return mRenderer && !IsPaused() && !mFailed && !GetBufferSize().IsEmpty();
+  if (!mRenderer || IsPaused() || mFailed || GetBufferSize().IsEmpty()) {
+    return false;
+  }
+#ifdef XP_WIN
+  auto* windows = mWidget->AsWindows();
+  if (windows->TransparencyModeIs(widget::TransparencyMode::Transparent)) {
+    Fail();
+    return false;
+  }
+  windows->UpdateCompositorWndSizeIfNecessary();
+#endif
+  return true;
 }
 
 RenderedFrameId RenderCompositorVulkan::EndFrame(
@@ -317,7 +370,16 @@ bool RenderCompositorVulkan::Resume() {
   if (!mRenderer || mFailed) {
     return false;
   }
-#ifdef MOZ_WIDGET_ANDROID
+#ifdef XP_WIN
+  Pause();
+  if (mFailed) {
+    return false;
+  }
+  auto config = AcquireWindowsSurface(mWidget, mValidation, mVsync);
+  if (!config || !SetSurface(&config->Raw())) {
+    return false;
+  }
+#elif defined(MOZ_WIDGET_ANDROID)
   Pause();
   if (mFailed) {
     return false;
