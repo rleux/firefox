@@ -13,6 +13,10 @@
 
 namespace mozilla::wr {
 
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+class VulkanX11Display;
+#endif
+
 class OwnedVulkanConfig {
  public:
   explicit OwnedVulkanConfig(const WrVulkanConfig& aConfig) : mConfig(aConfig) {
@@ -142,11 +146,14 @@ class RenderCompositorVulkan final : public RenderCompositor {
   base::RepeatingTimer<RenderCompositorVulkan> mCompletionTimer;
   bool mPaused = false;
   bool mFailed = false;
-#ifdef MOZ_WIDGET_ANDROID
   bool mValidation = false;
   bool mVsync = true;
   bool mTransparent = false;
+#ifdef MOZ_WIDGET_ANDROID
   bool mHandlingNewSurfaceError = false;
+#endif
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  RefPtr<VulkanX11Display> mX11Display;
 #endif
 };
 
