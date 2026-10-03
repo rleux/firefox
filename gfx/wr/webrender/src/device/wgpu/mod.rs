@@ -3,6 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::rc::Rc;
+use raw_window_handle::HasDisplayHandle;
 use wgpu_hal as hal;
 use wgpu_types as wgt;
 
@@ -17,7 +19,7 @@ pub use self::surface_config::SurfaceOptions;
 mod window_surface;
 pub use self::window_surface::SurfaceWindow;
 #[cfg(all(test, target_os = "linux", feature = "debugger"))]
-pub(crate) use self::window_surface::tests::x11::X11Window;
+pub(crate) use self::window_surface::tests::x11::{X11Display, X11Window};
 mod swapchain;
 #[cfg(test)]
 pub(crate) use self::swapchain::testing as surface_testing;
@@ -58,8 +60,17 @@ pub use self::buffer_pool::BufferPool;
 pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
-    pub window: Option<std::rc::Rc<dyn SurfaceWindow>>,
+    pub window: Option<Rc<dyn SurfaceWindow>>,
+    /// A separate display owner allows old windows to be released during replacement.
+    /// Otherwise the initial window keeps the display alive until device destruction.
+    /// With no window, a display owner starts windowed rendering with no surface attached.
+    pub display_owner: Option<Rc<dyn HasDisplayHandle>>,
     pub surface_options: SurfaceOptions,
+}
+
+enum InitialSurface {
+    Detached,
+    Attached(window_surface::WindowSurface),
 }
 
 /// An opened Vulkan adapter, device and queue.
@@ -80,8 +91,10 @@ pub struct Device {
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: Box<dyn hal::DynAdapter>,
-    surface: Cell<Option<window_surface::WindowSurface>>,
+    initial_surface: Cell<Option<InitialSurface>>,
+    // The instance may retain display connections, so their owner must outlive it.
     instance: Box<dyn hal::DynInstance>,
+    display_owner: Option<Rc<dyn HasDisplayHandle>>,
 }
 
 impl Device {

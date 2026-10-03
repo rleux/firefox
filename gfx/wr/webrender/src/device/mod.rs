@@ -141,6 +141,15 @@ pub trait GpuBackend {
         Ok(())
     }
 
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    fn set_wgpu_surface(
+        &mut self,
+        _window: Option<Rc<dyn wgpu::SurfaceWindow>>,
+        _options: wgpu::SurfaceOptions,
+    ) -> Result<(), String> {
+        Err("This backend does not manage a Vulkan surface".into())
+    }
+
     #[cfg(all(test, feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn wgpu_test_output(&self) -> Option<Rc<wgpu::Texture>> {
         None
