@@ -29,14 +29,20 @@ impl Device {
                 return Err("Adapter name must not be empty".into());
             }
         }
-        let display = options
-            .window
-            .as_ref()
-            .map(|window| {
-                window.display_handle()
-                    .map_err(|error| format!("Getting Vulkan display handle: {error}"))
-            })
+        let display_owner = options.display_owner.clone().or_else(|| {
+            options.window.clone().map(|window| window as Rc<dyn HasDisplayHandle>)
+        });
+        let display = display_owner.as_ref()
+            .map(|owner| owner.display_handle()
+                .map_err(|error| format!("Getting Vulkan display handle: {error}")))
             .transpose()?;
+        if let Some(window) = &options.window {
+            let window_display = window.display_handle()
+                .map_err(|error| format!("Getting Vulkan window display: {error}"))?;
+            if display.map(|handle| handle.as_raw()) != Some(window_display.as_raw()) {
+                return Err("Vulkan window and display owner must use the same display".into());
+            }
+        }
         if options.validation {
             let entry = unsafe { ash::Entry::load() }
                 .map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -149,8 +155,12 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: Box::new(exposed.adapter),
-            surface: Cell::new(surface),
+            initial_surface: Cell::new(display_owner.as_ref().map(|_| match surface {
+                Some(surface) => InitialSurface::Attached(surface),
+                None => InitialSurface::Detached,
+            })),
             instance: Box::new(instance),
+            display_owner,
         })
     }
     pub fn raw_device(&self) -> &hal::vulkan::Device {
