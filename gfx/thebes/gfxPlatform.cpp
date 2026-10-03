@@ -2487,6 +2487,9 @@ void gfxPlatform::InitWebRenderConfig() {
 #  if defined(MOZ_WIDGET_ANDROID)
   // SurfaceTexture video images still require the GL compositor.
   gfxVars::SetUseWebRenderVulkan(false);
+#  elif defined(XP_WIN)
+  gfxVars::SetUseWebRenderVulkan(hasHardware &&
+                                 StaticPrefs::gfx_webrender_vulkan_AtStartup());
 #  elif defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
   gfxVars::SetUseWebRenderVulkan(
       hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
