@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use crate::vulkan::SurfaceOptions;
 use crate::device::{Fence, FenceStatus, GpuFrameId};
 
 #[test]
@@ -84,6 +85,12 @@ fn frame_boundaries_reject_nesting_and_unfinished_passes() {
     assert!(crate::device::GpuBackend::set_surface_paused(&mut invalid, true).is_err());
     assert!(crate::device::GpuBackend::set_surface_paused(&mut invalid, false).is_err());
     drop(invalid);
+    let mut invalid = device();
+    invalid.begin_frame().unwrap();
+    assert!(crate::device::GpuBackend::set_vulkan_surface(
+        &mut invalid, None, SurfaceOptions::default(),
+    ).is_err());
+    drop(invalid);
     let mut device = device();
     assert!(device.end_frame().is_err());
     assert!(device.begin_render_pass(&descriptor()).is_err());
@@ -117,6 +124,9 @@ fn frame_boundaries_reject_nesting_and_unfinished_passes() {
     assert!(crate::device::GpuBackend::set_surface_paused(&mut device, true).is_err());
     device.fallback.raw.owner.lost.set(false);
     assert!(crate::device::GpuBackend::set_surface_paused(&mut device, false).is_err());
+    assert!(crate::device::GpuBackend::set_vulkan_surface(
+        &mut device, None, SurfaceOptions::default(),
+    ).is_err());
     assert!(crate::device::GpuBackend::gpu_submission_status(&mut device).is_err());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }

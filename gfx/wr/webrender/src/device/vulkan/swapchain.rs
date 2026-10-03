@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::window_surface::WindowSurface;
-use super::{hal, SubmissionQueue, SurfaceOptions};
+use super::{hal, InitialSurface, SubmissionQueue, SurfaceOptions, SurfaceWindow};
 use crate::device::PresentResult;
 use std::rc::Rc;
 use std::borrow::Borrow;
@@ -14,7 +14,7 @@ mod target;
 pub(super) use self::target::SurfaceView;
 
 pub(super) struct Swapchain {
-    surface: WindowSurface,
+    surface: Option<WindowSurface>,
     queue: Rc<SubmissionQueue>,
     config: Option<hal::SurfaceConfiguration>,
     acquired: Option<Rc<hal::AcquiredSurfaceTexture<hal::api::Vulkan>>>,
@@ -40,8 +40,11 @@ pub(super) enum PresentationStatus {
 
 impl Swapchain {
     pub fn new(queue: &Rc<SubmissionQueue>) -> Option<Self> {
-        queue.owner().surface.take().map(|surface| Self {
-            surface,
+        queue.owner().initial_surface.take().map(|surface| Self {
+            surface: match surface {
+                InitialSurface::Detached => None,
+                InitialSurface::Attached(surface) => Some(surface),
+            },
             queue: queue.clone(),
             config: None,
             acquired: None,
@@ -60,6 +63,13 @@ impl Swapchain {
         if self.acquired.is_some() {
             return Err("Cannot reconfigure a Vulkan swapchain with an acquired image".into());
         }
+        let Some(surface) = self.surface.as_mut() else {
+            return if size.contains(&0) {
+                Ok(())
+            } else {
+                Err("No Vulkan window is attached".into())
+            };
+        };
         let owner = self.queue.owner();
         if owner.is_lost() {
             return Err("Cannot configure a Vulkan swapchain on a lost device".into());
@@ -67,7 +77,7 @@ impl Swapchain {
         let config = if size.contains(&0) {
             None
         } else {
-            let caps = unsafe { owner.adapter.surface_capabilities(&self.surface.raw) }
+            let caps = unsafe { owner.adapter.surface_capabilities(&surface.raw) }
                 .ok_or("Vulkan adapter no longer supports the window surface")?;
             Some(owner.surface_configuration(&caps, size, options)?)
         };
@@ -77,11 +87,11 @@ impl Swapchain {
                 owner.lost.set(true);
                 format!("Waiting to reconfigure Vulkan swapchain: {error:?}")
             })?;
-            unsafe { self.surface.raw.unconfigure(&owner.open.device) };
+            unsafe { surface.raw.unconfigure(&owner.open.device) };
             self.config = None;
         }
         if let Some(config) = config {
-            unsafe { self.surface.raw.configure(&owner.open.device, &config) }.map_err(
+            unsafe { surface.raw.configure(&owner.open.device, &config) }.map_err(
                 |error| {
                     if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
                         owner.lost.set(true);
@@ -92,7 +102,7 @@ impl Swapchain {
             self.config = Some(config);
         }
         self.reconfigure = false;
-        self.surface.options = options;
+        surface.options = options;
         Ok(())
     }
 
@@ -120,7 +130,8 @@ impl Swapchain {
         if let Some(error) = testing::acquire_error() {
             return Err(error);
         }
-        let image = unsafe { self.queue.acquire_surface(&self.surface.raw) }.map_err(|error| {
+        let surface = &self.surface.as_ref().unwrap().raw;
+        let image = unsafe { self.queue.acquire_surface(surface) }.map_err(|error| {
             if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
                 self.queue.owner().lost.set(true);
             }
@@ -130,9 +141,31 @@ impl Swapchain {
         Ok(true)
     }
 
+    pub fn set_window(
+        &mut self,
+        window: Option<Rc<dyn SurfaceWindow>>,
+        options: SurfaceOptions,
+    ) -> Result<(), String> {
+        if self.acquired.is_some() {
+            return Err("Cannot replace a Vulkan window with an acquired image".into());
+        }
+        let surface = window
+            .as_ref()
+            .map(|window| self.queue.owner().create_surface(window, options))
+            .transpose()?;
+        self.queue.wait()?;
+        self.configure([0, 0], options)?;
+        self.surface = surface;
+        self.reconfigure = false;
+        self.present_result = None;
+        Ok(())
+    }
+
     pub fn set_paused(&mut self, paused: bool) -> Result<(), String> {
         if paused {
-            self.configure([0, 0], self.surface.options)?;
+            if let Some(options) = self.surface.as_ref().map(|surface| surface.options) {
+                self.configure([0, 0], options)?;
+            }
         }
         self.paused = paused;
         self.present_result = None;
@@ -140,7 +173,7 @@ impl Swapchain {
     }
 
     pub fn prepare_target(&mut self, size: [u32; 2]) -> Result<bool, String> {
-        if self.paused {
+        if self.paused || self.surface.is_none() {
             self.present_result = Some(PresentResult::Occluded);
             return Ok(false);
         }
@@ -159,7 +192,7 @@ impl Swapchain {
                 [config.extent.width, config.extent.height] != size
             })
         {
-            self.configure(size, self.surface.options)?;
+            self.configure(size, self.surface.as_ref().unwrap().options)?;
         }
         if self.config.as_ref().map_or(true, |config| {
             [config.extent.width, config.extent.height] != size
@@ -230,10 +263,10 @@ impl Swapchain {
         }
         let image =
             Rc::try_unwrap(image).unwrap_or_else(|_| unreachable!("Acquired image still borrowed"));
-        unsafe { self.surface.raw.discard_texture(image.texture) };
+        unsafe { self.surface.as_ref().unwrap().raw.discard_texture(image.texture) };
         result?;
         // Vulkan discard does not return the image to the swapchain.
-        self.configure([0, 0], self.surface.options)
+        self.configure([0, 0], self.surface.as_ref().unwrap().options)
     }
 }
 
@@ -262,7 +295,7 @@ impl AcquiredImage<'_> {
         let result = owner
             .open
             .queue
-            .present(&self.swapchain.surface.raw, image.texture);
+            .present(&self.swapchain.surface.as_ref().unwrap().raw, image.texture);
         let suboptimal = image.suboptimal;
         // Inject after presenting so the real image and semaphores are consumed.
         #[cfg(test)]
@@ -339,7 +372,7 @@ impl Drop for Swapchain {
                 if owner.open.queue.wait_for_idle().is_err() {
                     owner.lost.set(true);
                 }
-                self.surface.raw.unconfigure(&owner.open.device);
+                self.surface.as_ref().unwrap().raw.unconfigure(&owner.open.device);
             }
         }
     }

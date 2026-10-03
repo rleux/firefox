@@ -1562,12 +1562,28 @@ impl Renderer {
     /// Pause presentation and drain GPU work before the embedder hides the window.
     /// Rendering while paused can update caches but does not acquire window images.
     /// Resuming redraws the cached scene; the native window must remain alive.
-    /// Replacing the native window requires recreating the Renderer.
+    /// Pausing retains the native window; detaching it is a separate operation.
     pub fn set_surface_paused(&mut self, paused: bool) -> Result<(), RendererError> {
         self.device.set_surface_paused(paused).map_err(RendererError::Device)?;
         if !paused {
             self.force_redraw();
         }
+        Ok(())
+    }
+
+    /// Detach or replace a windowed Vulkan Renderer's surface between frames.
+    /// None drains GPU work and releases the surface. A separate Options::display_owner
+    /// allows releasing the old window while the instance keeps its display alive.
+    /// Detached renders update caches but cannot present. Replacement preserves
+    /// resources, queue serials and pause state, and must use the same display and adapter.
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    pub fn set_vulkan_surface(
+        &mut self,
+        window: Option<Rc<dyn crate::vulkan::SurfaceWindow>>,
+        options: crate::vulkan::SurfaceOptions,
+    ) -> Result<(), RendererError> {
+        self.device.set_vulkan_surface(window, options).map_err(RendererError::Device)?;
+        self.force_redraw();
         Ok(())
     }
 

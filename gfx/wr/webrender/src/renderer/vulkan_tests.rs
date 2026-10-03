@@ -375,3 +375,164 @@ fn vulkan_window_renderer_presents_display_lists_without_an_output_texture() {
     renderer.deinit();
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn vulkan_window_renderer_replaces_surface_without_rebuilding_scene() {
+    window_renderer_surface_lifecycle(false);
+}
+
+#[test]
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn vulkan_window_renderer_starts_without_surface() {
+    window_renderer_surface_lifecycle(true);
+}
+
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+fn window_renderer_surface_lifecycle(start_detached: bool) {
+    use crate::device::vulkan::{SurfaceOptions, X11Display, X11Window};
+    use crate::PresentResult;
+
+    validation_logging();
+    let display = Rc::new(unsafe { X11Display::new() });
+    let display_weak = Rc::downgrade(&display);
+    let mut window = Rc::new(unsafe { X11Window::with_display(display.clone()) });
+    let (tx, rx) = mpsc::channel();
+    let (mut renderer, sender) = crate::create_webrender_instance(
+        GpuBackendConfig::Vulkan(Options {
+            window: if start_detached { None } else { Some(window.clone()) },
+            display_owner: Some(display.clone()),
+            validation: true,
+            ..Default::default()
+        }),
+        Box::new(Notice(tx)),
+        crate::WebRenderOptions {
+            enable_subpixel_aa: false,
+            enable_debugger: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let size = DeviceIntSize::new(64, 48);
+    let mut api = sender.create_api();
+    let document = api.add_document(size);
+    let pipeline = PipelineId(0, 0);
+    let rect = LayoutRect::from_size(LayoutSize::new(64.0, 48.0));
+    let common = CommonItemProperties::new(rect, SpaceAndClipInfo::root_scroll(pipeline));
+    let mut builder = DisplayListBuilder::new(pipeline);
+    builder.begin(60.0);
+    builder.push_rect(&common, rect, ColorF::new(0.0, 1.0, 0.0, 1.0));
+    builder.push_rect(
+        &common,
+        LayoutRect::from_origin_and_size(LayoutPoint::new(8.0, 8.0), LayoutSize::new(48.0, 32.0)),
+        ColorF::new(1.0, 0.0, 0.0, 1.0),
+    );
+    let mut transaction = Transaction::new();
+    transaction.set_root_pipeline(pipeline);
+    transaction.set_display_list(Epoch(0), api.get_namespace_id(), builder.end());
+    transaction.generate_frame(1, true, false, RenderReasons::TESTING);
+    api.send_transaction(document, transaction);
+    rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+    renderer.update();
+    assert_eq!(
+        renderer.render(size, 0).unwrap().present_result,
+        Some(if start_detached { PresentResult::Occluded } else { PresentResult::Presented })
+    );
+    assert!(renderer.device.vulkan_test_output().is_none());
+    let cached_textures: FastHashMap<_, _> = renderer
+        .texture_resolver
+        .texture_cache_map
+        .iter()
+        .map(|(&id, entry)| (id, DrawTarget::from_texture(&entry.texture, false)))
+        .collect();
+    assert!(!cached_textures.is_empty());
+    let mut submitted = renderer.gpu_submission_status().unwrap().unwrap().submitted;
+
+    for paused in [false, true] {
+        let old = Rc::downgrade(&window);
+        if paused {
+            renderer.set_surface_paused(true).unwrap();
+            renderer
+                .set_vulkan_surface(None, SurfaceOptions::default())
+                .unwrap();
+            let completed = renderer.gpu_submission_status().unwrap().unwrap();
+            assert!(completed.completed >= submitted);
+            assert_eq!(completed.submitted, completed.completed);
+            window = Rc::new(unsafe { X11Window::with_display(display.clone()) });
+            assert!(old.upgrade().is_none());
+            for _ in 0..2 {
+                assert_eq!(
+                    renderer.render(size, 0).unwrap().present_result,
+                    Some(PresentResult::Occluded)
+                );
+                assert!(renderer.device.vulkan_test_output().is_none());
+            }
+        } else {
+            window = Rc::new(unsafe { X11Window::with_display(display.clone()) });
+            assert_eq!(old.upgrade().is_some(), !start_detached);
+        }
+        renderer
+            .set_vulkan_surface(Some(window.clone()), SurfaceOptions::default())
+            .unwrap();
+        assert!(old.upgrade().is_none());
+        if paused {
+            assert_eq!(
+                renderer.render(size, 0).unwrap().present_result,
+                Some(PresentResult::Occluded)
+            );
+            assert!(window.pixels([64, 48]).iter().all(|&pixel| pixel == 0));
+            renderer.set_surface_paused(false).unwrap();
+        }
+        let result = renderer.render(size, 0).unwrap();
+        assert_eq!(result.present_result, Some(PresentResult::Presented));
+        assert_eq!(result.stats.color_target_count, 1);
+        assert_eq!(
+            renderer.texture_resolver.texture_cache_map.len(),
+            cached_textures.len()
+        );
+        for (&id, target) in &cached_textures {
+            assert_eq!(
+                DrawTarget::from_texture(
+                    &renderer.texture_resolver.texture_cache_map[&id].texture,
+                    false
+                ),
+                *target
+            );
+        }
+        assert!(renderer.device.vulkan_test_output().is_none());
+        let status = renderer.gpu_submission_status().unwrap().unwrap();
+        assert!(status.submitted > submitted);
+        submitted = status.submitted;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !window
+            .pixels([64, 48])
+            .iter()
+            .enumerate()
+            .all(|(index, &pixel)| {
+                let inside = (8..56).contains(&(index % 64)) && (8..40).contains(&(index / 64));
+                pixel == if inside { 0xff0000 } else { 0x00ff00 }
+            })
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Cached scene was not presented on the replacement window"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    renderer
+        .set_vulkan_surface(None, SurfaceOptions::default())
+        .unwrap();
+    let weak = Rc::downgrade(&window);
+    drop(window);
+    assert!(weak.upgrade().is_none());
+    drop(display);
+    assert!(display_weak.upgrade().is_some());
+    api.delete_document(document);
+    renderer.deinit();
+    assert!(display_weak.upgrade().is_none());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}

@@ -88,3 +88,26 @@ fn android_handles_require_a_matching_display() {
 #[cfg(all(target_os = "linux", feature = "debugger"))]
 #[path = "window_surface_x11_tests.rs"]
 pub(in crate::device::vulkan) mod x11;
+
+
+#[test]
+fn mismatched_display_owner_is_rejected_before_vulkan_initialization() {
+    struct TestWindow(Display);
+    impl HasDisplayHandle for TestWindow {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            Ok(unsafe { DisplayHandle::borrow_raw(self.0) })
+        }
+    }
+    impl HasWindowHandle for TestWindow {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            panic!("Mismatched displays must be rejected before querying the window")
+        }
+    }
+    let options = super::super::Options {
+        window: Some(Rc::new(TestWindow(Display::Windows(WindowsDisplayHandle::new())))),
+        display_owner: Some(Rc::new(TestWindow(Display::Android(AndroidDisplayHandle::new())))),
+        ..Default::default()
+    };
+    let error = super::super::Device::new(&options).err().unwrap();
+    assert!(error.contains("must use the same display"), "{}", error);
+}

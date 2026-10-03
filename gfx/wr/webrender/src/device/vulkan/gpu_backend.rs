@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::super::{SurfaceOptions, SurfaceWindow};
 use crate::device as wr;
 use crate::device::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
 use crate::internal_types::{RenderTargetInfo, Swizzle, SwizzleSettings};
@@ -117,6 +118,21 @@ impl wr::GpuBackend for RenderDevice {
                 swapchain.set_paused(paused)?;
             }
             Ok(())
+        }).ok_or_else(|| self.failure().unwrap().to_owned())
+    }
+    fn set_vulkan_surface(
+        &mut self,
+        window: Option<Rc<dyn SurfaceWindow>>,
+        options: SurfaceOptions,
+    ) -> Result<(), String> {
+        self.operation(|device| {
+            if device.inside_frame {
+                return Err("Cannot replace a Vulkan window during a frame".into());
+            }
+            device.submissions.status()?;
+            device.swapchain.as_mut()
+                .ok_or("Vulkan surface replacement requires a windowed Renderer")?
+                .set_window(window, options)
         }).ok_or_else(|| self.failure().unwrap().to_owned())
     }
     #[cfg(test)]

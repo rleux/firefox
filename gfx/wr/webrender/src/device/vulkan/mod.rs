@@ -4,6 +4,8 @@
 
 use std::cell::Cell;
 use std::ffi::CStr;
+use std::rc::Rc;
+use raw_window_handle::HasDisplayHandle;
 use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
 use wgpu_types as wgt;
@@ -19,7 +21,7 @@ pub use self::surface_config::SurfaceOptions;
 mod window_surface;
 pub use self::window_surface::SurfaceWindow;
 #[cfg(all(test, target_os = "linux", feature = "debugger"))]
-pub(crate) use self::window_surface::tests::x11::X11Window;
+pub(crate) use self::window_surface::tests::x11::{X11Display, X11Window};
 mod swapchain;
 #[cfg(test)]
 pub(crate) use self::swapchain::testing as surface_testing;
@@ -62,8 +64,17 @@ pub use self::buffer_pool::BufferPool;
 pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
-    pub window: Option<std::rc::Rc<dyn SurfaceWindow>>,
+    pub window: Option<Rc<dyn SurfaceWindow>>,
+    /// A separate display owner allows old windows to be released during replacement.
+    /// Otherwise the initial window keeps the display alive until device destruction.
+    /// With no window, a display owner starts windowed rendering with no surface attached.
+    pub display_owner: Option<Rc<dyn HasDisplayHandle>>,
     pub surface_options: SurfaceOptions,
+}
+
+enum InitialSurface {
+    Detached,
+    Attached(window_surface::WindowSurface),
 }
 
 /// An opened Vulkan adapter, device and queue.
@@ -76,20 +87,28 @@ pub struct Device {
     features: wgt::Features,
     lost: Cell<bool>,
     adapter: hal::vulkan::Adapter,
-    surface: Cell<Option<window_surface::WindowSurface>>,
-    _instance: hal::vulkan::Instance,
+    initial_surface: Cell<Option<InitialSurface>>,
+    // The instance may retain display connections, so their owner must outlive it.
+    instance: hal::vulkan::Instance,
+    display_owner: Option<Rc<dyn HasDisplayHandle>>,
 }
 
 impl Device {
     pub fn new(options: &Options) -> Result<Self, String> {
-        let display = options
-            .window
-            .as_ref()
-            .map(|window| {
-                window.display_handle()
-                    .map_err(|error| format!("Getting Vulkan display handle: {error}"))
-            })
+        let display_owner = options.display_owner.clone().or_else(|| {
+            options.window.clone().map(|window| window as Rc<dyn HasDisplayHandle>)
+        });
+        let display = display_owner.as_ref()
+            .map(|owner| owner.display_handle()
+                .map_err(|error| format!("Getting Vulkan display handle: {error}")))
             .transpose()?;
+        if let Some(window) = &options.window {
+            let window_display = window.display_handle()
+                .map_err(|error| format!("Getting Vulkan window display: {error}"))?;
+            if display.map(|handle| handle.as_raw()) != Some(window_display.as_raw()) {
+                return Err("Vulkan window and display owner must use the same display".into());
+            }
+        }
         if options.validation {
             let entry = unsafe { ash::Entry::load() }
                 .map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -194,8 +213,12 @@ impl Device {
             features,
             lost: Cell::new(false),
             adapter: exposed.adapter,
-            surface: Cell::new(surface),
-            _instance: instance,
+            initial_surface: Cell::new(display_owner.as_ref().map(|_| match surface {
+                Some(surface) => InitialSurface::Attached(surface),
+                None => InitialSurface::Detached,
+            })),
+            instance,
+            display_owner,
         })
     }
 

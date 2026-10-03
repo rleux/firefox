@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::device::vulkan::{
-    hal, wgt, Device, Options, SurfaceOptions,
+    hal, wgt, Device, InitialSurface, Options, SurfaceOptions,
     resources::Owned,
     swapchain::{PresentationStatus, Swapchain},
     tests::{upload_queue, validation_logging, ERRORS},
@@ -13,11 +13,15 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::sync::atomic::Ordering;
 use wgpu_hal::{Adapter as _, CommandEncoder as _, Device as _};
 
-pub(crate) struct X11Window {
+pub(crate) struct X11Display {
     library: libloading::Library,
     display: NonNull<c_void>,
-    window: c_ulong,
     screen: c_int,
+}
+
+pub(crate) struct X11Window {
+    connection: Rc<X11Display>,
+    window: c_ulong,
 }
 
 #[repr(C)]
@@ -141,16 +145,21 @@ fn swapchain_consecutive_passes_order_color_and_depth_writes() {
 impl X11Window {
     pub(crate) fn clear(&self) {
         unsafe {
-            self.library.get::<unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int>(b"XClearWindow\0")
-                .unwrap()(self.display.as_ptr(), self.window);
-            self.library.get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
-                .unwrap()(self.display.as_ptr(), 0);
+            self.connection
+                .library
+                .get::<unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int>(b"XClearWindow\0")
+                .unwrap()(self.connection.display.as_ptr(), self.window);
+            self.connection
+                .library
+                .get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
+                .unwrap()(self.connection.display.as_ptr(), 0);
         }
     }
 
     pub(crate) fn pixels(&self, size: [u32; 2]) -> Vec<c_ulong> {
         unsafe {
             let get_image = self
+                .connection
                 .library
                 .get::<unsafe extern "C" fn(
                     *mut c_void,
@@ -164,15 +173,17 @@ impl X11Window {
                 ) -> *mut c_void>(b"XGetImage\0")
                 .unwrap();
             let get_pixel = self
+                .connection
                 .library
                 .get::<unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_ulong>(b"XGetPixel\0")
                 .unwrap();
             let destroy = self
+                .connection
                 .library
                 .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"XDestroyImage\0")
                 .unwrap();
             let image = get_image(
-                self.display.as_ptr(),
+                self.connection.display.as_ptr(),
                 self.window,
                 0,
                 0,
@@ -195,26 +206,32 @@ impl X11Window {
 
     pub(crate) fn resize(&self, size: [u32; 2]) {
         unsafe {
-            self.library
+            self.connection
+                .library
                 .get::<unsafe extern "C" fn(*mut c_void, c_ulong, c_uint, c_uint) -> c_int>(
                     b"XResizeWindow\0",
                 )
-                .unwrap()(self.display.as_ptr(), self.window, size[0], size[1]);
-            self.library
+                .unwrap()(
+                self.connection.display.as_ptr(),
+                self.window,
+                size[0],
+                size[1],
+            );
+            self.connection
+                .library
                 .get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
-                .unwrap()(self.display.as_ptr(), 0);
+                .unwrap()(self.connection.display.as_ptr(), 0);
         }
     }
 
     pub(crate) unsafe fn new() -> Self {
-        let library = libloading::Library::new("libX11.so.6").unwrap();
-        let open = library
-            .get::<unsafe extern "C" fn(*const c_char) -> *mut c_void>(b"XOpenDisplay\0")
-            .unwrap();
-        let display = NonNull::new(open(std::ptr::null())).expect("An X11 display is required");
-        let screen = library
-            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"XDefaultScreen\0")
-            .unwrap()(display.as_ptr());
+        Self::with_display(Rc::new(X11Display::new()))
+    }
+
+    pub(crate) unsafe fn with_display(connection: Rc<X11Display>) -> Self {
+        let library = &connection.library;
+        let display = connection.display;
+        let screen = connection.screen;
         let root = library
             .get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_ulong>(b"XRootWindow\0")
             .unwrap()(display.as_ptr(), screen);
@@ -258,16 +275,29 @@ impl X11Window {
         library
             .get::<unsafe extern "C" fn(*mut c_void, c_int) -> c_int>(b"XSync\0")
             .unwrap()(display.as_ptr(), 0);
+        Self { connection, window }
+    }
+}
+
+impl X11Display {
+    pub(crate) unsafe fn new() -> Self {
+        let library = libloading::Library::new("libX11.so.6").unwrap();
+        let open = library
+            .get::<unsafe extern "C" fn(*const c_char) -> *mut c_void>(b"XOpenDisplay\0")
+            .unwrap();
+        let display = NonNull::new(open(std::ptr::null())).expect("An X11 display is required");
+        let screen = library
+            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"XDefaultScreen\0")
+            .unwrap()(display.as_ptr());
         Self {
             library,
             display,
-            window,
             screen,
         }
     }
 }
 
-impl HasDisplayHandle for X11Window {
+impl HasDisplayHandle for X11Display {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
         Ok(unsafe {
             DisplayHandle::borrow_raw(Display::Xlib(XlibDisplayHandle::new(
@@ -275,6 +305,12 @@ impl HasDisplayHandle for X11Window {
                 self.screen,
             )))
         })
+    }
+}
+
+impl HasDisplayHandle for X11Window {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        self.connection.display_handle()
     }
 }
 
@@ -287,14 +323,79 @@ impl HasWindowHandle for X11Window {
 impl Drop for X11Window {
     fn drop(&mut self) {
         unsafe {
-            self.library
+            self.connection
+                .library
                 .get::<unsafe extern "C" fn(*mut c_void, c_ulong) -> c_int>(b"XDestroyWindow\0")
-                .unwrap()(self.display.as_ptr(), self.window);
+                .unwrap()(self.connection.display.as_ptr(), self.window);
+        }
+    }
+}
+
+impl Drop for X11Display {
+    fn drop(&mut self) {
+        unsafe {
             self.library
                 .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(b"XCloseDisplay\0")
                 .unwrap()(self.display.as_ptr());
         }
     }
+}
+
+#[test]
+#[ignore = "Requires X11, a presentation-capable Vulkan adapter and validation"]
+fn window_surface_rejects_changed_display() {
+    validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let device = Device::new(&Options {
+        window: Some(window),
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let other: Rc<dyn crate::vulkan::SurfaceWindow> = Rc::new(unsafe { X11Window::new() });
+    let error = device
+        .create_surface(&other, SurfaceOptions::default())
+        .err()
+        .unwrap();
+    assert!(error.contains("cannot change displays"), "{}", error);
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires X11, Vulkan and the Khronos validation layer"]
+fn window_surface_starts_without_surface() {
+    validation_logging();
+    let display = Rc::new(unsafe { X11Display::new() });
+    let weak = Rc::downgrade(&display);
+    let device = Rc::new(Device::new(&Options {
+        display_owner: Some(display.clone()),
+        validation: true,
+        ..Default::default()
+    }).unwrap());
+    let queue = Rc::new(upload_queue(&device));
+    let mut swapchain = Swapchain::new(&queue).unwrap();
+    assert!(Swapchain::new(&queue).is_none());
+    assert!(!swapchain.prepare_target([64, 48]).unwrap());
+    assert!(swapchain.configuration().is_none());
+    assert_eq!(swapchain.present_result(), Some(crate::PresentResult::Occluded));
+
+    swapchain.set_paused(true).unwrap();
+    let window = Rc::new(unsafe { X11Window::with_display(display.clone()) });
+    swapchain.set_window(Some(window), SurfaceOptions::default()).unwrap();
+    swapchain.begin_frame();
+    assert!(!swapchain.prepare_target([64, 48]).unwrap());
+    swapchain.set_paused(false).unwrap();
+    swapchain.begin_frame();
+    assert!(swapchain.prepare_target([64, 48]).unwrap());
+    swapchain.discard_acquired().unwrap();
+    swapchain.set_window(None, SurfaceOptions::default()).unwrap();
+    drop(display);
+    drop(swapchain);
+    drop(queue);
+    assert!(weak.upgrade().is_some());
+    drop(device);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -314,9 +415,13 @@ fn window_surface_selects_present_adapter_and_retains_window() {
             ..Default::default()
         };
         let device = Rc::new(Device::new(&options).unwrap());
-        let surface = device.surface.take().unwrap();
+        let initial_surface = device.initial_surface.take().unwrap();
+        let surface = match &initial_surface {
+            InitialSurface::Attached(surface) => surface,
+            InitialSurface::Detached => panic!("Expected the supplied window surface"),
+        };
         let caps = unsafe { device.adapter.surface_capabilities(&surface.raw) }.unwrap();
-        device.surface.set(Some(surface));
+        device.initial_surface.set(Some(initial_surface));
         let queue = Rc::new(upload_queue(&device));
         let mut swapchain = Swapchain::new(&queue).unwrap();
         assert!(Swapchain::new(&queue).is_none());
@@ -349,6 +454,8 @@ fn window_surface_selects_present_adapter_and_retains_window() {
         drop(device);
         assert!(weak.upgrade().is_some());
         drop(swapchain);
+        assert!(weak.upgrade().is_some());
+        drop(queue);
         assert!(weak.upgrade().is_none());
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
@@ -419,6 +526,14 @@ fn window_surface_rejects_present_incompatible_adapter() {
     };
     let error = Device::new(&options).err().unwrap();
     assert!(error.contains("No Vulkan adapters can present"), "{}", error);
+    let device = Device::new(&Options {
+        validation: true,
+        display_owner: Some(window.clone()),
+        ..Default::default()
+    }).unwrap();
+    let error = device.create_surface(options.window.as_ref().unwrap(), SurfaceOptions::default()).err().unwrap();
+    assert!(error.contains("cannot present to the replacement window"), "{}", error);
+    drop(device);
     drop(options);
     drop(window);
     assert!(weak.upgrade().is_none());
@@ -462,6 +577,7 @@ fn swapchain_acquisition_discards_and_drains_the_shared_queue() {
         .unwrap();
     std::mem::forget(swapchain.acquire().unwrap().unwrap());
     assert!(swapchain.acquire().is_err());
+    assert!(swapchain.set_window(None, SurfaceOptions::default()).is_err());
     assert!(swapchain
         .configure([0, 0], SurfaceOptions::default())
         .is_err());
