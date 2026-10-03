@@ -36,6 +36,14 @@ wr::WrExternalImage RenderSharedSurfaceTextureHost::Lock(uint8_t aChannelIndex,
                                   mMap.mStride * mSurface->GetSize().height);
 }
 
+wr::WrExternalImage RenderSharedSurfaceTextureHost::LockExternalBuffer(
+    uint8_t aChannelIndex) {
+  if (aChannelIndex != 0) {
+    return InvalidToWrExternalImage();
+  }
+  return Lock(aChannelIndex, nullptr);
+}
+
 void RenderSharedSurfaceTextureHost::Unlock() {
   if (mLocked) {
     mSurface->Unmap();

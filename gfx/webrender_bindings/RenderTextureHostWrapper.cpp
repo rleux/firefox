@@ -50,6 +50,18 @@ void RenderTextureHostWrapper::Unlock() {
   }
 }
 
+wr::WrExternalImage RenderTextureHostWrapper::LockExternalBuffer(
+    uint8_t aChannelIndex) {
+  return mTextureHost ? mTextureHost->LockExternalBuffer(aChannelIndex)
+                      : InvalidToWrExternalImage();
+}
+
+void RenderTextureHostWrapper::UnlockExternalBuffer() {
+  if (mTextureHost) {
+    mTextureHost->UnlockExternalBuffer();
+  }
+}
+
 wr::WrExternalImage RenderTextureHostWrapper::LockSWGL(
     uint8_t aChannelIndex, void* aContext, RenderCompositor* aCompositor) {
   if (!mTextureHost) {

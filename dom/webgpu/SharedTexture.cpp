@@ -7,6 +7,7 @@
 #include "mozilla/gfx/CanvasRenderThread.h"
 #include "mozilla/layers/TextureHost.h"
 #include "mozilla/webgpu/WebGPUParent.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 
 #ifdef XP_WIN
 #  include "mozilla/webgpu/SharedTextureD3D11.h"
@@ -29,6 +30,10 @@ UniquePtr<SharedTexture> SharedTexture::Create(
     const struct ffi::WGPUTextureFormat aFormat,
     const ffi::WGPUTextureUsages aUsage) {
   MOZ_ASSERT(aParent);
+
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    return nullptr;
+  }
 
   UniquePtr<SharedTexture> texture;
 #ifdef XP_WIN
