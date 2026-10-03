@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{hal, SurfaceOptions};
+use super::{hal, Device, SurfaceOptions};
 use raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle as Display, RawWindowHandle as Window,
 };
@@ -41,6 +41,30 @@ impl WindowSurface {
             options,
             _window: window.clone(),
         })
+    }
+}
+
+impl Device {
+    pub(super) fn create_surface(
+        &self,
+        window: &Rc<dyn SurfaceWindow>,
+        options: SurfaceOptions,
+    ) -> Result<WindowSurface, String> {
+        let display = window
+            .display_handle()
+            .map_err(|error| format!("Getting Vulkan display handle: {error}"))?;
+        let owned_display = self.display_owner.as_ref()
+            .ok_or("Vulkan window replacement requires an owned display")?
+            .display_handle()
+            .map_err(|error| format!("Getting owned Vulkan display: {error}"))?;
+        if display.as_raw() != owned_display.as_raw() {
+            return Err("Vulkan window replacement cannot change displays".into());
+        }
+        let surface = WindowSurface::new(self.instance.as_ref(), window, display.as_raw(), options)?;
+        if unsafe { self.adapter.surface_capabilities(surface.raw.as_ref()) }.is_none() {
+            return Err("The Vulkan adapter cannot present to the replacement window".into());
+        }
+        Ok(surface)
     }
 }
 
