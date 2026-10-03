@@ -110,6 +110,7 @@ CARGO_CONFIG_KEYS = {
     "MOZ_RUST_DEFAULT_FLAGS": _as_list,
     "MOZ_RUST_LIBRARY_RUSTCFLAGS": _as_list,
     "MOZ_RUST_SANITIZER_OPTION_VARS": _as_list,
+    "MOZ_WEBRENDER_VULKAN_SHADER_COMPILER": _as_str,
     "PKG_CONFIG": _as_str,
     "PKG_CONFIG_LIBDIR": _as_str,
     "PKG_CONFIG_PATH": _as_str,
@@ -527,6 +528,8 @@ def compose_env(
     env["RUSTFMT"] = substs.get("RUSTFMT")
     env["LIBCLANG_PATH"] = substs.get("MOZ_LIBCLANG_PATH")
     env["CLANG_PATH"] = substs.get("MOZ_CLANG_PATH")
+    if compiler := substs.get("MOZ_WEBRENDER_VULKAN_SHADER_COMPILER"):
+        env["WR_SHADER_COMPILER"] = compiler
     env["PKG_CONFIG_ALLOW_CROSS"] = "1"
     # A configured empty value clears an inherited one, which is how a sysroot
     # build keeps host search paths out of pkg-config.

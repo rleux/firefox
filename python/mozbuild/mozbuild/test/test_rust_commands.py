@@ -592,6 +592,17 @@ class TestComposeEnv(unittest.TestCase):
         )
         self.assertEqual(_env(_cmd(), {})["BINDGEN_EXTRA_CLANG_ARGS"], "")
 
+    def test_vulkan_shader_compiler_comes_from_configure(self):
+        for compiler in ("glslang", "naga"):
+            with self.subTest(compiler=compiler):
+                env = _env(
+                    _cmd(),
+                    {"MOZ_WEBRENDER_VULKAN_SHADER_COMPILER": compiler},
+                    {"WR_SHADER_COMPILER": "inherited"},
+                )
+                self.assertEqual(env["WR_SHADER_COMPILER"], compiler)
+        self.assertNotIn("WR_SHADER_COMPILER", _env(_cmd(), {}))
+
     def test_known_wrapper_custom_is_only_set_when_configured(self):
         self.assertNotIn("CC_KNOWN_WRAPPER_CUSTOM", _env(_cmd(), {}))
         env = _env(_cmd(), {"CC_KNOWN_WRAPPER_CUSTOM": "kache"})
