@@ -28,6 +28,8 @@ pub struct Submission {
     recording_id: Option<Rc<()>>,
     commits: Vec<Box<dyn FnOnce()>>,
     resources: Vec<Box<dyn Any>>,
+    #[cfg(target_os = "linux")]
+    external_sync: super::timeline::SubmissionSync,
 }
 
 /// Exclusive access to an open submission; releasing this borrow does not submit it.
@@ -61,6 +63,23 @@ impl DerefMut for SubmissionBorrow<'_> {
 }
 
 impl Recording<'_> {
+    #[cfg(target_os = "linux")]
+    pub fn wait_timeline(
+        &mut self, timeline: &Rc<super::SharedTimeline>, value: u64,
+    ) -> Result<(), String> {
+        let submission = &mut *self.submission;
+        submission.external_sync.wait(&submission.owner, timeline, value)
+    }
+
+    /// Publish the value to consumers only after successful submission.
+    #[cfg(target_os = "linux")]
+    pub fn signal_timeline(
+        &mut self, timeline: &Rc<super::SharedTimeline>, value: u64,
+    ) -> Result<(), String> {
+        let submission = &mut *self.submission;
+        submission.external_sync.signal(&submission.owner, timeline, value)
+    }
+
     pub fn encoder(&mut self) -> &mut hal::vulkan::CommandEncoder {
         self.submission.encoder.as_mut().unwrap()
     }
@@ -113,6 +132,8 @@ impl Submission {
             recording_id: Some(Rc::new(())),
             commits: Vec::new(),
             resources: Vec::new(),
+            #[cfg(target_os = "linux")]
+            external_sync: super::timeline::SubmissionSync::default(),
         };
         unsafe {
             submission.encoder = Some(
@@ -178,6 +199,8 @@ impl Submission {
         if !self.recording || self.attempted {
             return Err("Submission has already been attempted".into());
         }
+        #[cfg(target_os = "linux")]
+        self.external_sync.validate()?;
         self.attempted = true;
         unsafe {
             self.buffer = Some(
@@ -191,20 +214,23 @@ impl Submission {
                     })?,
             );
             self.recording = false;
-            self.owner
-                .open
-                .queue
-                .submit(
-                    &[self.buffer.as_ref().unwrap()],
-                    surfaces,
-                    (&self.fence, self.fence_value),
-                )
-                .map_err(|error| {
-                    self.owner.lost.set(true);
-                    format!("Submitting commands: {error:?}")
-                })?;
+            #[cfg(target_os = "linux")]
+            let staged = self.external_sync.stage(&self.owner.open.queue);
+            let result = self.owner.open.queue.submit(
+                &[self.buffer.as_ref().unwrap()],
+                surfaces,
+                (&self.fence, self.fence_value),
+            );
+            #[cfg(target_os = "linux")]
+            drop(staged);
+            result.map_err(|error| {
+                self.owner.lost.set(true);
+                format!("Submitting commands: {error:?}")
+            })?;
         }
         self.submitted = true;
+        #[cfg(target_os = "linux")]
+        self.external_sync.submitted();
         for commit in self.commits.drain(..) {
             commit();
         }
@@ -218,6 +244,8 @@ impl Submission {
             self.encoder.as_mut().unwrap().reset_all(buffer.into_iter());
         }
         self.resources.clear();
+        #[cfg(target_os = "linux")]
+        self.external_sync.clear();
         self.complete = true;
     }
 

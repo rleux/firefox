@@ -18,6 +18,10 @@ pub mod shaders {
 mod bindings;
 #[cfg(target_os = "linux")]
 mod external;
+#[cfg(target_os = "linux")]
+mod timeline;
+#[cfg(target_os = "linux")]
+pub use self::timeline::{SharedTimeline, TimelineHandle};
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
