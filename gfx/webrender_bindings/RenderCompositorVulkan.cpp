@@ -18,12 +18,65 @@
 #  include "mozilla/widget/AndroidCompositorWidget.h"
 #endif
 
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+#  include "mozilla/WidgetUtilsGtk.h"
+#  include "mozilla/X11Util.h"
+#  include "mozilla/widget/GtkCompositorWidget.h"
+#endif
+
 namespace mozilla::wr {
 
 bool RenderCompositorVulkan::IsRequested() {
   return gfx::gfxVars::UseWebRenderVulkan() &&
          !gfx::gfxVars::UseSoftwareWebRender();
 }
+
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+class VulkanX11Display final {
+ public:
+  NS_INLINE_DECL_REFCOUNTING(VulkanX11Display)
+
+  explicit VulkanX11Display(Display* aDisplay) : mDisplay(aDisplay) {}
+  Display* Get() const { return mDisplay; }
+
+ private:
+  ~VulkanX11Display() { XCloseDisplay(mDisplay); }
+  Display* const mDisplay;
+};
+
+static Maybe<OwnedVulkanConfig> AcquireX11Surface(
+    widget::CompositorWidget* aWidget, VulkanX11Display* aDisplay,
+    bool aValidation, bool aVsync) {
+  auto* gtk = aWidget->AsGTK();
+  const auto window = gtk ? gtk->XWindow() : 0;
+  if (!window) {
+    return Nothing();
+  }
+  XWindowAttributes attributes{};
+  if (!XGetWindowAttributes(aDisplay->Get(), window, &attributes)) {
+    return Nothing();
+  }
+  // GTK destroys its Renderer synchronously before destroying the native
+  // window.
+  WrVulkanConfig config{
+      WrWindowHandle::Xlib(aDisplay->Get(), window,
+                           XScreenNumberOfScreen(attributes.screen)),
+      {aWidget,
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->AddRef();
+       },
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->Release();
+       }},
+      {aDisplay,
+       [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->AddRef(); },
+       [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->Release(); }},
+      aValidation,
+      aVsync,
+      attributes.depth == 32};
+  return Some(OwnedVulkanConfig(config));
+}
+#endif
 
 #ifdef MOZ_WIDGET_ANDROID
 static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
@@ -64,6 +117,25 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
     return MakeUnique<RenderCompositorVulkan>(aWidget, config);
   }
 #endif
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  if (aWidget && aWidget->AsGTK() && widget::GdkIsX11Display()) {
+    auto* connection = XOpenDisplay(XDisplayString(DefaultXDisplay()));
+    if (!connection) {
+      aError.AssignLiteral("RcVulkan(X11 display)");
+      return nullptr;
+    }
+    RefPtr<VulkanX11Display> display = new VulkanX11Display(connection);
+    auto config = AcquireX11Surface(aWidget, display, false, true);
+    if (!config) {
+      aError.AssignLiteral("RcVulkan(X11 window)");
+      return nullptr;
+    }
+    auto compositor =
+        MakeUnique<RenderCompositorVulkan>(aWidget, config->Raw());
+    compositor->mX11Display = std::move(display);
+    return compositor;
+  }
+#endif
   aError.AssignLiteral("RcVulkan(unsupported widget)");
   return nullptr;
 }
@@ -73,11 +145,9 @@ RenderCompositorVulkan::RenderCompositorVulkan(
     const WrVulkanConfig& aConfig)
     : RenderCompositor(aWidget) {
   mConfig.emplace(aConfig);
-#ifdef MOZ_WIDGET_ANDROID
   mValidation = aConfig.validation;
   mVsync = aConfig.vsync;
   mTransparent = aConfig.transparent;
-#endif
 }
 
 RenderCompositorVulkan::~RenderCompositorVulkan() {
@@ -109,10 +179,8 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
   mConfig.reset();
   if (next) {
     mConfig.emplace(std::move(next.ref()));
-#ifdef MOZ_WIDGET_ANDROID
     mVsync = mConfig->Raw().vsync;
     mTransparent = mConfig->Raw().transparent;
-#endif
   }
   auto previous = mFrames.CompletedFrame();
   if (!PollCompletions()) {
@@ -240,6 +308,22 @@ bool RenderCompositorVulkan::Resume() {
   mHandlingNewSurfaceError = false;
   if (!SetSurface(&config->Raw())) {
     return false;
+  }
+#elif defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  if (mX11Display) {
+    Pause();
+    if (mFailed) {
+      return false;
+    }
+    auto config = AcquireX11Surface(mWidget, mX11Display, mValidation, mVsync);
+    if (!config) {
+      return false;
+    }
+    auto raw = config->Raw();
+    raw.transparent = mTransparent;
+    if (!SetSurface(&raw)) {
+      return false;
+    }
   }
 #endif
   if (!mConfig || !mConfig->HasWindow()) {
