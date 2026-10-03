@@ -514,6 +514,11 @@ RefPtr<RendererOGL::ScreenPixelsPromise> RendererOGL::RequestScreenPixels(
     return ScreenPixelsPromise::CreateAndReject(NS_ERROR_ILLEGAL_VALUE,
                                                 __func__);
   }
+  if (!mCompositor->SupportAsyncScreenshot() &&
+      !mCompositor->UseLayerCompositor()) {
+    return ScreenPixelsPromise::CreateAndReject(NS_ERROR_NOT_IMPLEMENTED,
+                                                __func__);
+  }
 
   // If a new request is made we no longer care about the result of the previous
   // one, so just reject it if it exists.

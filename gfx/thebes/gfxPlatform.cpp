@@ -2481,6 +2481,13 @@ void gfxPlatform::InitWebRenderConfig() {
 
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
 
+#if defined(MOZ_WEBRENDER_VULKAN)
+#  if defined(MOZ_WIDGET_ANDROID)
+  // SurfaceTexture video images still require the GL compositor.
+  gfxVars::SetUseWebRenderVulkan(false);
+#  endif
+#endif
+
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");
 
