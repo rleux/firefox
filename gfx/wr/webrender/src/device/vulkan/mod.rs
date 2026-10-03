@@ -16,6 +16,8 @@ pub mod shaders {
 }
 
 mod bindings;
+#[cfg(target_os = "linux")]
+mod external;
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
@@ -190,6 +192,10 @@ impl Device {
                 | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
                 | wgt::Features::TIMESTAMP_QUERY
                 | wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        #[cfg(target_os = "linux")]
+        let (open, features) = external::open_adapter(&exposed, features)
+            .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
+        #[cfg(not(target_os = "linux"))]
         let open = unsafe {
             exposed.adapter.open(
                 features,
