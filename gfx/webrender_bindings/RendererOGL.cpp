@@ -129,6 +129,7 @@ RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
   MOZ_ASSERT(mCompositor);
   MOZ_ASSERT(mRenderer);
   MOZ_ASSERT(mBridge);
+  mCompositor->SetRenderer(mRenderer, mWindowId);
   MOZ_COUNT_CTOR(RendererOGL);
 }
 
@@ -146,6 +147,7 @@ RendererOGL::~RendererOGL() {
   } else {
     wr_renderer_delete(mRenderer);
   }
+  mCompositor->SetRenderer(nullptr, mWindowId);
 }
 
 wr::WrExternalImageHandler RendererOGL::GetExternalImageHandler() {
@@ -234,14 +236,17 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   }
 
   LayoutDeviceIntSize size = mCompositor->GetBufferSize();
+  const auto renderSize = !present && mCompositor->UsesBackendPresentation()
+                              ? LayoutDeviceIntSize()
+                              : size;
   auto bufferAge = mCompositor->GetBufferAge();
 
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
   WrPresentResult presentResult;
-  bool rendered =
-      wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
-                         aOutStats, &dirtyRects, &didRasterize, &presentResult);
+  bool rendered = wr_renderer_render(
+      mRenderer, renderSize.width, renderSize.height, bufferAge, aOutStats,
+      &dirtyRects, &didRasterize, &presentResult);
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
@@ -257,6 +262,12 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     }
     RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
     return RenderedFrameId();
+  }
+
+  if (presentResult == WrPresentResult::Retry ||
+      presentResult == WrPresentResult::SizeMismatch) {
+    mBridge->ScheduleRenderOnCompositorThread(
+        wr::RenderReasons::SKIPPED_COMPOSITE);
   }
 
   RenderedFrameId frameId;
@@ -332,7 +343,6 @@ bool RendererOGL::EnsureAsyncScreenshot() {
   if (mCompositor->SupportAsyncScreenshot()) {
     return true;
   }
-  MOZ_ASSERT_UNREACHABLE("unexpected to be called");
   return false;
 }
 

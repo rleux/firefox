@@ -77,6 +77,10 @@ class RenderCompositor {
   // Called when WR rendering is skipped
   virtual void Update() {}
 
+  virtual const WrVulkanConfig* GetVulkanConfig() const { return nullptr; }
+  virtual bool UsesBackendPresentation() const { return false; }
+  virtual void SetRenderer(Renderer* aRenderer, WindowId aWindowId) {}
+
   virtual gl::GLContext* gl() const { return nullptr; }
   virtual void* swgl() const { return nullptr; }
 

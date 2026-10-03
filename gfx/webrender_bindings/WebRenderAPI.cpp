@@ -251,11 +251,13 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         auto* const swgl = compositor->swgl();
         auto* const gl =
             (compositor->gl() && !swgl) ? compositor->gl() : nullptr;
+        const auto* vulkan = compositor->GetVulkanConfig();
         RenderThread* const renderThread = RenderThread::Get();
-        auto* const progCache = (renderThread->GetProgramCache() && !swgl)
-                                    ? renderThread->GetProgramCache()->Raw()
-                                    : nullptr;
-        auto* const shaders = (renderThread->GetShaders() && !swgl)
+        auto* const progCache =
+            (renderThread->GetProgramCache() && !swgl && !vulkan)
+                ? renderThread->GetProgramCache()->Raw()
+                : nullptr;
+        auto* const shaders = (renderThread->GetShaders() && !swgl && !vulkan)
                                   ? renderThread->GetShaders()->RawShaders()
                                   : nullptr;
 
@@ -291,9 +293,9 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 aWindowId, aSize.width, aSize.height,
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
                 supportLowPriorityThreadpool, gfx::gfxVars::UseGLSwizzle(),
-                gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl, nullptr,
-                compositor->SurfaceOriginIsTopLeft(), progCache, shaders,
-                renderThread->ThreadPool().Raw(),
+                gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl,
+                vulkan, compositor->SurfaceOriginIsTopLeft(), progCache,
+                shaders, renderThread->ThreadPool().Raw(),
                 renderThread->ThreadPoolLP().Raw(),
                 renderThread->MemoryChunkPool(),
                 renderThread->GetRenderBackendPool(),

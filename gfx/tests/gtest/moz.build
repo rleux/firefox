@@ -30,6 +30,8 @@ UNIFIED_SOURCES += [
     "TestTextures.cpp",
     "TestTreeTraversal.cpp",
     "TestVsync.cpp",
+    "TestVulkanFrameTracker.cpp",
+    "TestVulkanSurfaceConfig.cpp",
     "TestYUVtoRGB32.cpp",
 ]
 
