@@ -1,6 +1,40 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 use super::*;
 use std::ffi::CStr;
 use wgpu_hal::{Adapter as _, Instance as _};
+use std::{ops::Deref, rc::Rc};
+
+pub(super) struct Owned<T> {
+    pub(super) owner: Rc<Device>,
+    raw: Option<T>,
+    destroy: unsafe fn(&hal::vulkan::Device, T),
+}
+
+impl<T> Owned<T> {
+    pub fn new(owner: &Rc<Device>, raw: T, destroy: unsafe fn(&hal::vulkan::Device, T)) -> Self {
+        Self { owner: owner.clone(), raw: Some(raw), destroy }
+    }
+}
+
+impl<T> Deref for Owned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.raw.as_ref().unwrap()
+    }
+}
+
+impl<T> Drop for Owned<T> {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            unsafe { (self.destroy)(self.owner.raw_device(), raw) }
+        }
+    }
+}
+
 impl Device {
     pub(super) unsafe fn clear_color_copy_destination(
         &self,

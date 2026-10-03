@@ -17,6 +17,11 @@ mod binding_cache;
 #[cfg(target_os = "linux")]
 #[path = "vulkan/external.rs"]
 mod external;
+#[cfg(target_os = "linux")]
+#[path = "vulkan/timeline.rs"]
+mod timeline;
+#[cfg(target_os = "linux")]
+pub use self::timeline::{SharedTimeline, TimelineHandle};
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
