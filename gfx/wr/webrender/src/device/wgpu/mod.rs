@@ -14,6 +14,9 @@ pub mod shaders {
 
 mod bindings;
 mod binding_cache;
+#[cfg(target_os = "linux")]
+#[path = "vulkan/external.rs"]
+mod external;
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;
