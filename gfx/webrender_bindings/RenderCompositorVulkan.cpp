@@ -4,6 +4,8 @@
 
 #include "RenderCompositorVulkan.h"
 
+#include "mozilla/StaticPrefs_gfx.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
 
@@ -17,6 +19,11 @@
 #endif
 
 namespace mozilla::wr {
+
+bool RenderCompositorVulkan::IsRequested() {
+  return gfx::gfxVars::UseWebRenderVulkan() &&
+         !gfx::gfxVars::UseSoftwareWebRender();
+}
 
 #ifdef MOZ_WIDGET_ANDROID
 static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(

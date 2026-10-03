@@ -2481,6 +2481,13 @@ void gfxPlatform::InitWebRenderConfig() {
 
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
 
+#if defined(MOZ_WEBRENDER_VULKAN)
+#  if defined(MOZ_WIDGET_ANDROID)
+  gfxVars::SetUseWebRenderVulkan(
+      hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup());
+#  endif
+#endif
+
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");
 
