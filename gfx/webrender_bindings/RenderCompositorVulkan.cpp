@@ -7,13 +7,70 @@
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
 
+#ifdef MOZ_WIDGET_ANDROID
+#  include <android/native_window.h>
+#  include <android/native_window_jni.h>
+
+#  include "mozilla/ScopeExit.h"
+#  include "mozilla/jni/Utils.h"
+#  include "mozilla/widget/AndroidCompositorWidget.h"
+#endif
+
 namespace mozilla::wr {
+
+#ifdef MOZ_WIDGET_ANDROID
+static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
+    widget::AndroidCompositorWidget* aWidget, bool aValidation, bool aVsync,
+    bool aTransparent) {
+  auto surface = reinterpret_cast<jobject>(aWidget->GetEGLNativeWindow());
+  if (!surface) {
+    return Nothing();
+  }
+  auto* window = ANativeWindow_fromSurface(jni::GetEnvForThread(), surface);
+  if (!window) {
+    return Nothing();
+  }
+  auto release = MakeScopeExit([&] { ANativeWindow_release(window); });
+  WrVulkanConfig config{
+      WrWindowHandle::Android(window),
+      {window,
+       [](void* aWindow) {
+         ANativeWindow_acquire(static_cast<ANativeWindow*>(aWindow));
+       },
+       [](void* aWindow) {
+         ANativeWindow_release(static_cast<ANativeWindow*>(aWindow));
+       }},
+      {},
+      aValidation,
+      aVsync,
+      aTransparent};
+  return Some(OwnedVulkanConfig(config));
+}
+#endif
+
+UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
+    const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError) {
+#ifdef MOZ_WIDGET_ANDROID
+  if (aWidget && aWidget->AsAndroid()) {
+    WrVulkanConfig config{
+        WrWindowHandle::Android(nullptr), {}, {}, false, true, false};
+    return MakeUnique<RenderCompositorVulkan>(aWidget, config);
+  }
+#endif
+  aError.AssignLiteral("RcVulkan(unsupported widget)");
+  return nullptr;
+}
 
 RenderCompositorVulkan::RenderCompositorVulkan(
     const RefPtr<widget::CompositorWidget>& aWidget,
     const WrVulkanConfig& aConfig)
     : RenderCompositor(aWidget) {
   mConfig.emplace(aConfig);
+#ifdef MOZ_WIDGET_ANDROID
+  mValidation = aConfig.validation;
+  mVsync = aConfig.vsync;
+  mTransparent = aConfig.transparent;
+#endif
 }
 
 RenderCompositorVulkan::~RenderCompositorVulkan() {
@@ -45,6 +102,10 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
   mConfig.reset();
   if (next) {
     mConfig.emplace(std::move(next.ref()));
+#ifdef MOZ_WIDGET_ANDROID
+    mVsync = mConfig->Raw().vsync;
+    mTransparent = mConfig->Raw().transparent;
+#endif
   }
   auto previous = mFrames.CompletedFrame();
   if (!PollCompletions()) {
@@ -148,7 +209,33 @@ void RenderCompositorVulkan::Pause() {
 }
 
 bool RenderCompositorVulkan::Resume() {
-  if (!mRenderer || mFailed || !mConfig || !mConfig->HasWindow()) {
+  if (!mRenderer || mFailed) {
+    return false;
+  }
+#ifdef MOZ_WIDGET_ANDROID
+  Pause();
+  if (mFailed) {
+    return false;
+  }
+  auto* widget = mWidget ? mWidget->AsAndroid() : nullptr;
+  if (!widget) {
+    return false;
+  }
+  auto config =
+      AcquireAndroidSurface(widget, mValidation, mVsync, mTransparent);
+  if (!config) {
+    if (mHandlingNewSurfaceError) {
+      RenderThread::Get()->HandleWebRenderError(WebRenderError::NEW_SURFACE);
+    }
+    mHandlingNewSurfaceError = true;
+    return false;
+  }
+  mHandlingNewSurfaceError = false;
+  if (!SetSurface(&config->Raw())) {
+    return false;
+  }
+#endif
+  if (!mConfig || !mConfig->HasWindow()) {
     return false;
   }
   if (!wr_renderer_set_surface_paused(mRenderer, false)) {

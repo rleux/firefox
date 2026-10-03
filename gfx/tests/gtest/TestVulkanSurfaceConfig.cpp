@@ -152,3 +152,10 @@ TEST(VulkanSurfaceConfig, DeferredAndroidNeedsNoNativeOwners)
   EXPECT_TRUE(compositor.IsPaused());
   EXPECT_FALSE(compositor.Resume());
 }
+
+TEST(VulkanSurfaceConfig, FactoryRejectsMissingWidget)
+{
+  nsCString error;
+  EXPECT_EQ(RenderCompositorVulkan::Create(nullptr, error), nullptr);
+  EXPECT_FALSE(error.IsEmpty());
+}
