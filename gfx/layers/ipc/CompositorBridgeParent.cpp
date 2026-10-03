@@ -72,6 +72,7 @@
 #include "nsThreadUtils.h"    // for NS_IsMainThread
 #ifdef XP_WIN
 #  include "mozilla/layers/CompositorD3D11.h"
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
 #  include "mozilla/widget/WinCompositorWidget.h"
 #endif
 #include "mozilla/Hal.h"
@@ -1199,7 +1200,8 @@ CompositorBridgeParent::AllocPWebRenderBridgeParent(
   if (mWidget && mWidget->AsWindows()) {
     const auto options = mWidget->GetCompositorOptions();
     if (!options.UseSoftwareWebRender() &&
-        (DeviceManagerDx::Get()->CanUseDComp() ||
+        (wr::RenderCompositorVulkan::IsRequested() ||
+         DeviceManagerDx::Get()->CanUseDComp() ||
          gfxVars::UseWebRenderFlipSequentialWin())) {
       mWidget->AsWindows()->EnsureCompositorWindow();
     } else if (options.UseSoftwareWebRender() &&
