@@ -863,10 +863,20 @@ bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_vulkan_image_delete(void*);
 void wr_test_webgpu_timeline_lifecycle();
+void wr_test_webgpu_timeline_submission();
+void wr_test_webgpu_timeline_failed_submission();
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {
   OnRenderThread([] { wr_test_webgpu_timeline_lifecycle(); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineSubmission) {
+  OnRenderThread([] { wr_test_webgpu_timeline_submission(); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineFailedSubmission) {
+  OnRenderThread([] { wr_test_webgpu_timeline_failed_submission(); });
 }
 
 TEST_F(RenderExternalBuffer,
