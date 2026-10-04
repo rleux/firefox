@@ -20,6 +20,7 @@
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/RemoteTextureHostWrapper.h"
 #include "mozilla/layers/TextureClientSharedSurface.h"
+#include "mozilla/layers/VulkanTextureHost.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webrender/RenderThread.h"
@@ -230,6 +231,25 @@ void RemoteTextureOwnerClient::PushTexture(
   RemoteTextureMap::Get()->PushTexture(
       aTextureId, aOwnerId, mForPid, std::move(textureData), textureHost,
       SharedResourceWrapper::SharedTexture(aSharedTexture));
+}
+
+bool RemoteTextureOwnerClient::PushVulkanTexture(
+    const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+    const VulkanImagePublication& aPublication,
+    std::function<void(VulkanImageReturnMessage&&)>&& aReturn) {
+  if (!IsRegistered(aOwnerId) ||
+      aPublication.publicationId() != aTextureId.mId) {
+    return false;
+  }
+  RefPtr<TextureHost> host = VulkanTextureHost::Create(
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT,
+      aPublication, std::move(aReturn));
+  if (!host) {
+    return false;
+  }
+  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
+                                       host, nullptr);
+  return true;
 }
 
 void RemoteTextureOwnerClient::PushDummyTexture(

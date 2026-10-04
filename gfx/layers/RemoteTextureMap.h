@@ -47,6 +47,8 @@ namespace layers {
 
 class CompositableHost;
 class RemoteTextureHostWrapper;
+class VulkanImagePublication;
+class VulkanImageReturnMessage;
 
 struct RemoteTextureInfo {
   RemoteTextureInfo(const RemoteTextureId aTextureId,
@@ -239,6 +241,13 @@ class RemoteTextureOwnerClient final {
                    const SurfaceDescriptor& aDesc);
   void PushDummyTexture(const RemoteTextureId aTextureId,
                         const RemoteTextureOwnerId aOwnerId);
+  // The producer retains its allocation until the render-thread return
+  // callback. Rejected publications remain with the caller and do not invoke
+  // the callback.
+  bool PushVulkanTexture(
+      const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+      const VulkanImagePublication& aPublication,
+      std::function<void(VulkanImageReturnMessage&&)>&& aReturn);
   void GetLatestBufferSnapshot(const RemoteTextureOwnerId aOwnerId,
                                const mozilla::ipc::Shmem& aDestShmem,
                                const gfx::IntSize& aDestSize,

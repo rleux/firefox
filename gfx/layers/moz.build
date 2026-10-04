@@ -138,6 +138,7 @@ EXPORTS.mozilla.layers += [
     "composite/ImageComposite.h",
     "composite/RemoteTextureHostWrapper.h",
     "composite/TextureHost.h",
+    "composite/VulkanTextureHost.h",
     "CompositeProcessFencesHolderMap.h",
     "CompositionRecorder.h",
     "Compositor.h",
@@ -467,6 +468,7 @@ UNIFIED_SOURCES += [
 SOURCES += [
     "client/TextureClient.cpp",
     "composite/TextureHost.cpp",
+    "composite/VulkanTextureHost.cpp",
     "ImageContainer.cpp",
     "PersistentBufferProvider.cpp",
     "wr/WebRenderTextureHost.cpp",

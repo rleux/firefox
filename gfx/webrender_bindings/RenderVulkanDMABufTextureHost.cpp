@@ -18,7 +18,6 @@ RenderVulkanDMABufTextureHost::Create(const WrVulkanDmaBufDescriptor& aImage,
                                       const WrVulkanTimelineDescriptor& aReady,
                                       uint64_t aReadyValue,
                                       ReturnCallback&& aReturn) {
-  MOZ_ASSERT(RenderThread::IsInRenderThread());
   auto bytes = CheckedInt<size_t>(aImage.width) * aImage.height * 4;
   if (!aReturn || !aReadyValue || !aImage.width || !aImage.height ||
       aImage.width > INT32_MAX || aImage.height > INT32_MAX || !aImage.stride ||
