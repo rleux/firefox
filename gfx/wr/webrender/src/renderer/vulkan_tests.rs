@@ -14,6 +14,8 @@ use std::sync::{mpsc, atomic::Ordering};
 
 #[path = "vulkan_image_tests.rs"]
 mod images;
+#[path = "vulkan_external_image_tests.rs"]
+mod external_images;
 #[path = "vulkan_clip_tests.rs"]
 mod clips;
 #[path = "vulkan_filter_tests.rs"]
