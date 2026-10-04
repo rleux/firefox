@@ -23,6 +23,8 @@ EXPORTS.mozilla.webrender += [
     "RenderTextureHostSWGL.h",
     "RenderTextureHostWrapper.h",
     "RenderThread.h",
+    "VulkanImageIPC.h",
+    "VulkanImageTypes.h",
     "webrender_ffi.h",
     "WebRenderAPI.h",
     "WebRenderTypes.h",
@@ -46,6 +48,7 @@ UNIFIED_SOURCES += [
     "RenderTextureHostSWGL.cpp",
     "RenderTextureHostWrapper.cpp",
     "RenderThread.cpp",
+    "VulkanImageIPC.cpp",
     "WebRenderAPI.cpp",
     "WebRenderTypes.cpp",
 ]

@@ -498,6 +498,7 @@ IPDL_SOURCES += [
     "ipc/PUiCompositorController.ipdl",
     "ipc/PVideoBridge.ipdl",
     "ipc/PWebRenderBridge.ipdl",
+    "ipc/VulkanImages.ipdlh",
     "ipc/WebRenderMessages.ipdlh",
 ]
 

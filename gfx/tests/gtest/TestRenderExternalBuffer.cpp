@@ -14,11 +14,13 @@
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/layers/SourceSurfaceSharedData.h"
 #include "mozilla/layers/SynchronousTask.h"
+#include "mozilla/layers/VulkanImages.h"
 #include "mozilla/webrender/RenderBufferTextureHost.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderSharedSurfaceTextureHost.h"
 #include "mozilla/webrender/RenderTextureHostWrapper.h"
 #include "mozilla/webrender/RenderThread.h"
+#include "mozilla/webrender/VulkanImageIPC.h"
 #include "mozilla/widget/CompositorWidget.h"
 #include "nsThreadUtils.h"
 
@@ -410,6 +412,200 @@ TEST_F(RenderExternalBuffer, VulkanCompositorDefersNotificationsPastUnlock) {
 }
 
 #if defined(XP_LINUX) && !defined(ANDROID)
+namespace {
+
+template <typename T>
+bool RoundTripVulkanMessage(const T& aInput, T& aOutput) {
+  IPC::Message message(MSG_ROUTING_NONE, 0);
+  IPC::MessageWriter writer(message);
+  IPC::WriteParam(&writer, aInput);
+  IPC::MessageReader reader(message);
+  return IPC::ReadParam(&reader, &aOutput);
+}
+
+layers::VulkanImagePublication PublicationForTest(int aFd) {
+  RefPtr<FileHandleWrapper> memory =
+      new FileHandleWrapper(DuplicateFileHandle(aFd));
+  RefPtr<FileHandleWrapper> semaphore =
+      new FileHandleWrapper(DuplicateFileHandle(aFd));
+  VulkanUUID device{}, driver{};
+  device.fill(0x12);
+  driver.fill(0x34);
+  return layers::VulkanImagePublication(
+      9, memory, IntSize(3, 2), SurfaceFormat::B8G8R8A8, 0, 4, 16, true, false,
+      true, layers::VulkanTimelineDescriptor(semaphore, device, driver, 7));
+}
+
+}  // namespace
+
+TEST_F(RenderExternalBuffer, VulkanPublicationWireValidation) {
+  UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(fd);
+  const auto original = PublicationForTest(fd.get());
+  layers::VulkanImagePublication decoded;
+  ASSERT_TRUE(RoundTripVulkanMessage(original, decoded));
+  EXPECT_TRUE(ValidateVulkanImagePublication(decoded));
+  EXPECT_EQ(decoded.publicationId(), original.publicationId());
+  EXPECT_EQ(decoded.size(), original.size());
+  EXPECT_EQ(decoded.format(), original.format());
+  EXPECT_EQ(decoded.modifier(), original.modifier());
+  EXPECT_EQ(decoded.offset(), original.offset());
+  EXPECT_EQ(decoded.stride(), original.stride());
+  EXPECT_TRUE(decoded.copySrc());
+  EXPECT_FALSE(decoded.copyDst());
+  EXPECT_TRUE(decoded.colorTarget());
+  EXPECT_EQ(decoded.ready().value(), original.ready().value());
+  EXPECT_EQ(decoded.ready().deviceUUID(), original.ready().deviceUUID());
+  EXPECT_EQ(decoded.ready().driverUUID(), original.ready().driverUUID());
+  EXPECT_NE(decoded.memory()->GetHandle(), original.memory()->GetHandle());
+  EXPECT_NE(decoded.ready().handle()->GetHandle(),
+            original.ready().handle()->GetHandle());
+  EXPECT_NE(fcntl(original.memory()->GetHandle(), F_GETFD), -1);
+  EXPECT_NE(fcntl(original.ready().handle()->GetHandle(), F_GETFD), -1);
+  for (int field = 0; field < 13; ++field) {
+    SCOPED_TRACE(field);
+    auto invalid = decoded;
+    switch (field) {
+      case 0:
+        invalid.publicationId() = 0;
+        break;
+      case 1:
+        invalid.memory() = nullptr;
+        break;
+      case 2:
+        invalid.ready().handle() = nullptr;
+        break;
+      case 3:
+        invalid.ready().value() = 0;
+        break;
+      case 4:
+        invalid.size().width = 0;
+        break;
+      case 5:
+        invalid.size().height = -1;
+        break;
+      case 6:
+        invalid.format() = SurfaceFormat::A8;
+        break;
+      case 7:
+        invalid.stride() = 8;
+        break;
+      case 8:
+        invalid.stride() = 17;
+        break;
+      case 9:
+        invalid.offset() = 1;
+        break;
+      case 10:
+        invalid.offset() = UINT64_MAX - 3;
+        break;
+      case 11:
+        invalid.stride() = UINT64_MAX - 3;
+        break;
+      case 12:
+        invalid.memory() = new FileHandleWrapper(UniqueFileHandle());
+        break;
+    }
+    EXPECT_FALSE(ValidateVulkanImagePublication(invalid));
+  }
+}
+
+TEST_F(RenderExternalBuffer, VulkanReturnWireValidation) {
+  UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(fd);
+  const auto publication = PublicationForTest(fd.get());
+  for (auto status :
+       {VulkanImageReturnStatus::Unused, VulkanImageReturnStatus::Submitted,
+        VulkanImageReturnStatus::Abandoned}) {
+    Maybe<layers::VulkanTimelineDescriptor> signal;
+    if (status == VulkanImageReturnStatus::Submitted) {
+      signal = Some(publication.ready());
+      signal->value() = 1;
+    }
+    layers::VulkanImageReturnMessage original(publication.publicationId(),
+                                              status, signal);
+    layers::VulkanImageReturnMessage decoded;
+    ASSERT_TRUE(RoundTripVulkanMessage(original, decoded));
+    EXPECT_TRUE(ValidateVulkanImageReturn(decoded, publication));
+    EXPECT_EQ(decoded.status(), status);
+    ++decoded.publicationId();
+    EXPECT_FALSE(ValidateVulkanImageReturn(decoded, publication));
+    decoded = original;
+    if (status != VulkanImageReturnStatus::Submitted) {
+      decoded.signal() = Some(publication.ready());
+      EXPECT_FALSE(ValidateVulkanImageReturn(decoded, publication));
+      continue;
+    }
+    for (int field = 0; field < 5; ++field) {
+      SCOPED_TRACE(field);
+      decoded = original;
+      switch (field) {
+        case 0:
+          decoded.signal().reset();
+          break;
+        case 1:
+          decoded.signal()->handle() = nullptr;
+          break;
+        case 2:
+          decoded.signal()->value() = 0;
+          break;
+        case 3:
+          ++decoded.signal()->deviceUUID()[0];
+          break;
+        case 4:
+          ++decoded.signal()->driverUUID()[15];
+          break;
+      }
+      EXPECT_FALSE(ValidateVulkanImageReturn(decoded, publication));
+    }
+  }
+  IPC::Message message(MSG_ROUTING_NONE, 0);
+  IPC::MessageWriter writer(message);
+  IPC::WriteParam(&writer, uint32_t(3));
+  IPC::MessageReader reader(message);
+  VulkanImageReturnStatus status = VulkanImageReturnStatus::Unused;
+  EXPECT_FALSE(IPC::ReadParam(&reader, &status));
+  EXPECT_EQ(status, VulkanImageReturnStatus::Unused);
+}
+
+TEST_F(RenderExternalBuffer, VulkanWireHostReturnsPublicationOnce) {
+  OnRenderThread([] {
+    UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    ASSERT_TRUE(fd);
+    auto publication = PublicationForTest(fd.get());
+    for (bool fail : {false, true}) {
+      size_t returns = 0;
+      RefPtr<RenderTextureHost> host = CreateVulkanImageHost(
+          publication, [&](layers::VulkanImageReturnMessage&& aReturn) {
+            ++returns;
+            EXPECT_TRUE(ValidateVulkanImageReturn(aReturn, publication));
+            EXPECT_EQ(aReturn.status(), fail
+                                            ? VulkanImageReturnStatus::Abandoned
+                                            : VulkanImageReturnStatus::Unused);
+          });
+      ASSERT_TRUE(host);
+      EXPECT_EQ(host->GetFormat(), SurfaceFormat::B8G8R8A8);
+      EXPECT_EQ(host->Bytes(), 24U);
+      if (fail) {
+        EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+                  WrExternalImageType::Invalid);
+        auto release = host->UnlockVulkan(nullptr);
+        ASSERT_TRUE(release);
+        VulkanImageReleaseQueue<> releases;
+        releases.Add(host, std::move(release.ref()));
+        releases.Poll();
+        EXPECT_EQ(returns, 1U);
+      }
+      host = nullptr;
+      EXPECT_EQ(returns, 1U);
+    }
+    publication.publicationId() = 0;
+    RefPtr<RenderTextureHost> rejected = CreateVulkanImageHost(
+        publication, [](layers::VulkanImageReturnMessage&&) { ADD_FAILURE(); });
+    EXPECT_FALSE(rejected);
+  });
+}
+
 TEST_F(RenderExternalBuffer,
        VulkanPublicationReturnCanReenterTextureManagement) {
   for (bool deferred : {false, true}) {
@@ -602,25 +798,29 @@ TEST_F(RenderExternalBuffer,
         wr_vulkan_external_images_delete(context);
         wr_vulkan_external_images_delete(alias);
       });
-      WrVulkanDmaBufDescriptor image{};
-      image.fd = source.mMemoryFd;
-      image.width = image.height = 2;
-      image.format = ImageFormat::RGBA8;
-      image.offset = source.mOffset;
-      image.stride = source.mStride;
-      image.copy_dst = true;
-      std::copy_n(source.mDeviceUUID, 16, image.device_uuid);
-      std::copy_n(source.mDriverUUID, 16, image.driver_uuid);
-      WrVulkanTimelineDescriptor ready{};
-      ready.fd = source.mReadyFd;
-      std::copy_n(source.mDeviceUUID, 16, ready.device_uuid);
-      std::copy_n(source.mDriverUUID, 16, ready.driver_uuid);
-      Maybe<VulkanImageReturn> returned;
-      RefPtr<RenderVulkanDMABufTextureHost> host =
-          RenderVulkanDMABufTextureHost::Create(
-              image, ready, 1, [&](VulkanImageReturn&& aReturn) {
-                returned.emplace(std::move(aReturn));
-              });
+      auto publication = PublicationForTest(source.mMemoryFd);
+      publication.size() = IntSize(2, 2);
+      publication.format() = SurfaceFormat::R8G8B8A8;
+      publication.offset() = source.mOffset;
+      publication.stride() = source.mStride;
+      publication.copySrc() = publication.colorTarget() = false;
+      publication.copyDst() = true;
+      publication.ready().handle() =
+          new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
+      publication.ready().value() = 1;
+      std::copy_n(source.mDeviceUUID, 16,
+                  publication.ready().deviceUUID().begin());
+      std::copy_n(source.mDriverUUID, 16,
+                  publication.ready().driverUUID().begin());
+      layers::VulkanImagePublication decoded;
+      ASSERT_TRUE(RoundTripVulkanMessage(publication, decoded));
+      Maybe<layers::VulkanImageReturnMessage> returned;
+      RefPtr<RenderTextureHost> host = CreateVulkanImageHost(
+          decoded, [&](layers::VulkanImageReturnMessage&& aReturn) {
+            returned.emplace();
+            EXPECT_TRUE(RoundTripVulkanMessage(aReturn, returned.ref()));
+            EXPECT_TRUE(ValidateVulkanImageReturn(returned.ref(), publication));
+          });
       ASSERT_TRUE(host);
       VulkanImageReleaseQueue<> releases;
       const auto first = host->LockVulkan(0, context);
@@ -650,14 +850,16 @@ TEST_F(RenderExternalBuffer,
       wr_test_vulkan_image_submit(fixture);
       releases.Poll();
       ASSERT_TRUE(returned);
-      EXPECT_EQ(returned->mStatus, fail ? VulkanImageReturnStatus::Abandoned
-                                        : VulkanImageReturnStatus::Submitted);
+      EXPECT_EQ(returned->status(), fail ? VulkanImageReturnStatus::Abandoned
+                                         : VulkanImageReturnStatus::Submitted);
       if (!fail) {
-        EXPECT_EQ(returned->mValue, 2U);
-        ASSERT_TRUE(returned->mSemaphore);
+        ASSERT_TRUE(returned->signal());
+        const auto& signal = returned->signal().ref();
+        EXPECT_EQ(signal.value(), 2U);
+        ASSERT_TRUE(signal.handle());
         EXPECT_TRUE(wr_test_vulkan_image_wait(
-            fixture, returned->mSemaphore.get(), returned->mDeviceUUID.data(),
-            returned->mDriverUUID.data(), returned->mValue));
+            fixture, signal.handle()->GetHandle(), signal.deviceUUID().data(),
+            signal.driverUUID().data(), signal.value()));
       }
     }
   });
