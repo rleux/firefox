@@ -47,7 +47,8 @@ pub(super) fn adapter() -> Arc<wgc::instance::Adapter> {
         "WebGPU timeline test",
         wgt::InstanceDescriptor {
             backends: wgt::Backends::VULKAN,
-            flags: wgt::InstanceFlags::VALIDATION,
+            flags: wgt::InstanceFlags::VALIDATION
+                | wgt::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION,
             ..wgt::InstanceDescriptor::new_without_display_handle()
         },
         None,
