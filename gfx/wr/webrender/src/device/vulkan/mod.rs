@@ -16,6 +16,8 @@ pub mod shaders {
 }
 
 mod bindings;
+mod external_textures;
+pub use self::external_textures::ExternalTextureRegistry;
 #[cfg(target_os = "linux")]
 mod external;
 #[cfg(target_os = "linux")]

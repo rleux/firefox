@@ -64,6 +64,9 @@ impl RenderDevice {
 }
 
 impl wr::GpuBackend for RenderDevice {
+    fn vulkan_external_textures(&self) -> Option<Rc<super::super::ExternalTextureRegistry>> {
+        Some(self.textures.external_textures())
+    }
     fn textures_created(&self) -> u32 {
         self.textures.created()
     }
@@ -190,8 +193,39 @@ impl wr::GpuBackend for RenderDevice {
             device.textures.bind(slot, texture)
         });
     }
-    fn bind_external_texture(&mut self, _: wr::TextureSlot, _: &wr::ExternalTexture) {
-        self.unsupported("external textures");
+    fn bind_external_texture(&mut self, slot: wr::TextureSlot, external: &wr::ExternalTexture) {
+        self.operation(|device| {
+            if external.id != 0 {
+                return device.textures.bind_external(slot, external);
+            }
+            if external.target != ImageBufferKind::Texture2D {
+                return Err("Vulkan external textures require Texture2D".into());
+            }
+            if device.invalid_external.is_none() {
+                let image = Texture::new(
+                    device.submissions.owner(),
+                    1,
+                    1,
+                    wgt::TextureFormat::Rgba8Unorm,
+                    TextureFilter::Nearest,
+                    false,
+                )?;
+                image.upload(
+                    &device.submissions,
+                    DeviceIntRect::from_size(DeviceIntSize::new(1, 1)),
+                    &[0; 4],
+                    None,
+                    0,
+                    None,
+                )?;
+                device.invalid_external = Some(image);
+            }
+            device.textures.bind_external_image(
+                slot,
+                device.invalid_external.as_ref().unwrap().clone(),
+                external.image_rendering,
+            )
+        });
     }
     fn begin_render_pass(&mut self, descriptor: &RenderPassDescriptor) {
         self.operation(|device| RenderDevice::begin_render_pass(device, descriptor));

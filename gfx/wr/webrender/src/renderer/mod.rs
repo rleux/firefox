@@ -1559,6 +1559,13 @@ impl Renderer {
         self.device.gpu_submission_status().map_err(RendererError::Device)
     }
 
+    /// Register application-owned Vulkan texture views for NativeTexture handles.
+    /// The registry and its handles belong to this Renderer.
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    pub fn vulkan_external_textures(&self) -> Option<Rc<crate::vulkan::ExternalTextureRegistry>> {
+        self.device.vulkan_external_textures()
+    }
+
     /// Pause presentation and drain GPU work before the embedder hides the window.
     /// Rendering while paused can update caches but does not acquire window images.
     /// Resuming redraws the cached scene; the native window must remain alive.

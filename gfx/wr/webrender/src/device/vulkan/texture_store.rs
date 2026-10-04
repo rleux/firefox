@@ -4,12 +4,12 @@
 
 use super::textures::texture_format;
 use super::program::ShaderResource;
-use super::{wgt, Device, Recording, Texture, TextureFilter};
+use super::{wgt, Device, ExternalTextureRegistry, Recording, Texture, TextureFilter};
 use crate::device::{
-    DrawTarget, GpuFrameId, ReadTarget, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot,
+    DrawTarget, ExternalTexture, GpuFrameId, ReadTarget, Texture as TextureHandle, TextureFlags, TextureId, TextureSlot,
 };
 use crate::internal_types::RenderTargetInfo;
-use api::{ImageBufferKind, ImageFormat, units::{DeviceIntRect, DeviceIntSize}};
+use api::{ImageBufferKind, ImageFormat, ImageRendering, units::{DeviceIntRect, DeviceIntSize}};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -21,14 +21,20 @@ struct Entry {
     renderable: bool,
 }
 
+enum Binding {
+    Owned(u32),
+    External { texture: Rc<Texture>, filter: TextureFilter },
+}
+
 pub(super) struct TextureStore {
     owner: Rc<Device>,
     entries: HashMap<u32, Entry>,
+    external: Rc<ExternalTextureRegistry>,
     last_id: u32,
     frame: GpuFrameId,
     created: u32,
     deleted: u32,
-    bound: [Option<u32>; 16],
+    bound: [Option<Binding>; 16],
     output: Option<Rc<Texture>>,
 }
 
@@ -37,11 +43,12 @@ impl TextureStore {
         Self {
             owner: owner.clone(),
             entries: HashMap::new(),
+            external: ExternalTextureRegistry::new(owner),
             last_id: 0,
             frame: GpuFrameId::new(0),
             created: 0,
             deleted: 0,
-            bound: [None; 16],
+            bound: std::array::from_fn(|_| None),
             output: None,
         }
     }
@@ -241,31 +248,71 @@ impl TextureStore {
             .bound
             .get_mut(slot.0)
             .ok_or("Invalid Vulkan texture slot")?;
-        *binding = Some(handle.id);
+        *binding = Some(Binding::Owned(handle.id));
+        Ok(())
+    }
+
+    pub fn external_textures(&self) -> Rc<ExternalTextureRegistry> {
+        self.external.clone()
+    }
+
+    pub fn bind_external(
+        &mut self,
+        slot: TextureSlot,
+        external: &ExternalTexture,
+    ) -> Result<(), String> {
+        if external.target != ImageBufferKind::Texture2D {
+            return Err("Vulkan external textures require Texture2D".into());
+        }
+        let texture = self.external.get(external.id)?;
+        self.bind_external_image(slot, texture, external.image_rendering)
+    }
+
+    pub fn bind_external_image(
+        &mut self,
+        slot: TextureSlot,
+        texture: Rc<Texture>,
+        rendering: ImageRendering,
+    ) -> Result<(), String> {
+        let binding = self
+            .bound
+            .get_mut(slot.0)
+            .ok_or("Invalid Vulkan texture slot")?;
+        let filter = match rendering {
+            ImageRendering::Auto | ImageRendering::CrispEdges => TextureFilter::Linear,
+            ImageRendering::Pixelated => TextureFilter::Nearest,
+        };
+        *binding = Some(Binding::External { texture, filter });
         Ok(())
     }
 
     pub fn reset_bindings(&mut self) {
-        self.bound.fill(None);
+        self.bound.fill_with(|| None);
     }
 
     pub fn clear_color_bindings(&mut self) {
-        self.bound[..3].fill(None);
+        self.bound[..3].fill_with(|| None);
     }
 
     fn unbind_texture(&mut self, id: u32) {
         for slot in &mut self.bound {
-            if *slot == Some(id) {
+            if matches!(slot, Some(Binding::Owned(bound)) if *bound == id) {
                 *slot = None;
             }
         }
     }
 
     pub fn bindings(&self) -> [Option<ShaderResource>; 16] {
-        self.bound.map(|id| {
-            id.map(|id| ShaderResource::Texture {
-                texture: self.entries[&id].color.clone(),
-                filter: None,
+        std::array::from_fn(|slot| {
+            self.bound[slot].as_ref().map(|binding| match binding {
+                Binding::Owned(id) => ShaderResource::Texture {
+                    texture: self.entries[id].color.clone(),
+                    filter: None,
+                },
+                Binding::External { texture, filter } => ShaderResource::Texture {
+                    texture: texture.clone(),
+                    filter: Some(*filter),
+                },
             })
         })
     }

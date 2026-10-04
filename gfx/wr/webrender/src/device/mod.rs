@@ -142,6 +142,11 @@ pub trait GpuBackend {
     }
 
     #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    fn vulkan_external_textures(&self) -> Option<Rc<vulkan::ExternalTextureRegistry>> {
+        None
+    }
+
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn set_vulkan_surface(
         &mut self,
         _window: Option<Rc<dyn vulkan::SurfaceWindow>>,
