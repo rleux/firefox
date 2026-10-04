@@ -109,8 +109,10 @@ wr::WrExternalImage RenderTextureHost::LockVulkan(uint8_t aChannelIndex,
   return LockExternalBuffer(aChannelIndex);
 }
 
-void RenderTextureHost::UnlockVulkan(WrVulkanExternalImages*) {
+Maybe<VulkanImageRelease> RenderTextureHost::UnlockVulkan(
+    WrVulkanExternalImages*) {
   UnlockExternalBuffer();
+  return Nothing();
 }
 
 wr::WrExternalImage RenderTextureHost::LockSWGL(uint8_t aChannelIndex,

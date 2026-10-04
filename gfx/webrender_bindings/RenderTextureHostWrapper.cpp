@@ -68,9 +68,15 @@ wr::WrExternalImage RenderTextureHostWrapper::LockVulkan(
                       : InvalidToWrExternalImage();
 }
 
-void RenderTextureHostWrapper::UnlockVulkan(WrVulkanExternalImages* aImages) {
+Maybe<VulkanImageRelease> RenderTextureHostWrapper::UnlockVulkan(
+    WrVulkanExternalImages* aImages) {
+  return mTextureHost ? mTextureHost->UnlockVulkan(aImages) : Nothing();
+}
+
+void RenderTextureHostWrapper::NotifyVulkanRelease(
+    uint64_t aValue, WrVulkanReleaseStatus aStatus) {
   if (mTextureHost) {
-    mTextureHost->UnlockVulkan(aImages);
+    mTextureHost->NotifyVulkanRelease(aValue, aStatus);
   }
 }
 

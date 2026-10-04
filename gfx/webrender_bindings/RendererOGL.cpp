@@ -256,6 +256,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   bool rendered = wr_renderer_render(
       mRenderer, renderSize.width, renderSize.height, bufferAge, aOutStats,
       &dirtyRects, &didRasterize, &presentResult);
+  mCompositor->AfterRender(rendered);
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
