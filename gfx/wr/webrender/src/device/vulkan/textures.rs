@@ -21,9 +21,9 @@ mod readback;
 pub use self::readback::PendingReadback;
 
 #[derive(Clone, Copy)]
-struct TextureState {
-    usage: wgt::TextureUses,
-    initialized: bool,
+pub(super) struct TextureState {
+    pub(super) usage: wgt::TextureUses,
+    pub(super) initialized: bool,
 }
 
 pub struct Texture {
@@ -37,6 +37,8 @@ pub struct Texture {
     mip_count: u32,
     usage: wgt::TextureUses,
     states: Rc<Vec<UsageState<TextureState>>>,
+    #[cfg(target_os = "linux")]
+    external: Option<Rc<super::DmaBufImage>>,
 }
 
 pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
@@ -53,6 +55,74 @@ pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
 }
 
 impl Texture {
+    #[cfg(target_os = "linux")]
+    pub fn from_dma_buf(
+        image: &Rc<super::DmaBufImage>,
+        filter: TextureFilter,
+    ) -> Result<Rc<Self>, String> {
+        if filter == TextureFilter::Trilinear || image.owner.is_lost() {
+            return Err("Imported textures require a live device and no mipmap filtering".into());
+        }
+        let owner = &image.owner;
+        let descriptor = image.descriptor();
+        let size = wgt::Extent3d {
+            width: descriptor.size[0],
+            height: descriptor.size[1],
+            depth_or_array_layers: 1,
+        };
+        let borrowed = unsafe {
+            owner.open.device.texture_from_raw(
+                image.image,
+                &hal::TextureDescriptor {
+                    label: Some("WR imported DMA-BUF texture"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgt::TextureDimension::D2,
+                    format: descriptor.format,
+                    usage: descriptor.usage,
+                    memory_flags: hal::MemoryFlags::empty(),
+                    view_formats: Vec::new(),
+                },
+                Some(Box::new(|| {})),
+                hal::vulkan::TextureMemory::External,
+            )
+        };
+        // DmaBufImage owns the native image and memory; only drop the HAL wrapper.
+        let raw = Rc::new(Owned::new(owner, borrowed, |_, texture| drop(texture)));
+        let view = unsafe {
+            owner.open.device.create_texture_view(
+                &raw,
+                &hal::TextureViewDescriptor {
+                    label: Some("WR imported DMA-BUF view"),
+                    swizzle: Default::default(),
+                    format: descriptor.format,
+                    dimension: wgt::TextureViewDimension::D2,
+                    usage: wgt::TextureUses::RESOURCE,
+                    range: wgt::ImageSubresourceRange {
+                        mip_level_count: Some(1),
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    },
+                },
+            )
+        }
+        .map_err(|error| format!("Creating DMA-BUF texture view: {error:?}"))?;
+        Ok(Rc::new(Self {
+            view: Owned::new(owner, view, hal::vulkan::Device::destroy_texture_view),
+            target: None,
+            raw,
+            size,
+            format: descriptor.format,
+            filter,
+            base_mip: 0,
+            mip_count: 1,
+            usage: wgt::TextureUses::RESOURCE,
+            states: image.states.clone(),
+            external: Some(image.clone()),
+        }))
+    }
+
     pub fn new(
         owner: &Rc<Device>,
         width: u32,
@@ -202,6 +272,8 @@ impl Texture {
                     })
                     .collect(),
             ),
+            #[cfg(target_os = "linux")]
+            external: None,
         }))
     }
 
@@ -268,6 +340,8 @@ impl Texture {
             base_mip,
             mip_count: 1,
             usage: self.usage,
+            #[cfg(target_os = "linux")]
+            external: self.external.clone(),
             states: self.states.clone(),
         }))
     }
@@ -291,6 +365,10 @@ impl Texture {
     }
 
     pub fn invalidate(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if self.external.is_some() {
+            return Err("Imported textures are read-only".into());
+        }
         let recording = commands.recording_id(&self.raw.owner)?;
         for state in self.states() {
             state.check_recording(&recording)?;
@@ -313,6 +391,10 @@ impl Texture {
     }
 
     pub(super) fn initialize(self: &Rc<Self>, commands: &mut Recording<'_>) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if self.external.is_some() {
+            return Err("Imported textures are read-only".into());
+        }
         let recording = commands.recording_id(&self.raw.owner)?;
         let (_, first) = self.states()[0].prepare(
             &recording,
@@ -334,6 +416,10 @@ impl Texture {
         commands: &mut Recording<'_>,
         to: wgt::TextureUses,
     ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if self.external.is_some() && !self.sample_initialized() {
+            return Err("DMA-BUF image has not been acquired for sampling".into());
+        }
         if !self.usage.contains(to)
             || ![
                 wgt::TextureUses::COPY_SRC,

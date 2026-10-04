@@ -7,6 +7,11 @@ use ash::vk;
 use std::fs::File;
 use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
 use std::rc::Rc;
+use crate::device::vulkan::state::UsageState;
+use crate::device::vulkan::textures::TextureState;
+
+#[path = "dmabuf_access.rs"]
+mod access;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DmaBufImageDescriptor {
@@ -53,6 +58,7 @@ pub struct DmaBufImage {
     pub(in crate::device::vulkan) image: vk::Image,
     memory: vk::DeviceMemory,
     descriptor: DmaBufImageDescriptor,
+    pub(in crate::device::vulkan) states: Rc<Vec<UsageState<TextureState>>>,
 }
 
 impl DmaBufImage {
@@ -167,6 +173,10 @@ impl Device {
             image,
             memory: vk::DeviceMemory::null(),
             descriptor,
+            states: Rc::new(vec![UsageState::new(TextureState {
+                usage: wgt::TextureUses::UNINITIALIZED,
+                initialized: false,
+            })]),
         };
         let requirements = unsafe { raw.get_image_memory_requirements(image) };
         if requirements.size > bytes || requirements.size > supported.max_resource_size() {
