@@ -1,0 +1,17 @@
+[package]
+name = "webrender-bindings-gtest"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+
+[features]
+vulkan = ["dep:webrender", "dep:ash", "webrender/vulkan"]
+
+[dependencies]
+webrender = { path = "../../wr/webrender", default-features = false, optional = true }
+ash = { version = "0.38", optional = true }
+
+[lib]
+path = "lib.rs"
+test = false
+doctest = false
