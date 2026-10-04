@@ -369,6 +369,7 @@ enum class TextureHostType : int8_t {
   AndroidHardwareBuffer,
   EGLImage,
   GLTexture,
+  Vulkan,
   Last
 };
 

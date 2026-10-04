@@ -12,9 +12,11 @@
 #include "gtest/gtest.h"
 #include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/GPUProcessManager.h"
+#include "mozilla/layers/RemoteTextureMap.h"
 #include "mozilla/layers/SourceSurfaceSharedData.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/layers/VulkanImages.h"
+#include "mozilla/layers/VulkanTextureHost.h"
 #include "mozilla/webrender/RenderBufferTextureHost.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderSharedSurfaceTextureHost.h"
@@ -606,6 +608,88 @@ TEST_F(RenderExternalBuffer, VulkanWireHostReturnsPublicationOnce) {
   });
 }
 
+TEST_F(RenderExternalBuffer, VulkanLayersHostRegistersBeforeRendering) {
+  UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(fd);
+  auto publication = PublicationForTest(fd.get());
+  size_t returns = 0;
+  RefPtr<layers::VulkanTextureHost> host = layers::VulkanTextureHost::Create(
+      layers::TextureFlags::DEFAULT, publication,
+      [&](layers::VulkanImageReturnMessage&& aReturn) {
+        EXPECT_TRUE(RenderThread::IsInRenderThread());
+        EXPECT_TRUE(ValidateVulkanImageReturn(aReturn, publication));
+        EXPECT_EQ(aReturn.status(), VulkanImageReturnStatus::Unused);
+        ++returns;
+      });
+  auto cleanup = MakeScopeExit([&] {
+    host = nullptr;
+    OnRenderThread([] {});
+  });
+  ASSERT_TRUE(host);
+  EXPECT_EQ(host->GetSize(), publication.size());
+  EXPECT_EQ(host->GetFormat(), publication.format());
+  EXPECT_EQ(host->NumSubTextures(), 1U);
+  RefPtr<DataSourceSurface> snapshot = host->GetAsSurface(nullptr);
+  EXPECT_FALSE(snapshot);
+  const auto id = host->GetMaybeExternalImageId();
+  ASSERT_TRUE(id);
+  host->EnsureRenderTexture(Nothing());
+  EXPECT_EQ(host->GetMaybeExternalImageId(), id);
+  OnRenderThread([&] {
+    auto* texture = RenderThread::Get()->GetRenderTexture(id.ref());
+    ASSERT_NE(texture, nullptr);
+    EXPECT_EQ(texture->GetFormat(), publication.format());
+    EXPECT_EQ(texture->Bytes(), 24U);
+    EXPECT_EQ(returns, 0U);
+  });
+  host = nullptr;
+  OnRenderThread([&] { EXPECT_EQ(returns, 1U); });
+}
+
+TEST_F(RenderExternalBuffer, VulkanRemotePublicationsReturnOnOwnerRemoval) {
+  ASSERT_NE(layers::RemoteTextureMap::Get(), nullptr);
+  UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(fd);
+  auto publication = PublicationForTest(fd.get());
+  const auto owner = layers::RemoteTextureOwnerId::GetNext();
+  RefPtr<layers::RemoteTextureOwnerClient> client =
+      new layers::RemoteTextureOwnerClient(base::GetCurrentProcId());
+  size_t returns = 0;
+  auto cleanup = MakeScopeExit([&] {
+    client->UnregisterAllTextureOwners();
+    OnRenderThread([] {});
+  });
+  const auto rejected = [](layers::VulkanImageReturnMessage&&) {
+    ADD_FAILURE();
+  };
+  auto id = layers::RemoteTextureId::GetNext();
+  publication.publicationId() = id.mId;
+  EXPECT_FALSE(client->PushVulkanTexture(id, owner, publication, rejected));
+  client->RegisterTextureOwner(owner);
+  ++publication.publicationId();
+  EXPECT_FALSE(client->PushVulkanTexture(id, owner, publication, rejected));
+  publication.publicationId() = id.mId;
+  auto invalid = publication;
+  invalid.memory() = nullptr;
+  EXPECT_FALSE(client->PushVulkanTexture(id, owner, invalid, rejected));
+  for (size_t i = 0; i < 2; ++i) {
+    id = layers::RemoteTextureId::GetNext();
+    publication.publicationId() = id.mId;
+    ASSERT_TRUE(client->PushVulkanTexture(
+        id, owner, publication,
+        [&,
+         expected = publication](layers::VulkanImageReturnMessage&& aReturn) {
+          EXPECT_TRUE(RenderThread::IsInRenderThread());
+          EXPECT_TRUE(ValidateVulkanImageReturn(aReturn, expected));
+          EXPECT_EQ(aReturn.status(), VulkanImageReturnStatus::Unused);
+          ++returns;
+        }));
+  }
+  OnRenderThread([&] { EXPECT_EQ(returns, 0U); });
+  client->UnregisterTextureOwner(owner);
+  OnRenderThread([&] { EXPECT_EQ(returns, 2U); });
+}
+
 TEST_F(RenderExternalBuffer,
        VulkanPublicationReturnCanReenterTextureManagement) {
   for (bool deferred : {false, true}) {
@@ -815,12 +899,20 @@ TEST_F(RenderExternalBuffer,
       layers::VulkanImagePublication decoded;
       ASSERT_TRUE(RoundTripVulkanMessage(publication, decoded));
       Maybe<layers::VulkanImageReturnMessage> returned;
-      RefPtr<RenderTextureHost> host = CreateVulkanImageHost(
-          decoded, [&](layers::VulkanImageReturnMessage&& aReturn) {
-            returned.emplace();
-            EXPECT_TRUE(RoundTripVulkanMessage(aReturn, returned.ref()));
-            EXPECT_TRUE(ValidateVulkanImageReturn(returned.ref(), publication));
-          });
+      RefPtr<layers::VulkanTextureHost> layersHost =
+          layers::VulkanTextureHost::Create(
+              layers::TextureFlags::DEFAULT, decoded,
+              [&](layers::VulkanImageReturnMessage&& aReturn) {
+                returned.emplace();
+                EXPECT_TRUE(RoundTripVulkanMessage(aReturn, returned.ref()));
+                EXPECT_TRUE(
+                    ValidateVulkanImageReturn(returned.ref(), publication));
+              });
+      ASSERT_TRUE(layersHost);
+      const auto id = layersHost->GetMaybeExternalImageId();
+      ASSERT_TRUE(id);
+      RefPtr<RenderTextureHost> host =
+          RenderThread::Get()->GetRenderTexture(id.ref());
       ASSERT_TRUE(host);
       VulkanImageReleaseQueue<> releases;
       const auto first = host->LockVulkan(0, context);
@@ -842,6 +934,7 @@ TEST_F(RenderExternalBuffer,
                   WrExternalImageType::Invalid);
         EXPECT_FALSE(host->UnlockVulkan(nullptr));
       }
+      layersHost = nullptr;
       host = nullptr;
       EXPECT_FALSE(returned);
       wr_vulkan_external_images_delete(context);

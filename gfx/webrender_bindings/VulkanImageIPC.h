@@ -32,9 +32,9 @@ bool ValidateVulkanImagePublication(const layers::VulkanImagePublication&);
 bool ValidateVulkanImageReturn(const layers::VulkanImageReturnMessage&,
                                const layers::VulkanImagePublication&);
 
-// Render-thread only. Rejection leaves the publication with its producer and
-// does not invoke the callback. Success follows the texture host's loan
-// contract.
+// Creation may precede render-thread registration. Use and destruction belong
+// to the render thread. Rejection does not invoke the callback; success follows
+// the texture host's loan contract.
 already_AddRefed<RenderTextureHost> CreateVulkanImageHost(
     const layers::VulkanImagePublication&,
     std::function<void(layers::VulkanImageReturnMessage&&)>&&);
