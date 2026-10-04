@@ -862,6 +862,11 @@ void wr_test_vulkan_image_submit(void*);
 bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_vulkan_image_delete(void*);
+void wr_test_webgpu_timeline_lifecycle();
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {
+  OnRenderThread([] { wr_test_webgpu_timeline_lifecycle(); });
 }
 
 TEST_F(RenderExternalBuffer,
