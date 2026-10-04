@@ -29,6 +29,10 @@ impl Texture {
     }
 
     pub(in crate::device::wgpu) fn writable(self: &Rc<Self>) -> Result<WritableTexture<'_>, String> {
+        #[cfg(target_os = "linux")]
+        if self.external.is_some() {
+            return Err("Imported textures are read-only".into());
+        }
         Ok(WritableTexture { texture: self })
     }
 
