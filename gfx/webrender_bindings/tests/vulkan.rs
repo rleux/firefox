@@ -11,12 +11,12 @@ use webrender::vulkan::{Device, Options, SharedTimeline, Submission, TimelineHan
 
 #[repr(C)]
 pub struct TestVulkanImage {
-    memory_fd: i32,
-    ready_fd: i32,
-    offset: u64,
-    stride: u64,
-    device_uuid: [u8; 16],
-    driver_uuid: [u8; 16],
+    pub(super) memory_fd: i32,
+    pub(super) ready_fd: i32,
+    pub(super) offset: u64,
+    pub(super) stride: u64,
+    pub(super) device_uuid: [u8; 16],
+    pub(super) driver_uuid: [u8; 16],
 }
 
 pub struct Fixture {
@@ -51,8 +51,7 @@ impl RenderNotifier for Notice {
     fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {}
 }
 
-#[no_mangle]
-pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut Fixture {
+pub(super) fn renderer() -> webrender::Renderer {
     let (renderer, _) = webrender::create_webrender_instance(
         webrender::GpuBackendConfig::Vulkan(Options {
             validation: true,
@@ -66,6 +65,12 @@ pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut
         None,
     )
     .unwrap();
+    renderer
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut Fixture {
+    let renderer = renderer();
     let producer = Rc::new(
         Device::new(&Options {
             validation: true,
