@@ -1480,7 +1480,10 @@ impl Device {
     ///
     /// - `hal_texture` must be created from `device_id` corresponding raw handle.
     /// - `hal_texture` must be created respecting `desc`
-    /// - `hal_texture` must be initialized
+    /// - If `cleared` is true, `hal_texture` must be initialized.
+    /// - Otherwise, depth/stencil and multi-planar imports must have
+    ///   `RENDER_ATTACHMENT` usage. Textures without attachment clearing must
+    ///   support native `COPY_DST` usage even if it is absent from `desc`.
     /// - The `initial_state` must match the actual driver-side state of
     ///   the wrapped resource at the moment of wrap.
     pub unsafe fn create_texture_from_hal(
@@ -1545,13 +1548,30 @@ impl Device {
             }
         };
 
+        let mut hal_usage =
+            conv::map_texture_usage(desc.usage, desc.format.into(), format_features.flags);
+        let clear_mode = if cleared {
+            resource::TextureClearMode::None
+        } else {
+            match self.create_texture_clear_mode(hal_texture.as_ref(), desc, hal_usage) {
+                Ok(mode) => mode,
+                Err(error) => {
+                    unsafe { self.raw().destroy_texture(hal_texture) };
+                    return Err(error.into());
+                }
+            }
+        };
+        if matches!(clear_mode, resource::TextureClearMode::BufferCopy) {
+            hal_usage |= wgt::TextureUses::COPY_DST;
+        }
+
         let texture = Texture::new(
             self,
             resource::TextureInner::Native { raw: hal_texture },
-            conv::map_texture_usage(desc.usage, desc.format.into(), format_features.flags),
+            hal_usage,
             desc,
             format_features,
-            resource::TextureClearMode::None,
+            clear_mode,
             !cleared, // inverted so it marks the tracker properly
         );
 
@@ -1985,6 +2005,88 @@ impl Device {
         Ok((format_features, hal_view_formats))
     }
 
+    fn create_texture_clear_mode(
+        &self,
+        raw_texture: &dyn hal::DynTexture,
+        desc: &resource::TextureDescriptor,
+        hal_usage: wgt::TextureUses,
+    ) -> Result<resource::TextureClearMode, DeviceError> {
+        Ok(
+            if hal_usage.contains(wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE)
+                || hal_usage.contains(wgt::TextureUses::COLOR_TARGET)
+                    && desc.dimension == wgt::TextureDimension::D2
+            {
+                let (is_color, usage) = if desc.format.is_depth_stencil_format() {
+                    (
+                        false,
+                        wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE,
+                    )
+                } else {
+                    (true, wgt::TextureUses::COLOR_TARGET)
+                };
+
+                let clear_label = hal_label(
+                    Some("(wgpu internal) clear texture view"),
+                    self.instance_flags,
+                );
+
+                let mut clear_views = SmallVec::new();
+                for mip_level in 0..desc.mip_level_count {
+                    for array_layer in 0..desc.size.depth_or_array_layers {
+                        macro_rules! push_clear_view {
+                            ($format:expr, $aspect:expr) => {
+                                let desc = hal::TextureViewDescriptor {
+                                    label: clear_label,
+                                    format: $format,
+                                    dimension: TextureViewDimension::D2,
+                                    usage,
+                                    range: wgt::ImageSubresourceRange {
+                                        aspect: $aspect,
+                                        base_mip_level: mip_level,
+                                        mip_level_count: Some(1),
+                                        base_array_layer: array_layer,
+                                        array_layer_count: Some(1),
+                                    },
+                                    swizzle: wgt::TextureComponentSwizzle::default(),
+                                };
+                                match unsafe { self.raw().create_texture_view(raw_texture, &desc) }
+                                {
+                                    Ok(view) => clear_views.push(ManuallyDrop::new(view)),
+                                    Err(error) => {
+                                        for view in clear_views {
+                                            unsafe {
+                                                self.raw().destroy_texture_view(
+                                                    ManuallyDrop::into_inner(view),
+                                                )
+                                            };
+                                        }
+                                        return Err(self.handle_hal_error(error));
+                                    }
+                                }
+                            };
+                        }
+
+                        if let Some(planes) = desc.format.planes() {
+                            for plane in 0..planes {
+                                let aspect = wgt::TextureAspect::from_plane(plane).unwrap();
+                                let format = desc.format.aspect_specific_format(aspect).unwrap();
+                                push_clear_view!(format, aspect);
+                            }
+                        } else {
+                            push_clear_view!(desc.format, wgt::TextureAspect::All);
+                        }
+                    }
+                }
+                resource::TextureClearMode::RenderPass {
+                    clear_views,
+                    is_color,
+                }
+            } else {
+                resource::TextureClearMode::BufferCopy
+            },
+        )
+    }
+
     fn create_texture_inner(
         self: &Arc<Self>,
         desc: &resource::TextureDescriptor,
@@ -2008,70 +2110,13 @@ impl Device {
         let raw_texture = unsafe { self.raw().create_texture(&hal_desc) }
             .map_err(|e| self.handle_hal_error_with_nonfatal_oom(e))?;
 
-        let clear_mode = if hal_usage
-            .contains(wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE)
-            || hal_usage.contains(wgt::TextureUses::COLOR_TARGET)
-                && desc.dimension == wgt::TextureDimension::D2
+        let clear_mode = match self.create_texture_clear_mode(raw_texture.as_ref(), desc, hal_usage)
         {
-            let (is_color, usage) = if desc.format.is_depth_stencil_format() {
-                (
-                    false,
-                    wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE,
-                )
-            } else {
-                (true, wgt::TextureUses::COLOR_TARGET)
-            };
-
-            let clear_label = hal_label(
-                Some("(wgpu internal) clear texture view"),
-                self.instance_flags,
-            );
-
-            let mut clear_views = SmallVec::new();
-            for mip_level in 0..desc.mip_level_count {
-                for array_layer in 0..desc.size.depth_or_array_layers {
-                    macro_rules! push_clear_view {
-                        ($format:expr, $aspect:expr) => {
-                            let desc = hal::TextureViewDescriptor {
-                                label: clear_label,
-                                format: $format,
-                                dimension: TextureViewDimension::D2,
-                                usage,
-                                range: wgt::ImageSubresourceRange {
-                                    aspect: $aspect,
-                                    base_mip_level: mip_level,
-                                    mip_level_count: Some(1),
-                                    base_array_layer: array_layer,
-                                    array_layer_count: Some(1),
-                                },
-                                swizzle: wgt::TextureComponentSwizzle::default(),
-                            };
-                            clear_views.push(ManuallyDrop::new(
-                                unsafe {
-                                    self.raw().create_texture_view(raw_texture.as_ref(), &desc)
-                                }
-                                .map_err(|e| self.handle_hal_error(e))?,
-                            ));
-                        };
-                    }
-
-                    if let Some(planes) = desc.format.planes() {
-                        for plane in 0..planes {
-                            let aspect = wgt::TextureAspect::from_plane(plane).unwrap();
-                            let format = desc.format.aspect_specific_format(aspect).unwrap();
-                            push_clear_view!(format, aspect);
-                        }
-                    } else {
-                        push_clear_view!(desc.format, wgt::TextureAspect::All);
-                    }
-                }
+            Ok(mode) => mode,
+            Err(error) => {
+                unsafe { self.raw().destroy_texture(raw_texture) };
+                return Err(error.into());
             }
-            resource::TextureClearMode::RenderPass {
-                clear_views,
-                is_color,
-            }
-        } else {
-            resource::TextureClearMode::BufferCopy
         };
 
         let texture = Texture::new(

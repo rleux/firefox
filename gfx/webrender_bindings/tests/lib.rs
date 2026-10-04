@@ -8,3 +8,5 @@ mod vulkan;
 mod webgpu_timeline;
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod webgpu_dmabuf;
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod webgpu_import;
