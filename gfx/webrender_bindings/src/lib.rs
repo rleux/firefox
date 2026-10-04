@@ -41,6 +41,7 @@ extern crate raw_window_handle;
 
 mod program_cache;
 mod vulkan;
+mod vulkan_external;
 
 #[allow(non_snake_case)]
 pub mod bindings;

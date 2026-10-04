@@ -9,6 +9,7 @@ use raw_window_handle::HasDisplayHandle;
 use wgpu_hal as hal;
 use wgpu_hal::{Adapter as _, Instance as _};
 use wgpu_types as wgt;
+pub use wgpu_types::{TextureFormat, TextureUses};
 
 #[cfg(wr_vulkan_shaders)]
 pub mod shaders {
