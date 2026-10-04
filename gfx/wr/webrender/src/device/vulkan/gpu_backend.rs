@@ -643,6 +643,7 @@ impl wr::GpuBackend for RenderDevice {
         self.draw_quads(indices, instances, base);
     }
     fn deinit(&mut self) {
+        self.textures.external_textures().disconnect();
         self.swapchain.take();
         let result = self.submissions.wait();
         self.record_result(result);
