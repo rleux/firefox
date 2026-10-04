@@ -13,6 +13,23 @@ use wgpu_bindings::server::{create_webrender_dma_buf, VulkanDmaBufInfo};
 use wgpu_bindings::vulkan_image::{acquire_image, import_image, release_image};
 use wgpu_bindings::vulkan_timeline::{VulkanTimeline, VulkanTimelineDescriptor};
 
+#[no_mangle]
+pub extern "C" fn wr_test_webgpu_global_init(global: &wgpu_bindings::server::Global) {
+    let (device, queue) = device_with_extensions(
+        &adapter(),
+        &[
+            khr::external_memory_fd::NAME,
+            ext::external_memory_dma_buf::NAME,
+            ext::image_drm_format_modifier::NAME,
+            khr::external_semaphore_fd::NAME,
+            khr::dedicated_allocation::NAME,
+            khr::get_memory_requirements2::NAME,
+        ],
+    );
+    global.import_device(device, wgr::id::DeviceId::zip(1, 0));
+    global.import_queue(queue, wgr::id::QueueId::zip(1, 0));
+}
+
 pub struct Fixture {
     renderer: Option<webrender::Renderer>,
     device: Arc<wgc::device::Device>,

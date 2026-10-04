@@ -30,6 +30,7 @@
 #  include <fcntl.h>
 
 #  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
+#  include "mozilla/webgpu/SharedTextureVulkan.h"
 #endif
 
 namespace mozilla::wr {
@@ -877,6 +878,64 @@ void wr_test_webgpu_timeline_failed_submission();
 void wr_test_webgpu_dmabuf_allocation();
 bool wr_test_webgpu_import_initialization();
 void wr_test_webgpu_dmabuf_import();
+void wr_test_webgpu_global_init(const webgpu::ffi::WGPUGlobal*);
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
+  OnRenderThread([] {
+    namespace ffi = webgpu::ffi;
+    using Texture = webgpu::SharedTextureVulkan;
+    auto* global = ffi::wgpu_server_new(nullptr);
+    wr_test_webgpu_global_init(global);
+    auto cleanup = MakeScopeExit([&] {
+      ffi::wgpu_server_poll_all_devices(global, true);
+      ffi::wgpu_server_delete(global);
+    });
+    ffi::WGPUTextureFormat format{};
+    format.tag = ffi::WGPUTextureFormat_Rgba8Unorm;
+    auto usage = WGPUTextureUsages_COPY_DST |
+                 WGPUTextureUsages_RENDER_ATTACHMENT;
+    auto texture = Texture::Create(global, 1, 2, 2, format, usage);
+    ASSERT_TRUE(texture);
+    EXPECT_EQ(texture->GetAcquireTimeline(), nullptr);
+    EXPECT_EQ(texture->GetAcquireValue(), 0u);
+    ffi::WGPUFfiTextureDescriptor desc{};
+    desc.size = {2, 2, 1};
+    desc.mip_level_count = 1;
+    desc.sample_count = 1;
+    desc.dimension = ffi::WGPUTextureDimension_D2;
+    desc.format = format;
+    desc.usage = usage;
+    for (uint64_t id = 1; id <= 3; ++id) {
+      auto memory = texture->CloneDmaBufFd();
+      ASSERT_TRUE(ffi::wgpu_vkimage_import_for_webrender(
+          global, 1, id, &desc, memory.get(), &texture->GetDMABufInfo(),
+          texture->GetAcquireTimeline(), texture->GetAcquireValue()));
+      ASSERT_TRUE(texture->Publish(global, 1, id, id));
+      EXPECT_TRUE(texture->IsSubmitted());
+      EXPECT_TRUE(ValidateVulkanImagePublication(texture->GetPublication()));
+      EXPECT_EQ(texture->TryRecycle(global), Texture::RecycleStatus::Pending);
+      auto callback = texture->GetReturnCallback();
+      callback(layers::VulkanImageReturnMessage(
+          id, VulkanImageReturnStatus::Unused, Nothing()));
+      ASSERT_EQ(texture->TryRecycle(global), Texture::RecycleStatus::Ready);
+      EXPECT_FALSE(texture->IsSubmitted());
+      EXPECT_NE(texture->GetAcquireTimeline(), nullptr);
+      EXPECT_EQ(texture->GetAcquireValue(), id);
+    }
+    auto memory = texture->CloneDmaBufFd();
+    ASSERT_TRUE(ffi::wgpu_vkimage_import_for_webrender(
+        global, 1, 4, &desc, memory.get(), &texture->GetDMABufInfo(),
+        texture->GetAcquireTimeline(), texture->GetAcquireValue()));
+    ASSERT_TRUE(texture->Publish(global, 1, 4, 4));
+    auto callback = texture->GetReturnCallback();
+    callback(layers::VulkanImageReturnMessage(
+        3, VulkanImageReturnStatus::Unused, Nothing()));
+    EXPECT_EQ(texture->TryRecycle(global), Texture::RecycleStatus::Abandoned);
+    texture = nullptr;
+    callback(layers::VulkanImageReturnMessage(
+        4, VulkanImageReturnStatus::Abandoned, Nothing()));
+  });
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {

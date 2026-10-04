@@ -26,6 +26,7 @@ namespace webgpu {
 class SharedTextureD3D11;
 class SharedTextureDMABuf;
 class SharedTextureMacIOSurface;
+class SharedTextureVulkan;
 class WebGPUParent;
 
 // A texture is created and owned by Gecko but is shared with the WebGPU
@@ -48,6 +49,8 @@ class SharedTexture {
   virtual void GetSnapshot(const ipc::Shmem& aDestShmem, size_t aDestStride) {}
 
   virtual SharedTextureDMABuf* AsSharedTextureDMABuf() { return nullptr; }
+
+  virtual SharedTextureVulkan* AsSharedTextureVulkan() { return nullptr; }
 
   virtual SharedTextureMacIOSurface* AsSharedTextureMacIOSurface() {
     return nullptr;
