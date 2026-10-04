@@ -76,6 +76,7 @@ class RenderCompositor {
   virtual bool Resume() = 0;
   // Called when WR rendering is skipped
   virtual void Update() {}
+  virtual void AfterRender(bool aSuccess) {}
 
   virtual const WrVulkanConfig* GetVulkanConfig() const { return nullptr; }
   virtual bool UsesBackendPresentation() const { return false; }

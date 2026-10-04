@@ -4,6 +4,8 @@
 
 #include <array>
 #include <cstring>
+#include <functional>
+#include <vector>
 
 #include "gfxPlatform.h"
 #include "gtest/gtest.h"
@@ -79,9 +81,21 @@ class VulkanTexture final : public RenderTextureHost {
     ++mLocks;
     return NativeTextureToWrExternalImage(19, 0, 0, 2, 2);
   }
-  void UnlockVulkan(WrVulkanExternalImages* aImages) override {
+  Maybe<VulkanImageRelease> UnlockVulkan(
+      WrVulkanExternalImages* aImages) override {
     EXPECT_EQ(aImages, mImages);
     ++mUnlocks;
+    if (mReleaseValue) {
+      return Some(VulkanImageRelease(nullptr, mReleaseValue.ref()));
+    }
+    return Nothing();
+  }
+  void NotifyVulkanRelease(uint64_t aValue,
+                           WrVulkanReleaseStatus aStatus) override {
+    mNotifications.emplace_back(aValue, aStatus);
+    if (mOnRelease) {
+      mOnRelease(aValue, aStatus);
+    }
   }
   size_t Bytes() override { return 0; }
 
@@ -89,9 +103,19 @@ class VulkanTexture final : public RenderTextureHost {
   uint8_t mChannel = 0;
   uint32_t mLocks = 0;
   uint32_t mUnlocks = 0;
+  Maybe<uint64_t> mReleaseValue;
+  std::vector<std::pair<uint64_t, WrVulkanReleaseStatus>> mNotifications;
+  std::function<void(uint64_t, WrVulkanReleaseStatus)> mOnRelease;
 
  private:
   ~VulkanTexture() override = default;
+};
+
+struct TestVulkanRelease {
+  uint64_t mValue;
+  WrVulkanReleaseStatus* mStatus;
+  uint64_t GetValue() const { return mValue; }
+  WrVulkanReleaseStatus GetStatus() const { return *mStatus; }
 };
 
 WrVulkanConfig DetachedConfig() {
@@ -243,9 +267,138 @@ TEST_F(RenderExternalBuffer, WrapperRetainsAndForwardsVulkanContext) {
     EXPECT_EQ(image.image_type, WrExternalImageType::NativeTexture);
     EXPECT_EQ(host->mImages, context);
     EXPECT_EQ(host->mChannel, 2);
-    wrapper->UnlockVulkan(context);
+    host->mReleaseValue = Some(uint64_t(17));
+    auto release = wrapper->UnlockVulkan(context);
+    ASSERT_TRUE(release);
+    EXPECT_EQ(release->GetValue(), 17U);
+    wrapper->NotifyVulkanRelease(17, WrVulkanReleaseStatus::Submitted);
+    ASSERT_EQ(host->mNotifications.size(), 1U);
+    EXPECT_EQ(host->mNotifications[0].first, 17U);
+    EXPECT_EQ(host->mNotifications[0].second, WrVulkanReleaseStatus::Submitted);
     EXPECT_EQ(host->mLocks, 1U);
     EXPECT_EQ(host->mUnlocks, 1U);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanReleasesNotifyOnlyResolvedReceipts) {
+  OnRenderThread([] {
+    auto status = WrVulkanReleaseStatus::Pending;
+    VulkanImageReleaseQueue<TestVulkanRelease> releases;
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    EXPECT_FALSE(releases.HasPending());
+    releases.Add(host, {7, &status});
+    releases.Poll();
+    EXPECT_TRUE(releases.HasPending());
+    EXPECT_TRUE(host->mNotifications.empty());
+    status = WrVulkanReleaseStatus::Submitted;
+    releases.Poll();
+    releases.Poll();
+    EXPECT_FALSE(releases.HasPending());
+    ASSERT_EQ(host->mNotifications.size(), 1U);
+    EXPECT_EQ(host->mNotifications[0].first, 7U);
+    EXPECT_EQ(host->mNotifications[0].second, status);
+    status = WrVulkanReleaseStatus::Abandoned;
+    releases.Add(host, {8, &status});
+    releases.Poll();
+    ASSERT_EQ(host->mNotifications.size(), 2U);
+    EXPECT_EQ(host->mNotifications[1].first, 8U);
+    EXPECT_EQ(host->mNotifications[1].second, status);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanCancellationPreservesSubmittedReleases) {
+  OnRenderThread([] {
+    auto submitted = WrVulkanReleaseStatus::Submitted;
+    auto pending = WrVulkanReleaseStatus::Pending;
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    VulkanImageReleaseQueue<TestVulkanRelease> releases;
+    releases.Add(host, {1, &pending});
+    releases.Add(host, {2, &submitted});
+    releases.Poll(true);
+    ASSERT_EQ(host->mNotifications.size(), 2U);
+    EXPECT_EQ(host->mNotifications[0].second, WrVulkanReleaseStatus::Abandoned);
+    EXPECT_EQ(host->mNotifications[1].second, WrVulkanReleaseStatus::Submitted);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanQueueRetainsHostUntilTeardownNotification) {
+  OnRenderThread([] {
+    auto status = WrVulkanReleaseStatus::Pending;
+    bool notified = false;
+    bool destroyed = false;
+    {
+      VulkanImageReleaseQueue<TestVulkanRelease> releases;
+      RefPtr<VulkanTexture> host = new VulkanTexture;
+      host->mOnRelease = [&](uint64_t aValue, WrVulkanReleaseStatus aStatus) {
+        EXPECT_FALSE(destroyed);
+        EXPECT_EQ(aValue, 41U);
+        EXPECT_EQ(aStatus, WrVulkanReleaseStatus::Abandoned);
+        notified = true;
+      };
+      host->SetDestroyedCallback([&] { destroyed = true; });
+      releases.Add(host, {41, &status});
+      host = nullptr;
+      releases.Poll();
+      EXPECT_FALSE(notified);
+      EXPECT_FALSE(destroyed);
+    }
+    EXPECT_TRUE(notified);
+    EXPECT_TRUE(destroyed);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanReleaseCallbacksCanEnqueueMoreWork) {
+  OnRenderThread([] {
+    auto status = WrVulkanReleaseStatus::Submitted;
+    VulkanImageReleaseQueue<TestVulkanRelease> releases;
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    auto* target = host.get();
+    host->mOnRelease = [&](uint64_t aValue, WrVulkanReleaseStatus) {
+      if (aValue == 1) {
+        releases.Add(target, {2, &status});
+      }
+    };
+    releases.Add(host, {1, &status});
+    releases.Poll();
+    ASSERT_EQ(host->mNotifications.size(), 1U);
+    EXPECT_TRUE(releases.HasPending());
+    releases.Poll();
+    ASSERT_EQ(host->mNotifications.size(), 2U);
+    EXPECT_FALSE(releases.HasPending());
+    EXPECT_EQ(host->mNotifications[1].first, 2U);
+    host->mNotifications.clear();
+    status = WrVulkanReleaseStatus::Pending;
+    releases.Add(host, {1, &status});
+    releases.Poll(true);
+    ASSERT_EQ(host->mNotifications.size(), 2U);
+    EXPECT_EQ(host->mNotifications[0].second, WrVulkanReleaseStatus::Abandoned);
+    EXPECT_EQ(host->mNotifications[1].second, WrVulkanReleaseStatus::Abandoned);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanCompositorDefersNotificationsPastUnlock) {
+  OnRenderThread([] {
+    RenderCompositorVulkan compositor(nullptr, DetachedConfig());
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    for (bool success : {true, false}) {
+      const auto previous = host->mNotifications.size();
+      host->mReleaseValue = Some(uint64_t(previous + 1));
+      compositor.UnlockExternalImage(host);
+      EXPECT_EQ(host->mNotifications.size(), previous);
+      compositor.AfterRender(success);
+      ASSERT_EQ(host->mNotifications.size(), previous + 1);
+      EXPECT_EQ(host->mNotifications.back().first, previous + 1);
+      EXPECT_EQ(host->mNotifications.back().second,
+                WrVulkanReleaseStatus::Abandoned);
+    }
+    host->mReleaseValue = Some(uint64_t(3));
+    compositor.UnlockExternalImage(host);
+    EXPECT_EQ(host->mNotifications.size(), 2U);
+    compositor.SetRenderer(nullptr, WindowId{});
+    ASSERT_EQ(host->mNotifications.size(), 3U);
+    EXPECT_EQ(host->mNotifications.back().first, 3U);
+    EXPECT_EQ(host->mNotifications.back().second,
+              WrVulkanReleaseStatus::Abandoned);
   });
 }
 
