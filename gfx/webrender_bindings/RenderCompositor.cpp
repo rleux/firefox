@@ -16,6 +16,7 @@
 #include "mozilla/webrender/RenderCompositorOGL.h"
 #include "mozilla/webrender/RenderCompositorSWGL.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
+#include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/widget/CompositorWidget.h"
 
 #ifdef XP_WIN
@@ -36,6 +37,15 @@
 #endif
 
 namespace mozilla::wr {
+
+WrExternalImage RenderCompositor::LockExternalImage(RenderTextureHost* aTexture,
+                                                    uint8_t aChannelIndex) {
+  return aTexture->LockExternalBuffer(aChannelIndex);
+}
+
+void RenderCompositor::UnlockExternalImage(RenderTextureHost* aTexture) {
+  aTexture->UnlockExternalBuffer();
+}
 
 void wr_compositor_add_surface(void* aCompositor, wr::NativeSurfaceId aId,
                                const wr::CompositorSurfaceTransform* aTransform,

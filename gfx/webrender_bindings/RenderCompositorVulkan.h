@@ -119,6 +119,9 @@ class RenderCompositorVulkan final : public RenderCompositor {
   bool IsWindowHidden() override;
   bool SetSurface(const WrVulkanConfig* aConfig);
   void SetRenderer(Renderer* aRenderer, WindowId aWindowId) override;
+  WrExternalImage LockExternalImage(RenderTextureHost* aTexture,
+                                    uint8_t aChannelIndex) override;
+  void UnlockExternalImage(RenderTextureHost* aTexture) override;
   bool BeginFrame() override;
   RenderedFrameId EndFrame(const nsTArray<DeviceIntRect>& aDirtyRects) override;
   RenderedFrameId UpdateFrameId() override;
@@ -144,6 +147,12 @@ class RenderCompositorVulkan final : public RenderCompositor {
   void WakeUp();
 
   Maybe<OwnedVulkanConfig> mConfig;
+  struct ExternalImagesDeleter {
+    void operator()(WrVulkanExternalImages* aImages) {
+      wr_vulkan_external_images_delete(aImages);
+    }
+  };
+  UniquePtr<WrVulkanExternalImages, ExternalImagesDeleter> mExternalImages;
   VulkanFrameTracker mFrames;
   // RendererOGL clears this borrowed pointer immediately after Renderer deletion.
   Renderer* mRenderer = nullptr;

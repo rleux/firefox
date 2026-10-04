@@ -82,6 +82,10 @@ class RenderCompositor {
   virtual bool IsWindowHidden() { return false; }
   virtual void SetRenderer(Renderer* aRenderer, WindowId aWindowId) {}
 
+  virtual WrExternalImage LockExternalImage(RenderTextureHost* aTexture,
+                                            uint8_t aChannelIndex);
+  virtual void UnlockExternalImage(RenderTextureHost* aTexture);
+
   virtual gl::GLContext* gl() const { return nullptr; }
   virtual void* swgl() const { return nullptr; }
 
