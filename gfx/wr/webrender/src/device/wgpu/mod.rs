@@ -18,6 +18,11 @@ mod binding_cache;
 #[path = "vulkan/external.rs"]
 mod external;
 #[cfg(target_os = "linux")]
+#[path = "vulkan/dmabuf.rs"]
+mod dmabuf;
+#[cfg(target_os = "linux")]
+pub use self::dmabuf::DmaBufFormat;
+#[cfg(target_os = "linux")]
 #[path = "vulkan/timeline.rs"]
 mod timeline;
 #[cfg(target_os = "linux")]
