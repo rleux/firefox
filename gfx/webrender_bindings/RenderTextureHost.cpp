@@ -104,6 +104,15 @@ wr::WrExternalImage RenderTextureHost::LockExternalBuffer(
   return InvalidToWrExternalImage();
 }
 
+wr::WrExternalImage RenderTextureHost::LockVulkan(uint8_t aChannelIndex,
+                                                  WrVulkanExternalImages*) {
+  return LockExternalBuffer(aChannelIndex);
+}
+
+void RenderTextureHost::UnlockVulkan(WrVulkanExternalImages*) {
+  UnlockExternalBuffer();
+}
+
 wr::WrExternalImage RenderTextureHost::LockSWGL(uint8_t aChannelIndex,
                                                 void* aContext,
                                                 RenderCompositor* aCompositor) {
