@@ -14,6 +14,8 @@ pub mod shaders {
 
 mod bindings;
 mod binding_cache;
+mod external_textures;
+pub use self::external_textures::ExternalTextureRegistry;
 #[cfg(target_os = "linux")]
 #[path = "vulkan/external.rs"]
 mod external;
