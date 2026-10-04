@@ -11,6 +11,9 @@ use crate::device::wgpu::shader::select_draw_shader;
 use crate::device::RenderState;
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 
+#[path = "../external_access_tests.rs"]
+mod registry;
+
 fn publish(
     source: &Rc<DmaBufImage>,
     ready: &Rc<SharedTimeline>,
