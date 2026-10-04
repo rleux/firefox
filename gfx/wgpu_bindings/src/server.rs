@@ -102,7 +102,7 @@ fn get_linux_dmabuf_modifiers() -> Option<Vec<u64>> {
 }
 
 #[cfg(target_os = "linux")]
-const DMABUF_DEVICE_EXTENSIONS: &[&'static std::ffi::CStr] = &[
+pub(crate) const DMABUF_DEVICE_EXTENSIONS: &[&'static std::ffi::CStr] = &[
     khr::external_memory_fd::NAME,
     ash::ext::external_memory_dma_buf::NAME,
     ash::ext::image_drm_format_modifier::NAME,
@@ -1166,15 +1166,15 @@ pub struct VulkanDmaBufInfo {
 /// Destroys a `VkImage` and its dedicated `VkDeviceMemory` unless ownership has
 /// been handed over with [`ScopedVkImage::release`].
 #[cfg(target_os = "linux")]
-struct ScopedVkImage<'a> {
+pub(crate) struct ScopedVkImage<'a> {
     device: &'a ash::Device,
     image: vk::Image,
-    memory: vk::DeviceMemory,
+    pub(crate) memory: vk::DeviceMemory,
 }
 
 #[cfg(target_os = "linux")]
 impl<'a> ScopedVkImage<'a> {
-    fn new(device: &'a ash::Device, image: vk::Image) -> Self {
+    pub(crate) fn new(device: &'a ash::Device, image: vk::Image) -> Self {
         Self {
             device,
             image,
@@ -1182,7 +1182,7 @@ impl<'a> ScopedVkImage<'a> {
         }
     }
 
-    fn release(&mut self) {
+    pub(crate) fn release(&mut self) {
         self.image = vk::Image::null();
         self.memory = vk::DeviceMemory::null();
     }
@@ -1208,7 +1208,7 @@ impl Drop for ScopedVkImage<'_> {
 /// `vkGetImageMemoryRequirements2`. The caller always makes a dedicated
 /// allocation, so the dedicated requirements are only reported, never acted on.
 #[cfg(target_os = "linux")]
-unsafe fn dedicated_image_memory_requirements(
+pub(crate) unsafe fn dedicated_image_memory_requirements(
     instance: &ash::Instance,
     device: &ash::Device,
     image: vk::Image,
@@ -1856,7 +1856,7 @@ pub unsafe fn is_dmabuf_supported(
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn dmabuf_image_properties(
+pub(crate) unsafe fn dmabuf_image_properties(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
     format: vk::Format,

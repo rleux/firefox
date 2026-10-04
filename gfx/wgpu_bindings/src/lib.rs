@@ -20,6 +20,8 @@ pub mod server;
 pub mod telemetry;
 #[cfg(target_os = "linux")]
 pub mod vulkan_timeline;
+#[cfg(target_os = "linux")]
+pub mod vulkan_image;
 
 use std::marker::PhantomData;
 use std::{borrow::Cow, mem, slice};

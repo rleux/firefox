@@ -867,6 +867,7 @@ void wr_test_webgpu_timeline_submission();
 void wr_test_webgpu_timeline_failed_submission();
 void wr_test_webgpu_dmabuf_allocation();
 bool wr_test_webgpu_import_initialization();
+void wr_test_webgpu_dmabuf_import();
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {
@@ -887,6 +888,10 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedDMABufAllocation) {
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUImportedTextureInitialization) {
   OnRenderThread([] { EXPECT_TRUE(wr_test_webgpu_import_initialization()); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedDMABufImport) {
+  OnRenderThread([] { wr_test_webgpu_dmabuf_import(); });
 }
 
 TEST_F(RenderExternalBuffer,

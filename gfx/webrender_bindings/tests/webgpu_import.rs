@@ -128,7 +128,7 @@ unsafe fn dirty_texture(
     )
 }
 
-fn readback(
+pub(super) fn readback(
     device: &Arc<wgc::device::Device>,
     queue: &Arc<wgc::device::queue::Queue>,
     texture: Arc<wgc::resource::Texture>,
