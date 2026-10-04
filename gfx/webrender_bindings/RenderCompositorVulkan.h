@@ -8,6 +8,7 @@
 #include <deque>
 
 #include "RenderCompositor.h"
+#include "RenderTextureHost.h"
 #include "base/timer.h"
 #include "mozilla/Maybe.h"
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
@@ -102,6 +103,48 @@ class VulkanFrameTracker {
   RenderedFrameId mCompletedFrame{1};
 };
 
+template <typename Release = VulkanImageRelease>
+class VulkanImageReleaseQueue {
+ public:
+  VulkanImageReleaseQueue() = default;
+  VulkanImageReleaseQueue(const VulkanImageReleaseQueue&) = delete;
+  VulkanImageReleaseQueue& operator=(const VulkanImageReleaseQueue&) = delete;
+  ~VulkanImageReleaseQueue() { Poll(true); }
+
+  void Add(RenderTextureHost* aHost, Release&& aRelease) {
+    mPending.push_back({aHost, std::move(aRelease)});
+  }
+
+  bool HasPending() const { return !mPending.empty(); }
+
+  void Poll(bool aCancelPending = false) {
+    size_t remaining = mPending.size();
+    while (!mPending.empty() && (aCancelPending || remaining != 0)) {
+      if (!aCancelPending) {
+        --remaining;
+      }
+      auto entry = std::move(mPending.front());
+      mPending.pop_front();
+      auto status = entry.mRelease.GetStatus();
+      if (status == WrVulkanReleaseStatus::Pending) {
+        if (!aCancelPending) {
+          mPending.push_back(std::move(entry));
+          continue;
+        }
+        status = WrVulkanReleaseStatus::Abandoned;
+      }
+      entry.mHost->NotifyVulkanRelease(entry.mRelease.GetValue(), status);
+    }
+  }
+
+ private:
+  struct Entry {
+    RefPtr<RenderTextureHost> mHost;
+    Release mRelease;
+  };
+  std::deque<Entry> mPending;
+};
+
 class RenderCompositorVulkan final : public RenderCompositor {
  public:
   static bool IsRequested();
@@ -135,6 +178,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
     return mPaused || !mConfig || !mConfig->HasWindow();
   }
   void Update() override;
+  void AfterRender(bool aSuccess) override;
   LayoutDeviceIntSize GetBufferSize() override;
   bool SurfaceOriginIsTopLeft() override { return true; }
   bool SupportAsyncScreenshot() override { return false; }
@@ -142,7 +186,8 @@ class RenderCompositorVulkan final : public RenderCompositor {
  private:
   bool PollCompletions();
   void UpdateWindowVisibility();
-  void PollPendingFrames();
+  void PollPendingWork();
+  void UpdateCompletionTimer();
   void Fail();
   void WakeUp();
 
@@ -153,6 +198,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
     }
   };
   UniquePtr<WrVulkanExternalImages, ExternalImagesDeleter> mExternalImages;
+  VulkanImageReleaseQueue<> mImageReleases;
   VulkanFrameTracker mFrames;
   // RendererOGL clears this borrowed pointer immediately after Renderer deletion.
   Renderer* mRenderer = nullptr;

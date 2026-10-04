@@ -33,7 +33,10 @@ class RenderTextureHostWrapper final : public RenderTextureHostSWGL {
   void UnlockExternalBuffer() override;
   wr::WrExternalImage LockVulkan(uint8_t aChannelIndex,
                                  WrVulkanExternalImages* aImages) override;
-  void UnlockVulkan(WrVulkanExternalImages* aImages) override;
+  Maybe<VulkanImageRelease> UnlockVulkan(
+      WrVulkanExternalImages* aImages) override;
+  void NotifyVulkanRelease(uint64_t aValue,
+                           WrVulkanReleaseStatus aStatus) override;
   void ClearCachedResources() override;
   void PrepareForUse() override;
   void NotifyForUse() override;

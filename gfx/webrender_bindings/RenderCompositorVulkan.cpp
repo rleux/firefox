@@ -234,6 +234,9 @@ void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
   mCompletionTimer.Stop();
   mRenderer = aRenderer;
   mWindowId = aWindowId;
+  if (!aRenderer) {
+    mImageReleases.Poll(true);
+  }
   mExternalImages.reset(aRenderer ? wr_vulkan_external_images_new(aRenderer)
                                   : nullptr);
 }
@@ -244,7 +247,14 @@ WrExternalImage RenderCompositorVulkan::LockExternalImage(
 }
 
 void RenderCompositorVulkan::UnlockExternalImage(RenderTextureHost* aTexture) {
-  aTexture->UnlockVulkan(mExternalImages.get());
+  if (auto release = aTexture->UnlockVulkan(mExternalImages.get())) {
+    mImageReleases.Add(aTexture, std::move(release.ref()));
+  }
+}
+
+void RenderCompositorVulkan::AfterRender(bool aSuccess) {
+  mImageReleases.Poll(!aSuccess);
+  UpdateCompletionTimer();
 }
 
 bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
@@ -309,13 +319,18 @@ RenderedFrameId RenderCompositorVulkan::UpdateFrameId() {
     Fail();
     return frame;
   }
-  if (!mFrames.HasPendingFrames()) {
+  UpdateCompletionTimer();
+  return frame;
+}
+
+void RenderCompositorVulkan::UpdateCompletionTimer() {
+  if (!mRenderer || mFailed ||
+      (!mFrames.HasPendingFrames() && !mImageReleases.HasPending())) {
     mCompletionTimer.Stop();
   } else if (!mCompletionTimer.IsRunning()) {
     mCompletionTimer.Start(base::TimeDelta::FromMilliseconds(2), this,
-                           &RenderCompositorVulkan::PollPendingFrames);
+                           &RenderCompositorVulkan::PollPendingWork);
   }
-  return frame;
 }
 
 bool RenderCompositorVulkan::PollCompletions() {
@@ -329,13 +344,12 @@ bool RenderCompositorVulkan::PollCompletions() {
     Fail();
     return false;
   }
-  if (!mFrames.HasPendingFrames()) {
-    mCompletionTimer.Stop();
-  }
+  mImageReleases.Poll();
+  UpdateCompletionTimer();
   return true;
 }
 
-void RenderCompositorVulkan::PollPendingFrames() {
+void RenderCompositorVulkan::PollPendingWork() {
   auto previous = mFrames.CompletedFrame();
   if (PollCompletions() && previous != mFrames.CompletedFrame()) {
     WakeUp();
@@ -352,6 +366,7 @@ void RenderCompositorVulkan::WakeUp() {
 void RenderCompositorVulkan::Fail() {
   if (!mFailed) {
     mFailed = true;
+    mImageReleases.Poll(true);
     mExternalImages.reset();
     mCompletionTimer.Stop();
     WakeUp();
