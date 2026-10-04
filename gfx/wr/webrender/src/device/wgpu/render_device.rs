@@ -70,10 +70,12 @@ impl RenderDevice {
             0,
             None,
         )?;
+        let textures = TextureStore::new(owner);
+        textures.external_textures().attach_queue(&submissions);
         Ok(Self {
             properties: RendererProperties::new(owner),
             programs: ProgramStore::default(),
-            textures: TextureStore::new(owner),
+            textures,
             vertex_arrays: VertexArrayStore::new(&pool),
             uploads: UploadBuffers::new(&pool),
             passes: RenderPassState::new(&quad),
@@ -112,6 +114,7 @@ impl RenderDevice {
             Err(error) => {
                 self.failure.get_or_insert(error);
                 self.passes.discard();
+                self.textures.external_textures().disconnect();
                 self.submissions.discard_recording();
                 if let Some(swapchain) = &mut self.swapchain {
                     let _ = swapchain.discard_acquired();
