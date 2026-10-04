@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <functional>
@@ -20,6 +21,12 @@
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
 #include "nsThreadUtils.h"
+
+#if defined(XP_LINUX) && !defined(ANDROID)
+#  include <fcntl.h>
+
+#  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
+#endif
 
 namespace mozilla::wr {
 
@@ -401,5 +408,261 @@ TEST_F(RenderExternalBuffer, VulkanCompositorDefersNotificationsPastUnlock) {
               WrVulkanReleaseStatus::Abandoned);
   });
 }
+
+#if defined(XP_LINUX) && !defined(ANDROID)
+TEST_F(RenderExternalBuffer,
+       VulkanPublicationReturnCanReenterTextureManagement) {
+  for (bool deferred : {false, true}) {
+    ExternalImageId id{uint64_t(GPUProcessManager::Get()->AllocateNamespace())
+                       << 32};
+    bool returned = false;
+    OnRenderThread([id, deferred, &returned] {
+      UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+      ASSERT_TRUE(fd);
+      WrVulkanDmaBufDescriptor image{};
+      image.fd = fd.get();
+      image.width = image.height = 2;
+      image.stride = 8;
+      image.format = ImageFormat::RGBA8;
+      WrVulkanTimelineDescriptor ready{};
+      ready.fd = fd.get();
+      RefPtr<RenderTextureHost> host = RenderVulkanDMABufTextureHost::Create(
+          image, ready, 1, [&](VulkanImageReturn&& aReturn) {
+            EXPECT_EQ(aReturn.mStatus, VulkanImageReturnStatus::Unused);
+            (void)RenderThread::Get()->SyncObjectNeeded();
+            returned = true;
+          });
+      ASSERT_TRUE(host);
+      RenderThread::Get()->RegisterExternalImage(id, host.forget());
+      if (!deferred) {
+        RenderThread::Get()->UnregisterExternalImage(id);
+        EXPECT_TRUE(returned);
+      }
+    });
+    if (deferred) {
+      RenderThread::Get()->UnregisterExternalImage(id);
+    }
+    OnRenderThread([&] { EXPECT_TRUE(returned); });
+  }
+}
+
+TEST_F(RenderExternalBuffer,
+       VulkanPublicationReturnsUnusedWithoutConsumingFDs) {
+  OnRenderThread([] {
+    UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    ASSERT_TRUE(fd);
+    WrVulkanDmaBufDescriptor image{};
+    image.fd = fd.get();
+    image.width = 3;
+    image.height = 2;
+    image.stride = 16;
+    image.format = ImageFormat::BGRA8;
+    WrVulkanTimelineDescriptor ready{};
+    ready.fd = fd.get();
+    Maybe<VulkanImageReturn> returned;
+    auto host = RenderVulkanDMABufTextureHost::Create(
+        image, ready, 1, [&](VulkanImageReturn&& aReturn) {
+          returned.emplace(std::move(aReturn));
+        });
+    RefPtr<RenderVulkanDMABufTextureHost> retained = std::move(host);
+    ASSERT_TRUE(retained);
+    EXPECT_NE(fcntl(fd.get(), F_GETFD), -1);
+    EXPECT_EQ(retained->Bytes(), 24U);
+    EXPECT_EQ(retained->GetFormat(), SurfaceFormat::B8G8R8A8);
+    fd.reset();
+    EXPECT_FALSE(returned);
+    retained = nullptr;
+    ASSERT_TRUE(returned);
+    EXPECT_EQ(returned->mStatus, VulkanImageReturnStatus::Unused);
+    EXPECT_FALSE(returned->mSemaphore);
+    EXPECT_EQ(returned->mValue, 0U);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanPublicationRejectsInvalidMetadata) {
+  OnRenderThread([] {
+    UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    ASSERT_TRUE(fd);
+    WrVulkanDmaBufDescriptor valid{};
+    valid.fd = fd.get();
+    valid.width = valid.height = 2;
+    valid.stride = 8;
+    valid.format = ImageFormat::RGBA8;
+    WrVulkanTimelineDescriptor ready{};
+    ready.fd = fd.get();
+    bool returned = false;
+    for (int field = 0; field < 6; ++field) {
+      auto image = valid;
+      switch (field) {
+        case 0:
+          image.fd = -1;
+          break;
+        case 1:
+          image.width = 0;
+          break;
+        case 2:
+          image.stride = 0;
+          break;
+        case 3:
+          image.format = ImageFormat::R8;
+          break;
+        case 4:
+          image.device_uuid[0] = 1;
+          break;
+        case 5:
+          image.driver_uuid[0] = 1;
+          break;
+      }
+      RefPtr<RenderVulkanDMABufTextureHost> host =
+          RenderVulkanDMABufTextureHost::Create(
+              image, ready, 1, [&](VulkanImageReturn&&) { returned = true; });
+      EXPECT_FALSE(host);
+      EXPECT_FALSE(returned);
+      EXPECT_NE(fcntl(fd.get(), F_GETFD), -1);
+    }
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanPublicationAbandonsUnavailableContext) {
+  OnRenderThread([] {
+    UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
+    ASSERT_TRUE(fd);
+    WrVulkanDmaBufDescriptor image{};
+    image.fd = fd.get();
+    image.width = image.height = 2;
+    image.stride = 8;
+    image.format = ImageFormat::RGBA8;
+    WrVulkanTimelineDescriptor ready{};
+    ready.fd = fd.get();
+    Maybe<VulkanImageReturn> returned;
+    size_t returns = 0;
+    RefPtr<RenderVulkanDMABufTextureHost> host =
+        RenderVulkanDMABufTextureHost::Create(
+            image, ready, 1, [&](VulkanImageReturn&& aReturn) {
+              ++returns;
+              returned.emplace(std::move(aReturn));
+            });
+    ASSERT_TRUE(host);
+    EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_EQ(host->LockVulkan(1, nullptr).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_FALSE(host->UnlockVulkan(nullptr));
+    auto release = host->UnlockVulkan(nullptr);
+    ASSERT_TRUE(release);
+    EXPECT_FALSE(returned);
+    VulkanImageReleaseQueue<> releases;
+    releases.Add(host, std::move(release.ref()));
+    releases.Poll();
+    ASSERT_TRUE(returned);
+    EXPECT_EQ(returned->mStatus, VulkanImageReturnStatus::Abandoned);
+    EXPECT_EQ(returns, 1U);
+    EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_FALSE(host->UnlockVulkan(nullptr));
+    host = nullptr;
+    EXPECT_EQ(returns, 1U);
+  });
+}
+
+#  ifdef MOZ_WEBRENDER_VULKAN
+struct TestVulkanImage {
+  int32_t mMemoryFd;
+  int32_t mReadyFd;
+  uint64_t mOffset;
+  uint64_t mStride;
+  uint8_t mDeviceUUID[16];
+  uint8_t mDriverUUID[16];
+};
+
+extern "C" {
+void* wr_test_vulkan_image_new(TestVulkanImage*);
+Renderer* wr_test_vulkan_image_renderer(void*);
+void wr_test_vulkan_image_submit(void*);
+bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
+                               uint64_t);
+void wr_test_vulkan_image_delete(void*);
+}
+
+TEST_F(RenderExternalBuffer,
+       DISABLED_VulkanPublicationReturnsSubmittedTimeline) {
+  OnRenderThread([] {
+    for (bool fail : {false, true}) {
+      TestVulkanImage source{};
+      auto* fixture = wr_test_vulkan_image_new(&source);
+      ASSERT_NE(fixture, nullptr);
+      auto cleanup =
+          MakeScopeExit([&] { wr_test_vulkan_image_delete(fixture); });
+      auto* renderer = wr_test_vulkan_image_renderer(fixture);
+      auto* context = wr_vulkan_external_images_new(renderer);
+      auto* alias = wr_vulkan_external_images_new(renderer);
+      ASSERT_NE(context, nullptr);
+      ASSERT_NE(alias, nullptr);
+      auto cleanupContexts = MakeScopeExit([&] {
+        wr_vulkan_external_images_delete(context);
+        wr_vulkan_external_images_delete(alias);
+      });
+      WrVulkanDmaBufDescriptor image{};
+      image.fd = source.mMemoryFd;
+      image.width = image.height = 2;
+      image.format = ImageFormat::RGBA8;
+      image.offset = source.mOffset;
+      image.stride = source.mStride;
+      image.copy_dst = true;
+      std::copy_n(source.mDeviceUUID, 16, image.device_uuid);
+      std::copy_n(source.mDriverUUID, 16, image.driver_uuid);
+      WrVulkanTimelineDescriptor ready{};
+      ready.fd = source.mReadyFd;
+      std::copy_n(source.mDeviceUUID, 16, ready.device_uuid);
+      std::copy_n(source.mDriverUUID, 16, ready.driver_uuid);
+      Maybe<VulkanImageReturn> returned;
+      RefPtr<RenderVulkanDMABufTextureHost> host =
+          RenderVulkanDMABufTextureHost::Create(
+              image, ready, 1, [&](VulkanImageReturn&& aReturn) {
+                returned.emplace(std::move(aReturn));
+              });
+      ASSERT_TRUE(host);
+      VulkanImageReleaseQueue<> releases;
+      const auto first = host->LockVulkan(0, context);
+      ASSERT_EQ(first.image_type, WrExternalImageType::NativeTexture);
+      const auto nested = host->LockVulkan(0, alias);
+      EXPECT_EQ(nested.handle, first.handle);
+      EXPECT_FALSE(host->UnlockVulkan(context));
+      auto release = host->UnlockVulkan(alias);
+      ASSERT_TRUE(release);
+      releases.Add(host, std::move(release.ref()));
+      EXPECT_EQ(host->LockVulkan(0, alias).handle, first.handle);
+      release = host->UnlockVulkan(alias);
+      ASSERT_TRUE(release);
+      releases.Add(host, std::move(release.ref()));
+      releases.Poll();
+      EXPECT_FALSE(returned);
+      if (fail) {
+        EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+                  WrExternalImageType::Invalid);
+        EXPECT_FALSE(host->UnlockVulkan(nullptr));
+      }
+      host = nullptr;
+      EXPECT_FALSE(returned);
+      wr_vulkan_external_images_delete(context);
+      wr_vulkan_external_images_delete(alias);
+      context = alias = nullptr;
+      wr_test_vulkan_image_submit(fixture);
+      releases.Poll();
+      ASSERT_TRUE(returned);
+      EXPECT_EQ(returned->mStatus, fail ? VulkanImageReturnStatus::Abandoned
+                                        : VulkanImageReturnStatus::Submitted);
+      if (!fail) {
+        EXPECT_EQ(returned->mValue, 2U);
+        ASSERT_TRUE(returned->mSemaphore);
+        EXPECT_TRUE(wr_test_vulkan_image_wait(
+            fixture, returned->mSemaphore.get(), returned->mDeviceUUID.data(),
+            returned->mDriverUUID.data(), returned->mValue));
+      }
+    }
+  });
+}
+#  endif
+#endif
 
 }  // namespace mozilla::wr

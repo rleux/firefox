@@ -143,6 +143,7 @@ fn unsupported_external_bindings_fail_without_changing_outputs() {
     let images = WrVulkanExternalImages {};
     let timeline = WrVulkanTimeline {};
     let image = WrVulkanDmaBufImage {};
+    assert!(!wr_vulkan_dmabuf_matches_context(&image, &images));
     let receipt = WrVulkanRelease {};
     let mut descriptor = WrVulkanTimelineDescriptor {
         fd: -99,
