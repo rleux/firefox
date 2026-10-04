@@ -26,6 +26,7 @@
 
 #if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
 #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+#  include "mozilla/webgpu/SharedTextureVulkan.h"
 #endif
 
 #if defined(XP_MACOSX)
@@ -114,6 +115,9 @@ extern int32_t wgpu_server_get_dma_buf_fd(WGPUWebGPUParentPtr aParent,
     return -1;
   }
 
+  if (auto* vulkan = texture->AsSharedTextureVulkan()) {
+    return vulkan->CloneDmaBufFd().release();
+  }
   auto* textureDMABuf = texture->AsSharedTextureDMABuf();
   if (!textureDMABuf) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");
@@ -122,6 +126,22 @@ extern int32_t wgpu_server_get_dma_buf_fd(WGPUWebGPUParentPtr aParent,
   auto fd = textureDMABuf->CloneDmaBufFd();
   // fd should be closed by the caller.
   return fd.release();
+}
+
+extern bool wgpu_server_get_vulkan_dmabuf_info(WGPUWebGPUParentPtr aParent,
+                                               WGPUTextureId aId,
+                                               WGPUVulkanDmaBufInfo* aInfo,
+                                               const WGPUVulkanTimeline** aWait,
+                                               uint64_t* aValue) {
+  auto texture = static_cast<WebGPUParent*>(aParent)->GetSharedTexture(aId);
+  auto* vulkan = texture ? texture->AsSharedTextureVulkan() : nullptr;
+  if (!vulkan) {
+    return false;
+  }
+  *aInfo = vulkan->GetDMABufInfo();
+  *aWait = vulkan->GetAcquireTimeline();
+  *aValue = vulkan->GetAcquireValue();
+  return true;
 }
 
 extern "C" bool wgpu_server_get_linux_dmabuf_modifiers(
@@ -407,6 +427,10 @@ class PresentationData {
   uint64_t mSubmissionIndex = 0;
 
   std::deque<std::shared_ptr<SharedTexture>> mRecycledSharedTextures;
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  std::deque<std::shared_ptr<SharedTexture>> mPendingVulkanTextures;
+  bool mUsesVulkanTextures = false;
+#endif
 
   std::unordered_set<layers::RemoteTextureId, layers::RemoteTextureId::HashFn>
       mWaitingReadbackTexturesForPresent;
@@ -1015,6 +1039,12 @@ ipc::IPCResult WebGPUParent::GetFrontBufferSnapshot(
   RefPtr<PresentationData> data = lookup->second.get();
   data->mReadbackSnapshotCallbackCalled = false;
 
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (data->mUsesVulkanTextures) {
+    return IPC_OK();
+  }
+#endif
+
   const Maybe<int32_t> maybeStride =
       layers::ImageDataSerializer::GetRGBStride(data->mDesc);
   if (maybeStride.isNothing()) {
@@ -1149,6 +1179,23 @@ void WebGPUParent::PostSharedTexture(
 
   RefPtr<PresentationData> data = lookup->second.get();
 
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (auto* vulkan = aSharedTexture->AsSharedTextureVulkan()) {
+    if (!mRemoteTextureOwner->PushVulkanTexture(aRemoteTextureId, aOwnerId,
+                                                vulkan->GetPublication(),
+                                                vulkan->GetReturnCallback())) {
+      mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+      return;
+    }
+    data->mPendingVulkanTextures.push_back(aSharedTexture);
+    // Dropping a recycling candidate is safe: the consumer owns its handles.
+    if (data->mPendingVulkanTextures.size() > 4) {
+      data->mPendingVulkanTextures.pop_front();
+    }
+    return;
+  }
+#endif
+
   Maybe<layers::SurfaceDescriptor> desc = aSharedTexture->ToSurfaceDescriptor();
   if (!desc) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");
@@ -1197,6 +1244,16 @@ void WebGPUParent::SwapChainPresent(
     }
     std::shared_ptr<SharedTexture> sharedTexture = it->second;
     mSharedTextures.erase(it);
+
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+    if (auto* vulkan = sharedTexture->AsSharedTextureVulkan()) {
+      if (!vulkan->Publish(mContext.get(), data->mQueueId, aTextureId,
+                           aRemoteTextureId.mId)) {
+        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+        return;
+      }
+    }
+#endif
 
     if (!sharedTexture->IsSubmitted()) {
       mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
@@ -1465,6 +1522,23 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
                      static_cast<uint32_t>(data->mDesc.size().height));
   MOZ_RELEASE_ASSERT(SwapChainFormatMatches(data->mDesc.format(), aFormat));
 
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  for (auto it = data->mPendingVulkanTextures.begin();
+       it != data->mPendingVulkanTextures.end();) {
+    auto status = (*it)->AsSharedTextureVulkan()->TryRecycle(mContext.get());
+    if (status == SharedTextureVulkan::RecycleStatus::Pending) {
+      ++it;
+      continue;
+    }
+    if (status == SharedTextureVulkan::RecycleStatus::Abandoned) {
+      data->mPendingVulkanTextures.clear();
+      return false;
+    }
+    data->mRecycledSharedTextures.push_back(*it);
+    it = data->mPendingVulkanTextures.erase(it);
+  }
+#endif
+
   // Recycled SharedTexture if it exists.
   if (!data->mRecycledSharedTextures.empty()) {
     std::shared_ptr<SharedTexture> texture =
@@ -1482,6 +1556,11 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
 
   auto sharedTexture = CreateSharedTexture(ownerId, aDeviceId, aTextureId,
                                            aWidth, aHeight, aFormat, aUsage);
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (sharedTexture && sharedTexture->AsSharedTextureVulkan()) {
+    data->mUsesVulkanTextures = true;
+  }
+#endif
   return static_cast<bool>(sharedTexture);
 }
 

@@ -261,16 +261,36 @@ pub unsafe extern "C" fn wgpu_vkimage_import_for_webrender(
     returned: Option<&VulkanTimeline>,
     value: u64,
 ) -> bool {
-    if fd < 0 || returned.is_none() != (value == 0) {
+    if fd < 0 {
+        return false;
+    }
+    import_for_webrender(
+        global,
+        device_id,
+        texture_id,
+        &desc.to_wgpu(),
+        BorrowedFd::borrow_raw(fd),
+        info,
+        returned,
+        value,
+    )
+}
+
+pub(crate) unsafe fn import_for_webrender(
+    global: &Global,
+    device_id: id::DeviceId,
+    texture_id: id::TextureId,
+    desc: &wgc::resource::TextureDescriptor<'_>,
+    fd: BorrowedFd<'_>,
+    info: &VulkanDmaBufInfo,
+    returned: Option<&VulkanTimeline>,
+    value: u64,
+) -> bool {
+    if returned.is_none() != (value == 0) {
         return false;
     }
     let device = global.resolve_device_id(device_id);
-    match import_image(
-        device.clone(),
-        BorrowedFd::borrow_raw(fd),
-        &desc.to_wgpu(),
-        info,
-    ) {
+    match import_image(device.clone(), fd, desc, info) {
         Ok(texture) => {
             if let Some(returned) = returned {
                 let Some(queue) = device.get_queue() else {

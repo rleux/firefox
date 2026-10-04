@@ -1745,6 +1745,14 @@ extern "C" {
     #[cfg(target_os = "linux")]
     fn wgpu_server_get_dma_buf_info(parent: WebGPUParentPtr, id: id::TextureId) -> DMABufInfo;
     #[cfg(target_os = "linux")]
+    fn wgpu_server_get_vulkan_dmabuf_info(
+        parent: WebGPUParentPtr,
+        id: id::TextureId,
+        info: &mut VulkanDmaBufInfo,
+        wait: &mut *const crate::vulkan_timeline::VulkanTimeline,
+        value: &mut u64,
+    ) -> bool;
+    #[cfg(target_os = "linux")]
     fn wgpu_server_get_dma_buf_fd(parent: WebGPUParentPtr, id: id::TextureId) -> i32;
     #[cfg(target_os = "linux")]
     fn wgpu_server_get_linux_dmabuf_modifiers(
@@ -2043,6 +2051,30 @@ impl Global {
                 let msg = c"Failed to create shared texture";
                 gfx_critical_note(msg.as_ptr());
                 return false;
+            }
+
+            let mut info = VulkanDmaBufInfo::default();
+            let mut wait = ptr::null();
+            let mut value = 0;
+            if wgpu_server_get_vulkan_dmabuf_info(
+                self.owner, texture_id, &mut info, &mut wait, &mut value,
+            ) {
+                use std::os::fd::AsFd;
+                let fd = wgpu_server_get_dma_buf_fd(self.owner, texture_id);
+                if fd < 0 {
+                    return false;
+                }
+                let fd = OwnedFd::from_raw_fd(fd);
+                return crate::vulkan_image::import_for_webrender(
+                    self,
+                    device_id,
+                    texture_id,
+                    desc,
+                    fd.as_fd(),
+                    &info,
+                    wait.as_ref(),
+                    value,
+                );
             }
 
             let info = wgpu_server_get_dma_buf_info(self.owner, texture_id);

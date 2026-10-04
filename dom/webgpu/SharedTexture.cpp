@@ -14,6 +14,8 @@
 
 #if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
 #  include "mozilla/webgpu/SharedTextureDMABuf.h"
+#  include "mozilla/webgpu/SharedTextureVulkan.h"
+#  include "mozilla/webrender/RenderCompositorVulkan.h"
 #endif
 
 #ifdef XP_MACOSX
@@ -35,6 +37,10 @@ UniquePtr<SharedTexture> SharedTexture::Create(
   texture = SharedTextureD3D11::Create(aParent, aDeviceId, aWidth, aHeight,
                                        aFormat, aUsage);
 #elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    return SharedTextureVulkan::Create(aParent->GetContext(), aDeviceId, aWidth,
+                                       aHeight, aFormat, aUsage);
+  }
   texture = SharedTextureDMABuf::Create(aParent, aDeviceId, aWidth, aHeight,
                                         aFormat, aUsage);
 #elif defined(XP_MACOSX)
