@@ -12,9 +12,11 @@
 #include "mozilla/layers/SourceSurfaceSharedData.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/webrender/RenderBufferTextureHost.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderSharedSurfaceTextureHost.h"
 #include "mozilla/webrender/RenderTextureHostWrapper.h"
 #include "mozilla/webrender/RenderThread.h"
+#include "mozilla/widget/CompositorWidget.h"
 #include "nsThreadUtils.h"
 
 namespace mozilla::wr {
@@ -67,6 +69,34 @@ class ContextOnlyTexture final : public RenderTextureHost {
  private:
   ~ContextOnlyTexture() override = default;
 };
+
+class VulkanTexture final : public RenderTextureHost {
+ public:
+  WrExternalImage LockVulkan(uint8_t aChannel,
+                             WrVulkanExternalImages* aImages) override {
+    mImages = aImages;
+    mChannel = aChannel;
+    ++mLocks;
+    return NativeTextureToWrExternalImage(19, 0, 0, 2, 2);
+  }
+  void UnlockVulkan(WrVulkanExternalImages* aImages) override {
+    EXPECT_EQ(aImages, mImages);
+    ++mUnlocks;
+  }
+  size_t Bytes() override { return 0; }
+
+  WrVulkanExternalImages* mImages = nullptr;
+  uint8_t mChannel = 0;
+  uint32_t mLocks = 0;
+  uint32_t mUnlocks = 0;
+
+ private:
+  ~VulkanTexture() override = default;
+};
+
+WrVulkanConfig DetachedConfig() {
+  return {WrWindowHandle::Android(nullptr), {}, {}, false, true, false};
+}
 
 }  // namespace
 
@@ -157,6 +187,65 @@ TEST_F(RenderExternalBuffer, WrapperRetainsAndForwardsBuffer) {
     }
     wrapper = nullptr;
     EXPECT_TRUE(destroyed);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanCompositorPreservesBufferFallback) {
+  OnRenderThread([] {
+    RenderCompositorVulkan compositor(nullptr, DetachedConfig());
+    std::array<uint8_t, 24> bytes{};
+    RefPtr<RenderTextureHost> host =
+        new RenderBufferTextureHost(bytes.data(), BufferDescriptorForTest());
+    EXPECT_EQ(compositor.LockExternalImage(host, 1).image_type,
+              WrExternalImageType::Invalid);
+    compositor.UnlockExternalImage(host);
+    auto image = compositor.LockExternalImage(host, 0);
+    EXPECT_EQ(image.image_type, WrExternalImageType::RawData);
+    EXPECT_EQ(image.buff, bytes.data());
+    EXPECT_EQ(image.size, bytes.size());
+    compositor.UnlockExternalImage(host);
+
+    RefPtr<ContextOnlyTexture> unsupported = new ContextOnlyTexture;
+    EXPECT_EQ(compositor.LockExternalImage(unsupported, 0).image_type,
+              WrExternalImageType::Invalid);
+    compositor.UnlockExternalImage(unsupported);
+    EXPECT_FALSE(unsupported->mUsedContextPath);
+  });
+}
+
+TEST_F(RenderExternalBuffer, VulkanCompositorDispatchesGpuHooks) {
+  OnRenderThread([] {
+    RenderCompositorVulkan compositor(nullptr, DetachedConfig());
+    RenderCompositor* backend = &compositor;
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    auto image = backend->LockExternalImage(host, 3);
+    EXPECT_EQ(image.image_type, WrExternalImageType::NativeTexture);
+    EXPECT_EQ(host->mImages, nullptr);
+    EXPECT_EQ(host->mChannel, 3);
+    EXPECT_EQ(host->mLocks, 1U);
+    backend->UnlockExternalImage(host);
+    EXPECT_EQ(host->mUnlocks, 1U);
+  });
+}
+
+TEST_F(RenderExternalBuffer, WrapperRetainsAndForwardsVulkanContext) {
+  ExternalImageId id{uint64_t(GPUProcessManager::Get()->AllocateNamespace())
+                     << 32};
+  OnRenderThread([id] {
+    RefPtr<VulkanTexture> host = new VulkanTexture;
+    RefPtr<RenderTextureHost> registered = host;
+    RenderThread::Get()->RegisterExternalImage(id, registered.forget());
+    RefPtr<RenderTextureHost> wrapper = new RenderTextureHostWrapper(id);
+    RenderThread::Get()->UnregisterExternalImage(id);
+    uint8_t token;
+    auto* context = reinterpret_cast<WrVulkanExternalImages*>(&token);
+    auto image = wrapper->LockVulkan(2, context);
+    EXPECT_EQ(image.image_type, WrExternalImageType::NativeTexture);
+    EXPECT_EQ(host->mImages, context);
+    EXPECT_EQ(host->mChannel, 2);
+    wrapper->UnlockVulkan(context);
+    EXPECT_EQ(host->mLocks, 1U);
+    EXPECT_EQ(host->mUnlocks, 1U);
   });
 }
 
