@@ -21,7 +21,7 @@ mod external;
 #[cfg(target_os = "linux")]
 mod dmabuf;
 #[cfg(target_os = "linux")]
-pub use self::dmabuf::DmaBufFormat;
+pub use self::dmabuf::{DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
 #[cfg(target_os = "linux")]
 mod timeline;
 #[cfg(target_os = "linux")]
