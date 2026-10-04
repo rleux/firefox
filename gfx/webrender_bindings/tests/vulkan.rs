@@ -17,6 +17,7 @@ pub struct TestVulkanImage {
     pub(super) stride: u64,
     pub(super) device_uuid: [u8; 16],
     pub(super) driver_uuid: [u8; 16],
+    pub(super) copy_src: bool,
 }
 
 pub struct Fixture {
@@ -208,6 +209,7 @@ pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut
             stride: layout.row_pitch,
             device_uuid,
             driver_uuid,
+            copy_src: false,
         };
         Box::into_raw(Box::new(Fixture {
             renderer: Some(renderer),

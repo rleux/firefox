@@ -853,6 +853,7 @@ struct TestVulkanImage {
   uint64_t mStride;
   uint8_t mDeviceUUID[16];
   uint8_t mDriverUUID[16];
+  bool mCopySrc;
 };
 
 extern "C" {
@@ -889,7 +890,8 @@ static void CheckVulkanPublication() {
     publication.format() = SurfaceFormat::R8G8B8A8;
     publication.offset() = source.mOffset;
     publication.stride() = source.mStride;
-    publication.copySrc() = publication.colorTarget() = false;
+    publication.copySrc() = source.mCopySrc;
+    publication.colorTarget() = false;
     publication.copyDst() = true;
     publication.ready().handle() =
         new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
