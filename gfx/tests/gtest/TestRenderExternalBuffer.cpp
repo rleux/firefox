@@ -853,6 +853,7 @@ struct TestVulkanImage {
   uint64_t mStride;
   uint8_t mDeviceUUID[16];
   uint8_t mDriverUUID[16];
+  bool mCopySrc;
 };
 
 extern "C" {
@@ -869,6 +870,7 @@ bool wr_test_webgpu_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_webgpu_image_delete(void*);
 bool wr_test_webgpu_read_transition_initializes();
+void wr_test_webgpu_unused_publication_recycles();
 void wr_test_webgpu_timeline_lifecycle();
 void wr_test_webgpu_timeline_submission();
 void wr_test_webgpu_timeline_failed_submission();
@@ -931,7 +933,8 @@ static void CheckVulkanPublication(bool aWebGPU) {
     publication.format() = SurfaceFormat::R8G8B8A8;
     publication.offset() = source.mOffset;
     publication.stride() = source.mStride;
-    publication.copySrc() = publication.colorTarget() = false;
+    publication.copySrc() = source.mCopySrc;
+    publication.colorTarget() = false;
     publication.copyDst() = true;
     publication.ready().handle() =
         new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
@@ -1012,6 +1015,10 @@ TEST_F(RenderExternalBuffer,
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUReadTransitionInitializes) {
   OnRenderThread(
       [] { EXPECT_TRUE(wr_test_webgpu_read_transition_initializes()); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUUnusedPublicationRecycles) {
+  OnRenderThread([] { wr_test_webgpu_unused_publication_recycles(); });
 }
 
 #  endif

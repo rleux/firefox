@@ -9,17 +9,16 @@ use ash::{ext, khr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
-use wgpu_bindings::server::create_webrender_dma_buf;
-use wgpu_bindings::vulkan_image::{import_image, release_image};
-use wgpu_bindings::vulkan_timeline::{
-    submit_with_timelines, VulkanTimeline, VulkanTimelineDescriptor, VulkanTimelinePoint,
-};
+use wgpu_bindings::server::{create_webrender_dma_buf, VulkanDmaBufInfo};
+use wgpu_bindings::vulkan_image::{acquire_image, import_image, release_image};
+use wgpu_bindings::vulkan_timeline::{VulkanTimeline, VulkanTimelineDescriptor};
 
 pub struct Fixture {
     renderer: Option<webrender::Renderer>,
     device: Arc<wgc::device::Device>,
     queue: Arc<wgc::device::queue::Queue>,
     _memory: OwnedFd,
+    info: VulkanDmaBufInfo,
     _ready_fd: OwnedFd,
     _ready: VulkanTimeline,
 }
@@ -52,7 +51,7 @@ pub unsafe extern "C" fn wr_test_webgpu_image_new(output: &mut TestVulkanImage) 
             khr::get_memory_requirements2::NAME,
         ],
     );
-    let usage = wgt::TextureUsages::COPY_DST | wgt::TextureUsages::TEXTURE_BINDING;
+    let usage = wgt::TextureUsages::COPY_SRC | wgt::TextureUsages::COPY_DST | wgt::TextureUsages::TEXTURE_BINDING;
     let (info, memory) =
         create_webrender_dma_buf(device.clone(), [2, 2], wgt::TextureFormat::Rgba8Unorm, usage).unwrap();
     let desc = wgc::resource::TextureDescriptor {
@@ -98,12 +97,14 @@ pub unsafe extern "C" fn wr_test_webgpu_image_new(output: &mut TestVulkanImage) 
         stride: info.layout.strides[0],
         device_uuid: info.device_uuid,
         driver_uuid: info.driver_uuid,
+        copy_src: true,
     };
     Box::into_raw(Box::new(Fixture {
         renderer: Some(renderer()),
         device,
         queue,
         _memory: memory,
+        info,
         _ready_fd: ready_fd,
         _ready: ready,
     }))
@@ -136,23 +137,7 @@ pub unsafe extern "C" fn wr_test_webgpu_image_wait(
         },
     )
     .unwrap();
-    let index = submit_with_timelines(
-        &fixture.queue,
-        &[],
-        &[VulkanTimelinePoint {
-            timeline: Some(&timeline),
-            value,
-        }],
-        &[],
-    )
-    .unwrap();
-    fixture
-        .device
-        .poll(wgt::PollType::Wait {
-            submission_index: Some(index),
-            timeout: Some(Duration::from_secs(5)),
-        })
-        .is_ok()
+    recycle(fixture, &timeline, value)
 }
 
 #[no_mangle]
@@ -225,4 +210,73 @@ pub unsafe extern "C" fn wr_test_webgpu_read_transition_initializes() -> bool {
         }
     }
     true
+}
+
+unsafe fn recycle(fixture: &Fixture, returned: &VulkanTimeline, value: u64) -> bool {
+    use std::os::fd::AsFd;
+    let desc = wgc::resource::TextureDescriptor {
+        label: None,
+        size: wgt::Extent3d {
+            width: 2,
+            height: 2,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgt::TextureDimension::D2,
+        format: wgt::TextureFormat::Rgba8Unorm,
+        usage: wgt::TextureUsages::COPY_SRC | wgt::TextureUsages::COPY_DST | wgt::TextureUsages::TEXTURE_BINDING,
+        view_formats: vec![],
+    };
+    let invalid = import_image(fixture.device.clone(), fixture._memory.as_fd(), &desc, &fixture.info).unwrap();
+    assert!(acquire_image(&fixture.queue, invalid.clone(), returned, 0).is_none());
+    assert!(invalid.as_hal::<wgc::api::Vulkan>().is_none());
+    let texture = import_image(fixture.device.clone(), fixture._memory.as_fd(), &desc, &fixture.info).unwrap();
+    let index = acquire_image(&fixture.queue, texture.clone(), returned, value).unwrap();
+    fixture
+        .device
+        .poll(wgt::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .unwrap();
+    let bytes = readback(&fixture.device, &fixture.queue, texture.clone()).unwrap();
+    for row in bytes.chunks(256) {
+        assert_eq!(&row[..8], &[0; 8]);
+    }
+    fixture.queue.write_texture(
+        wgt::TexelCopyTextureInfo {
+            texture: texture.clone(),
+            mip_level: 0,
+            origin: wgt::Origin3d::ZERO,
+            aspect: wgt::TextureAspect::All,
+        },
+        &[0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255],
+        &wgt::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(2),
+        },
+        &desc.size,
+    );
+    let bytes = readback(&fixture.device, &fixture.queue, texture).unwrap();
+    for row in bytes.chunks(256) {
+        assert_eq!(&row[..8], &[0, 255, 0, 255, 0, 255, 0, 255]);
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_webgpu_unused_publication_recycles() {
+    let mut output = TestVulkanImage {
+        memory_fd: -1,
+        ready_fd: -1,
+        offset: 0,
+        stride: 0,
+        device_uuid: [0; 16],
+        driver_uuid: [0; 16],
+        copy_src: false,
+    };
+    let fixture = Box::from_raw(wr_test_webgpu_image_new(&mut output));
+    assert!(recycle(&fixture, &fixture._ready, 1));
 }

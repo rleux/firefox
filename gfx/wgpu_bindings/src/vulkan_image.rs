@@ -248,6 +248,8 @@ pub unsafe fn import_image(
 /// # Safety
 /// The nonnegative FD must remain open and obey import_image's allocation and
 /// ownership contract. The texture ID must be available in the global hub.
+/// Recycled allocations require their return/ready timeline point; fresh ones
+/// use a null timeline and zero value.
 #[no_mangle]
 pub unsafe extern "C" fn wgpu_vkimage_import_for_webrender(
     global: &Global,
@@ -256,22 +258,123 @@ pub unsafe extern "C" fn wgpu_vkimage_import_for_webrender(
     desc: &FfiTextureDescriptor,
     fd: i32,
     info: &VulkanDmaBufInfo,
+    returned: Option<&VulkanTimeline>,
+    value: u64,
 ) -> bool {
-    if fd < 0 {
+    if fd < 0 || returned.is_none() != (value == 0) {
         return false;
     }
+    let device = global.resolve_device_id(device_id);
     match import_image(
-        global.resolve_device_id(device_id),
+        device.clone(),
         BorrowedFd::borrow_raw(fd),
         &desc.to_wgpu(),
         info,
     ) {
         Ok(texture) => {
+            if let Some(returned) = returned {
+                let Some(queue) = device.get_queue() else {
+                    return false;
+                };
+                if acquire_image(&queue, texture.clone(), returned, value).is_none() {
+                    return false;
+                }
+            }
             global.import_texture(texture, texture_id);
             true
         }
         Err(_) => false,
     }
+}
+
+/// Acquire a freshly imported allocation after its previous publication ends.
+/// # Safety
+/// The texture must not have been used by wgpu yet. The wait must be the submitted
+/// consumer return, or the producer's ready point for an unused publication.
+/// The peer must have released GENERAL/EXTERNAL ownership. Device/queue access
+/// must obey submit_with_timelines's serialization contract.
+pub unsafe fn acquire_image(
+    queue: &Arc<wgc::device::queue::Queue>,
+    texture: Arc<wgc::resource::Texture>,
+    returned: &VulkanTimeline,
+    value: u64,
+) -> Option<u64> {
+    let device = queue.device();
+    let desc = texture.descriptor();
+    if !Arc::ptr_eq(device, texture.device())
+        || desc.dimension != wgt::TextureDimension::D2
+        || desc.mip_level_count != 1
+        || desc.sample_count != 1
+        || desc.size.depth_or_array_layers != 1
+        || !matches!(
+            desc.format,
+            wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm
+        )
+    {
+        return None;
+    }
+    device.check_is_valid().ok()?;
+    let hal = device.clone().as_hal::<wgc::api::Vulkan>()?;
+    let image = texture.clone().as_hal::<wgc::api::Vulkan>()?;
+    let acquire = device.create_command_encoder(&Default::default());
+    let recorded = acquire.as_hal_mut::<wgc::api::Vulkan, _, _>(|encoder| {
+        let Some(encoder) = encoder else {
+            return false;
+        };
+        let barrier = vk::ImageMemoryBarrier::default()
+            .image(image.raw_handle())
+            .subresource_range(
+                vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .level_count(1)
+                    .layer_count(1),
+            )
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+            .dst_queue_family_index(hal.queue_family_index())
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
+        hal.raw_device().cmd_pipeline_barrier(
+            encoder.raw_handle(),
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+        true
+    });
+    drop(image);
+    let acquire = acquire.finish(&Default::default());
+    if !recorded {
+        return None;
+    }
+    // Track the image after ownership acquisition so explicit destruction also
+    // defers its native storage until this submission completes.
+    let tracked = device.create_command_encoder(&Default::default());
+    tracked.transition_resources(
+        std::iter::empty(),
+        std::iter::once(wgt::TextureTransition {
+            texture: texture.clone(),
+            selector: None,
+            state: wgt::TextureUses::COPY_DST,
+        }),
+    );
+    let tracked = tracked.finish(&Default::default());
+    let result = submit_with_timelines(
+        queue,
+        &[acquire, tracked],
+        &[VulkanTimelinePoint {
+            timeline: Some(returned),
+            value,
+        }],
+        &[],
+    );
+    if result.is_none() {
+        texture.destroy();
+    }
+    result
 }
 
 /// Publish a single-plane imported image, consuming its producer texture.

@@ -134,9 +134,11 @@ pub(super) fn readback(
     queue: &Arc<wgc::device::queue::Queue>,
     texture: Arc<wgc::resource::Texture>,
 ) -> Option<Vec<u8>> {
+    let size = texture.descriptor().size;
+    let stride = (size.width * 4).next_multiple_of(256);
     let buffer = device.create_buffer(&wgc::resource::BufferDescriptor {
         label: None,
-        size: 256 * 3,
+        size: u64::from(stride) * u64::from(size.height),
         usage: wgt::BufferUsages::COPY_DST | wgt::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -152,15 +154,11 @@ pub(super) fn readback(
             buffer: buffer.clone(),
             layout: wgt::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(256),
-                rows_per_image: Some(3),
+                bytes_per_row: Some(stride),
+                rows_per_image: Some(size.height),
             },
         },
-        &wgt::Extent3d {
-            width: 4,
-            height: 3,
-            depth_or_array_layers: 1,
-        },
+        &size,
     );
     let commands = encoder.finish(&Default::default());
     for filter in [
