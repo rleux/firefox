@@ -254,6 +254,33 @@ fn dmabuf_bindings_retain_images_until_renderer_submission() {
     let imported = unsafe { wr_vulkan_dmabuf_import(&context, &source.descriptor) };
     assert!(!imported.is_null());
     let imported = unsafe { Box::from_raw(imported) };
+    assert!(wr_vulkan_dmabuf_matches_context(&imported, &context));
+    let same_context = wr_vulkan_external_images_new(&renderer);
+    assert!(!same_context.is_null());
+    assert!(wr_vulkan_dmabuf_matches_context(&imported, unsafe {
+        &*same_context
+    }));
+    unsafe { wr_vulkan_external_images_delete(same_context) };
+    let (other, _) = webrender::create_webrender_instance(
+        webrender::GpuBackendConfig::Vulkan(Options {
+            validation: true,
+            ..Default::default()
+        }),
+        Box::new(Notice),
+        webrender::WebRenderOptions {
+            enable_debugger: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let other_context = wr_vulkan_external_images_new(&other);
+    assert!(!other_context.is_null());
+    assert!(!wr_vulkan_dmabuf_matches_context(&imported, unsafe {
+        &*other_context
+    }));
+    unsafe { wr_vulkan_external_images_delete(other_context) };
+    other.deinit();
     assert_eq!(source.fd.as_raw_fd(), source.descriptor.fd);
     let released = wr_vulkan_timeline_new(&context);
     assert!(!released.is_null());

@@ -19,6 +19,7 @@ gecko-fuzz-targets = { path = "../../../../tools/fuzzing/rust", optional = true 
 fog-gtest = { path = "../../../components/glean/tests/gtest" }
 dap_ffi-gtest = { path = "../../../components/dap/ffi-gtest" }
 kvstore-gtest = { path = "../../../components/kvstore/test/gtest" }
+webrender-bindings-gtest = { path = "../../../../gfx/webrender_bindings/tests" }
 
 # Workarounds for https://github.com/rust-lang/rust/issues/58393
 mozglue-static = { path = "../../../../mozglue/static/rust" }

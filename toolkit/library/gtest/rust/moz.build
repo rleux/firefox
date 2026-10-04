@@ -7,6 +7,9 @@ include("../../rust/gkrust-features.mozbuild")
 if CONFIG["FUZZING_INTERFACES"]:
     gkrust_features += ["gecko-fuzz-targets"]
 
+if CONFIG["MOZ_WEBRENDER_VULKAN"] and CONFIG["OS_TARGET"] == "Linux":
+    gkrust_features += ["webrender-bindings-gtest/vulkan"]
+
 RustLibrary(
     "gkrust-gtest",
     gkrust_features,

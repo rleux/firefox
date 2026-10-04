@@ -273,11 +273,17 @@ void RenderThread::ShutDownTask() {
 
   {
     // Clear RenderTextureHosts
-    MutexAutoLock lock(mRenderTextureMapLock);
-    mRenderTexturesDeferred.clear();
-    mRenderTextures.clear();
-    mSyncObjectNeededRenderTextures.clear();
-    mRenderTextureOps.clear();
+    decltype(mRenderTexturesDeferred) deferred;
+    decltype(mRenderTextures) textures;
+    decltype(mSyncObjectNeededRenderTextures) syncTextures;
+    decltype(mRenderTextureOps) operations;
+    {
+      MutexAutoLock lock(mRenderTextureMapLock);
+      deferred.swap(mRenderTexturesDeferred);
+      textures.swap(mRenderTextures);
+      syncTextures.swap(mSyncObjectNeededRenderTextures);
+      operations.swap(mRenderTextureOps);
+    }
   }
 
   // These must be destroyed before the thread pools as they hold a reference to
@@ -1121,6 +1127,8 @@ void RenderThread::RegisterExternalImage(
 
 void RenderThread::UnregisterExternalImage(
     const wr::ExternalImageId& aExternalImageId) {
+  // Release after unlocking: host destruction can invoke producer callbacks.
+  RefPtr<RenderTextureHost> released;
   MutexAutoLock lock(mRenderTextureMapLock);
   if (mHasShutdown) {
     return;
@@ -1151,6 +1159,7 @@ void RenderThread::UnregisterExternalImage(
         "RenderThread::DeferredRenderTextureHostDestroy", this,
         &RenderThread::DeferredRenderTextureHostDestroy));
   } else {
+    released = std::move(it->second);
     mRenderTextures.erase(it);
   }
 }
@@ -1283,9 +1292,14 @@ RefPtr<RenderTextureHostUsageInfo> RenderThread::GetOrMergeUsageInfo(
 void RenderThread::UnregisterExternalImageDuringShutdown(
     const wr::ExternalImageId& aExternalImageId) {
   MOZ_ASSERT(IsInRenderThread());
+  RefPtr<RenderTextureHost> released;
   MutexAutoLock lock(mRenderTextureMapLock);
   MOZ_ASSERT(mHasShutdown);
-  mRenderTextures.erase(aExternalImageId);
+  auto it = mRenderTextures.find(aExternalImageId);
+  if (it != mRenderTextures.end()) {
+    released = std::move(it->second);
+    mRenderTextures.erase(it);
+  }
 }
 
 bool RenderThread::SyncObjectNeeded() {
@@ -1295,8 +1309,11 @@ bool RenderThread::SyncObjectNeeded() {
 }
 
 void RenderThread::DeferredRenderTextureHostDestroy() {
-  MutexAutoLock lock(mRenderTextureMapLock);
-  mRenderTexturesDeferred.clear();
+  decltype(mRenderTexturesDeferred) released;
+  {
+    MutexAutoLock lock(mRenderTextureMapLock);
+    released.swap(mRenderTexturesDeferred);
+  }
 }
 
 RenderTextureHost* RenderThread::GetRenderTexture(
@@ -1424,9 +1441,9 @@ void RenderThread::HandleDeviceReset(gfx::DeviceResetDetectPlace aPlace,
 
   gfxCriticalNote << "Handle DeviceReset";
 
+  DeferredRenderTextureHostDestroy();
   {
     MutexAutoLock lock(mRenderTextureMapLock);
-    mRenderTexturesDeferred.clear();
     for (const auto& entry : mRenderTextures) {
       entry.second->ClearCachedResources();
     }
@@ -1470,16 +1487,16 @@ void RenderThread::HandleWebRenderError(WebRenderError aError) {
     return;
   }
 
+  mHandlingWebRenderError = true;
   NotifyWebRenderError(aError);
 
+  DeferredRenderTextureHostDestroy();
   {
     MutexAutoLock lock(mRenderTextureMapLock);
-    mRenderTexturesDeferred.clear();
     for (const auto& entry : mRenderTextures) {
       entry.second->ClearCachedResources();
     }
   }
-  mHandlingWebRenderError = true;
   // WebRender is going to be disabled by
   // GPUProcessManager::NotifyWebRenderError()
 }

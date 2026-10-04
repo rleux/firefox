@@ -163,6 +163,20 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_delete(object: *mut WrVulkanDmaBufImag
     }
 }
 
+#[no_mangle]
+pub extern "C" fn wr_vulkan_dmabuf_matches_context(
+    image: &WrVulkanDmaBufImage,
+    images: &WrVulkanExternalImages,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return Rc::ptr_eq(&image.image.registry, &images.registry);
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, images);
+        false
+    }
+}
+
 /// The producer must release the initialized image in GENERAL layout to EXTERNAL
 /// ownership before ready reaches value. It and any aliases must not access the
 /// allocation again until the consumer's release signal completes.
