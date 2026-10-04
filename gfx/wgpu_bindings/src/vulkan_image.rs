@@ -6,11 +6,13 @@ use crate::server::{
     dedicated_image_memory_requirements, dmabuf_image_properties, Global, ScopedVkImage,
     VulkanDmaBufInfo, DMABUF_DEVICE_EXTENSIONS,
 };
+use crate::vulkan_timeline::{submit_with_timelines, VulkanTimeline, VulkanTimelinePoint};
 use crate::FfiTextureDescriptor;
 use ash::{khr, vk};
 use std::fs::File;
 use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
 use std::sync::Arc;
+use wgc::resource::ParentDevice;
 use wgpu_core_remote_types::id;
 
 /// Import an allocation as a fresh, uncleared wgpu texture.
@@ -270,4 +272,127 @@ pub unsafe extern "C" fn wgpu_vkimage_import_for_webrender(
         }
         Err(_) => false,
     }
+}
+
+/// Publish a single-plane imported image, consuming its producer texture.
+/// # Safety
+/// The image must be the allocation being published. Device/queue access must
+/// obey submit_with_timelines's serialization contract. No peer may access the
+/// allocation before the successful signal; failed publications must be discarded.
+pub unsafe fn release_image(
+    queue: &Arc<wgc::device::queue::Queue>,
+    texture: Arc<wgc::resource::Texture>,
+    ready: &VulkanTimeline,
+    value: u64,
+) -> Option<u64> {
+    let device = queue.device();
+    let desc = texture.descriptor();
+    if !Arc::ptr_eq(device, texture.device())
+        || desc.dimension != wgt::TextureDimension::D2
+        || desc.mip_level_count != 1
+        || desc.sample_count != 1
+        || desc.size.depth_or_array_layers != 1
+        || !matches!(
+            desc.format,
+            wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm
+        )
+    {
+        return None;
+    }
+    device.check_is_valid().ok()?;
+    let hal = device.clone().as_hal::<wgc::api::Vulkan>()?;
+    let image = texture.clone().as_hal::<wgc::api::Vulkan>()?;
+    let prepare = device.create_command_encoder(&Default::default());
+    prepare.transition_resources(
+        std::iter::empty(),
+        std::iter::once(wgt::TextureTransition {
+            texture: texture.clone(),
+            selector: None,
+            state: wgt::TextureUses::RESOURCE,
+        }),
+    );
+    let prepare = prepare.finish(&Default::default());
+    let release = device.create_command_encoder(&Default::default());
+    let recorded = release.as_hal_mut::<wgc::api::Vulkan, _, _>(|encoder| {
+        let Some(encoder) = encoder else {
+            return false;
+        };
+        let raw = hal.raw_device();
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        let barrier = vk::ImageMemoryBarrier::default()
+            .image(image.raw_handle())
+            .subresource_range(range)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE);
+        raw.cmd_pipeline_barrier(
+            encoder.raw_handle(),
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+        let barrier = barrier
+            .old_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(hal.queue_family_index())
+            .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+            .dst_access_mask(vk::AccessFlags::empty());
+        raw.cmd_pipeline_barrier(
+            encoder.raw_handle(),
+            vk::PipelineStageFlags::ALL_COMMANDS,
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[barrier],
+        );
+        true
+    });
+    drop(image);
+    let release = release.finish(&Default::default());
+    if !recorded {
+        return None;
+    }
+    let result = submit_with_timelines(
+        queue,
+        &[prepare, release],
+        &[],
+        &[VulkanTimelinePoint {
+            timeline: Some(ready),
+            value,
+        }],
+    );
+    texture.destroy();
+    result
+}
+
+/// # Safety
+/// The texture must be the imported allocation being published. Device/queue
+/// access must obey release_image's contract. A zero result forbids publication.
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_vkimage_release_for_webrender(
+    global: &Global,
+    queue_id: id::QueueId,
+    texture_id: id::TextureId,
+    ready: Option<&VulkanTimeline>,
+    value: u64,
+) -> u64 {
+    let Some(ready) = ready else {
+        return 0;
+    };
+    release_image(
+        &global.resolve_queue_id(queue_id),
+        global.resolve_texture_id(texture_id),
+        ready,
+        value,
+    )
+    .unwrap_or(0)
 }

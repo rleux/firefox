@@ -16,15 +16,16 @@ fn wait(device: &Arc<wgc::device::Device>, index: u64) {
         .unwrap();
 }
 
-unsafe fn dirty_texture(
+pub(super) unsafe fn dirty_texture(
     device: &Arc<wgc::device::Device>,
     queue: &Arc<wgc::device::queue::Queue>,
     render_pass: bool,
 ) -> wgh::vulkan::Texture {
     let hal = device.clone().as_hal::<wgc::api::Vulkan>().unwrap();
     let raw = hal.raw_device();
-    let mut usage = vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST;
-    let mut uses = wgt::TextureUses::COPY_SRC | wgt::TextureUses::COPY_DST;
+    let mut usage =
+        vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED;
+    let mut uses = wgt::TextureUses::COPY_SRC | wgt::TextureUses::COPY_DST | wgt::TextureUses::RESOURCE;
     if render_pass {
         usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
         uses |= wgt::TextureUses::COLOR_TARGET;

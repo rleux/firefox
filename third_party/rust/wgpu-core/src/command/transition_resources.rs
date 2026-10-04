@@ -82,6 +82,10 @@ pub(crate) fn transition_resources(
     // Process texture transitions
     for texture_transition in texture_transitions {
         texture_transition.texture.same_device(state.device)?;
+        let selector = texture_transition
+            .selector
+            .clone()
+            .unwrap_or_else(|| texture_transition.texture.full_range.clone());
 
         unsafe {
             usage_scope.textures.merge_single(
@@ -90,6 +94,36 @@ pub(crate) fn transition_resources(
                 texture_transition.state,
             )
         }?;
+        if texture_transition.state.intersects(
+            wgt::TextureUses::COPY_SRC
+                | wgt::TextureUses::RESOURCE
+                | wgt::TextureUses::STORAGE_READ_ONLY
+                | wgt::TextureUses::STORAGE_READ_WRITE
+                | wgt::TextureUses::STORAGE_ATOMIC
+                | wgt::TextureUses::PRESENT,
+        ) {
+            let texture = &texture_transition.texture;
+            for mip in selector.mips {
+                let mut size = texture.desc.mip_level_size(mip).unwrap();
+                let z = if texture.desc.dimension == wgt::TextureDimension::D3 {
+                    0
+                } else {
+                    size.depth_or_array_layers = selector.layers.end - selector.layers.start;
+                    selector.layers.start
+                };
+                super::transfer::handle_src_texture_init(
+                    state,
+                    &wgt::TexelCopyTextureInfo {
+                        texture: texture.clone(),
+                        mip_level: mip,
+                        origin: wgt::Origin3d { x: 0, y: 0, z },
+                        aspect: wgt::TextureAspect::All,
+                    },
+                    &size,
+                    texture,
+                )?;
+            }
+        }
     }
 
     // Record any needed barriers based on tracker data
@@ -114,6 +148,8 @@ pub enum TransitionResourcesError {
     InvalidResource(#[from] InvalidResourceError),
     #[error(transparent)]
     ResourceUsage(#[from] ResourceUsageCompatibilityError),
+    #[error(transparent)]
+    Initialization(#[from] super::TransferError),
 }
 
 impl WebGpuError for TransitionResourcesError {
@@ -123,6 +159,7 @@ impl WebGpuError for TransitionResourcesError {
             Self::EncoderState(e) => e.webgpu_error_type(),
             Self::InvalidResource(e) => e.webgpu_error_type(),
             Self::ResourceUsage(e) => e.webgpu_error_type(),
+            Self::Initialization(e) => e.webgpu_error_type(),
         }
     }
 }

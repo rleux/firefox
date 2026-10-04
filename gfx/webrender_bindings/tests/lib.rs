@@ -10,3 +10,6 @@ mod webgpu_timeline;
 mod webgpu_dmabuf;
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod webgpu_import;
+
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod webgpu_publication;

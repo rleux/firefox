@@ -714,7 +714,7 @@ fn handle_texture_init(
 ///
 /// Ensure the source texture of a transfer is in the right initialization
 /// state, and record the state for after the transfer operation.
-fn handle_src_texture_init(
+pub(super) fn handle_src_texture_init(
     state: &mut EncodingState,
     source: &TexelCopyTextureInfo,
     copy_size: &Extent3d,

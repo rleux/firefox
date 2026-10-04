@@ -862,6 +862,13 @@ void wr_test_vulkan_image_submit(void*);
 bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_vulkan_image_delete(void*);
+void* wr_test_webgpu_image_new(TestVulkanImage*);
+Renderer* wr_test_webgpu_image_renderer(void*);
+void wr_test_webgpu_image_submit(void*);
+bool wr_test_webgpu_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
+                               uint64_t);
+void wr_test_webgpu_image_delete(void*);
+bool wr_test_webgpu_read_transition_initializes();
 void wr_test_webgpu_timeline_lifecycle();
 void wr_test_webgpu_timeline_submission();
 void wr_test_webgpu_timeline_failed_submission();
@@ -894,99 +901,119 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedDMABufImport) {
   OnRenderThread([] { wr_test_webgpu_dmabuf_import(); });
 }
 
-TEST_F(RenderExternalBuffer,
-       DISABLED_VulkanPublicationReturnsSubmittedTimeline) {
-  OnRenderThread([] {
-    for (bool fail : {false, true}) {
-      TestVulkanImage source{};
-      auto* fixture = wr_test_vulkan_image_new(&source);
-      ASSERT_NE(fixture, nullptr);
-      auto cleanup =
-          MakeScopeExit([&] { wr_test_vulkan_image_delete(fixture); });
-      auto* renderer = wr_test_vulkan_image_renderer(fixture);
-      auto* context = wr_vulkan_external_images_new(renderer);
-      auto* alias = wr_vulkan_external_images_new(renderer);
-      ASSERT_NE(context, nullptr);
-      ASSERT_NE(alias, nullptr);
-      auto cleanupContexts = MakeScopeExit([&] {
-        wr_vulkan_external_images_delete(context);
-        wr_vulkan_external_images_delete(alias);
-      });
-      auto publication = PublicationForTest(source.mMemoryFd);
-      publication.size() = IntSize(2, 2);
-      publication.format() = SurfaceFormat::R8G8B8A8;
-      publication.offset() = source.mOffset;
-      publication.stride() = source.mStride;
-      publication.copySrc() = publication.colorTarget() = false;
-      publication.copyDst() = true;
-      publication.ready().handle() =
-          new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
-      publication.ready().value() = 1;
-      std::copy_n(source.mDeviceUUID, 16,
-                  publication.ready().deviceUUID().begin());
-      std::copy_n(source.mDriverUUID, 16,
-                  publication.ready().driverUUID().begin());
-      layers::VulkanImagePublication decoded;
-      ASSERT_TRUE(RoundTripVulkanMessage(publication, decoded));
-      Maybe<layers::VulkanImageReturnMessage> returned;
-      RefPtr<layers::VulkanTextureHost> layersHost =
-          layers::VulkanTextureHost::Create(
-              layers::TextureFlags::DEFAULT, decoded,
-              [&](layers::VulkanImageReturnMessage&& aReturn) {
-                returned.emplace();
-                EXPECT_TRUE(RoundTripVulkanMessage(aReturn, returned.ref()));
-                EXPECT_TRUE(
-                    ValidateVulkanImageReturn(returned.ref(), publication));
-              });
-      ASSERT_TRUE(layersHost);
-      const auto id = layersHost->GetMaybeExternalImageId();
-      ASSERT_TRUE(id);
-      RefPtr<RenderTextureHost> host =
-          RenderThread::Get()->GetRenderTexture(id.ref());
-      ASSERT_TRUE(host);
-      VulkanImageReleaseQueue<> releases;
-      const auto first = host->LockVulkan(0, context);
-      ASSERT_EQ(first.image_type, WrExternalImageType::NativeTexture);
-      const auto nested = host->LockVulkan(0, alias);
-      EXPECT_EQ(nested.handle, first.handle);
-      EXPECT_FALSE(host->UnlockVulkan(context));
-      auto release = host->UnlockVulkan(alias);
-      ASSERT_TRUE(release);
-      releases.Add(host, std::move(release.ref()));
-      EXPECT_EQ(host->LockVulkan(0, alias).handle, first.handle);
-      release = host->UnlockVulkan(alias);
-      ASSERT_TRUE(release);
-      releases.Add(host, std::move(release.ref()));
-      releases.Poll();
-      EXPECT_FALSE(returned);
-      if (fail) {
-        EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
-                  WrExternalImageType::Invalid);
-        EXPECT_FALSE(host->UnlockVulkan(nullptr));
-      }
-      layersHost = nullptr;
-      host = nullptr;
-      EXPECT_FALSE(returned);
+static void CheckVulkanPublication(bool aWebGPU) {
+  const auto create =
+      aWebGPU ? wr_test_webgpu_image_new : wr_test_vulkan_image_new;
+  const auto rendererFor =
+      aWebGPU ? wr_test_webgpu_image_renderer : wr_test_vulkan_image_renderer;
+  const auto submit =
+      aWebGPU ? wr_test_webgpu_image_submit : wr_test_vulkan_image_submit;
+  const auto wait =
+      aWebGPU ? wr_test_webgpu_image_wait : wr_test_vulkan_image_wait;
+  const auto destroy =
+      aWebGPU ? wr_test_webgpu_image_delete : wr_test_vulkan_image_delete;
+  for (bool fail : {false, true}) {
+    TestVulkanImage source{};
+    auto* fixture = create(&source);
+    ASSERT_NE(fixture, nullptr);
+    auto cleanup = MakeScopeExit([&] { destroy(fixture); });
+    auto* renderer = rendererFor(fixture);
+    auto* context = wr_vulkan_external_images_new(renderer);
+    auto* alias = wr_vulkan_external_images_new(renderer);
+    ASSERT_NE(context, nullptr);
+    ASSERT_NE(alias, nullptr);
+    auto cleanupContexts = MakeScopeExit([&] {
       wr_vulkan_external_images_delete(context);
       wr_vulkan_external_images_delete(alias);
-      context = alias = nullptr;
-      wr_test_vulkan_image_submit(fixture);
-      releases.Poll();
-      ASSERT_TRUE(returned);
-      EXPECT_EQ(returned->status(), fail ? VulkanImageReturnStatus::Abandoned
-                                         : VulkanImageReturnStatus::Submitted);
-      if (!fail) {
-        ASSERT_TRUE(returned->signal());
-        const auto& signal = returned->signal().ref();
-        EXPECT_EQ(signal.value(), 2U);
-        ASSERT_TRUE(signal.handle());
-        EXPECT_TRUE(wr_test_vulkan_image_wait(
-            fixture, signal.handle()->GetHandle(), signal.deviceUUID().data(),
-            signal.driverUUID().data(), signal.value()));
-      }
+    });
+    auto publication = PublicationForTest(source.mMemoryFd);
+    publication.size() = IntSize(2, 2);
+    publication.format() = SurfaceFormat::R8G8B8A8;
+    publication.offset() = source.mOffset;
+    publication.stride() = source.mStride;
+    publication.copySrc() = publication.colorTarget() = false;
+    publication.copyDst() = true;
+    publication.ready().handle() =
+        new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
+    publication.ready().value() = 1;
+    std::copy_n(source.mDeviceUUID, 16,
+                publication.ready().deviceUUID().begin());
+    std::copy_n(source.mDriverUUID, 16,
+                publication.ready().driverUUID().begin());
+    layers::VulkanImagePublication decoded;
+    ASSERT_TRUE(RoundTripVulkanMessage(publication, decoded));
+    Maybe<layers::VulkanImageReturnMessage> returned;
+    RefPtr<layers::VulkanTextureHost> layersHost =
+        layers::VulkanTextureHost::Create(
+            layers::TextureFlags::DEFAULT, decoded,
+            [&](layers::VulkanImageReturnMessage&& aReturn) {
+              returned.emplace();
+              EXPECT_TRUE(RoundTripVulkanMessage(aReturn, returned.ref()));
+              EXPECT_TRUE(
+                  ValidateVulkanImageReturn(returned.ref(), publication));
+            });
+    ASSERT_TRUE(layersHost);
+    const auto id = layersHost->GetMaybeExternalImageId();
+    ASSERT_TRUE(id);
+    RefPtr<RenderTextureHost> host =
+        RenderThread::Get()->GetRenderTexture(id.ref());
+    ASSERT_TRUE(host);
+    VulkanImageReleaseQueue<> releases;
+    const auto first = host->LockVulkan(0, context);
+    ASSERT_EQ(first.image_type, WrExternalImageType::NativeTexture);
+    const auto nested = host->LockVulkan(0, alias);
+    EXPECT_EQ(nested.handle, first.handle);
+    EXPECT_FALSE(host->UnlockVulkan(context));
+    auto release = host->UnlockVulkan(alias);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    EXPECT_EQ(host->LockVulkan(0, alias).handle, first.handle);
+    release = host->UnlockVulkan(alias);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    releases.Poll();
+    EXPECT_FALSE(returned);
+    if (fail) {
+      EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+                WrExternalImageType::Invalid);
+      EXPECT_FALSE(host->UnlockVulkan(nullptr));
     }
-  });
+    layersHost = nullptr;
+    host = nullptr;
+    EXPECT_FALSE(returned);
+    wr_vulkan_external_images_delete(context);
+    wr_vulkan_external_images_delete(alias);
+    context = alias = nullptr;
+    submit(fixture);
+    releases.Poll();
+    ASSERT_TRUE(returned);
+    EXPECT_EQ(returned->status(), fail ? VulkanImageReturnStatus::Abandoned
+                                       : VulkanImageReturnStatus::Submitted);
+    if (!fail) {
+      ASSERT_TRUE(returned->signal());
+      const auto& signal = returned->signal().ref();
+      EXPECT_EQ(signal.value(), 2U);
+      ASSERT_TRUE(signal.handle());
+      EXPECT_TRUE(wait(fixture, signal.handle()->GetHandle(),
+                       signal.deviceUUID().data(), signal.driverUUID().data(),
+                       signal.value()));
+    }
+  }
 }
+
+TEST_F(RenderExternalBuffer,
+       DISABLED_VulkanPublicationReturnsSubmittedTimeline) {
+  OnRenderThread([] { CheckVulkanPublication(false); });
+}
+TEST_F(RenderExternalBuffer,
+       DISABLED_WebGPUPublicationReturnsSubmittedTimeline) {
+  OnRenderThread([] { CheckVulkanPublication(true); });
+}
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUReadTransitionInitializes) {
+  OnRenderThread(
+      [] { EXPECT_TRUE(wr_test_webgpu_read_transition_initializes()); });
+}
+
 #  endif
 #endif
 
