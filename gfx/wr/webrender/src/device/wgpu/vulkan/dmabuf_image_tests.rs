@@ -11,6 +11,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use wgpu_hal::{CommandEncoder as _, Device as _};
 
+#[path = "dmabuf_access_tests.rs"]
+mod access;
+
 fn descriptor() -> DmaBufImageDescriptor {
     DmaBufImageDescriptor {
         size: [3, 2],
@@ -117,6 +120,10 @@ fn export_image(
         owner: owner.clone(),
         image,
         memory: vk::DeviceMemory::null(),
+        states: Rc::new(vec![UsageState::new(TextureState {
+            usage: wgt::TextureUses::UNINITIALIZED,
+            initialized: false,
+        })]),
         descriptor: DmaBufImageDescriptor {
             size,
             format,
