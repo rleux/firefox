@@ -19,6 +19,10 @@ mod bindings;
 #[cfg(target_os = "linux")]
 mod external;
 #[cfg(target_os = "linux")]
+mod dmabuf;
+#[cfg(target_os = "linux")]
+pub use self::dmabuf::DmaBufFormat;
+#[cfg(target_os = "linux")]
 mod timeline;
 #[cfg(target_os = "linux")]
 pub use self::timeline::{SharedTimeline, TimelineHandle};
