@@ -7,6 +7,7 @@ use std::rc::Rc;
 use raw_window_handle::HasDisplayHandle;
 use wgpu_hal as hal;
 use wgpu_types as wgt;
+pub use wgpu_types::{TextureFormat, TextureUses};
 
 pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
