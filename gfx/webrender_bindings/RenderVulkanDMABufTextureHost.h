@@ -5,23 +5,12 @@
 #ifndef MOZILLA_GFX_RENDERVULKANDMABUFTEXTUREHOST_H
 #define MOZILLA_GFX_RENDERVULKANDMABUFTEXTUREHOST_H
 
-#include <array>
 #include <functional>
 
 #include "RenderTextureHost.h"
-#include "mozilla/UniquePtrExtensions.h"
+#include "VulkanImageTypes.h"
 
 namespace mozilla::wr {
-
-enum class VulkanImageReturnStatus { Unused, Submitted, Abandoned };
-
-struct VulkanImageReturn {
-  VulkanImageReturnStatus mStatus = VulkanImageReturnStatus::Unused;
-  UniqueFileHandle mSemaphore;
-  std::array<uint8_t, 16> mDeviceUUID{};
-  std::array<uint8_t, 16> mDriverUUID{};
-  uint64_t mValue = 0;
-};
 
 // A successful Create borrows immutable image contents until the return
 // callback. Submitted returns require a GPU wait before reuse; Abandoned
