@@ -62,6 +62,18 @@ void RenderTextureHostWrapper::UnlockExternalBuffer() {
   }
 }
 
+wr::WrExternalImage RenderTextureHostWrapper::LockVulkan(
+    uint8_t aChannelIndex, WrVulkanExternalImages* aImages) {
+  return mTextureHost ? mTextureHost->LockVulkan(aChannelIndex, aImages)
+                      : InvalidToWrExternalImage();
+}
+
+void RenderTextureHostWrapper::UnlockVulkan(WrVulkanExternalImages* aImages) {
+  if (mTextureHost) {
+    mTextureHost->UnlockVulkan(aImages);
+  }
+}
+
 wr::WrExternalImage RenderTextureHostWrapper::LockSWGL(
     uint8_t aChannelIndex, void* aContext, RenderCompositor* aCompositor) {
   if (!mTextureHost) {

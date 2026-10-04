@@ -6,6 +6,7 @@
 
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
 
@@ -228,10 +229,22 @@ bool RenderCompositorVulkan::IsWindowHidden() {
 
 void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
                                          WindowId aWindowId) {
+  MOZ_ASSERT(RenderThread::IsInRenderThread());
   MOZ_ASSERT(!mRenderer || !aRenderer);
   mCompletionTimer.Stop();
   mRenderer = aRenderer;
   mWindowId = aWindowId;
+  mExternalImages.reset(aRenderer ? wr_vulkan_external_images_new(aRenderer)
+                                  : nullptr);
+}
+
+WrExternalImage RenderCompositorVulkan::LockExternalImage(
+    RenderTextureHost* aTexture, uint8_t aChannelIndex) {
+  return aTexture->LockVulkan(aChannelIndex, mExternalImages.get());
+}
+
+void RenderCompositorVulkan::UnlockExternalImage(RenderTextureHost* aTexture) {
+  aTexture->UnlockVulkan(mExternalImages.get());
 }
 
 bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
@@ -339,6 +352,7 @@ void RenderCompositorVulkan::WakeUp() {
 void RenderCompositorVulkan::Fail() {
   if (!mFailed) {
     mFailed = true;
+    mExternalImages.reset();
     mCompletionTimer.Stop();
     WakeUp();
   }

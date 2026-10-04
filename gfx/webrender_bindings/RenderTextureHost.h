@@ -95,6 +95,12 @@ class RenderTextureHost {
   virtual wr::WrExternalImage LockExternalBuffer(uint8_t aChannelIndex);
   virtual void UnlockExternalBuffer() {}
 
+  // The context is borrowed for the callback and can be null on unsupported
+  // platforms.
+  virtual wr::WrExternalImage LockVulkan(uint8_t aChannelIndex,
+                                         WrVulkanExternalImages* aImages);
+  virtual void UnlockVulkan(WrVulkanExternalImages* aImages);
+
   virtual wr::WrExternalImage LockSWGL(uint8_t aChannelIndex, void* aContext,
                                        RenderCompositor* aCompositor);
 
