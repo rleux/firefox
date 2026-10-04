@@ -6,3 +6,5 @@
 mod vulkan;
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod webgpu_timeline;
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod webgpu_dmabuf;

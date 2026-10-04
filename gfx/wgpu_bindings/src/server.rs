@@ -1151,6 +1151,18 @@ pub struct DMABufInfo {
     pub strides: [u64; 3],
 }
 
+#[derive(Debug, Default)]
+#[repr(C)]
+pub struct VulkanDmaBufInfo {
+    pub layout: DMABufInfo,
+    pub rgba: bool,
+    pub copy_src: bool,
+    pub copy_dst: bool,
+    pub color_target: bool,
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+}
+
 /// Destroys a `VkImage` and its dedicated `VkDeviceMemory` unless ownership has
 /// been handed over with [`ScopedVkImage::release`].
 #[cfg(target_os = "linux")]
@@ -1215,8 +1227,7 @@ unsafe fn dedicated_image_memory_requirements(
     if dedicated_requirements.requires_dedicated_allocation == vk::FALSE
         && dedicated_requirements.prefers_dedicated_allocation == vk::FALSE
     {
-        let msg = c"dmabuf image neither requires nor prefers a dedicated allocation";
-        gfx_critical_note(msg.as_ptr());
+        log::debug!("dmabuf image neither requires nor prefers a dedicated allocation");
     }
 
     requirements
@@ -1239,9 +1250,16 @@ pub extern "C" fn wgpu_vkimage_create_with_dma_buf(
     height: u32,
     out_fd: *mut i32,
 ) -> DMABufInfo {
-    match create_dma_buf(global, device_id, width, height) {
+    match create_dma_buf(
+        global.resolve_device_id(device_id),
+        width,
+        height,
+        vk::Format::B8G8R8A8_UNORM,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        false,
+    ) {
         Ok((info, fd)) => {
-            unsafe { *out_fd = fd };
+            unsafe { *out_fd = fd.into_raw_fd() };
             info
         }
         Err(msg) => {
@@ -1253,21 +1271,131 @@ pub extern "C" fn wgpu_vkimage_create_with_dma_buf(
 }
 
 #[cfg(target_os = "linux")]
-fn create_dma_buf(
+pub fn create_webrender_dma_buf(
+    device: Arc<wgc::device::Device>,
+    size: [u32; 2],
+    format: wgt::TextureFormat,
+    usage: wgt::TextureUsages,
+) -> Result<(VulkanDmaBufInfo, OwnedFd), CString> {
+    let raw_format = match format {
+        wgt::TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+        wgt::TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+        _ => return Err(c"Unsupported WebRender DMA-BUF format".to_owned()),
+    };
+    let allowed = wgt::TextureUsages::COPY_SRC
+        | wgt::TextureUsages::COPY_DST
+        | wgt::TextureUsages::TEXTURE_BINDING
+        | wgt::TextureUsages::RENDER_ATTACHMENT;
+    if !allowed.contains(usage) {
+        return Err(c"Unsupported WebRender DMA-BUF usage".to_owned());
+    }
+    // COPY_DST lets wgpu initialize memory; SAMPLED lets WebRender consume it.
+    let mut raw_usage = vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED;
+    let copy_src = usage.contains(wgt::TextureUsages::COPY_SRC);
+    let color_target = usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT);
+    if copy_src {
+        raw_usage |= vk::ImageUsageFlags::TRANSFER_SRC;
+    }
+    if color_target {
+        raw_usage |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+    }
+    let (layout, fd) = create_dma_buf(
+        device.clone(),
+        size[0],
+        size[1],
+        raw_format,
+        raw_usage,
+        true,
+    )?;
+    let hal = unsafe { device.as_hal::<wgc::api::Vulkan>() }.unwrap();
+    let mut ids = vk::PhysicalDeviceIDProperties::default();
+    unsafe {
+        hal.shared_instance()
+            .raw_instance()
+            .get_physical_device_properties2(
+                hal.raw_physical_device(),
+                &mut vk::PhysicalDeviceProperties2::default().push_next(&mut ids),
+            );
+    }
+    Ok((
+        VulkanDmaBufInfo {
+            layout,
+            rgba: format == wgt::TextureFormat::Rgba8Unorm,
+            copy_src,
+            copy_dst: true,
+            color_target,
+            device_uuid: ids.device_uuid,
+            driver_uuid: ids.driver_uuid,
+        },
+        fd,
+    ))
+}
+
+#[no_mangle]
+#[cfg(target_os = "linux")]
+pub extern "C" fn wgpu_vkimage_create_for_webrender(
     global: &Global,
     device_id: id::DeviceId,
     width: u32,
     height: u32,
-) -> Result<(DMABufInfo, i32), CString> {
-    let device = global.resolve_device_id(device_id);
+    format: wgt::TextureFormat,
+    usage: wgt::TextureUsages,
+    out_fd: &mut i32,
+) -> VulkanDmaBufInfo {
+    *out_fd = -1;
+    match create_webrender_dma_buf(
+        global.resolve_device_id(device_id),
+        [width, height],
+        format,
+        usage,
+    ) {
+        Ok((info, fd)) => {
+            *out_fd = fd.into_raw_fd();
+            info
+        }
+        Err(_) => VulkanDmaBufInfo::default(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn create_dma_buf(
+    owner: Arc<wgc::device::Device>,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    usage_flags: vk::ImageUsageFlags,
+    for_webrender: bool,
+) -> Result<(DMABufInfo, OwnedFd), CString> {
+    owner
+        .check_is_valid()
+        .map_err(|_| c"Invalid WebGPU device".to_owned())?;
     unsafe {
-        let hal_device = device
+        let hal_device = owner
             .as_hal::<wgc::api::Vulkan>()
-            .expect("Vulkan backend device on linux");
+            .ok_or_else(|| c"Vulkan device unavailable".to_owned())?;
 
         let device = hal_device.raw_device();
         let physical_device = hal_device.raw_physical_device();
         let instance = hal_device.shared_instance().raw_instance();
+
+        if for_webrender
+            && DMABUF_DEVICE_EXTENSIONS
+                .iter()
+                .any(|name| !hal_device.enabled_device_extensions().contains(name))
+        {
+            return Err(c"Vulkan DMA-BUF extensions are not enabled".to_owned());
+        }
+        let properties = instance.get_physical_device_properties(physical_device);
+        if for_webrender && properties.api_version < vk::API_VERSION_1_1 {
+            return Err(c"WebRender DMA-BUF sharing requires Vulkan 1.1".to_owned());
+        }
+        if width == 0
+            || height == 0
+            || width > properties.limits.max_image_dimension2_d
+            || height > properties.limits.max_image_dimension2_d
+        {
+            return Err(c"Invalid DMA-BUF dimensions".to_owned());
+        }
 
         let count = {
             let mut drm_format_modifier_props_list =
@@ -1277,7 +1405,7 @@ fn create_dma_buf(
 
             instance.get_physical_device_format_properties2(
                 physical_device,
-                vk::Format::B8G8R8A8_UNORM,
+                format,
                 &mut format_properties_2,
             );
             drm_format_modifier_props_list.drm_format_modifier_count
@@ -1297,34 +1425,68 @@ fn create_dma_buf(
 
         instance.get_physical_device_format_properties2(
             physical_device,
-            vk::Format::B8G8R8A8_UNORM,
+            format,
             &mut format_properties_2,
         );
 
-        let mut usage_flags = vk::ImageUsageFlags::empty();
-        usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
-
-        modifier_props.retain(|modifier_prop| {
-            is_dmabuf_supported(
+        modifier_props.retain(|entry| {
+            if for_webrender {
+                let mut required = vk::FormatFeatureFlags::SAMPLED_IMAGE
+                    | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+                for (usage, feature) in [
+                    (
+                        vk::ImageUsageFlags::TRANSFER_SRC,
+                        vk::FormatFeatureFlags::TRANSFER_SRC,
+                    ),
+                    (
+                        vk::ImageUsageFlags::TRANSFER_DST,
+                        vk::FormatFeatureFlags::TRANSFER_DST,
+                    ),
+                    (
+                        vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                        vk::FormatFeatureFlags::COLOR_ATTACHMENT,
+                    ),
+                ] {
+                    if usage_flags.contains(usage) {
+                        required |= feature;
+                    }
+                }
+                if entry.drm_format_modifier_plane_count != 1
+                    || !entry.drm_format_modifier_tiling_features.contains(required)
+                {
+                    return false;
+                }
+            }
+            dmabuf_image_properties(
                 instance,
                 physical_device,
-                vk::Format::B8G8R8A8_UNORM,
-                modifier_prop.drm_format_modifier,
+                format,
+                entry.drm_format_modifier,
                 usage_flags,
             )
+            .is_some_and(|properties| {
+                !for_webrender
+                    || (width <= properties.max_extent.width
+                        && height <= properties.max_extent.height
+                        && properties.max_extent.depth >= 1
+                        && properties.max_mip_levels >= 1
+                        && properties.max_array_layers >= 1
+                        && properties
+                            .sample_counts
+                            .contains(vk::SampleCountFlags::TYPE_1))
+            })
         });
 
         if modifier_props.is_empty() {
             return Err(c"format not supported for dmabuf import".to_owned());
         }
 
-        let Some(consumer_modifiers) = get_linux_dmabuf_modifiers() else {
-            return Err(c"failed to get consumer dmabuf modifiers".to_owned());
-        };
-
-        modifier_props.retain(|modifier_prop| {
-            consumer_modifiers.contains(&modifier_prop.drm_format_modifier)
-        });
+        if !for_webrender {
+            let Some(consumer_modifiers) = get_linux_dmabuf_modifiers() else {
+                return Err(c"failed to get consumer dmabuf modifiers".to_owned());
+            };
+            modifier_props.retain(|entry| consumer_modifiers.contains(&entry.drm_format_modifier));
+        }
 
         if modifier_props.is_empty() {
             let msg =
@@ -1353,12 +1515,13 @@ fn create_dma_buf(
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
 
         let vk_info = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::ALIAS)
+            .flags(if for_webrender {
+                vk::ImageCreateFlags::empty()
+            } else {
+                vk::ImageCreateFlags::ALIAS
+            })
             .image_type(vk::ImageType::TYPE_2D)
-            // Bug 1971883: Rather than hard-coding this format, we should use
-            // whatever format was negotiated between `GPUCanvasContext.configure`
-            // and the GPU process.
-            .format(vk::Format::B8G8R8A8_UNORM)
+            .format(format)
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
@@ -1398,12 +1561,34 @@ fn create_dma_buf(
         }
 
         let memory_req = dedicated_image_memory_requirements(instance, device, image);
+        if for_webrender {
+            let properties = dmabuf_image_properties(
+                instance,
+                physical_device,
+                format,
+                image_modifier_properties.drm_format_modifier,
+                usage_flags,
+            )
+            .ok_or_else(|| c"Unsupported DMA-BUF allocation".to_owned())?;
+            if memory_req.size > properties.max_resource_size {
+                return Err(c"DMA-BUF allocation exceeds device limits".to_owned());
+            }
+        }
         let mem_properties = instance.get_physical_device_memory_properties(physical_device);
-        let memory_type_index = select_memory_type(
-            &mem_properties,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            memory_req.memory_type_bits,
-        );
+        let memory_type_index = if for_webrender {
+            (0..mem_properties.memory_type_count).find(|&index| {
+                let flags = mem_properties.memory_types[index as usize].property_flags;
+                memory_req.memory_type_bits & (1 << index) != 0
+                    && flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                    && !flags.contains(vk::MemoryPropertyFlags::PROTECTED)
+            })
+        } else {
+            select_memory_type(
+                &mem_properties,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                memory_req.memory_type_bits,
+            )
+        };
         let Some(memory_type_index) = memory_type_index else {
             let msg = c"Failed to get DEVICE_LOCAL memory index";
             return Err(msg.to_owned());
@@ -1487,7 +1672,7 @@ fn create_dma_buf(
                 offsets,
                 strides,
             },
-            fd,
+            OwnedFd::from_raw_fd(fd),
         ))
     }
 }
@@ -1667,6 +1852,17 @@ pub unsafe fn is_dmabuf_supported(
     modifier: u64,
     usage: vk::ImageUsageFlags,
 ) -> bool {
+    dmabuf_image_properties(instance, physical_device, format, modifier, usage).is_some()
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn dmabuf_image_properties(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    modifier: u64,
+    usage: vk::ImageUsageFlags,
+) -> Option<vk::ImageFormatProperties> {
     let mut drm_props = vk::ExternalImageFormatProperties::default();
     let mut props = vk::ImageFormatProperties2::default().push_next(&mut drm_props);
 
@@ -1692,16 +1888,17 @@ pub unsafe fn is_dmabuf_supported(
         Ok(_) => (),
         Err(_) => {
             //debug!(?format, ?modifier, "format not supported for dma import");
-            return false;
+            return None;
         }
     }
 
+    let image_properties = props.image_format_properties;
     if !drm_props
         .external_memory_properties
         .compatible_handle_types
         .contains(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
     {
-        return false;
+        return None;
     }
 
     drm_props
@@ -1710,6 +1907,7 @@ pub unsafe fn is_dmabuf_supported(
         .contains(
             vk::ExternalMemoryFeatureFlags::EXPORTABLE | vk::ExternalMemoryFeatureFlags::IMPORTABLE,
         )
+        .then_some(image_properties)
 }
 
 #[cfg(target_os = "linux")]

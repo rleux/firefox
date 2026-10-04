@@ -15,6 +15,18 @@ fn device(
     adapter: &Arc<wgc::instance::Adapter>,
     external: bool,
 ) -> (Arc<wgc::device::Device>, Arc<wgc::device::queue::Queue>) {
+    let extensions = if external {
+        vec![khr::external_semaphore_fd::NAME]
+    } else {
+        Vec::new()
+    };
+    device_with_extensions(adapter, &extensions)
+}
+
+pub(super) fn device_with_extensions(
+    adapter: &Arc<wgc::instance::Adapter>,
+    extensions: &[&'static std::ffi::CStr],
+) -> (Arc<wgc::device::Device>, Arc<wgc::device::queue::Queue>) {
     let mut desc = wgc::device::DeviceDescriptor::default();
     adapter.validate_device_descriptor(&mut desc).unwrap();
     let hal = unsafe { adapter.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
@@ -23,18 +35,14 @@ fn device(
             desc.required_features,
             &desc.required_limits,
             &desc.memory_hints,
-            Some(Box::new(move |args| {
-                if external {
-                    args.extensions.push(khr::external_semaphore_fd::NAME);
-                }
-            })),
+            Some(Box::new(|args| args.extensions.extend_from_slice(extensions))),
         )
         .unwrap()
     };
     unsafe { adapter.create_device_and_queue_from_hal(open.into(), &desc) }.unwrap()
 }
 
-fn adapter() -> Arc<wgc::instance::Adapter> {
+pub(super) fn adapter() -> Arc<wgc::instance::Adapter> {
     let instance = wgc::instance::Instance::new(
         "WebGPU timeline test",
         wgt::InstanceDescriptor {

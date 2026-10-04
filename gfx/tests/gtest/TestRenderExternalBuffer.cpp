@@ -865,6 +865,7 @@ void wr_test_vulkan_image_delete(void*);
 void wr_test_webgpu_timeline_lifecycle();
 void wr_test_webgpu_timeline_submission();
 void wr_test_webgpu_timeline_failed_submission();
+void wr_test_webgpu_dmabuf_allocation();
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {
@@ -877,6 +878,10 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineSubmission) {
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineFailedSubmission) {
   OnRenderThread([] { wr_test_webgpu_timeline_failed_submission(); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedDMABufAllocation) {
+  OnRenderThread([] { wr_test_webgpu_dmabuf_allocation(); });
 }
 
 TEST_F(RenderExternalBuffer,
