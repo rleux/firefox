@@ -5,6 +5,10 @@
 use super::{wgt, Device};
 use ash::vk;
 
+#[path = "dmabuf_image.rs"]
+mod image;
+pub use self::image::{DmaBufImage, DmaBufImageDescriptor};
+
 #[derive(Clone, Debug)]
 pub struct DmaBufFormat {
     format: wgt::TextureFormat,
