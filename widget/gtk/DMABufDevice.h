@@ -269,6 +269,9 @@ class MOZ_RAII DMABufDeviceLock final {
   }
 
   DMABufDevice* GetDMABufDevice() { return mDMABufDevice; }
+#ifdef XP_LINUX
+  bool GetDRMDeviceId(uint64_t& aMajor, uint64_t& aMinor) const;
+#endif
   operator gbm_device*() { return GetGBMDevice(); }
 
  private:
