@@ -8,6 +8,7 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/webrender/RenderThread.h"
+#include "mozilla/webrender/VulkanImageIPC.h"
 #include "mozilla/widget/CompositorWidget.h"
 
 #ifdef XP_WIN
@@ -237,8 +238,10 @@ void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
   if (!aRenderer) {
     mImageReleases.Poll(true);
   }
+  mImageCapabilities.reset();
   mExternalImages.reset(aRenderer ? wr_vulkan_external_images_new(aRenderer)
                                   : nullptr);
+  mImageCapabilities = VulkanImageCapabilities::Register(mExternalImages.get());
 }
 
 WrExternalImage RenderCompositorVulkan::LockExternalImage(
@@ -367,6 +370,7 @@ void RenderCompositorVulkan::Fail() {
   if (!mFailed) {
     mFailed = true;
     mImageReleases.Poll(true);
+    mImageCapabilities.reset();
     mExternalImages.reset();
     mCompletionTimer.Stop();
     WakeUp();

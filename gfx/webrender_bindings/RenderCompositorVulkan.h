@@ -17,6 +17,8 @@
 
 namespace mozilla::wr {
 
+class VulkanImageCapabilities;
+
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
 class VulkanX11Display;
 #endif
@@ -198,6 +200,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
     }
   };
   UniquePtr<WrVulkanExternalImages, ExternalImagesDeleter> mExternalImages;
+  UniquePtr<VulkanImageCapabilities> mImageCapabilities;
   VulkanImageReleaseQueue<> mImageReleases;
   VulkanFrameTracker mFrames;
   // RendererOGL clears this borrowed pointer immediately after Renderer deletion.

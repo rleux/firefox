@@ -2,7 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-//! All objects and calls are confined to the creating Renderer's render thread.
+//! Rendering objects and calls are confined to the creating Renderer's render thread.
+//! Capability snapshots contain no device references and may be queried/deleted on any thread.
 //! Input FDs are borrowed; exported FDs belong to the caller. Non-null pointers
 //! must refer to live objects of the corresponding type, and deletion is unique.
 
@@ -66,6 +67,56 @@ pub struct WrVulkanDmaBufImage {
 pub struct WrVulkanRelease {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     receipt: PendingExternalRelease,
+}
+
+pub struct WrVulkanDmaBufCapabilities {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    capabilities: DmaBufCapabilities,
+}
+
+#[no_mangle]
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_new(
+    images: &WrVulkanExternalImages,
+) -> *mut WrVulkanDmaBufCapabilities {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return boxed(
+        images
+            .registry
+            .device()
+            .dma_buf_capabilities()
+            .map(|capabilities| WrVulkanDmaBufCapabilities { capabilities }),
+    );
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = images;
+        ptr::null_mut()
+    }
+}
+
+/// Metadata-only preflight. Does not inspect or take ownership of the descriptor FD.
+#[no_mangle]
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports(
+    capabilities: &WrVulkanDmaBufCapabilities,
+    descriptor: &WrVulkanDmaBufDescriptor,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return image_descriptor(descriptor)
+        .map(|image| capabilities.capabilities.supports(&image))
+        .unwrap_or(false);
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (capabilities, descriptor);
+        false
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_dmabuf_capabilities_delete(
+    capabilities: *mut WrVulkanDmaBufCapabilities,
+) {
+    if !capabilities.is_null() {
+        drop(Box::from_raw(capabilities));
+    }
 }
 
 #[no_mangle]

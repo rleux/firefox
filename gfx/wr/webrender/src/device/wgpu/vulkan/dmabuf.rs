@@ -20,6 +20,26 @@ pub struct DmaBufFormat {
     dedicated_only: bool,
 }
 
+pub struct DmaBufCapabilities {
+    device_uuid: [u8; 16],
+    driver_uuid: [u8; 16],
+    formats: Vec<DmaBufFormat>,
+}
+
+impl DmaBufCapabilities {
+    /// Match immutable device/format limits; import still validates the allocation.
+    pub fn supports(&self, image: &DmaBufImageDescriptor) -> bool {
+        self.device_uuid == image.device_uuid
+            && self.driver_uuid == image.driver_uuid
+            && self.formats.iter().any(|format| {
+                format.format == image.format
+                    && format.usage == image.usage
+                    && format.modifier == image.modifier
+                    && format.supports_extent(image.size)
+            })
+    }
+}
+
 impl DmaBufFormat {
     pub fn format(&self) -> wgt::TextureFormat {
         self.format
@@ -102,6 +122,42 @@ fn eligible_modifier(
 }
 
 impl Device {
+    pub fn dma_buf_capabilities(&self) -> Result<DmaBufCapabilities, String> {
+        let mut capabilities = DmaBufCapabilities {
+            device_uuid: [0; 16],
+            driver_uuid: [0; 16],
+            formats: Vec::new(),
+        };
+        if !self
+            .features
+            .contains(wgt::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+        {
+            return Ok(capabilities);
+        }
+        (capabilities.device_uuid, capabilities.driver_uuid) = image::identity(self);
+        for format in [
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::TextureFormat::Bgra8Unorm,
+        ] {
+            for bits in 0..8 {
+                let mut usage = wgt::TextureUses::RESOURCE;
+                for (bit, flag) in [
+                    (1, wgt::TextureUses::COPY_SRC),
+                    (2, wgt::TextureUses::COPY_DST),
+                    (4, wgt::TextureUses::COLOR_TARGET),
+                ] {
+                    if bits & bit != 0 {
+                        usage |= flag;
+                    }
+                }
+                capabilities
+                    .formats
+                    .extend(self.dma_buf_formats(format, usage)?);
+            }
+        }
+        Ok(capabilities)
+    }
+
     /// Query single-memory-plane, linearly filterable RGB imports for this usage.
     pub fn dma_buf_formats(
         &self,
