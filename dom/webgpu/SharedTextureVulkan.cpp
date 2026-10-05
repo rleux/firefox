@@ -8,6 +8,7 @@
 #include <limits>
 
 #include "mozilla/webrender/VulkanImageIPC.h"
+#include "mozilla/webrender/WebRenderTypes.h"
 
 namespace mozilla::webgpu {
 
@@ -48,6 +49,25 @@ SharedTextureVulkan::SharedTextureVulkan(ffi::WGPUDeviceId aDeviceId,
     : SharedTexture(aWidth, aHeight, aFormat, aUsage), mDeviceId(aDeviceId) {}
 
 SharedTextureVulkan::~SharedTextureVulkan() = default;
+
+bool SharedTextureVulkan::CanPresent() const {
+  wr::WrVulkanDmaBufDescriptor image{};
+  image.fd = -1;
+  image.width = mWidth;
+  image.height = mHeight;
+  image.format = mInfo.rgba ? wr::ImageFormat::RGBA8 : wr::ImageFormat::BGRA8;
+  image.modifier = mInfo.layout.modifier;
+  image.offset = mInfo.layout.offsets[0];
+  image.stride = mInfo.layout.strides[0];
+  image.copy_src = mInfo.copy_src;
+  image.copy_dst = mInfo.copy_dst;
+  image.color_target = mInfo.color_target;
+  std::copy(std::begin(mInfo.device_uuid), std::end(mInfo.device_uuid),
+            image.device_uuid);
+  std::copy(std::begin(mInfo.driver_uuid), std::end(mInfo.driver_uuid),
+            image.driver_uuid);
+  return wr::VulkanImageCapabilities::Supports(image);
+}
 
 UniqueFileHandle SharedTextureVulkan::CloneDmaBufFd() const {
   return mMemory->ClonePlatformHandle();

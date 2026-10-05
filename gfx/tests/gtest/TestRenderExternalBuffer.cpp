@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <functional>
+#include <thread>
 #include <vector>
 
 #include "gfxPlatform.h"
@@ -987,6 +988,32 @@ static void CheckVulkanPublication(bool aWebGPU) {
       wr_vulkan_external_images_delete(context);
       wr_vulkan_external_images_delete(alias);
     });
+    auto capabilities = VulkanImageCapabilities::Register(context);
+    ASSERT_TRUE(capabilities);
+    WrVulkanDmaBufDescriptor supported{};
+    supported.fd = -1;
+    supported.width = supported.height = 2;
+    supported.format = ImageFormat::RGBA8;
+    supported.copy_src = source.mCopySrc;
+    supported.copy_dst = true;
+    std::copy_n(source.mDeviceUUID, 16, supported.device_uuid);
+    std::copy_n(source.mDriverUUID, 16, supported.driver_uuid);
+    std::thread query([&] {
+      EXPECT_TRUE(VulkanImageCapabilities::Supports(supported));
+      auto invalid = supported;
+      invalid.device_uuid[0] ^= 1;
+      EXPECT_FALSE(VulkanImageCapabilities::Supports(invalid));
+      invalid = supported;
+      invalid.driver_uuid[0] ^= 1;
+      EXPECT_FALSE(VulkanImageCapabilities::Supports(invalid));
+      invalid = supported;
+      invalid.width = UINT32_MAX;
+      EXPECT_FALSE(VulkanImageCapabilities::Supports(invalid));
+      invalid = supported;
+      invalid.modifier = UINT64_MAX;
+      EXPECT_FALSE(VulkanImageCapabilities::Supports(invalid));
+    });
+    query.join();
     auto publication = PublicationForTest(source.mMemoryFd);
     publication.size() = IntSize(2, 2);
     publication.format() = SurfaceFormat::R8G8B8A8;
@@ -1049,6 +1076,9 @@ static void CheckVulkanPublication(bool aWebGPU) {
     context = alias = nullptr;
     submit(fixture);
     releases.Poll();
+    EXPECT_TRUE(VulkanImageCapabilities::Supports(supported));
+    capabilities = nullptr;
+    EXPECT_FALSE(VulkanImageCapabilities::Supports(supported));
     ASSERT_TRUE(returned);
     EXPECT_EQ(returned->status(), fail ? VulkanImageReturnStatus::Abandoned
                                        : VulkanImageReturnStatus::Submitted);

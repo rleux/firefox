@@ -38,8 +38,12 @@ UniquePtr<SharedTexture> SharedTexture::Create(
                                        aFormat, aUsage);
 #elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
   if (wr::RenderCompositorVulkan::IsRequested()) {
-    return SharedTextureVulkan::Create(aParent->GetContext(), aDeviceId, aWidth,
-                                       aHeight, aFormat, aUsage);
+    auto vulkan = SharedTextureVulkan::Create(aParent->GetContext(), aDeviceId,
+                                              aWidth, aHeight, aFormat, aUsage);
+    if (!vulkan || !vulkan->CanPresent()) {
+      return nullptr;
+    }
+    return vulkan;
   }
   texture = SharedTextureDMABuf::Create(aParent, aDeviceId, aWidth, aHeight,
                                         aFormat, aUsage);

@@ -1546,6 +1546,12 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
     // Check if the texture is recyclable.
     if (texture->mWidth == aWidth && texture->mHeight == aHeight &&
         texture->mFormat.tag == aFormat.tag && texture->mUsage == aUsage) {
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+      if (auto* vulkan = texture->AsSharedTextureVulkan();
+          vulkan && !vulkan->CanPresent()) {
+        return false;
+      }
+#endif
       texture->SetOwnerId(ownerId);
       data->mRecycledSharedTextures.pop_front();
       mSharedTextures.emplace(aTextureId, texture);

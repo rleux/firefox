@@ -34,6 +34,7 @@ class SharedTextureVulkan final : public SharedTexture {
   const ffi::WGPUVulkanDmaBufInfo& GetDMABufInfo() const { return mInfo; }
   const ffi::WGPUVulkanTimeline* GetAcquireTimeline() const;
   uint64_t GetAcquireValue() const { return mAcquireValue; }
+  bool CanPresent() const;
 
   bool Publish(const ffi::WGPUGlobal* aContext, ffi::WGPUQueueId aQueueId,
                ffi::WGPUTextureId aTextureId, uint64_t aPublicationId);

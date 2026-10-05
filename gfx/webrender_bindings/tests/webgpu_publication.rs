@@ -15,6 +15,8 @@ use wgpu_bindings::vulkan_timeline::{VulkanTimeline, VulkanTimelineDescriptor};
 
 #[no_mangle]
 pub extern "C" fn wr_test_webgpu_global_init(global: &wgpu_bindings::server::Global) {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<webrender::vulkan::DmaBufCapabilities>();
     let (device, queue) = device_with_extensions(
         &adapter(),
         &[
