@@ -156,11 +156,11 @@ impl SharedTimeline {
         Ok(Rc::new(timeline))
     }
 
-    fn validate_value(&self, value: u64) -> Result<(), String> {
-        if self.max_difference == u64::MAX {
-            return Ok(());
-        }
+    pub(super) fn current_value(&self) -> Result<u64, String> {
         let owner = &self.semaphore.owner;
+        if owner.is_lost() {
+            return Err("Vulkan device requires recreation".into());
+        }
         let current = unsafe {
             if owner
                 .open
@@ -182,6 +182,14 @@ impl SharedTimeline {
             }
         }
         .map_err(|error| format!("Querying shared timeline: {error:?}"))?;
+        Ok(current)
+    }
+
+    fn validate_value(&self, value: u64) -> Result<(), String> {
+        if self.max_difference == u64::MAX {
+            return Ok(());
+        }
+        let current = self.current_value()?;
         if value.saturating_sub(current) > self.max_difference {
             return Err("Timeline value exceeds the device's outstanding range".into());
         }

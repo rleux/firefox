@@ -8,8 +8,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::time::Duration;
 use webrender::vulkan::{
-    Device, ForeignRgbLayout, Options, SharedTimeline, Submission, SyncFileWait, Texture,
-    TextureFilter,
+    Device, ForeignReleaseStatus, ForeignRgbLayout, Options, SharedTimeline, Submission,
+    SyncFileWait, Texture, TextureFilter,
 };
 
 unsafe fn ready_fence(owner: &Rc<Device>) -> OwnedFd {
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(
     let ready = ready_fence(&fixture.device);
     let released = SharedTimeline::new(&fixture.device).unwrap();
     let clone = image.clone();
-    {
+    let discarded = {
         let mut abandoned = Submission::new(&fixture.device).unwrap();
         let mut commands = abandoned.recording().unwrap();
         assert!(image.release(&mut commands, &released, 1).is_err());
@@ -129,22 +129,51 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(
         assert!(clone
             .release(&mut other.recording().unwrap(), &released, 1)
             .is_err());
-    }
+        let receipt = clone
+            .release(&mut abandoned.recording().unwrap(), &released, 1)
+            .unwrap();
+        assert_eq!(receipt.status(), ForeignReleaseStatus::Pending);
+        receipt
+    };
+    assert_eq!(discarded.status(), ForeignReleaseStatus::Abandoned);
+    let gate_owner = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let gate = SharedTimeline::new(&gate_owner).unwrap();
+    let imported_gate = SharedTimeline::import(&fixture.device, &gate.export().unwrap()).unwrap();
     for value in 1..=2 {
         let mut submission = Submission::new(&fixture.device).unwrap();
-        {
+        let receipt = {
             let mut commands = submission.recording().unwrap();
+            commands.wait_timeline(&imported_gate, value).unwrap();
             image
                 .acquire(
                     &mut commands,
                     SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap(),
                 )
                 .unwrap();
-            clone.release(&mut commands, &released, value).unwrap();
+            let receipt = clone.release(&mut commands, &released, value).unwrap();
             assert!(image.release(&mut commands, &released, value).is_err());
-        }
+            receipt
+        };
+        assert_eq!(receipt.status(), ForeignReleaseStatus::Pending);
         submission.submit().unwrap();
+        assert!(!submission.wait(Some(Duration::from_millis(50))).unwrap());
+        assert_eq!(receipt.status(), ForeignReleaseStatus::Pending);
+        let mut open = Submission::new(&gate_owner).unwrap();
+        open.recording()
+            .unwrap()
+            .signal_timeline(&gate, value)
+            .unwrap();
+        open.submit().unwrap();
         assert!(submission.wait(Some(Duration::from_secs(5))).unwrap());
+        assert!(open.wait(Some(Duration::from_secs(5))).unwrap());
+        assert_eq!(receipt.status(), ForeignReleaseStatus::Complete);
+        assert_eq!(receipt.status(), ForeignReleaseStatus::Complete);
     }
     drop(image);
     drop(alpha);

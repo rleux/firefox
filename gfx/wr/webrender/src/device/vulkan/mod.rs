@@ -30,7 +30,9 @@ pub use self::dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImag
 #[cfg(target_os = "linux")]
 mod foreign_rgb;
 #[cfg(target_os = "linux")]
-pub use self::foreign_rgb::{ForeignRgbImage, ForeignRgbLayout};
+pub use self::foreign_rgb::{
+    ForeignReleaseStatus, ForeignRgbImage, ForeignRgbLayout, PendingForeignRelease,
+};
 #[cfg(target_os = "linux")]
 mod timeline;
 #[cfg(target_os = "linux")]

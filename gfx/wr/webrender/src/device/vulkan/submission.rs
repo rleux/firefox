@@ -295,7 +295,9 @@ impl Drop for Submission {
     fn drop(&mut self) {
         unsafe {
             if self.attempted && !self.complete {
-                let _ = self.owner.open.queue.wait_for_idle();
+                if self.owner.open.queue.wait_for_idle().is_err() {
+                    self.owner.lost.set(true);
+                }
             }
             if let Some(mut encoder) = self.encoder.take() {
                 if self.recording {

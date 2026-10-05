@@ -4,6 +4,7 @@
 
 use super::{wgt, Device, DmaBufImage, DmaBufImageDescriptor, Recording, SharedTimeline, SyncFileWait};
 use std::os::fd::BorrowedFd;
+use std::cell::Cell;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +65,66 @@ pub struct ForeignRgbImage {
     layout: ForeignRgbLayout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignReleaseStatus {
+    Pending,
+    Complete,
+    Abandoned,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReleaseStage {
+    Recording,
+    Submitted,
+    Complete,
+    Abandoned,
+}
+
+struct ReleaseState {
+    timeline: Rc<SharedTimeline>,
+    value: u64,
+    stage: Cell<ReleaseStage>,
+}
+
+pub struct PendingForeignRelease(Rc<ReleaseState>);
+
+impl PendingForeignRelease {
+    pub fn status(&self) -> ForeignReleaseStatus {
+        match self.0.stage.get() {
+            ReleaseStage::Recording => ForeignReleaseStatus::Pending,
+            ReleaseStage::Complete => ForeignReleaseStatus::Complete,
+            ReleaseStage::Abandoned => ForeignReleaseStatus::Abandoned,
+            ReleaseStage::Submitted => match self.0.timeline.current_value() {
+                Ok(value) if value >= self.0.value => {
+                    self.0.stage.set(ReleaseStage::Complete);
+                    ForeignReleaseStatus::Complete
+                }
+                Ok(_) => ForeignReleaseStatus::Pending,
+                Err(_) => {
+                    self.0.stage.set(ReleaseStage::Abandoned);
+                    ForeignReleaseStatus::Abandoned
+                }
+            },
+        }
+    }
+}
+
+struct CommitRelease(Rc<ReleaseState>);
+
+impl CommitRelease {
+    fn submit(self) {
+        self.0.stage.set(ReleaseStage::Submitted);
+    }
+}
+
+impl Drop for CommitRelease {
+    fn drop(&mut self) {
+        if self.0.stage.get() == ReleaseStage::Recording {
+            self.0.stage.set(ReleaseStage::Abandoned);
+        }
+    }
+}
+
 impl ForeignRgbImage {
     pub fn layout(&self) -> ForeignRgbLayout {
         self.layout
@@ -97,7 +158,7 @@ impl ForeignRgbImage {
         commands: &mut Recording<'_>,
         released: &Rc<SharedTimeline>,
         value: u64,
-    ) -> Result<(), String> {
+    ) -> Result<PendingForeignRelease, String> {
         let recording = commands.recording_id(&self.image.owner)?;
         self.image.states[0].check_recording(&recording)?;
         if !self.image.states[0].current().initialized {
@@ -109,7 +170,15 @@ impl ForeignRgbImage {
             &recording,
             false,
             ash::vk::QUEUE_FAMILY_FOREIGN_EXT,
-        )
+        )?;
+        let state = Rc::new(ReleaseState {
+            timeline: released.clone(),
+            value,
+            stage: Cell::new(ReleaseStage::Recording),
+        });
+        let commit = CommitRelease(state.clone());
+        commands.commit(move || commit.submit());
+        Ok(PendingForeignRelease(state))
     }
 }
 
