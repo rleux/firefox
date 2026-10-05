@@ -864,6 +864,8 @@ void wr_test_vulkan_image_submit(void*);
 bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_vulkan_image_delete(void*);
+Renderer* wr_test_vulkan_renderer_new();
+void wr_test_vulkan_renderer_delete(Renderer*);
 }
 
 static void CheckVulkanPublication() {
