@@ -79,6 +79,7 @@ class RenderCompositor {
 
   virtual const WrVulkanConfig* GetVulkanConfig() const { return nullptr; }
   virtual bool UsesBackendPresentation() const { return false; }
+  virtual bool IsWindowHidden() { return false; }
   virtual void SetRenderer(Renderer* aRenderer, WindowId aWindowId) {}
 
   virtual gl::GLContext* gl() const { return nullptr; }
