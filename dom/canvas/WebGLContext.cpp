@@ -1203,7 +1203,18 @@ bool WebGLContext::PresentIntoXR(gl::SwapChain& swapChain,
 void InitSwapChain(gl::GLContext& gl, gl::SwapChain& swapChain,
                    const layers::TextureType consumerType, bool useAsync) {
   if (!swapChain.mFactory) {
-    auto typedFactory = gl::SurfaceFactory::Create(&gl, consumerType);
+    auto type = consumerType;
+    if (gfx::gfxVars::UseWebRenderVulkan() &&
+        !gfx::gfxVars::UseSoftwareWebRender()) {
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+      if (type != layers::TextureType::DMABUF) {
+        type = layers::TextureType::Unknown;
+      }
+#else
+      type = layers::TextureType::Unknown;
+#endif
+    }
+    auto typedFactory = gl::SurfaceFactory::Create(&gl, type);
     if (typedFactory) {
       swapChain.mFactory = std::move(typedFactory);
     }
@@ -1289,7 +1300,12 @@ bool WebGLContext::CopyToSwapChain(
   bool useAsync = options.remoteTextureOwnerId.IsValid() &&
                   options.remoteTextureId.IsValid();
 
-  InitSwapChain(*gl, srcFb->mSwapChain, consumerType, useAsync);
+  auto type = consumerType;
+  if (!useAsync && gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+    type = layers::TextureType::Unknown;
+  }
+  InitSwapChain(*gl, srcFb->mSwapChain, type, useAsync);
 
   // If we're using async present and if there is no way to serialize surfaces,
   // then a readback is required to do the copy. In this case, there's no reason
@@ -1529,7 +1545,9 @@ Maybe<uvec2> WebGLContext::FrontBufferSnapshotInto(
 
   // -
 
-  front->BeginRead();
+  if (!front->BeginRead()) {
+    return {};
+  }
   auto reset = MakeScopeExit([&] { front->EndRead(); });
 
   // -
@@ -1703,6 +1721,10 @@ WebGLContext::GetBackBufferSnapshotSharedSurface(layers::TextureType texType,
     return nullptr;
   }
 
+  if (gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+    texType = layers::TextureType::Unknown;
+  }
   InitSwapChain(*gl, mSnapshotSwapChain, texType, true);
 
   {

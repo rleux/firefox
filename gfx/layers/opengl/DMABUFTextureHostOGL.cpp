@@ -118,9 +118,14 @@ void DMABUFTextureHostOGL::PushResourceUpdates(
       if (NS_WARN_IF(!format)) {
         return;
       }
-      wr::ImageDescriptor descriptor(GetSize(), *format,
-                                     wr::ToOpacityType(mSurface->GetFormat()));
-      (aResources.*method)(aImageKeys[0], descriptor, aExtID, imageType, 0,
+      const bool opaque =
+          mSurface->IsForeignRGB() && (mFlags & TextureFlags::IS_OPAQUE);
+      wr::ImageDescriptor descriptor(
+          GetSize(), *format,
+          opaque ? wr::OpacityType::Opaque
+                 : wr::ToOpacityType(mSurface->GetFormat()));
+      (aResources.*method)(aImageKeys[0], descriptor, aExtID, imageType,
+                           opaque ? 1 : 0,
                            /* aNormalizedUvs */ false);
       break;
     }

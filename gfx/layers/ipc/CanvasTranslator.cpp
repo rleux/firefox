@@ -522,8 +522,8 @@ already_AddRefed<gfx::SourceSurface> CanvasTranslator::WaitForSurface(
       !mSharedContext->IsContextLost()) {
     surf->mSharedSurface =
         mSharedContext->ExportSharedSurface(mWebglTextureType, surf->mData);
-    if (surf->mSharedSurface && surf->mSharedSurface->IsValid()) {
-      surf->mSharedSurface->BeginRead();
+    if (surf->mSharedSurface && surf->mSharedSurface->IsValid() &&
+        surf->mSharedSurface->BeginRead()) {
       *aDesc = surf->mSharedSurface->ToSurfaceDescriptor();
       surf->mSharedSurface->EndRead();
     }
@@ -1898,7 +1898,9 @@ bool CanvasTranslator::ResolveExternalSnapshot(uint64_t aSyncId,
 
   RefPtr<gfx::SourceSurface> resolved;
   if (snapshot.mSharedSurface && snapshot.mSharedSurface->IsValid()) {
-    snapshot.mSharedSurface->BeginRead();
+    if (!snapshot.mSharedSurface->BeginRead()) {
+      return false;
+    }
     if (snapshot.mDescriptor) {
       if (aDT) {
         resolved =

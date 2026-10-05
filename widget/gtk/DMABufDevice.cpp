@@ -14,6 +14,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef XP_LINUX
+#  include <sys/sysmacros.h>
+#endif
 
 #include <mutex>
 
@@ -45,6 +48,21 @@ namespace widget {
 
 StaticMutex DMABufDeviceLock::sMutex;
 DMABufDevice* DMABufDeviceLock::sDMABufDevice = nullptr;
+
+#ifdef XP_LINUX
+bool DMABufDeviceLock::GetDRMDeviceId(uint64_t& aMajor,
+                                      uint64_t& aMinor) const {
+  sMutex.AssertCurrentThreadOwns();
+  struct stat device{};
+  if (!mGBMDevice || !mDMABufDevice || fstat(mDMABufDevice->mDRMFd, &device) ||
+      !S_ISCHR(device.st_mode)) {
+    return false;
+  }
+  aMajor = major(device.st_rdev);
+  aMinor = minor(device.st_rdev);
+  return true;
+}
+#endif
 
 bool sUseWebGLDmabufBackend = true;
 
