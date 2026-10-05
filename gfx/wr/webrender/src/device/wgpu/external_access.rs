@@ -3,7 +3,10 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::ExternalTextureRegistry;
-use crate::device::wgpu::{Device, DmaBufImage, SharedTimeline, SubmissionQueue};
+use crate::device::wgpu::{
+    Device, DmaBufImage, ForeignRgbImage, PendingForeignRelease, SharedTimeline, SubmissionQueue,
+    SyncFileWait,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -54,6 +57,29 @@ impl Drop for CommitRelease {
 }
 
 impl ExternalTextureRegistry {
+    /// # Safety
+    /// The caller must satisfy ForeignRgbImage::acquire's publication contract.
+    pub unsafe fn acquire_foreign_rgb(
+        &self,
+        image: &ForeignRgbImage,
+        ready: SyncFileWait,
+    ) -> Result<(), String> {
+        let queue = self.queue()?;
+        let mut commands = queue.recording()?;
+        image.acquire(&mut commands, ready)
+    }
+
+    pub fn release_foreign_rgb(
+        &self,
+        image: &ForeignRgbImage,
+        released: &Rc<SharedTimeline>,
+        value: u64,
+    ) -> Result<PendingForeignRelease, String> {
+        let queue = self.queue()?;
+        let mut commands = queue.recording()?;
+        image.release(&mut commands, released, value)
+    }
+
     fn queue(&self) -> Result<Rc<SubmissionQueue>, String> {
         self.submissions
             .borrow()

@@ -368,7 +368,9 @@ impl Drop for Submission {
             if matches!(self.state, SubmissionState::EncodingFailed { .. }
                 | SubmissionState::Unconfirmed { .. } | SubmissionState::Submitted { .. })
             {
-                let _ = data.owner.open.queue.wait_for_idle();
+                if data.owner.open.queue.wait_for_idle().is_err() {
+                    data.owner.lost.set(true);
+                }
                 #[cfg(test)]
                 data.owner.trace.borrow_mut().push(super::tests::Command::SubmissionIdleWait);
             }
