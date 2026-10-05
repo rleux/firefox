@@ -15,5 +15,7 @@ AsyncPanZoom
 Silk
 Moz2D
 DebuggingWebRenderScreenshots
+VulkanWebRenderOverview
+VulkanWebRenderImplementation
 GraphicsOverview
 ```
