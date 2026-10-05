@@ -96,18 +96,8 @@ impl Drop for DmaBufImage {
 }
 
 pub(super) fn identity(owner: &Device) -> ([u8; 16], [u8; 16]) {
-    let mut id = vk::PhysicalDeviceIDProperties::default();
-    unsafe {
-        owner
-            .raw_device()
-            .shared_instance()
-            .raw_instance()
-            .get_physical_device_properties2(
-                owner.raw_device().raw_physical_device(),
-                &mut vk::PhysicalDeviceProperties2::default().push_next(&mut id),
-            );
-    }
-    (id.device_uuid, id.driver_uuid)
+    let (device, driver, _) = crate::device::wgpu::timeline::properties(owner);
+    (device, driver)
 }
 
 fn memory_type(bits: u32, properties: &vk::PhysicalDeviceMemoryProperties) -> Result<u32, String> {
@@ -146,9 +136,10 @@ impl Device {
             return Err("Vulkan device requires recreation".into());
         }
         let supported = self
-            .dma_buf_formats(descriptor.format, descriptor.usage)?
-            .into_iter()
+            .cached_dma_buf_formats(descriptor.format, descriptor.usage)?
+            .iter()
             .find(|entry| entry.modifier() == descriptor.modifier)
+            .cloned()
             .ok_or("Unsupported DMA-BUF format, modifier or usage")?;
         if !supported.supports_extent(descriptor.size) {
             return Err("DMA-BUF dimensions exceed device limits".into());

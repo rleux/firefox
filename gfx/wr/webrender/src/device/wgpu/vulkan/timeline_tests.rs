@@ -28,13 +28,14 @@ impl Drop for UnblockOnFailure {
                 .semaphore(*self.0.semaphore)
                 .value(self.1);
             unsafe {
-                let _ = if owner.raw_device().enabled_device_extensions()
-                    .contains(&ash::khr::timeline_semaphore::NAME)
-                {
-                    ash::khr::timeline_semaphore::Device::new(
-                        owner.raw_device().shared_instance().raw_instance(),
-                        owner.raw_device().raw_device(),
-                    ).signal_semaphore(&info)
+                let extension = owner.native_cache.timeline.get_or_init(|| {
+                    owner.raw_device().enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME)
+                        .then(|| ash::khr::timeline_semaphore::Device::new(
+                            owner.raw_device().shared_instance().raw_instance(), owner.raw_device().raw_device(),
+                        ))
+                });
+                let _ = if let Some(extension) = extension {
+                    extension.signal_semaphore(&info)
                 } else {
                     owner.raw_device().raw_device().signal_semaphore(&info)
                 };
