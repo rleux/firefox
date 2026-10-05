@@ -866,6 +866,11 @@ bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
 void wr_test_vulkan_image_delete(void*);
 Renderer* wr_test_vulkan_renderer_new();
 void wr_test_vulkan_renderer_delete(Renderer*);
+void wr_test_vulkan_sync_file_wait();
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanSyncFileWait) {
+  OnRenderThread([] { wr_test_vulkan_sync_file_wait(); });
 }
 
 static void CheckVulkanPublication() {

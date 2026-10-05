@@ -188,6 +188,7 @@ impl SharedTimeline {
 
 #[derive(Default)]
 pub(super) struct SubmissionSync {
+    sync_files: Vec<super::SyncFileWait>,
     waits: Vec<(Rc<SharedTimeline>, u64)>,
     signals: Vec<(Rc<SharedTimeline>, u64)>,
 }
@@ -204,6 +205,18 @@ fn add(entries: &mut Vec<(Rc<SharedTimeline>, u64)>, timeline: &Rc<SharedTimelin
 }
 
 impl SubmissionSync {
+    pub fn wait_sync_file(
+        &mut self,
+        owner: &Rc<Device>,
+        wait: super::SyncFileWait,
+    ) -> Result<(), String> {
+        if !Rc::ptr_eq(owner, &wait.semaphore.owner) {
+            return Err("Sync-file wait belongs to another Vulkan device".into());
+        }
+        self.sync_files.push(wait);
+        Ok(())
+    }
+
     pub fn wait(
         &mut self,
         owner: &Rc<Device>,
@@ -257,12 +270,14 @@ impl SubmissionSync {
     }
 
     pub fn stage<'a>(&'a self, queue: &'a dyn hal::DynQueue) -> Result<Option<StagedSync<'a>>, String> {
-        if self.waits.is_empty() && self.signals.is_empty() {
+        if self.sync_files.is_empty() && self.waits.is_empty() && self.signals.is_empty() {
             return Ok(None);
         }
         let queue = queue.as_any().downcast_ref::<hal::vulkan::Queue>()
             .ok_or("External Vulkan synchronization requires a Vulkan queue")?;
-
+        for wait in &self.sync_files {
+            queue.add_wait_semaphore(*wait.semaphore, None, vk::PipelineStageFlags::ALL_COMMANDS);
+        }
         for (timeline, value) in &self.waits {
             queue.add_wait_semaphore(
                 *timeline.semaphore,
@@ -283,6 +298,7 @@ impl SubmissionSync {
     }
 
     pub fn clear(&mut self) {
+        self.sync_files.clear();
         self.waits.clear();
         self.signals.clear();
     }
@@ -295,6 +311,9 @@ pub(super) struct StagedSync<'a> {
 
 impl Drop for StagedSync<'_> {
     fn drop(&mut self) {
+        for wait in &self.sync.sync_files {
+            self.queue.remove_wait_semaphore(*wait.semaphore);
+        }
         for (timeline, _) in &self.sync.waits {
             self.queue.remove_wait_semaphore(*timeline.semaphore);
         }
