@@ -17,31 +17,8 @@ impl SyncFileWait {
     /// # Safety
     /// The borrowed FD must be a genuine SYNC_FD semaphore export or compatible fence.
     pub unsafe fn import(owner: &Rc<Device>, fd: BorrowedFd<'_>) -> Result<Self, String> {
-        if owner.is_lost()
-            || owner.raw_device().shared_instance().instance_api_version() < vk::API_VERSION_1_1
-            || !owner
-                .raw_device()
-                .enabled_device_extensions()
-                .contains(&khr::external_semaphore_fd::NAME)
-        {
+        if owner.is_lost() || !owner.supports_sync_file_import() {
             return Err("Vulkan sync-file import is unavailable".into());
-        }
-        let instance = owner.raw_device().shared_instance().raw_instance();
-        let mut properties = vk::ExternalSemaphoreProperties::default();
-        instance.get_physical_device_external_semaphore_properties(
-            owner.raw_device().raw_physical_device(),
-            &vk::PhysicalDeviceExternalSemaphoreInfo::default()
-                .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
-            &mut properties,
-        );
-        if !properties
-            .external_semaphore_features
-            .contains(vk::ExternalSemaphoreFeatureFlags::IMPORTABLE)
-            || !properties
-                .compatible_handle_types
-                .contains(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD)
-        {
-            return Err("Device cannot import sync-file fences".into());
         }
         let fd = fd
             .try_clone_to_owned()
@@ -53,7 +30,7 @@ impl SyncFileWait {
         let semaphore = Owned::new(owner, semaphore, |device, semaphore| unsafe {
             device.raw_device().destroy_semaphore(semaphore, None);
         });
-        khr::external_semaphore_fd::Device::new(instance, raw)
+        owner.external_semaphore_fd()
             .import_semaphore_fd(
                 &vk::ImportSemaphoreFdInfoKHR::default()
                     .semaphore(*semaphore)
@@ -64,5 +41,38 @@ impl SyncFileWait {
             .map_err(|error| format!("Importing sync-file semaphore: {error:?}"))?;
         let _ = fd.into_raw_fd();
         Ok(Self { semaphore })
+    }
+}
+
+impl Device {
+    pub(super) fn supports_sync_file_import(&self) -> bool {
+        *self.native_cache.sync_file.get_or_init(|| self.query_sync_file_import())
+    }
+
+    fn query_sync_file_import(&self) -> bool {
+        if self.raw_device().shared_instance().instance_api_version() < vk::API_VERSION_1_1
+            || !self
+                .raw_device()
+                .enabled_device_extensions()
+                .contains(&khr::external_semaphore_fd::NAME)
+        {
+            return false;
+        }
+        let instance = self.raw_device().shared_instance().raw_instance();
+        let mut properties = vk::ExternalSemaphoreProperties::default();
+        unsafe {
+            instance.get_physical_device_external_semaphore_properties(
+                self.raw_device().raw_physical_device(),
+                &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
+                &mut properties,
+            );
+        }
+        properties
+            .external_semaphore_features
+            .contains(vk::ExternalSemaphoreFeatureFlags::IMPORTABLE)
+            && properties
+                .compatible_handle_types
+                .contains(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD)
     }
 }

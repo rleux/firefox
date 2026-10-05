@@ -44,33 +44,32 @@ pub struct SharedTimeline {
     max_difference: u64,
 }
 
-fn properties(owner: &Device) -> ([u8; 16], [u8; 16], u64) {
-    let mut id = vk::PhysicalDeviceIDProperties::default();
-    let mut timeline = vk::PhysicalDeviceTimelineSemaphoreProperties::default();
-    unsafe {
-        owner
-            .raw_device()
-            .shared_instance()
-            .raw_instance()
-            .get_physical_device_properties2(
-                owner.raw_device().raw_physical_device(),
-                &mut vk::PhysicalDeviceProperties2::default()
-                    .push_next(&mut id)
-                    .push_next(&mut timeline),
-            );
-    }
-    (
-        id.device_uuid,
-        id.driver_uuid,
-        timeline.max_timeline_semaphore_value_difference,
-    )
+pub(super) fn properties(owner: &Device) -> ([u8; 16], [u8; 16], u64) {
+    *owner.native_cache.properties.get_or_init(|| {
+        let mut id = vk::PhysicalDeviceIDProperties::default();
+        let mut timeline = vk::PhysicalDeviceTimelineSemaphoreProperties::default();
+        unsafe {
+            owner
+                .raw_device()
+                .shared_instance()
+                .raw_instance()
+                .get_physical_device_properties2(
+                    owner.raw_device().raw_physical_device(),
+                    &mut vk::PhysicalDeviceProperties2::default()
+                        .push_next(&mut id)
+                        .push_next(&mut timeline),
+                );
+        }
+        (
+            id.device_uuid,
+            id.driver_uuid,
+            timeline.max_timeline_semaphore_value_difference,
+        )
+    })
 }
 
-fn extension(owner: &Device) -> ash::khr::external_semaphore_fd::Device {
-    ash::khr::external_semaphore_fd::Device::new(
-        owner.raw_device().shared_instance().raw_instance(),
-        owner.raw_device().raw_device(),
-    )
+fn extension(owner: &Device) -> &ash::khr::external_semaphore_fd::Device {
+    owner.external_semaphore_fd()
 }
 
 impl SharedTimeline {
@@ -161,16 +160,14 @@ impl SharedTimeline {
             return Err("Vulkan device requires recreation".into());
         }
         let current = unsafe {
-            if owner
-                .raw_device()
-                .enabled_device_extensions()
-                .contains(&ash::khr::timeline_semaphore::NAME)
-            {
-                ash::khr::timeline_semaphore::Device::new(
-                    owner.raw_device().shared_instance().raw_instance(),
-                    owner.raw_device().raw_device(),
-                )
-                .get_semaphore_counter_value(*self.semaphore)
+            let extension = owner.native_cache.timeline.get_or_init(|| {
+                owner.raw_device().enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME)
+                    .then(|| ash::khr::timeline_semaphore::Device::new(
+                        owner.raw_device().shared_instance().raw_instance(), owner.raw_device().raw_device(),
+                    ))
+            });
+            if let Some(extension) = extension {
+                extension.get_semaphore_counter_value(*self.semaphore)
             } else {
                 owner
                     .raw_device()

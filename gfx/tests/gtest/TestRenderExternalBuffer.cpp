@@ -30,7 +30,9 @@
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include <fcntl.h>
 #  include <sys/eventfd.h>
+#  include <sys/stat.h>
 #  include <sys/syscall.h>
+#  include <sys/sysmacros.h>
 #  include <unistd.h>
 
 #  include "base/linux_memfd_defs.h"
@@ -991,7 +993,7 @@ static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(
   return desc;
 }
 
-static void CheckForeignRenderHost(void* aFixture, int aMemory,
+static void CheckForeignRenderHost(void* aFixture, int aDrmFd, int aMemory,
                                    uint32_t aFormat, uint32_t aStride) {
   UniqueFileHandle ready(wr_test_foreign_rgb_ready(aFixture));
   ASSERT_TRUE(ready);
@@ -1016,6 +1018,51 @@ static void CheckForeignRenderHost(void* aFixture, int aMemory,
       wr_test_vulkan_renderer_delete(second);
     });
     ASSERT_TRUE(context && alias && next);
+    struct stat drm{};
+    ASSERT_EQ(fstat(aDrmFd, &drm), 0);
+    ASSERT_TRUE(S_ISCHR(drm.st_mode));
+    const auto drmMajor = major(drm.st_rdev);
+    const auto drmMinor = minor(drm.st_rdev);
+    WrVulkanForeignRgbDescriptor supported{};
+    supported.fd = -1;
+    supported.width = 17;
+    supported.height = 9;
+    supported.fourcc = aFormat;
+    supported.stride = aStride;
+    EXPECT_FALSE(VulkanImageCapabilities::SupportsForeignRGB(
+        supported, drmMajor, drmMinor));
+    auto capabilities = VulkanImageCapabilities::Register(context);
+    ASSERT_TRUE(capabilities);
+    std::thread query([&] {
+      EXPECT_TRUE(VulkanImageCapabilities::SupportsForeignRGB(
+          supported, drmMajor, drmMinor));
+      EXPECT_FALSE(VulkanImageCapabilities::SupportsForeignRGB(
+          supported, drmMajor, UINT64_MAX));
+      for (int change = 0; change < 5; ++change) {
+        auto invalid = supported;
+        switch (change) {
+          case 0:
+            invalid.fourcc = GBM_FORMAT_NV12;
+            break;
+          case 1:
+            invalid.modifier = 1;
+            break;
+          case 2:
+            invalid.width = INT32_MAX;
+            invalid.stride = uint64_t(INT32_MAX) * 4;
+            break;
+          case 3:
+            invalid.offset = 1;
+            break;
+          case 4:
+            invalid.stride = 1;
+            break;
+        }
+        EXPECT_FALSE(VulkanImageCapabilities::SupportsForeignRGB(
+            invalid, drmMajor, drmMinor));
+      }
+    });
+    query.join();
     VulkanImageReleaseQueue<> releases;
     ASSERT_TRUE(access->TryLock());
     EXPECT_EQ(host->LockVulkan(0, context).image_type,
@@ -1053,6 +1100,8 @@ static void CheckForeignRenderHost(void* aFixture, int aMemory,
     }
     wr_test_vulkan_renderer_delete(first);
     first = nullptr;
+    EXPECT_TRUE(VulkanImageCapabilities::SupportsForeignRGB(supported, drmMajor,
+                                                            drmMinor));
     releases.Poll();
     EXPECT_FALSE(releases.HasPending());
     ASSERT_TRUE(access->TryLock());
@@ -1195,7 +1244,7 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
                 WrVulkanReleaseStatus::Complete);
       EXPECT_TRUE(DuplicateFileHandle(memory.get()));
       EXPECT_TRUE(DuplicateFileHandle(ready.get()));
-      CheckForeignRenderHost(fixture, memory.get(), format,
+      CheckForeignRenderHost(fixture, drmFd, memory.get(), format,
                              widget::GbmLib::GetStride(buffer));
       CheckForeignCompositorShutdown(fixture, memory.get(), format,
                                      widget::GbmLib::GetStride(buffer));

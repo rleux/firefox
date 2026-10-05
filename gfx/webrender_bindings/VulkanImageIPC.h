@@ -30,12 +30,15 @@ namespace mozilla::wr {
 class RenderTextureHost;
 struct WrVulkanExternalImages;
 struct WrVulkanDmaBufDescriptor;
+struct WrVulkanForeignRgbDescriptor;
 struct WrVulkanDmaBufCapabilities;
 
 class VulkanImageCapabilities final {
  public:
   static UniquePtr<VulkanImageCapabilities> Register(WrVulkanExternalImages*);
   static bool Supports(const WrVulkanDmaBufDescriptor&);
+  static bool SupportsForeignRGB(const WrVulkanForeignRgbDescriptor&,
+                                 uint64_t aDrmMajor, uint64_t aDrmMinor);
   ~VulkanImageCapabilities();
 
  private:
