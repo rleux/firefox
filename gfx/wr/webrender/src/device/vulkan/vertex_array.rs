@@ -4,10 +4,12 @@
 
 use super::bindings::DrawBindings;
 use super::draw::Draw;
+use super::quad_instances;
 use super::{wgt, Buffer, BufferPool};
 use api::units::DeviceIntRect;
 use crate::device::{Buffer as DeviceBuffer, BufferId, BufferKind, VertexArray, VertexDescriptor};
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 
@@ -15,6 +17,7 @@ struct Data {
     usage: wgt::BufferUses,
     length: usize,
     buffer: Option<Rc<Buffer>>,
+    quad_offsets: Option<Vec<usize>>,
 }
 
 impl Data {
@@ -33,6 +36,7 @@ impl Data {
                 pool.recycle(old);
             }
             self.length = 0;
+            self.quad_offsets = None;
             return Ok(());
         }
         if let Some(buffer) = self
@@ -68,6 +72,7 @@ impl Data {
             }
         }
         self.length = length;
+        self.quad_offsets = None;
         Ok(())
     }
 }
@@ -94,12 +99,16 @@ pub(super) struct InstanceSlice {
     offset: u64,
     count: u32,
     stride: u64,
+    expanded_quads: bool,
 }
 
 impl InstanceSlice {
     pub fn draw(&self, bindings: Rc<DrawBindings>, scissor: DeviceIntRect) -> Result<Draw, String> {
         if self.stride != bindings.pipeline.instance_stride {
             return Err("Vulkan instance stride does not match the draw pipeline".into());
+        }
+        if self.expanded_quads && !quad_instances::is_quad_shader(bindings.pipeline.shader.name) {
+            return Err("Expanded Vulkan quad instances require a quad shader".into());
         }
         Ok(Draw {
             bindings,
@@ -155,6 +164,7 @@ impl VertexArrayStore {
                 usage,
                 length: 0,
                 buffer: None,
+                quad_offsets: None,
             },
         );
         Ok(DeviceBuffer { id, kind, size: 0 })
@@ -167,7 +177,14 @@ impl VertexArrayStore {
         };
         self.buffers
             .get(&buffer.id)
-            .filter(|data| data.usage == usage && data.length == buffer.size)
+            .filter(|data| {
+                data.usage == usage
+                    && data
+                        .quad_offsets
+                        .as_ref()
+                        .map_or(data.length, |offsets| (offsets.len() - 1) * 16)
+                        == buffer.size
+            })
             .ok_or_else(|| "Invalid Vulkan buffer".into())
     }
 
@@ -284,6 +301,54 @@ impl VertexArrayStore {
         Ok(())
     }
 
+    pub fn is_bound_instance_buffer(&self, buffer: &DeviceBuffer) -> bool {
+        self.bound
+            .and_then(|id| self.arrays.get(&id))
+            .map_or(false, |array| array.instances == Some(buffer.id))
+    }
+
+    pub fn update_quad_instances(
+        &mut self,
+        buffer: &mut DeviceBuffer,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.buffer_data(buffer)?;
+        let array = self
+            .bound
+            .and_then(|id| self.arrays.get(&id))
+            .ok_or("No Vulkan vertex array is bound")?;
+        if array.instances != Some(buffer.id) {
+            return Err("Vulkan quad buffer is not bound as instances".into());
+        }
+        if array.stride != 16 || bytes.len() % 16 != 0 {
+            return Err("Invalid Vulkan quad instance stride".into());
+        }
+        if quad_instances::packed_size(bytes)? == bytes.len() {
+            return self.write_buffer(buffer, bytes);
+        }
+        let mut offsets = Vec::with_capacity(bytes.len() / 16 + 1);
+        offsets.push(0usize);
+        for instance in bytes.chunks_exact(16) {
+            let size = quad_instances::packed_size(instance)?;
+            offsets.push(
+                offsets
+                    .last()
+                    .unwrap()
+                    .checked_add(size)
+                    .ok_or("Vulkan expanded instance size overflow")?,
+            );
+        }
+        let length = *offsets.last().unwrap();
+        let pool = self.pool.clone();
+        let data = self.data_mut(buffer.id)?;
+        data.write(&pool, length, false, |out| {
+            quad_instances::pack(bytes, out);
+        })?;
+        data.quad_offsets = Some(offsets);
+        buffer.size = bytes.len();
+        Ok(())
+    }
+
     pub fn reallocate(&mut self, buffer: &mut DeviceBuffer, length: usize) -> Result<(), String> {
         self.buffer_data(buffer)?;
         let pool = self.pool.clone();
@@ -302,6 +367,9 @@ impl VertexArrayStore {
         self.buffer_data(buffer)?;
         let pool = self.pool.clone();
         let data = self.data_mut(buffer.id)?;
+        if data.quad_offsets.is_some() {
+            return Err("Cannot partially update expanded Vulkan quad instances".into());
+        }
         let end = offset
             .checked_add(bytes.len())
             .filter(|end| *end <= data.length)
@@ -335,6 +403,26 @@ impl VertexArrayStore {
             .instances
             .and_then(|id| self.buffers.get(&id))
             .ok_or("Invalid Vulkan instance buffer")?;
+        let (offset, size, count) = if let Some(offsets) = &data.quad_offsets {
+            if array.stride != 16 {
+                return Err("Expanded Vulkan quad instances require a 16-byte stride".into());
+            }
+            let first = *offsets
+                .get(base as usize)
+                .ok_or("Vulkan base instance exceeds expanded data")?;
+            let end = base
+                .checked_add(count)
+                .ok_or("Vulkan instance count overflow")?;
+            let last = *offsets
+                .get(end as usize)
+                .ok_or("Vulkan draw exceeds expanded instance data")?;
+            let size = last - first;
+            let count = u32::try_from(size / array.stride)
+                .map_err(|_| "Vulkan expanded instance count overflow")?;
+            (first, size, count)
+        } else {
+            (offset, size, count)
+        };
         if offset
             .checked_add(size)
             .map_or(true, |end| end > data.length)
@@ -351,6 +439,7 @@ impl VertexArrayStore {
             offset: offset as u64,
             count,
             stride: array.stride as u64,
+            expanded_quads: data.quad_offsets.is_some(),
         }))
     }
 

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use super::super::quad_instances;
 use super::super::{SurfaceOptions, SurfaceWindow};
 use crate::device as wr;
 use crate::device::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
@@ -557,7 +558,17 @@ impl wr::GpuBackend for RenderDevice {
         buffer.id = 0;
     }
     fn write_buffer(&mut self, buffer: &mut wr::Buffer, bytes: &[u8], _: wr::VertexUsageHint) {
-        self.operation(|device| device.vertex_arrays.write_buffer(buffer, bytes));
+        self.operation(|device| {
+            if device.vertex_arrays.is_bound_instance_buffer(buffer)
+                && device.programs.current().map_or(false, |program| {
+                    quad_instances::is_quad_shader(program.shader().name)
+                })
+            {
+                device.vertex_arrays.update_quad_instances(buffer, bytes)
+            } else {
+                device.vertex_arrays.write_buffer(buffer, bytes)
+            }
+        });
     }
     fn write_buffer_repeated(
         &mut self,

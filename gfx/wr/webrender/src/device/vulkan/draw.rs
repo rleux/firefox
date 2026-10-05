@@ -4,11 +4,13 @@
 
 use super::bindings::DrawBindings;
 use super::pipeline::DrawPipeline;
+use super::quad_instances;
 use super::{hal, wgt, Buffer, Device, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntPoint, DeviceIntRect};
 use ash::vk;
 use euclid::default::Transform3D;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::ops::Range;
 use std::rc::Rc;
 use wgpu_hal::CommandEncoder as _;
@@ -240,9 +242,23 @@ impl<T: ColorAttachment> DrawPass<'_, T> {
                 return Err("Missing draw batch projection".into());
             }
         }
-        let sizes: Vec<_> = active.iter().map(|batch| batch.instances.len()).collect();
+        let sizes: Vec<_> = active
+            .iter()
+            .map(|batch| {
+                if quad_instances::is_quad_shader(batch.pipeline.shader.name) {
+                    quad_instances::packed_size(batch.instances)
+                } else {
+                    Ok(batch.instances.len())
+                }
+            })
+            .collect::<Result<_, _>>()?;
         let instances = uploads.upload_instances_with(commands, &sizes, |index, destination| {
-            destination.copy_from_slice(active[index].instances);
+            let batch = active[index];
+            if quad_instances::is_quad_shader(batch.pipeline.shader.name) {
+                quad_instances::pack(batch.instances, destination);
+            } else {
+                destination.copy_from_slice(batch.instances);
+            }
             Ok(())
         })?;
         let mut draws = Vec::with_capacity(active.len());
@@ -265,7 +281,8 @@ impl<T: ColorAttachment> DrawPass<'_, T> {
                 bindings,
                 instances: buffer.clone(),
                 instance_offset: range.start,
-                instance_count: batch.instance_count,
+                instance_count: u32::try_from(sizes[index] as u64 / batch.pipeline.instance_stride)
+                    .map_err(|_| "Vulkan expanded instance count overflow")?,
                 scissor: batch.scissor,
             });
         }

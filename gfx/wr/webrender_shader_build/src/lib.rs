@@ -143,6 +143,9 @@ pub fn build(
         for features in variants {
             let mut defines: Vec<_> = features.split(',').filter(|s| !s.is_empty()).collect();
             defines.push("VULKAN");
+            if name.starts_with("ps_quad") {
+                defines.push("VULKAN_AA_GRID");
+            }
             let (vertex, fragment, _, _) =
                 build_shader_strings(ShaderVersion::Gl, &defines, name, &|file| {
                     Cow::Owned(shader_source_from_file(&res.join(format!("{file}.glsl"))))

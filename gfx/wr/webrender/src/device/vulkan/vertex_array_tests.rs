@@ -13,6 +13,7 @@ use api::units::{DeviceIntPoint, DeviceIntSize};
 use crate::device::RenderState;
 use crate::renderer::desc;
 use std::sync::atomic::Ordering;
+use std::convert::TryInto;
 
 fn pool() -> Rc<BufferPool> {
     validation_logging();
@@ -332,5 +333,59 @@ fn vertex_array_ranges_and_identifiers_are_checked() {
     store.delete_buffer(&mut instances).unwrap();
     assert!(store.bind(&vao).is_err());
     assert!(store.arrays.is_empty() && store.buffers.is_empty());
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn expanded_quad_ranges_preserve_logical_indices_and_snapshots() {
+    let pool = pool();
+    let mut store = VertexArrayStore::new(&pool);
+    let mut vertices = store.create_buffer(BufferKind::Vertex).unwrap();
+    let mut instances = store.create_buffer(BufferKind::Vertex).unwrap();
+    let mut vao = store
+        .create(&desc::PRIM_INSTANCES, &vertices, Some(&instances), None, 1)
+        .unwrap();
+    store.bind(&vao).unwrap();
+    let source: Vec<_> = [1u32, 0, 3]
+        .iter()
+        .flat_map(|part| {
+            IntoIterator::into_iter([13u32, 23, (8 << 24) | (10 << 16) | (part << 8) | 17, 47])
+                .flat_map(u32::to_ne_bytes)
+        })
+        .collect();
+    store
+        .update_quad_instances(&mut instances, &source)
+        .unwrap();
+    let parts = |slice: &InstanceSlice| {
+        bytes(slice)
+            .chunks_exact(16)
+            .map(|instance| (u32::from_ne_bytes(instance[8..12].try_into().unwrap()) >> 8) & 255)
+            .collect::<Vec<_>>()
+    };
+    let old = store.instances(0, 3).unwrap().unwrap();
+    assert_eq!(parts(&old), [6, 1, 7, 0, 8, 3, 9]);
+    assert_eq!(parts(&store.instances(1, 1).unwrap().unwrap()), [0]);
+    assert_eq!(parts(&store.instances(2, 1).unwrap().unwrap()), [8, 3, 9]);
+    assert_eq!(
+        parts(&store.instances(0, 2).unwrap().unwrap()),
+        [6, 1, 7, 0]
+    );
+    assert!(store.instances(2, 2).is_err());
+    assert!(store.update_range(&instances, 0, &[0; 16]).is_err());
+    assert!(store
+        .update_quad_instances(&mut instances, &[0; 15])
+        .is_err());
+    store
+        .update_quad_instances(&mut instances, &source[16..32])
+        .unwrap();
+    assert_eq!(parts(&store.instances(0, 1).unwrap().unwrap()), [0]);
+    assert!(!store.instances(0, 1).unwrap().unwrap().expanded_quads);
+    assert_eq!(parts(&old), [6, 1, 7, 0, 8, 3, 9]);
+    store.update_range(&instances, 0, &[0; 16]).unwrap();
+    store.delete(&mut vao).unwrap();
+    store.delete_buffer(&mut vertices).unwrap();
+    store.delete_buffer(&mut instances).unwrap();
+    assert_eq!(parts(&old), [6, 1, 7, 0, 8, 3, 9]);
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }

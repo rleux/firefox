@@ -51,6 +51,7 @@ mod swapchain;
 #[cfg(test)]
 pub(crate) use self::swapchain::testing as surface_testing;
 mod draw;
+mod quad_instances;
 mod render_pass;
 #[cfg(wr_vulkan_shaders)]
 mod render_device;
