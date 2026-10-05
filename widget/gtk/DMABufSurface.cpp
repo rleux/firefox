@@ -6,6 +6,9 @@
 
 #include "DMABufDevice.h"
 #include "DMABufFormats.h"
+#ifdef XP_LINUX
+#  include "DMABufAccess.h"
+#endif
 
 #ifdef MOZ_WAYLAND
 #  include "nsWaylandDisplay.h"
@@ -484,6 +487,12 @@ bool DMABufSurface::ReleaseDMABuf() {
     }
   }
   mBufferPlaneCount = 0;
+  mForeignRGBDescriptor = nullptr;
+#ifdef XP_LINUX
+  mForeignAccess = nullptr;
+#endif
+  mForeignRGB = false;
+  mForeignRGBGeneration = 0;
 
   return released;
 }
@@ -522,16 +531,83 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
   return surf.forget();
 }
 
+bool DMABufSurface::EnableForeignRGB() {
+#ifdef XP_LINUX
+  if (!GetAsDMABufSurfaceRGBA() || mBufferPlaneCount != 1) {
+    return false;
+  }
+  if (mForeignRGB) {
+    return ForeignRGBUsable();
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor) ||
+      descriptor.get_SurfaceDescriptorDMABuf().modifier()[0] != 0) {
+    return false;
+  }
+  auto access = widget::DMABufAccess::Create();
+  if (!access) {
+    return false;
+  }
+  if (!mGlobalRefCountFd) {
+    GlobalRefCountCreate();
+  }
+  if (!mGlobalRefCountFd) {
+    return false;
+  }
+  mForeignAccess = std::move(access);
+  mForeignRGB = true;
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::ForeignRGBUsable() const {
+#ifdef XP_LINUX
+  return !mForeignRGB || (mForeignAccess && mForeignAccess->IsUsable());
+#else
+  return !mForeignRGB;
+#endif
+}
+
+bool DMABufSurface::TryLockForeignRGB() {
+#ifdef XP_LINUX
+  return mForeignAccess && mForeignAccess->TryLock();
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::LockForeignRGB() {
+#ifdef XP_LINUX
+  return mForeignAccess && mForeignAccess->WaitLock(5000);
+#else
+  return false;
+#endif
+}
+
+void DMABufSurface::UnlockForeignRGB(bool aAbandon) {
+#ifdef XP_LINUX
+  if (mForeignAccess) {
+    mForeignAccess->Unlock(aAbandon);
+  }
+#endif
+}
+
 void DMABufSurface::FenceSet() {
   MutexAutoLock lock(mSurfaceLock);
+  mSyncFd = nullptr;
 
-  if (!mGL) {
+  if (!mGL || !mGL->MakeCurrent()) {
     gfxCriticalNoteOnce
         << "DMABufSurface::FenceSet() failed: missing GL context";
     return;
   }
 
-  mGL->MakeCurrent();
+  if (mForeignRGB) {
+    MOZ_RELEASE_ASSERT(mForeignRGBGeneration != UINT64_MAX);
+    ++mForeignRGBGeneration;
+  }
 
   const auto& gle = gl::GLContextEGL::Cast(mGL);
   const auto& egl = gle->mEgl;
@@ -543,10 +619,12 @@ void DMABufSurface::FenceSet() {
     if (EGLSyncKHR sync =
             egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr)) {
       auto rawFd = egl->fDupNativeFenceFDANDROID(sync);
-      mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
       egl->fDestroySync(sync);
-      mGL->fFlush();
-      return;
+      if (rawFd >= 0) {
+        mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
+        mGL->fFlush();
+        return;
+      }
     }
   }
 
@@ -1148,6 +1226,36 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     return false;
   }
 
+  if (desc.foreignRGBImageState()) {
+#ifdef XP_LINUX
+    if (mBufferPlaneCount != 1 || desc.width().Length() != 1 ||
+        desc.height().Length() != 1 || desc.modifier().Length() != 1 ||
+        desc.strides().Length() != 1 || desc.offsets().Length() != 1 ||
+        desc.modifier()[0] != 0 || !desc.width()[0] || !desc.height()[0] ||
+        desc.width()[0] > INT32_MAX || desc.height()[0] > INT32_MAX ||
+        desc.strides()[0] > INT32_MAX ||
+        uint64_t(desc.strides()[0]) < uint64_t(desc.width()[0]) * 4 ||
+        desc.strides()[0] % 4 || desc.offsets()[0] % 4 ||
+        desc.fence().Length() != 1 || desc.fence()[0]->GetHandle() < 0 ||
+        !desc.foreignRGBImageState()->generation() ||
+        desc.refCount().Length() != 1 || desc.semaphoreFd() ||
+        (desc.fourccFormat() != GBM_FORMAT_ARGB8888 &&
+         desc.fourccFormat() != GBM_FORMAT_ABGR8888)) {
+      return false;
+    }
+    auto access =
+        widget::DMABufAccess::Import(desc.foreignRGBImageState()->accessLock());
+    if (!access || !access->IsUsable()) {
+      return false;
+    }
+    mForeignAccess = std::move(access);
+    mForeignRGB = true;
+    mForeignRGBDescriptor = MakeUnique<SurfaceDescriptorDMABuf>(desc);
+#else
+    return false;
+#endif
+  }
+
   mFOURCCFormat = desc.fourccFormat();
   mWidth[0] = desc.width()[0];
   mHeight[0] = desc.height()[0];
@@ -1177,7 +1285,11 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
   }
 
   if (desc.refCount().Length() > 0) {
-    GlobalRefCountImport(desc.refCount()[0].ClonePlatformHandle().release());
+    auto reference = desc.refCount()[0].ClonePlatformHandle();
+    if (desc.foreignRGBImageState() && !reference) {
+      return false;
+    }
+    GlobalRefCountImport(reference.release());
   }
 
   LOGDMABUF("  imported size %d x %d format %x planes %d", mWidth[0],
@@ -1193,6 +1305,15 @@ bool DMABufSurfaceRGBA::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceRGBA::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mForeignRGBDescriptor) {
+    aOutDescriptor = *mForeignRGBDescriptor;
+    return ForeignRGBUsable();
+  }
+  if (mForeignRGB &&
+      (!ForeignRGBUsable() ||
+       (mForeignRGBGeneration && (!mSyncFd || mSyncFd->GetHandle() < 0)))) {
+    return false;
+  }
   AutoTArray<uint32_t, BUFFER_SURFACE_PLANES> width;
   AutoTArray<uint32_t, BUFFER_SURFACE_PLANES> height;
   AutoTArray<NotNull<RefPtr<gfx::FileHandleWrapper>>, BUFFER_SURFACE_PLANES>
@@ -1231,7 +1352,16 @@ bool DMABufSurfaceRGBA::Serialize(
       mColorRange, mozilla::gfx::ColorSpace2::UNKNOWN,
       mozilla::gfx::TransferFunction::Default, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
-      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata);
+      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata,
+      Nothing());
+#ifdef XP_LINUX
+  if (mForeignRGBGeneration) {
+    aOutDescriptor.get_SurfaceDescriptorDMABuf().foreignRGBImageState() =
+        Some(layers::ForeignRGBImageState(
+            mForeignRGBGeneration,
+            WrapNotNull(RefPtr{mForeignAccess->Handle()})));
+  }
+#endif
   return true;
 }
 
@@ -2049,6 +2179,9 @@ bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
     const SurfaceDescriptorDMABuf& aDesc) {
+  if (aDesc.foreignRGBImageState()) {
+    return false;
+  }
   mBufferPlaneCount = aDesc.fds().Length();
   MOZ_RELEASE_ASSERT(mBufferPlaneCount <= BUFFER_SURFACE_PLANES);
   if (mBufferPlaneCount <= 0 ||
@@ -2150,7 +2283,7 @@ bool DMABufSurfaceYUV::Serialize(
       height, widthBytes, heightBytes, format, strides, offsets,
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
-      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata);
+      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing());
   return true;
 }
 
