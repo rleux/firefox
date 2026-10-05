@@ -204,6 +204,21 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_acquire(
     false
 }
 
+/// Returns a sampling alias with alpha fixed to one; ownership follows the image.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_dmabuf_opaque_view(
+    image: &WrVulkanDmaBufImage,
+    output: &mut ExternalTextureHandle,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    if let Some(handle) = checked(image.image.opaque_view()) {
+        *output = handle;
+        return true;
+    }
+    let _ = (image, output);
+    false
+}
+
 /// Records release without submitting. Publish value only after the receipt reports Submitted.
 #[no_mangle]
 pub extern "C" fn wr_vulkan_dmabuf_release(
@@ -252,6 +267,7 @@ pub unsafe extern "C" fn wr_vulkan_release_delete(object: *mut WrVulkanRelease) 
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod enabled {
     use super::*;
+    use std::cell::Cell;
     use std::os::fd::BorrowedFd;
     pub(super) use std::os::fd::IntoRawFd;
     pub(super) use std::rc::Rc;
@@ -289,11 +305,27 @@ mod enabled {
         pub registry: Rc<ExternalTextureRegistry>,
         pub raw: Rc<DmaBufImage>,
         pub handle: ExternalTextureHandle,
+        opaque_handle: Cell<Option<ExternalTextureHandle>>,
     }
 
     impl Drop for ImportedImage {
         fn drop(&mut self) {
+            if let Some(handle) = self.opaque_handle.get() {
+                let _ = self.registry.unregister(handle);
+            }
             let _ = self.registry.unregister(self.handle);
+        }
+    }
+
+    impl ImportedImage {
+        pub(super) fn opaque_view(&self) -> Result<ExternalTextureHandle, String> {
+            if let Some(handle) = self.opaque_handle.get() {
+                return Ok(handle);
+            }
+            let texture = Texture::from_dma_buf(&self.raw, TextureFilter::Linear, true)?;
+            let handle = self.registry.register(&texture)?;
+            self.opaque_handle.set(Some(handle));
+            Ok(handle)
         }
     }
 
@@ -333,12 +365,13 @@ mod enabled {
             .registry
             .device()
             .import_dma_buf(fd(&descriptor.fd)?, image_descriptor(descriptor)?)?;
-        let texture = Texture::from_dma_buf(&raw, TextureFilter::Linear)?;
+        let texture = Texture::from_dma_buf(&raw, TextureFilter::Linear, false)?;
         let handle = images.registry.register(&texture)?;
         Ok(ImportedImage {
             registry: images.registry.clone(),
             raw,
             handle,
+            opaque_handle: Cell::new(None),
         })
     }
 }
