@@ -19,6 +19,7 @@ UNIFIED_SOURCES += [
     "TestFontOverlapPrevention.cpp",
     "TestGfxWidgets.cpp",
     "TestImageAddressableSize.cpp",
+    "TestImageBridgeRecovery.cpp",
     "TestMatrix.cpp",
     "TestMoz2D.cpp",
     "TestNVImage.cpp",
