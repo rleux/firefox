@@ -24,6 +24,7 @@ class RenderVulkanDMABufTextureHost final : public RenderTextureHost {
       const WrVulkanTimelineDescriptor& aReady, uint64_t aReadyValue,
       ReturnCallback&& aReturn);
 
+  // Channels 0 and 1 sample the original alpha and constant-one alpha.
   WrExternalImage LockVulkan(uint8_t aChannelIndex,
                              WrVulkanExternalImages* aImages) override;
   Maybe<VulkanImageRelease> UnlockVulkan(
@@ -66,6 +67,7 @@ class RenderVulkanDMABufTextureHost final : public RenderTextureHost {
   ReturnCallback mReturn;
   VulkanImageReturn mReturnInfo;
   ExternalTextureHandle mHandle{};
+  ExternalTextureHandle mOpaqueHandle{};
   uint64_t mLastIssued = 0;
   uint64_t mLastNotified = 0;
   size_t mPendingReleases = 0;

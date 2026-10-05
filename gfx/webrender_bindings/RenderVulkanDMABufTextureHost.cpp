@@ -105,7 +105,7 @@ WrExternalImage RenderVulkanDMABufTextureHost::LockVulkan(
     uint8_t aChannelIndex, WrVulkanExternalImages* aImages) {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
   ++mLocks;
-  if (mFailed || aChannelIndex || !aImages) {
+  if (mFailed || aChannelIndex > 1 || !aImages) {
     mFailed = true;
     return InvalidToWrExternalImage();
   }
@@ -122,8 +122,14 @@ WrExternalImage RenderVulkanDMABufTextureHost::LockVulkan(
     }
     mAcquired = true;
   }
+  if (aChannelIndex == 1 && !mOpaqueHandle._0 &&
+      !wr_vulkan_dmabuf_opaque_view(mImage.get(), &mOpaqueHandle)) {
+    mFailed = true;
+    return InvalidToWrExternalImage();
+  }
+  const auto handle = aChannelIndex == 1 ? mOpaqueHandle : mHandle;
   return NativeTextureToWrExternalImage(
-      mHandle._0, 0, 0, float(mDescriptor.width), float(mDescriptor.height));
+      handle._0, 0, 0, float(mDescriptor.width), float(mDescriptor.height));
 }
 
 Maybe<VulkanImageRelease> RenderVulkanDMABufTextureHost::UnlockVulkan(
