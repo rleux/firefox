@@ -1384,6 +1384,12 @@ impl TextureCache {
         filter: TextureFilter,
         descriptor: &ImageDescriptor,
     ) -> bool {
+        if !matches!(
+            descriptor.format,
+            ImageFormat::R8 | ImageFormat::R16 | ImageFormat::RGBA8 | ImageFormat::BGRA8
+        ) {
+            return false;
+        }
         let mut allowed_in_shared_cache = true;
 
         if matches!(descriptor.format, ImageFormat::RGBA8 | ImageFormat::BGRA8)
@@ -1670,6 +1676,56 @@ impl TextureCacheUpdate {
 mod test_texture_cache {
     use crate::renderer::GpuBufferBuilderF;
     use crate::internal_types::FrameId;
+
+    #[test]
+    fn formats_without_shared_atlases_allocate_standalone() {
+        use super::{EntryDetails, Eviction, TargetShader, TextureCache, TextureCacheHandle};
+        use crate::device::TextureFilter;
+        use crate::frame_allocator::FrameMemory;
+        use crate::gpu_types::UvRectKind;
+        use api::{DirtyRect, ImageDescriptor, ImageDescriptorFlags, ImageFormat};
+        use api::units::DeviceIntSize;
+
+        let mut cache = TextureCache::new_for_testing(2048, ImageFormat::BGRA8);
+        let memory = FrameMemory::fallback();
+        let mut gpu_buffer = GpuBufferBuilderF::new(&memory, 0, FrameId::first());
+        for (format, standalone) in [
+            (ImageFormat::RG8, true),
+            (ImageFormat::RG16, true),
+            (ImageFormat::RGBAF32, true),
+            (ImageFormat::RGBAI32, true),
+            (ImageFormat::R8, false),
+            (ImageFormat::R16, false),
+            (ImageFormat::RGBA8, false),
+            (ImageFormat::BGRA8, false),
+        ] {
+            let mut handle = TextureCacheHandle::invalid();
+            let descriptor = ImageDescriptor::new(17, 13, format, ImageDescriptorFlags::empty());
+            cache.update(
+                &mut handle,
+                descriptor,
+                TextureFilter::Linear,
+                None,
+                [0.0; 4],
+                DirtyRect::All,
+                &mut gpu_buffer,
+                None,
+                UvRectKind::Rect,
+                Eviction::Manual,
+                TargetShader::Default,
+                false,
+            );
+            let entry = cache.get_entry_opt(&handle).unwrap();
+            assert_eq!(
+                matches!(entry.details, EntryDetails::Standalone { .. }),
+                standalone,
+                "{format:?}"
+            );
+            assert_eq!(entry.input_format, format);
+            assert_eq!(entry.size, DeviceIntSize::new(17, 13));
+            cache.evict_handle(&handle);
+        }
+    }
 
     #[test]
     fn check_allocation_size_balance() {
