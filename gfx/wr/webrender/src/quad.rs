@@ -2185,6 +2185,10 @@ pub fn add_to_batch<F>(
         Right = 3,
         Bottom = 4,
         All = 5,
+        LeftTop = 6,
+        LeftBottom = 7,
+        RightTop = 8,
+        RightBottom = 9,
     }
 
     let mut textures = [TextureSource::Invalid; 3];
@@ -2262,11 +2266,17 @@ pub fn add_to_batch<F>(
         // Add instances for the antialisaing. This gives the center part
         // an opportunity to stay in the opaque pass.
         if edge_flags.contains(EdgeMask::LEFT) {
+            if edge_flags.contains(EdgeMask::TOP) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::LeftTop as u8, ..instance }.into());
+            }
             let instance = QuadInstance {
                 part_index: PartIndex::Left as u8,
                 ..instance
             };
             f(aa_batch_key, instance.into());
+            if edge_flags.contains(EdgeMask::BOTTOM) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::LeftBottom as u8, ..instance }.into());
+            }
         }
         if edge_flags.contains(EdgeMask::TOP) {
             let instance = QuadInstance {
@@ -2276,11 +2286,17 @@ pub fn add_to_batch<F>(
             f(aa_batch_key, instance.into());
         }
         if edge_flags.contains(EdgeMask::RIGHT) {
+            if edge_flags.contains(EdgeMask::TOP) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::RightTop as u8, ..instance }.into());
+            }
             let instance = QuadInstance {
                 part_index: PartIndex::Right as u8,
                 ..instance
             };
             f(aa_batch_key, instance.into());
+            if edge_flags.contains(EdgeMask::BOTTOM) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::RightBottom as u8, ..instance }.into());
+            }
         }
         if edge_flags.contains(EdgeMask::BOTTOM) {
             let instance = QuadInstance {
