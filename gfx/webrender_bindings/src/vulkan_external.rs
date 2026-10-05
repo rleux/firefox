@@ -137,6 +137,29 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_capabilities_delete(
     }
 }
 
+/// Metadata-only preflight against the producer's DRM render node.
+#[no_mangle]
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_foreign_rgb(
+    capabilities: &WrVulkanDmaBufCapabilities,
+    descriptor: &WrVulkanForeignRgbDescriptor,
+    drm_major: u64,
+    drm_minor: u64,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return foreign_layout(descriptor)
+        .map(|layout| {
+            capabilities
+                .capabilities
+                .supports_foreign_rgb([drm_major, drm_minor], layout)
+        })
+        .unwrap_or(false);
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (capabilities, descriptor, drm_major, drm_minor);
+        false
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn wr_vulkan_external_images_new(renderer: &Renderer) -> *mut WrVulkanExternalImages {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
@@ -578,13 +601,7 @@ mod enabled {
         images: &WrVulkanExternalImages,
         descriptor: &WrVulkanForeignRgbDescriptor,
     ) -> Result<ImportedImage<ForeignRgbImage>, String> {
-        let layout = ForeignRgbLayout::new(
-            [descriptor.width, descriptor.height],
-            descriptor.fourcc,
-            descriptor.modifier,
-            descriptor.stride,
-            descriptor.offset,
-        )?;
+        let layout = foreign_layout(descriptor)?;
         let raw = images
             .registry
             .device()
@@ -597,6 +614,16 @@ mod enabled {
             handle,
             opaque_handle: Cell::new(None),
         })
+    }
+
+    pub(super) fn foreign_layout(descriptor: &WrVulkanForeignRgbDescriptor) -> Result<ForeignRgbLayout, String> {
+        ForeignRgbLayout::new(
+            [descriptor.width, descriptor.height],
+            descriptor.fourcc,
+            descriptor.modifier,
+            descriptor.stride,
+            descriptor.offset,
+        )
     }
 }
 

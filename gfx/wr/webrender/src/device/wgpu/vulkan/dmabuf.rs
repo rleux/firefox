@@ -2,8 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{wgt, Device};
+use super::{wgt, Device, ForeignRgbLayout};
 use ash::vk;
+use std::rc::Rc;
 
 #[path = "dmabuf_image.rs"]
 mod image;
@@ -20,13 +21,25 @@ pub struct DmaBufFormat {
     dedicated_only: bool,
 }
 
+#[derive(Clone)]
 pub struct DmaBufCapabilities {
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
-    formats: Vec<DmaBufFormat>,
+    foreign_drm_node: Option<[u64; 2]>,
+    formats: std::sync::Arc<[DmaBufFormat]>,
 }
 
 impl DmaBufCapabilities {
+    pub fn supports_foreign_rgb(&self, drm_node: [u64; 2], layout: ForeignRgbLayout) -> bool {
+        self.foreign_drm_node == Some(drm_node)
+            && self.formats.iter().any(|format| {
+                format.format == layout.format()
+                    && format.usage == wgt::TextureUses::RESOURCE
+                    && format.modifier == 0
+                    && format.supports_extent(layout.size())
+            })
+    }
+
     /// Match immutable device/format limits; import still validates the allocation.
     pub fn supports(&self, image: &DmaBufImageDescriptor) -> bool {
         self.device_uuid == image.device_uuid
@@ -123,10 +136,20 @@ fn eligible_modifier(
 
 impl Device {
     pub fn dma_buf_capabilities(&self) -> Result<DmaBufCapabilities, String> {
+        if let Some(capabilities) = self.native_cache.capabilities.get() {
+            return Ok(capabilities.clone());
+        }
+        let capabilities = self.query_dma_buf_capabilities()?;
+        let _ = self.native_cache.capabilities.set(capabilities.clone());
+        Ok(capabilities)
+    }
+
+    fn query_dma_buf_capabilities(&self) -> Result<DmaBufCapabilities, String> {
         let mut capabilities = DmaBufCapabilities {
             device_uuid: [0; 16],
             driver_uuid: [0; 16],
-            formats: Vec::new(),
+            foreign_drm_node: self.foreign_rgb_drm_node(),
+            formats: std::sync::Arc::from([]),
         };
         if !self
             .features
@@ -134,6 +157,7 @@ impl Device {
         {
             return Ok(capabilities);
         }
+        let mut formats = Vec::new();
         (capabilities.device_uuid, capabilities.driver_uuid) = image::identity(self);
         for format in [
             wgt::TextureFormat::Rgba8Unorm,
@@ -150,12 +174,42 @@ impl Device {
                         usage |= flag;
                     }
                 }
-                capabilities
-                    .formats
-                    .extend(self.dma_buf_formats(format, usage)?);
+                formats.extend(self.cached_dma_buf_formats(format, usage)?.iter().cloned());
             }
         }
+        capabilities.formats = formats.into();
         Ok(capabilities)
+    }
+
+    fn foreign_rgb_drm_node(&self) -> Option<[u64; 2]> {
+        *self.native_cache.drm_node.get_or_init(|| self.query_foreign_rgb_drm_node())
+    }
+
+    fn query_foreign_rgb_drm_node(&self) -> Option<[u64; 2]> {
+        if !self
+            .raw_device()
+            .enabled_device_extensions()
+            .contains(&ash::ext::queue_family_foreign::NAME)
+            || !self
+                .raw_adapter()
+                .physical_device_capabilities()
+                .supports_extension(ash::ext::physical_device_drm::NAME)
+            || !self.supports_sync_file_import()
+        {
+            return None;
+        }
+        let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+        unsafe {
+            self.raw_device()
+                .shared_instance()
+                .raw_instance()
+                .get_physical_device_properties2(
+                    self.raw_device().raw_physical_device(),
+                    &mut vk::PhysicalDeviceProperties2::default().push_next(&mut drm),
+                );
+        }
+        (drm.has_render != 0 && drm.render_major >= 0 && drm.render_minor >= 0)
+            .then_some([drm.render_major as u64, drm.render_minor as u64])
     }
 
     /// Query single-memory-plane, linearly filterable RGB imports for this usage.
@@ -164,6 +218,19 @@ impl Device {
         format: wgt::TextureFormat,
         usage: wgt::TextureUses,
     ) -> Result<Vec<DmaBufFormat>, String> {
+        Ok(self.cached_dma_buf_formats(format, usage)?.to_vec())
+    }
+
+    pub(super) fn cached_dma_buf_formats(&self, format: wgt::TextureFormat, usage: wgt::TextureUses) -> Result<Rc<[DmaBufFormat]>, String> {
+        if let Some(formats) = self.native_cache.formats.borrow().get(&(format, usage)) {
+            return Ok(formats.clone());
+        }
+        let formats: Rc<[DmaBufFormat]> = self.query_dma_buf_formats(format, usage)?.into();
+        self.native_cache.formats.borrow_mut().insert((format, usage), formats.clone());
+        Ok(formats)
+    }
+
+    fn query_dma_buf_formats(&self, format: wgt::TextureFormat, usage: wgt::TextureUses) -> Result<Vec<DmaBufFormat>, String> {
         let (raw_format, raw_usage, required) = image_parameters(format, usage)?;
         if !self
             .features
@@ -173,30 +240,33 @@ impl Device {
         }
         let raw = self.raw_device().shared_instance().raw_instance();
         let physical = self.raw_device().raw_physical_device();
-        let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
-        unsafe {
-            raw.get_physical_device_format_properties2(
-                physical,
-                raw_format,
-                &mut vk::FormatProperties2::default().push_next(&mut list),
-            );
-        }
-        let mut entries = vec![
-            vk::DrmFormatModifierPropertiesEXT::default();
-            list.drm_format_modifier_count as usize
-        ];
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        list.p_drm_format_modifier_properties = entries.as_mut_ptr();
-        unsafe {
-            raw.get_physical_device_format_properties2(
-                physical,
-                raw_format,
-                &mut vk::FormatProperties2::default().push_next(&mut list),
-            );
-        }
-        entries.truncate(list.drm_format_modifier_count as usize);
+        let entries = self.native_cache.modifiers.borrow_mut().entry(format).or_insert_with(|| {
+            let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
+            unsafe {
+                raw.get_physical_device_format_properties2(
+                    physical,
+                    raw_format,
+                    &mut vk::FormatProperties2::default().push_next(&mut list),
+                );
+            }
+            let mut entries = vec![
+                vk::DrmFormatModifierPropertiesEXT::default();
+                list.drm_format_modifier_count as usize
+            ];
+            if entries.is_empty() {
+                return Vec::new().into();
+            }
+            list.p_drm_format_modifier_properties = entries.as_mut_ptr();
+            unsafe {
+                raw.get_physical_device_format_properties2(
+                    physical,
+                    raw_format,
+                    &mut vk::FormatProperties2::default().push_next(&mut list),
+                );
+            }
+            entries.truncate(list.drm_format_modifier_count as usize);
+            entries.into()
+        }).clone();
         let mut formats = Vec::new();
         for entry in entries
             .iter()

@@ -106,6 +106,8 @@ enum InitialSurface {
 /// An opened Vulkan adapter, device and queue.
 pub struct Device {
     open: hal::DynOpenDevice,
+    #[cfg(target_os = "linux")]
+    native_cache: native::Cache,
     #[cfg(test)]
     trace: std::cell::RefCell<Vec<tests::Command>>,
     shader_module: fn(&dyn hal::DynDevice, &str, &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String>,

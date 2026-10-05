@@ -158,3 +158,28 @@ fn dma_buf_queries_match_native_image_creation() {
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+#[ignore = "Requires Vulkan DMA-BUF modifiers and validation"]
+fn immutable_capabilities_share_cached_native_queries() {
+    use crate::device::wgpu::{Options, tests::{validation_logging, ERRORS}};
+    use std::sync::atomic::Ordering;
+    validation_logging();
+    let owner = Device::new(&Options { validation: true, ..Default::default() }).unwrap();
+    let first = owner.dma_buf_capabilities().unwrap();
+    let second = owner.dma_buf_capabilities().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first.formats, &second.formats));
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<DmaBufCapabilities>();
+    for format in [wgt::TextureFormat::Rgba8Unorm, wgt::TextureFormat::Bgra8Unorm] {
+        let a = owner.cached_dma_buf_formats(format, wgt::TextureUses::RESOURCE).unwrap();
+        let b = owner.cached_dma_buf_formats(format, wgt::TextureUses::RESOURCE).unwrap();
+        assert!(Rc::ptr_eq(&a, &b));
+    }
+    if owner.features.contains(wgt::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
+        assert_eq!(owner.native_cache.modifiers.borrow().len(), 2);
+        assert_eq!(owner.native_cache.formats.borrow().len(), 16);
+        assert!(owner.native_cache.properties.get().is_some());
+    }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
