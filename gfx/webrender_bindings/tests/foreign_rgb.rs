@@ -4,7 +4,7 @@
 
 use ash::vk;
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd};
 use std::rc::Rc;
 use std::time::Duration;
 use webrender::vulkan::{
@@ -138,6 +138,11 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(fixture: &Fixture, fd: i32, 
     drop(image);
     drop(alpha);
     drop(opaque);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_foreign_rgb_ready(fixture: &Fixture) -> i32 {
+    ready_fence(&fixture.device).into_raw_fd()
 }
 
 #[no_mangle]
