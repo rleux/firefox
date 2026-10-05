@@ -7,13 +7,70 @@
 #include <algorithm>
 
 #include "mozilla/CheckedInt.h"
+#include "mozilla/StaticMutex.h"
+#include "mozilla/StaticPtr.h"
 #include "mozilla/layers/VulkanImages.h"
 #include "mozilla/webrender/RenderTextureHost.h"
+#include "mozilla/webrender/RenderThread.h"
+#include "nsTArray.h"
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include "RenderVulkanDMABufTextureHost.h"
 #endif
 
 namespace mozilla::wr {
+
+static StaticMutex sCapabilitiesMutex;
+static StaticAutoPtr<nsTArray<VulkanImageCapabilities*>> sCapabilities
+    MOZ_GUARDED_BY(sCapabilitiesMutex);
+
+UniquePtr<VulkanImageCapabilities> VulkanImageCapabilities::Register(
+    WrVulkanExternalImages* aImages) {
+  MOZ_ASSERT(RenderThread::IsInRenderThread());
+  if (!aImages) {
+    return nullptr;
+  }
+  auto* capabilities = wr_vulkan_dmabuf_capabilities_new(aImages);
+  return UniquePtr<VulkanImageCapabilities>(
+      new VulkanImageCapabilities(capabilities));
+}
+
+VulkanImageCapabilities::VulkanImageCapabilities(
+    WrVulkanDmaBufCapabilities* aCapabilities)
+    : mCapabilities(aCapabilities) {
+  StaticMutexAutoLock lock(sCapabilitiesMutex);
+  if (!sCapabilities) {
+    sCapabilities = new nsTArray<VulkanImageCapabilities*>();
+  }
+  sCapabilities->AppendElement(this);
+}
+
+VulkanImageCapabilities::~VulkanImageCapabilities() {
+  StaticMutexAutoLock lock(sCapabilitiesMutex);
+  MOZ_RELEASE_ASSERT(sCapabilities && sCapabilities->RemoveElement(this));
+  if (sCapabilities->IsEmpty()) {
+    sCapabilities = nullptr;
+  }
+}
+
+void VulkanImageCapabilities::Deleter::operator()(
+    WrVulkanDmaBufCapabilities* aCapabilities) const {
+  wr_vulkan_dmabuf_capabilities_delete(aCapabilities);
+}
+
+bool VulkanImageCapabilities::Supports(const WrVulkanDmaBufDescriptor& aImage) {
+  StaticMutexAutoLock lock(sCapabilitiesMutex);
+  if (!sCapabilities || sCapabilities->IsEmpty()) {
+    return false;
+  }
+  for (const auto* capabilities : *sCapabilities) {
+    if (!capabilities->mCapabilities ||
+        !wr_vulkan_dmabuf_capabilities_supports(
+            capabilities->mCapabilities.get(), &aImage)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 static bool ValidHandle(gfx::FileHandleWrapper* aHandle) {
   return aHandle && FileHandleIsValid(aHandle->GetHandle());

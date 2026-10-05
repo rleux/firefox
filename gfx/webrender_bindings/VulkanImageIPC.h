@@ -9,6 +9,7 @@
 
 #include "ipc/EnumSerializer.h"
 #include "mozilla/AlreadyAddRefed.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/webrender/VulkanImageTypes.h"
 
 namespace IPC {
@@ -27,6 +28,23 @@ class VulkanImageReturnMessage;
 
 namespace mozilla::wr {
 class RenderTextureHost;
+struct WrVulkanExternalImages;
+struct WrVulkanDmaBufDescriptor;
+struct WrVulkanDmaBufCapabilities;
+
+class VulkanImageCapabilities final {
+ public:
+  static UniquePtr<VulkanImageCapabilities> Register(WrVulkanExternalImages*);
+  static bool Supports(const WrVulkanDmaBufDescriptor&);
+  ~VulkanImageCapabilities();
+
+ private:
+  explicit VulkanImageCapabilities(WrVulkanDmaBufCapabilities*);
+  struct Deleter {
+    void operator()(WrVulkanDmaBufCapabilities*) const;
+  };
+  UniquePtr<WrVulkanDmaBufCapabilities, Deleter> mCapabilities;
+};
 
 bool ValidateVulkanImagePublication(const layers::VulkanImagePublication&);
 bool ValidateVulkanImageReturn(const layers::VulkanImageReturnMessage&,
