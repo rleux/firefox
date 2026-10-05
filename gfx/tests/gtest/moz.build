@@ -42,7 +42,7 @@ SOURCES += [
 ]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk" and CONFIG["MOZ_X11"]:
-    SOURCES += ["TestVulkanX11Surface.cpp"]
+    SOURCES += ["TestVulkanX11Surface.cpp", "TestX11WindowVisibility.cpp"]
     LOCAL_INCLUDES += ["/widget", "/widget/gtk"]
     CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
 

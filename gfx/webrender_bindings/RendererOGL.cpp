@@ -191,6 +191,11 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   bool fullRender = false;
   bool needPostRenderCall = false;
   bool beginFrame = !mThread->IsHandlingDeviceReset();
+  if (beginFrame && present && aReadbackBuffer.isNothing() &&
+      !layers::ProfilerScreenshots::IsEnabled() && !mCompositionRecorder &&
+      mCompositor->IsWindowHidden()) {
+    present = false;
+  }
 
   if (beginFrame && present) {
     if (!mCompositor->GetWidget()->PreRender(&widgetContext)) {
