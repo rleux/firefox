@@ -95,7 +95,7 @@ impl Drop for DmaBufImage {
     }
 }
 
-fn identity(owner: &Device) -> ([u8; 16], [u8; 16]) {
+pub(super) fn identity(owner: &Device) -> ([u8; 16], [u8; 16]) {
     let mut id = vk::PhysicalDeviceIDProperties::default();
     unsafe {
         owner

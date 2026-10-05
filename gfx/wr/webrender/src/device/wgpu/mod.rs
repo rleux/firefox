@@ -26,7 +26,7 @@ mod external;
 #[path = "vulkan/dmabuf.rs"]
 mod dmabuf;
 #[cfg(target_os = "linux")]
-pub use self::dmabuf::{DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
+pub use self::dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
 #[cfg(target_os = "linux")]
 #[path = "vulkan/timeline.rs"]
 mod timeline;
