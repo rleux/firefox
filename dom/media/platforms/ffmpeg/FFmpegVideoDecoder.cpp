@@ -1017,6 +1017,14 @@ void FFmpegVideoDecoder<LIBAV_VER>::InitHWDecoderIfAllowed() {
     return;
   }
 
+#  ifdef MOZ_WIDGET_GTK
+  if (gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+    FFMPEG_LOG("Vulkan native video transport unavailable, using CPU frames");
+    return;
+  }
+#  endif
+
 #  ifdef MOZ_USE_HWDECODE_VULKAN
   if (NS_SUCCEEDED(InitVulkanDecoder())) {
     return;
