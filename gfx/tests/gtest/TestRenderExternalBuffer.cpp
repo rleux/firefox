@@ -1093,7 +1093,7 @@ static void CheckForeignRenderHost(void* aFixture, int aMemory,
     VulkanImageReleaseQueue<> releases;
     ASSERT_TRUE(access->TryLock());
     EXPECT_EQ(host->LockVulkan(0, context).image_type,
-              WrExternalImageType::Invalid);
+              WrExternalImageType::Pending);
     EXPECT_FALSE(host->UnlockVulkan(context));
     EXPECT_TRUE(access->IsUsable());
     access->Unlock();
@@ -1114,7 +1114,7 @@ static void CheckForeignRenderHost(void* aFixture, int aMemory,
     EXPECT_TRUE(releases.HasPending());
     EXPECT_FALSE(access->TryLock());
     EXPECT_EQ(host->LockVulkan(0, next).image_type,
-              WrExternalImageType::Invalid);
+              WrExternalImageType::Pending);
     EXPECT_FALSE(host->UnlockVulkan(next));
     EXPECT_TRUE(access->IsUsable());
     if (abandon) {

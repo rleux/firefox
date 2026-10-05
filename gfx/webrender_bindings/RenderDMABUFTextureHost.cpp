@@ -35,7 +35,7 @@ class RenderDMABUFTextureHost::VulkanState {
     if (mImage &&
         !wr_vulkan_foreign_rgb_matches_context(mImage.get(), aImages)) {
       if (mAcquired || mPending || mLocks != 1) {
-        return InvalidToWrExternalImage();
+        return PendingToWrExternalImage();
       }
       mImage.reset();
       mReleased.reset();
@@ -44,7 +44,8 @@ class RenderDMABUFTextureHost::VulkanState {
     }
     if (!mAccessLocked) {
       if (!mSurface->TryLockForeignRGB()) {
-        return InvalidToWrExternalImage();
+        return mSurface->ForeignRGBUsable() ? PendingToWrExternalImage()
+                                            : InvalidToWrExternalImage();
       }
       mAccessLocked = true;
     }
