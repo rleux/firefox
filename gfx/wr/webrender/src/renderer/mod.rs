@@ -709,6 +709,8 @@ struct RenderTargetClear {
 /// one per OS window), and all instances share the same thread.
 pub struct Renderer {
     result_rx: Receiver<ResultMsg>,
+    update_blocked_on_images: bool,
+    pending_external_documents: FastHashSet<DocumentId>,
     api_tx: Sender<ApiMsg>,
     /// Identifies this renderer's window on a potentially shared backend.
     backend_id: RenderBackendId,
@@ -966,6 +968,9 @@ impl Renderer {
     }
 
     pub fn flush_pipeline_info(&mut self) -> PipelineInfo {
+        if self.update_blocked_on_images || !self.pending_external_documents.is_empty() {
+            return PipelineInfo::default();
+        }
         mem::replace(&mut self.pipeline_info, PipelineInfo::default())
     }
 
@@ -993,14 +998,57 @@ impl Renderer {
         self.pending_result_msg.take()
     }
 
+    fn flush_document(&mut self, document_id: DocumentId) -> bool {
+        if !self
+            .active_documents
+            .get(&document_id)
+            .is_some_and(|doc| self.frame_must_be_drawn(doc))
+        {
+            return true;
+        }
+        let mut doc = self.active_documents.remove(&document_id).unwrap();
+        // If the document we are replacing must be drawn (in order to
+        // update the texture cache), issue a render just to
+        // off-screen targets, ie pass None to render_impl. We do this
+        // because a) we don't need to render to the main framebuffer
+        // so it is cheaper not to, and b) doing so without a
+        // subsequent present would break partial present.
+        doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
+        let ready = self
+            .render_impl(document_id, &mut doc, None, 0)
+            .map_or(true, |result| !result.external_images_pending);
+        self.active_documents.insert(document_id, doc);
+        ready
+    }
+
     /// Processes the result queue.
     ///
     /// Should be called before `render()`, as texture cache updates are done here.
-    pub fn update(&mut self) {
+    /// Returns true when an unavailable texture handle requires a later retry.
+    pub fn update(&mut self) -> bool {
         tracy_rs::profile_scope!("update");
+        self.update_blocked_on_images = false;
 
         // Pull any pending results and return the most recent.
         while let Some(msg) = self.get_next_result_msg() {
+            let ready = match &msg {
+                ResultMsg::PublishDocument(_, id, _, _)
+                | ResultMsg::RenderDocumentOffscreen(id, _, _) => self.flush_document(*id),
+                ResultMsg::UpdateResources {
+                    memory_pressure,
+                    discard_active_documents,
+                    ..
+                } if *memory_pressure || *discard_active_documents => {
+                    let ids: Vec<_> = self.active_documents.keys().copied().collect();
+                    ids.into_iter().all(|id| self.flush_document(id))
+                }
+                _ => true,
+            };
+            if !ready {
+                self.update_blocked_on_images = true;
+                self.pending_result_msg = Some(msg);
+                break;
+            }
             match msg {
                 ResultMsg::PublishPipelineInfo(mut pipeline_info) => {
                     for ((pipeline_id, document_id), epoch) in pipeline_info.epochs {
@@ -1023,24 +1071,8 @@ impl Renderer {
 
                     // Add a new document to the active set
 
-                    // If the document we are replacing must be drawn (in order to
-                    // update the texture cache), issue a render just to
-                    // off-screen targets, ie pass None to render_impl. We do this
-                    // because a) we don't need to render to the main framebuffer
-                    // so it is cheaper not to, and b) doing so without a
-                    // subsequent present would break partial present.
                     let prev_frame_memory = if let Some(mut prev_doc) = self.active_documents.remove(&document_id) {
                         doc.profile.merge(&mut prev_doc.profile);
-
-                        if self.frame_must_be_drawn(&prev_doc) {
-                            prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
-                            self.render_impl(
-                                document_id,
-                                &mut prev_doc,
-                                None,
-                                0,
-                            ).ok();
-                        }
 
                         Some(prev_doc.frame.allocator_memory)
                     } else {
@@ -1054,6 +1086,7 @@ impl Renderer {
                     }
 
                     self.active_documents.insert(document_id, doc);
+                    self.pending_external_documents.remove(&document_id);
 
                     // IMPORTANT: The pending texture cache updates must be applied
                     //            *after* the previous frame has been rendered above
@@ -1098,23 +1131,8 @@ impl Renderer {
                         //
                         // UpdateResources and PublishDocument share the backend's FIFO
                         // result queue, so the replacement cannot overtake these frees.
-                        let active_documents = mem::replace(
-                            &mut self.active_documents,
-                            FastHashMap::default(),
-                        );
-                        for (doc_id, mut doc) in active_documents {
-                            if self.frame_must_be_drawn(&doc) {
-                                // As this render will not be presented, we must pass None to
-                                // render_impl. This avoids interfering with partial present
-                                // logic, as well as being more efficient.
-                                self.render_impl(
-                                    doc_id,
-                                    &mut doc,
-                                    None,
-                                    0,
-                                ).ok();
-                            }
-                        }
+                        self.active_documents.clear();
+                        self.pending_external_documents.clear();
                     }
 
                     self.pending_texture_cache_updates |= !resource_updates.texture_updates.updates.is_empty();
@@ -1133,27 +1151,6 @@ impl Renderer {
                     self.device.end_frame();
                 }
                 ResultMsg::RenderDocumentOffscreen(document_id, mut offscreen_doc, resources) => {
-                    // Flush pending operations if needed (See comment in the match arm for
-                    // PublishPipelineInfo).
-
-                    // Borrow-ck dance.
-                    let prev_doc = self.active_documents.remove(&document_id);
-                    if let Some(mut prev_doc) = prev_doc {
-                        if self.frame_must_be_drawn(&prev_doc) {
-                            prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
-                            self.render_impl(
-                                document_id,
-                                &mut prev_doc,
-                                None,
-                                0,
-                            ).ok();
-                        }
-
-                        self.active_documents.insert(document_id, prev_doc);
-                    }
-
-                    // Now update resources and render the offscreen frame.
-
                     self.pending_texture_cache_updates |= !resources.texture_updates.updates.is_empty();
                     self.pending_texture_updates.push(resources.texture_updates);
                     self.pending_native_surface_updates.extend(resources.native_surface_updates);
@@ -1161,12 +1158,24 @@ impl Renderer {
                     if self.debug_flags.contains(DebugFlags::SKIP_RENDERING) {
                         self.apply_pending_resource_updates();
                     } else {
-                        self.render_impl(
+                        let result = self.render_impl(
                             document_id,
                             &mut offscreen_doc,
                             None,
                             0,
                         ).unwrap();
+                        if result.external_images_pending {
+                            self.update_blocked_on_images = true;
+                            self.pending_result_msg = Some(ResultMsg::RenderDocumentOffscreen(
+                                document_id,
+                                offscreen_doc,
+                                crate::internal_types::ResourceUpdateList {
+                                    texture_updates: TextureUpdateList::new(),
+                                    native_surface_updates: Vec::new(),
+                                },
+                            ));
+                            break;
+                        }
                     }
                 }
                 ResultMsg::AppendNotificationRequests(mut notifications) => {
@@ -1202,6 +1211,7 @@ impl Renderer {
                     #[cfg(feature = "replay")]
                     DebugOutput::LoadCapture(config, plain_externals) => {
                         self.active_documents.clear();
+                        self.pending_external_documents.clear();
                         self.load_capture(config, plain_externals);
                     }
                 },
@@ -1210,6 +1220,7 @@ impl Renderer {
                 }
             }
         }
+        self.update_blocked_on_images
     }
 
     fn frame_must_be_drawn(&self, doc: &RenderedDocument) -> bool {
@@ -1607,6 +1618,13 @@ impl Renderer {
         buffer_age: usize,
     ) -> Result<RenderResults, Vec<RendererError>> {
         self.device_size = Some(device_size);
+        if self.update_blocked_on_images {
+            return Ok(RenderResults {
+                external_images_pending: true,
+                present_result: Some(crate::PresentResult::Retry),
+                ..RenderResults::default()
+            });
+        }
 
         // TODO(gw): We want to make the active document that is
         //           being rendered configurable via the public
@@ -1674,6 +1692,10 @@ impl Renderer {
                 Ok(RenderResults::default())
             }
         };
+
+        if result.is_ok() && !self.pending_external_documents.is_empty() {
+            return result;
+        }
 
         drain_filter(
             &mut self.notifications,
@@ -1767,6 +1789,50 @@ impl Renderer {
             device_size = None;
         }
 
+        let frame = &mut active_doc.frame;
+        let profile = &mut active_doc.profile;
+        assert!(self.current_compositor_kind == frame.composite_state.compositor_kind);
+
+        if self.shared_texture_cache_cleared {
+            assert!(
+                self.documents_seen.contains(&doc_id),
+                "Cleared texture cache without sending new document frame."
+            );
+        }
+
+        let images_ready = external_image::update_deferred_resolves(
+            self.external_image_handler.as_mut(),
+            &mut self.texture_resolver.external_images,
+            &mut self.gpu_profiler,
+            &mut self.device,
+            &frame.deferred_resolves,
+            &mut frame.gpu_buffer_f,
+        );
+
+        if !images_ready {
+            external_image::unlock_external_images(
+                self.external_image_handler.as_mut(),
+                &mut self.texture_resolver.external_images,
+                &frame.deferred_resolves,
+            );
+            self.gpu_profiler.end_frame();
+            self.staging_texture_pool.end_frame(&mut self.device);
+            self.texture_upload_buffer_pool.end_frame(&mut self.device);
+            self.device.end_frame();
+            self.profile.end_time(profiler::RENDERER_TIME);
+            self.pending_external_documents.insert(doc_id);
+            results.external_images_pending = true;
+            results.present_result = Some(crate::PresentResult::Retry);
+            self.check_device_errors();
+            return if self.renderer_errors.is_empty() {
+                Ok(results)
+            } else {
+                Err(mem::take(&mut self.renderer_errors))
+            };
+        }
+
+        self.pending_external_documents.remove(&doc_id);
+
         if let Some(device_size) = device_size {
             // Inform the client that we are starting a composition transaction if native
             // compositing is enabled. This needs to be done early in the frame, so that
@@ -1784,27 +1850,9 @@ impl Renderer {
                 &mut self.debug_overlay_state,
                 self.debug_flags,
                 device_size,
-                !active_doc.frame.debug_items.is_empty(),
+                !frame.debug_items.is_empty(),
             );
         }
-
-        let frame = &mut active_doc.frame;
-        let profile = &mut active_doc.profile;
-        assert!(self.current_compositor_kind == frame.composite_state.compositor_kind);
-
-        if self.shared_texture_cache_cleared {
-            assert!(self.documents_seen.contains(&doc_id),
-                    "Cleared texture cache without sending new document frame.");
-        }
-
-        external_image::update_deferred_resolves(
-            self.external_image_handler.as_mut(),
-            &mut self.texture_resolver.external_images,
-            &mut self.gpu_profiler,
-            &mut self.device,
-            &frame.deferred_resolves,
-            &mut frame.gpu_buffer_f,
-        );
 
         // Now that external images are resolved, copy their (potentially Y-flipped) uv
         // rects into the quad segment blocks that reference them.
@@ -4540,6 +4588,9 @@ impl RendererStats {
 /// some non-repr(C) data.
 #[derive(Debug, Default)]
 pub struct RenderResults {
+    /// No drawing occurred because a texture handle is temporarily unavailable.
+    pub external_images_pending: bool,
+
     /// Backend presentation outcome. Callers must schedule retries as indicated;
     /// None leaves presentation to the caller or indicates no window rendering.
     pub present_result: Option<crate::PresentResult>,
@@ -4774,7 +4825,7 @@ impl Renderer {
                             }
                         }
                     }
-                    ExternalImageSource::Invalid => {
+                    ExternalImageSource::Invalid | ExternalImageSource::Pending => {
                         info!("\t\tinvalid source!");
                         (None, String::new())
                     }
