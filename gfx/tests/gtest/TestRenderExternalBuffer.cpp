@@ -317,21 +317,35 @@ TEST_F(RenderExternalBuffer, VulkanReleasesNotifyOnlyResolvedReceipts) {
     ASSERT_EQ(host->mNotifications.size(), 2U);
     EXPECT_EQ(host->mNotifications[1].first, 8U);
     EXPECT_EQ(host->mNotifications[1].second, status);
+    status = WrVulkanReleaseStatus::Pending;
+    releases.Add(host, {9, &status});
+    releases.Poll();
+    EXPECT_TRUE(releases.HasPending());
+    status = WrVulkanReleaseStatus::Complete;
+    releases.Poll();
+    EXPECT_FALSE(releases.HasPending());
+    ASSERT_EQ(host->mNotifications.size(), 3U);
+    EXPECT_EQ(host->mNotifications[2].first, 9U);
+    EXPECT_EQ(host->mNotifications[2].second, status);
   });
 }
 
 TEST_F(RenderExternalBuffer, VulkanCancellationPreservesSubmittedReleases) {
   OnRenderThread([] {
     auto submitted = WrVulkanReleaseStatus::Submitted;
+    auto complete = WrVulkanReleaseStatus::Complete;
     auto pending = WrVulkanReleaseStatus::Pending;
     RefPtr<VulkanTexture> host = new VulkanTexture;
     VulkanImageReleaseQueue<TestVulkanRelease> releases;
     releases.Add(host, {1, &pending});
     releases.Add(host, {2, &submitted});
+    releases.Add(host, {3, &complete});
     releases.Poll(true);
-    ASSERT_EQ(host->mNotifications.size(), 2U);
+    EXPECT_FALSE(releases.HasPending());
+    ASSERT_EQ(host->mNotifications.size(), 3U);
     EXPECT_EQ(host->mNotifications[0].second, WrVulkanReleaseStatus::Abandoned);
     EXPECT_EQ(host->mNotifications[1].second, WrVulkanReleaseStatus::Submitted);
+    EXPECT_EQ(host->mNotifications[2].second, WrVulkanReleaseStatus::Complete);
   });
 }
 
@@ -887,6 +901,7 @@ void wr_test_vulkan_sync_file_wait();
 void* wr_test_foreign_rgb_new(int32_t*);
 void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
 void wr_test_foreign_rgb_delete(void*);
+int32_t wr_test_foreign_rgb_ready(void*);
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
@@ -979,6 +994,56 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
       wr_test_foreign_rgb_import(fixture, memory.get(), format,
                                  widget::GbmLib::GetStride(buffer));
       EXPECT_TRUE(DuplicateFileHandle(memory.get()));
+
+      auto* renderer = wr_test_vulkan_renderer_new();
+      auto deleteRenderer =
+          MakeScopeExit([&] { wr_test_vulkan_renderer_delete(renderer); });
+      auto* context = wr_vulkan_external_images_new(renderer);
+      ASSERT_TRUE(context);
+      auto deleteContext =
+          MakeScopeExit([&] { wr_vulkan_external_images_delete(context); });
+      WrVulkanForeignRgbDescriptor descriptor{};
+      descriptor.fd = memory.get();
+      descriptor.width = 17;
+      descriptor.height = 9;
+      descriptor.fourcc = format;
+      descriptor.stride = widget::GbmLib::GetStride(buffer);
+      auto* image = wr_vulkan_foreign_rgb_import(context, &descriptor);
+      ASSERT_TRUE(image);
+      auto deleteImage =
+          MakeScopeExit([&] { wr_vulkan_foreign_rgb_delete(image); });
+      EXPECT_TRUE(wr_vulkan_foreign_rgb_matches_context(image, context));
+      UniqueFileHandle ready(wr_test_foreign_rgb_ready(fixture));
+      ASSERT_TRUE(ready);
+      ExternalTextureHandle handle{999};
+      EXPECT_FALSE(wr_vulkan_foreign_rgb_acquire(image, -1, &handle));
+      EXPECT_EQ(handle._0, 999u);
+      ASSERT_TRUE(wr_vulkan_foreign_rgb_acquire(image, ready.get(), &handle));
+      ExternalTextureHandle opaque{};
+      ASSERT_TRUE(wr_vulkan_foreign_rgb_opaque_view(image, &opaque));
+      EXPECT_NE(opaque._0, handle._0);
+      auto* timeline = wr_vulkan_timeline_new(context);
+      ASSERT_TRUE(timeline);
+      auto deleteTimeline =
+          MakeScopeExit([&] { wr_vulkan_timeline_delete(timeline); });
+      auto* receipt = wr_vulkan_foreign_rgb_release(image, timeline, 1);
+      ASSERT_TRUE(receipt);
+      auto deleteReceipt =
+          MakeScopeExit([&] { wr_vulkan_release_delete(receipt); });
+      EXPECT_EQ(wr_vulkan_release_status(receipt),
+                WrVulkanReleaseStatus::Pending);
+      wr_vulkan_foreign_rgb_delete(image);
+      image = nullptr;
+      wr_vulkan_timeline_delete(timeline);
+      timeline = nullptr;
+      wr_vulkan_external_images_delete(context);
+      context = nullptr;
+      wr_test_vulkan_renderer_delete(renderer);
+      renderer = nullptr;
+      EXPECT_EQ(wr_vulkan_release_status(receipt),
+                WrVulkanReleaseStatus::Complete);
+      EXPECT_TRUE(DuplicateFileHandle(memory.get()));
+      EXPECT_TRUE(DuplicateFileHandle(ready.get()));
     }
   });
 }
