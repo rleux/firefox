@@ -5,6 +5,10 @@
 #include <fcntl.h>
 #include <gbm.h>
 #include <unistd.h>
+#ifdef XP_LINUX
+#  include <sys/eventfd.h>
+#  include "mozilla/widget/DMABufAccess.h"
+#endif
 
 #include "gtest/gtest.h"
 #include "mozilla/NotNull.h"
@@ -44,7 +48,7 @@ static SurfaceDescriptor MakeRGBADescriptor(RefPtr<FileHandleWrapper> fd) {
       width, height, width, height, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
 }
 
 // Matches what DMABufSurfaceYUV::Serialize() produces for a two-plane 128×128
@@ -67,7 +71,7 @@ static SurfaceDescriptor MakeYUVDescriptor(RefPtr<FileHandleWrapper> fd0,
       height, widthAligned, heightAligned, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
 }
 
 // Run 3 serialize → import cycles for a single-plane RGBA surface.
@@ -157,3 +161,103 @@ TEST(DMABufSurface, YUVRoundtrip)
   EXPECT_EQ(surface->GetHeight(1), 64);
   YUVRoundtrip(surface);
 }
+
+#ifdef XP_LINUX
+static SurfaceDescriptor MakeForeignDescriptor() {
+  auto descriptor = MakeRGBADescriptor(MakeFd());
+  auto& image = descriptor.get_SurfaceDescriptorDMABuf();
+  auto access = widget::DMABufAccess::Create();
+  MOZ_RELEASE_ASSERT(access);
+  image.foreignRGBImageState() =
+      Some(ForeignRGBImageState(1, WrapNotNull(RefPtr{access->Handle()})));
+  image.fence().AppendElement(WrapNotNull(MakeFd()));
+  UniqueFileHandle counter(
+      eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE));
+  MOZ_RELEASE_ASSERT(counter);
+  image.refCount().AppendElement(ipc::FileDescriptor(counter.get()));
+  return descriptor;
+}
+
+TEST(DMABufSurface, ForeignPublicationRetainsDescriptorAndAccess)
+{
+  auto descriptor = MakeForeignDescriptor();
+  IPC::Message message(MSG_ROUTING_NONE, 0);
+  IPC::MessageWriter writer(message);
+  IPC::WriteParam(&writer, descriptor);
+  IPC::MessageReader reader(message);
+  SurfaceDescriptor received;
+  ASSERT_TRUE(IPC::ReadParam(&reader, &received));
+  descriptor = std::move(received);
+  RefPtr<DMABufSurface> first = DMABufSurface::CreateDMABufSurface(descriptor);
+  ASSERT_TRUE(first);
+  EXPECT_TRUE(first->IsForeignRGB());
+  EXPECT_TRUE(first->ForeignRGBUsable());
+  SurfaceDescriptor forwarded;
+  ASSERT_TRUE(first->Serialize(forwarded));
+  const auto& frozen = forwarded.get_SurfaceDescriptorDMABuf();
+  const auto& original = descriptor.get_SurfaceDescriptorDMABuf();
+  EXPECT_EQ(frozen.uid(), original.uid());
+  EXPECT_EQ(frozen.pid(), original.pid());
+  EXPECT_EQ(frozen.width(), original.width());
+  EXPECT_EQ(frozen.height(), original.height());
+  EXPECT_EQ(frozen.strides(), original.strides());
+  EXPECT_EQ(frozen.offsets(), original.offsets());
+  EXPECT_EQ(frozen.foreignRGBImageState()->generation(), 1u);
+  EXPECT_EQ(frozen.fence()[0]->GetHandle(), original.fence()[0]->GetHandle());
+  EXPECT_TRUE(first->IsGlobalRefSet());
+  RefPtr<DMABufSurface> second = DMABufSurface::CreateDMABufSurface(forwarded);
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->TryLockForeignRGB());
+  EXPECT_FALSE(second->TryLockForeignRGB());
+  first->UnlockForeignRGB();
+  ASSERT_TRUE(second->TryLockForeignRGB());
+  second->UnlockForeignRGB(true);
+  EXPECT_FALSE(first->ForeignRGBUsable());
+  EXPECT_FALSE(first->Serialize(forwarded));
+  RefPtr<DMABufSurface> rejected = DMABufSurface::CreateDMABufSurface(descriptor);
+  EXPECT_FALSE(rejected);
+}
+
+TEST(DMABufSurface, ForeignPublicationRejectsIncompleteMetadata)
+{
+  const auto valid = MakeForeignDescriptor();
+  for (int change = 0; change < 10; ++change) {
+    auto invalid = valid;
+    auto& image = invalid.get_SurfaceDescriptorDMABuf();
+    switch (change) {
+      case 0:
+        image.foreignRGBImageState()->generation() = 0;
+        break;
+      case 1:
+        image.modifier()[0] = 1;
+        break;
+      case 2:
+        image.fence().Clear();
+        break;
+      case 3:
+        image.refCount().Clear();
+        break;
+      case 4:
+        image.fourccFormat() = GBM_FORMAT_XRGB8888;
+        break;
+      case 5:
+        image.strides()[0] = 1;
+        break;
+      case 6:
+        image.width()[0] = 0;
+        break;
+      case 7:
+        image.offsets()[0] = 1;
+        break;
+      case 8:
+        image.bufferType() = DMABufSurface::SURFACE_YUV;
+        break;
+      case 9:
+        image.refCount()[0] = ipc::FileDescriptor();
+        break;
+    }
+    RefPtr<DMABufSurface> rejected = DMABufSurface::CreateDMABufSurface(invalid);
+    EXPECT_FALSE(rejected);
+  }
+}
+#endif

@@ -78,6 +78,11 @@ namespace layers {
   CompositeProcessFencesHolderId? fencesHolderId;
 };
 
+[Comparable] struct ForeignRGBImageState {
+  uint64_t generation;
+  FileHandleWrapper accessLock;
+};
+
 [Comparable] struct SurfaceDescriptorDMABuf {
   uint32_t bufferType;
   uint32_t fourccFormat;
@@ -103,6 +108,7 @@ namespace layers {
   nullable FileHandleWrapper semaphoreFd;
   bool semaphoreFdIsSyncFd;
   HDRMetadata hdrMetadata;
+  ForeignRGBImageState? foreignRGBImageState;
 };
 
 [Comparable] struct SurfaceTextureDescriptor {
