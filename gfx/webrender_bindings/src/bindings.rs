@@ -623,6 +623,22 @@ impl CrashAnnotator for MozCrashAnnotator {
 }
 
 #[no_mangle]
+pub extern "C" fn wr_renderer_get_backend_info(
+    renderer: &Renderer,
+    backend: &mut nsstring::nsACString,
+    adapter: &mut nsstring::nsACString,
+    driver: &mut nsstring::nsACString,
+) {
+    let info = renderer.get_graphics_api_info();
+    backend.assign(match info.kind {
+        webrender::GraphicsApi::OpenGL => "OpenGL",
+        webrender::GraphicsApi::Vulkan => "Vulkan",
+    });
+    adapter.assign(&info.renderer);
+    driver.assign(&info.version);
+}
+
+#[no_mangle]
 pub extern "C" fn wr_renderer_set_clear_color(renderer: &mut Renderer, color: ColorF) {
     renderer.set_clear_color(color);
 }

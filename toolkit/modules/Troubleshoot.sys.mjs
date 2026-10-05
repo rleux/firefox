@@ -604,6 +604,7 @@ var dataProviders = {
     data.numAcceleratedWindows = 0;
 
     let devicePixelRatios = [];
+    let webRenderWindow;
 
     for (let win of Services.ww.getWindowEnumerator()) {
       let winUtils = win.windowUtils;
@@ -620,6 +621,7 @@ var dataProviders = {
         data.numTotalWindows++;
         data.windowLayerManagerType = winUtils.layerManagerType;
         data.windowLayerManagerRemote = winUtils.layerManagerRemote;
+        webRenderWindow = winUtils;
       } catch (e) {
         continue;
       }
@@ -847,8 +849,16 @@ var dataProviders = {
       return ret;
     }
 
-    // Webgpu info is going to need awaits.
+    // Backend and WebGPU info require asynchronous queries.
     (async () => {
+      if (webRenderWindow) {
+        try {
+          data.webRenderBackend = JSON.parse(
+            await webRenderWindow.getWebRenderBackendInfo()
+          );
+        } catch (e) {}
+      }
+
       data.webgpuDefaultAdapter = await GetWebgpuInfo({});
       data.webgpuFallbackAdapter = await GetWebgpuInfo({
         forceFallbackAdapter: true,
