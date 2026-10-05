@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{wgt, Device};
+use super::{wgt, Device, ForeignRgbLayout};
 use ash::vk;
 
 #[path = "dmabuf_image.rs"]
@@ -23,10 +23,21 @@ pub struct DmaBufFormat {
 pub struct DmaBufCapabilities {
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
+    foreign_drm_node: Option<[u64; 2]>,
     formats: Vec<DmaBufFormat>,
 }
 
 impl DmaBufCapabilities {
+    pub fn supports_foreign_rgb(&self, drm_node: [u64; 2], layout: ForeignRgbLayout) -> bool {
+        self.foreign_drm_node == Some(drm_node)
+            && self.formats.iter().any(|format| {
+                format.format == layout.format()
+                    && format.usage == wgt::TextureUses::RESOURCE
+                    && format.modifier == 0
+                    && format.supports_extent(layout.size())
+            })
+    }
+
     /// Match immutable device/format limits; import still validates the allocation.
     pub fn supports(&self, image: &DmaBufImageDescriptor) -> bool {
         self.device_uuid == image.device_uuid
@@ -126,6 +137,7 @@ impl Device {
         let mut capabilities = DmaBufCapabilities {
             device_uuid: [0; 16],
             driver_uuid: [0; 16],
+            foreign_drm_node: self.foreign_rgb_drm_node(),
             formats: Vec::new(),
         };
         if !self
@@ -156,6 +168,35 @@ impl Device {
             }
         }
         Ok(capabilities)
+    }
+
+    fn foreign_rgb_drm_node(&self) -> Option<[u64; 2]> {
+        if !self
+            .open
+            .device
+            .enabled_device_extensions()
+            .contains(&ash::ext::queue_family_foreign::NAME)
+            || !self
+                .adapter
+                .physical_device_capabilities()
+                .supports_extension(ash::ext::physical_device_drm::NAME)
+            || !self.supports_sync_file_import()
+        {
+            return None;
+        }
+        let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+        unsafe {
+            self.open
+                .device
+                .shared_instance()
+                .raw_instance()
+                .get_physical_device_properties2(
+                    self.open.device.raw_physical_device(),
+                    &mut vk::PhysicalDeviceProperties2::default().push_next(&mut drm),
+                );
+        }
+        (drm.has_render != 0 && drm.render_major >= 0 && drm.render_minor >= 0)
+            .then_some([drm.render_major as u64, drm.render_minor as u64])
     }
 
     /// Query single-memory-plane, linearly filterable RGB imports for this usage.
