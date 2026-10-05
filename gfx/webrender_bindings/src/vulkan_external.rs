@@ -41,10 +41,23 @@ pub struct WrVulkanDmaBufDescriptor {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WrVulkanForeignRgbDescriptor {
+    pub fd: i32,
+    pub width: u32,
+    pub height: u32,
+    pub fourcc: u32,
+    pub modifier: u64,
+    pub offset: u64,
+    pub stride: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WrVulkanReleaseStatus {
     Pending,
     Submitted,
+    Complete,
     Abandoned,
 }
 
@@ -61,12 +74,17 @@ pub struct WrVulkanTimeline {
 
 pub struct WrVulkanDmaBufImage {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    image: ImportedImage,
+    image: ImportedImage<Rc<DmaBufImage>>,
+}
+
+pub struct WrVulkanForeignRgbImage {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    image: ImportedImage<ForeignRgbImage>,
 }
 
 pub struct WrVulkanRelease {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    receipt: PendingExternalRelease,
+    receipt: ImageRelease,
 }
 
 pub struct WrVulkanDmaBufCapabilities {
@@ -262,12 +280,124 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_opaque_view(
     output: &mut ExternalTextureHandle,
 ) -> bool {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    if let Some(handle) = checked(image.image.opaque_view()) {
+    if let Some(handle) = checked(
+        image
+            .image
+            .opaque_view(|| Texture::from_dma_buf(&image.image.raw, TextureFilter::Linear, true)),
+    ) {
         *output = handle;
         return true;
     }
     let _ = (image, output);
     false
+}
+
+/// Borrow a negotiated, unprotected linear RGB allocation from a foreign API.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_import(
+    images: &WrVulkanExternalImages,
+    descriptor: &WrVulkanForeignRgbDescriptor,
+) -> *mut WrVulkanForeignRgbImage {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return boxed(
+        import_foreign_image(images, descriptor).map(|image| WrVulkanForeignRgbImage { image }),
+    );
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (images, descriptor);
+        ptr::null_mut()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_delete(image: *mut WrVulkanForeignRgbImage) {
+    if !image.is_null() {
+        drop(Box::from_raw(image));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_matches_context(
+    image: &WrVulkanForeignRgbImage,
+    images: &WrVulkanExternalImages,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return Rc::ptr_eq(&image.image.registry, &images.registry);
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, images);
+        false
+    }
+}
+
+/// The borrowed sync-file must cover submitted writes to the initialized image.
+/// Hold exclusive publication access until the ownership-return receipt completes.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_acquire(
+    image: &WrVulkanForeignRgbImage,
+    ready_fd: i32,
+    output: &mut ExternalTextureHandle,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    if let Some(wait) = checked(
+        fd(&ready_fd).and_then(|fd| SyncFileWait::import(image.image.registry.device(), fd)),
+    ) {
+        if checked(
+            image
+                .image
+                .registry
+                .acquire_foreign_rgb(&image.image.raw, wait),
+        )
+        .is_some()
+        {
+            *output = image.image.handle;
+            return true;
+        }
+    }
+    let _ = (image, ready_fd, output);
+    false
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_opaque_view(
+    image: &WrVulkanForeignRgbImage,
+    output: &mut ExternalTextureHandle,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    if let Some(handle) =
+        checked(image.image.opaque_view(|| {
+            Texture::from_foreign_rgb(&image.image.raw, TextureFilter::Linear, true)
+        }))
+    {
+        *output = handle;
+        return true;
+    }
+    let _ = (image, output);
+    false
+}
+
+/// Records return to FOREIGN_EXT. Producer access requires Complete, not Submitted.
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_release(
+    image: &WrVulkanForeignRgbImage,
+    released: &WrVulkanTimeline,
+    value: u64,
+) -> *mut WrVulkanRelease {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return boxed(
+        image
+            .image
+            .registry
+            .release_foreign_rgb(&image.image.raw, &released.timeline, value)
+            .map(|receipt| WrVulkanRelease {
+                receipt: ImageRelease::Foreign(receipt),
+            }),
+    );
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, released, value);
+        ptr::null_mut()
+    }
 }
 
 /// Records release without submitting. Publish value only after the receipt reports Submitted.
@@ -283,7 +413,9 @@ pub extern "C" fn wr_vulkan_dmabuf_release(
             .image
             .registry
             .release_dma_buf(&image.image.raw, &released.timeline, value)
-            .map(|receipt| WrVulkanRelease { receipt }),
+            .map(|receipt| WrVulkanRelease {
+                receipt: ImageRelease::Vulkan(receipt),
+            }),
     );
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
@@ -292,16 +424,24 @@ pub extern "C" fn wr_vulkan_dmabuf_release(
     }
 }
 
-/// Submitted permits a GPU wait, not immediate CPU reuse. Abandoned requires discarding
-/// the allocation. A null receipt also reports Abandoned; polling never submits work.
+/// Submitted permits a GPU wait; Complete permits immediate producer access.
+/// Abandoned requires discarding the allocation. Null also reports Abandoned.
+/// Polling never submits work.
 #[no_mangle]
 pub extern "C" fn wr_vulkan_release_status(receipt: Option<&WrVulkanRelease>) -> WrVulkanReleaseStatus {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     if let Some(receipt) = receipt {
-        return match receipt.receipt.status() {
-            ExternalReleaseStatus::Pending => WrVulkanReleaseStatus::Pending,
-            ExternalReleaseStatus::Submitted(_) => WrVulkanReleaseStatus::Submitted,
-            ExternalReleaseStatus::Abandoned => WrVulkanReleaseStatus::Abandoned,
+        return match &receipt.receipt {
+            ImageRelease::Vulkan(receipt) => match receipt.status() {
+                ExternalReleaseStatus::Pending => WrVulkanReleaseStatus::Pending,
+                ExternalReleaseStatus::Submitted(_) => WrVulkanReleaseStatus::Submitted,
+                ExternalReleaseStatus::Abandoned => WrVulkanReleaseStatus::Abandoned,
+            },
+            ImageRelease::Foreign(receipt) => match receipt.status() {
+                ForeignReleaseStatus::Pending => WrVulkanReleaseStatus::Pending,
+                ForeignReleaseStatus::Complete => WrVulkanReleaseStatus::Complete,
+                ForeignReleaseStatus::Abandoned => WrVulkanReleaseStatus::Abandoned,
+            },
         };
     }
     let _ = receipt;
@@ -324,6 +464,11 @@ mod enabled {
     pub(super) use std::rc::Rc;
     pub(super) use webrender::vulkan::*;
 
+    pub(super) enum ImageRelease {
+        Vulkan(PendingExternalRelease),
+        Foreign(PendingForeignRelease),
+    }
+
     pub(super) fn checked<T>(result: Result<T, String>) -> Option<T> {
         result
             .map_err(|error| log::error!("Vulkan external image: {}", error))
@@ -334,7 +479,7 @@ mod enabled {
         checked(result).map_or(ptr::null_mut(), |value| Box::into_raw(Box::new(value)))
     }
 
-    unsafe fn fd(raw: &i32) -> Result<BorrowedFd<'_>, String> {
+    pub(super) unsafe fn fd(raw: &i32) -> Result<BorrowedFd<'_>, String> {
         if *raw < 0 {
             return Err("Missing Vulkan external FD".into());
         }
@@ -352,14 +497,14 @@ mod enabled {
         SharedTimeline::import(images.registry.device(), &handle)
     }
 
-    pub(super) struct ImportedImage {
+    pub(super) struct ImportedImage<T> {
         pub registry: Rc<ExternalTextureRegistry>,
-        pub raw: Rc<DmaBufImage>,
+        pub raw: T,
         pub handle: ExternalTextureHandle,
         opaque_handle: Cell<Option<ExternalTextureHandle>>,
     }
 
-    impl Drop for ImportedImage {
+    impl<T> Drop for ImportedImage<T> {
         fn drop(&mut self) {
             if let Some(handle) = self.opaque_handle.get() {
                 let _ = self.registry.unregister(handle);
@@ -368,12 +513,15 @@ mod enabled {
         }
     }
 
-    impl ImportedImage {
-        pub(super) fn opaque_view(&self) -> Result<ExternalTextureHandle, String> {
+    impl<T> ImportedImage<T> {
+        pub(super) fn opaque_view(
+            &self,
+            create: impl FnOnce() -> Result<Rc<Texture>, String>,
+        ) -> Result<ExternalTextureHandle, String> {
             if let Some(handle) = self.opaque_handle.get() {
                 return Ok(handle);
             }
-            let texture = Texture::from_dma_buf(&self.raw, TextureFilter::Linear, true)?;
+            let texture = create()?;
             let handle = self.registry.register(&texture)?;
             self.opaque_handle.set(Some(handle));
             Ok(handle)
@@ -411,12 +559,37 @@ mod enabled {
     pub(super) unsafe fn import_image(
         images: &WrVulkanExternalImages,
         descriptor: &WrVulkanDmaBufDescriptor,
-    ) -> Result<ImportedImage, String> {
+    ) -> Result<ImportedImage<Rc<DmaBufImage>>, String> {
         let raw = images
             .registry
             .device()
             .import_dma_buf(fd(&descriptor.fd)?, image_descriptor(descriptor)?)?;
         let texture = Texture::from_dma_buf(&raw, TextureFilter::Linear, false)?;
+        let handle = images.registry.register(&texture)?;
+        Ok(ImportedImage {
+            registry: images.registry.clone(),
+            raw,
+            handle,
+            opaque_handle: Cell::new(None),
+        })
+    }
+
+    pub(super) unsafe fn import_foreign_image(
+        images: &WrVulkanExternalImages,
+        descriptor: &WrVulkanForeignRgbDescriptor,
+    ) -> Result<ImportedImage<ForeignRgbImage>, String> {
+        let layout = ForeignRgbLayout::new(
+            [descriptor.width, descriptor.height],
+            descriptor.fourcc,
+            descriptor.modifier,
+            descriptor.stride,
+            descriptor.offset,
+        )?;
+        let raw = images
+            .registry
+            .device()
+            .import_foreign_rgb(fd(&descriptor.fd)?, layout)?;
+        let texture = Texture::from_foreign_rgb(&raw, TextureFilter::Linear, false)?;
         let handle = images.registry.register(&texture)?;
         Ok(ImportedImage {
             registry: images.registry.clone(),
