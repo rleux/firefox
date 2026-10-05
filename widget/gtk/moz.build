@@ -63,6 +63,10 @@ EXPORTS.mozilla.widget += [
     "WindowSurfaceProvider.h",
 ]
 
+if CONFIG["OS_TARGET"] == "Linux":
+    EXPORTS.mozilla.widget += ["DMABufAccess.h"]
+    UNIFIED_SOURCES += ["DMABufAccess.cpp"]
+
 UNIFIED_SOURCES += [
     "AsyncClipboardRequest.cpp",
     "BufferSurface.cpp",
