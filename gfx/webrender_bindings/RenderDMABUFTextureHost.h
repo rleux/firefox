@@ -28,6 +28,15 @@ class RenderDMABUFTextureHost final : public RenderTextureHostSWGL {
   void Unlock() override;
   void ClearCachedResources() override;
 
+#ifdef XP_LINUX
+  WrExternalImage LockVulkan(uint8_t aChannelIndex,
+                             WrVulkanExternalImages* aImages) override;
+  Maybe<VulkanImageRelease> UnlockVulkan(
+      WrVulkanExternalImages* aImages) override;
+  void NotifyVulkanRelease(uint64_t aValue,
+                           WrVulkanReleaseStatus aStatus) override;
+#endif
+
   size_t Bytes() override {
     return mSurface->GetWidth() * mSurface->GetHeight() *
            BytesPerPixel(mSurface->GetFormat());
@@ -53,6 +62,10 @@ class RenderDMABUFTextureHost final : public RenderTextureHostSWGL {
   RefPtr<DMABufSurface> mSurface;
   RefPtr<gl::GLContext> mGL;
   RefPtr<gfx::DataSourceSurface> mReadback;
+#ifdef XP_LINUX
+  class VulkanState;
+  UniquePtr<VulkanState> mVulkan;
+#endif
 };
 
 }  // namespace wr
