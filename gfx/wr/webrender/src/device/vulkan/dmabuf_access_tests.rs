@@ -161,7 +161,7 @@ fn dma_buf_access_samples_updates_and_releases_through_the_draw_path() {
                 let (source, fd) = export_image(&producer, format, caps.modifier(), [2, 2]);
                 let image =
                     unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
-                let texture = Texture::from_dma_buf(&image, TextureFilter::Linear).unwrap();
+                let texture = Texture::from_dma_buf(&image, TextureFilter::Linear, false).unwrap();
                 assert!(!texture.initialized());
                 assert_eq!(texture.size().width, 2);
                 let (quad, draw) = sampled_draw(&consumer, texture.clone());
@@ -241,9 +241,9 @@ fn dma_buf_access_rolls_back_and_shares_state_between_views() {
         let (source, fd) = export_image(&producer, wgt::TextureFormat::Rgba8Unorm, 0, [2, 2]);
         let mut send = publish(&source, &ready, 1, None, [1., 0., 0., 1.]);
         let image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
-        assert!(Texture::from_dma_buf(&image, TextureFilter::Trilinear).is_err());
-        let first = Texture::from_dma_buf(&image, TextureFilter::Nearest).unwrap();
-        let second = Texture::from_dma_buf(&image, TextureFilter::Linear).unwrap();
+        assert!(Texture::from_dma_buf(&image, TextureFilter::Trilinear, false).is_err());
+        let first = Texture::from_dma_buf(&image, TextureFilter::Nearest, false).unwrap();
+        let second = Texture::from_dma_buf(&image, TextureFilter::Linear, false).unwrap();
         let mut acquire = Submission::new(&consumer).unwrap();
         {
             let mut recording = acquire.recording().unwrap();
@@ -304,8 +304,8 @@ fn dma_buf_access_view_retains_the_native_allocation() {
         let image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
         let weak = Rc::downgrade(&image);
         let weak_device = Rc::downgrade(&consumer);
-        let first = Texture::from_dma_buf(&image, TextureFilter::Nearest).unwrap();
-        let second = Texture::from_dma_buf(&image, TextureFilter::Linear).unwrap();
+        let first = Texture::from_dma_buf(&image, TextureFilter::Nearest, false).unwrap();
+        let second = Texture::from_dma_buf(&image, TextureFilter::Linear, false).unwrap();
         drop(image);
         drop(consumer);
         drop(source);

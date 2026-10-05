@@ -59,6 +59,7 @@ impl Texture {
     pub fn from_dma_buf(
         image: &Rc<super::DmaBufImage>,
         filter: TextureFilter,
+        force_opaque: bool,
     ) -> Result<Rc<Self>, String> {
         if filter == TextureFilter::Trilinear || image.owner.is_lost() {
             return Err("Imported textures require a live device and no mipmap filtering".into());
@@ -95,7 +96,14 @@ impl Texture {
                 &raw,
                 &hal::TextureViewDescriptor {
                     label: Some("WR imported DMA-BUF view"),
-                    swizzle: Default::default(),
+                    swizzle: wgt::TextureComponentSwizzle {
+                        a: if force_opaque {
+                            wgt::ComponentSwizzle::One
+                        } else {
+                            wgt::ComponentSwizzle::A
+                        },
+                        ..Default::default()
+                    },
                     format: descriptor.format,
                     dimension: wgt::TextureViewDimension::D2,
                     usage: wgt::TextureUses::RESOURCE,

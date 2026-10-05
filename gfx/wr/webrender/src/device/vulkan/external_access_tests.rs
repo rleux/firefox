@@ -185,7 +185,7 @@ mod window {
                 .import_dma_buf(fd.as_fd(), *source.descriptor())
         }
         .unwrap();
-        let texture = Texture::from_dma_buf(&image, TextureFilter::Linear).unwrap();
+        let texture = Texture::from_dma_buf(&image, TextureFilter::Linear, false).unwrap();
         let value = Rc::new(Cell::new(0));
         let receipts = Rc::new(RefCell::new(Vec::new()));
         renderer.set_external_image_handler(Box::new(Handler {

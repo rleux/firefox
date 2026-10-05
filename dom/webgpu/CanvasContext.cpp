@@ -338,7 +338,7 @@ bool CanvasContext::InitializeCanvasRenderer(
   layers::CanvasRendererData data;
   data.mContext = this;
   data.mSize = mCanvasSize;
-  data.mIsOpaque = false;
+  data.mIsOpaque = wr::RenderCompositorVulkan::IsRequested() && GetIsOpaque();
   data.mRemoteTextureOwnerId = mRemoteTextureOwnerId;
 
   aRenderer->Initialize(data);
@@ -515,7 +515,7 @@ void CanvasContext::ForceNewFrame() {
   } else if (mOffscreenCanvas) {
     dom::OffscreenCanvasDisplayData data;
     data.mSize = mCanvasSize;
-    data.mIsOpaque = false;
+    data.mIsOpaque = wr::RenderCompositorVulkan::IsRequested() && GetIsOpaque();
     mOffscreenCanvas->UpdateDisplayData(data);
   }
 }
