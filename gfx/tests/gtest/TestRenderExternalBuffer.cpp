@@ -30,8 +30,9 @@
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include <fcntl.h>
 
-#  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
 #  include "mozilla/webgpu/SharedTextureVulkan.h"
+#  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
+#  include "mozilla/widget/DMABufDevice.h"
 #endif
 
 namespace mozilla::wr {
@@ -883,6 +884,9 @@ void wr_test_webgpu_global_init(const webgpu::ffi::WGPUGlobal*);
 Renderer* wr_test_vulkan_renderer_new();
 void wr_test_vulkan_renderer_delete(Renderer*);
 void wr_test_vulkan_sync_file_wait();
+void* wr_test_foreign_rgb_new(int32_t*);
+void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
+void wr_test_foreign_rgb_delete(void*);
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
@@ -939,6 +943,34 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
     texture = nullptr;
     callback(layers::VulkanImageReturnMessage(
         4, VulkanImageReturnStatus::Abandoned, Nothing()));
+  });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
+  ASSERT_TRUE(widget::GbmLib::IsAvailable());
+  OnRenderThread([] {
+    int32_t drmFd = -1;
+    auto* fixture = wr_test_foreign_rgb_new(&drmFd);
+    ASSERT_TRUE(fixture);
+    auto cleanup = MakeScopeExit([&] { wr_test_foreign_rgb_delete(fixture); });
+    auto* gbm = widget::GbmLib::CreateDevice(drmFd);
+    ASSERT_TRUE(gbm);
+    auto destroyDevice =
+        MakeScopeExit([&] { widget::GbmLib::DestroyDevice(gbm); });
+    for (const auto format : {GBM_FORMAT_ARGB8888, GBM_FORMAT_ABGR8888}) {
+      auto* buffer = widget::GbmLib::Create(
+          gbm, 17, 9, format, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+      ASSERT_TRUE(buffer);
+      auto destroyBuffer =
+          MakeScopeExit([&] { widget::GbmLib::Destroy(buffer); });
+      ASSERT_EQ(widget::GbmLib::GetModifier(buffer), 0u);
+      ASSERT_EQ(widget::GbmLib::GetPlaneCount(buffer), 1);
+      UniqueFileHandle memory(widget::GbmLib::GetFd(buffer));
+      ASSERT_TRUE(memory);
+      wr_test_foreign_rgb_import(fixture, memory.get(), format,
+                                 widget::GbmLib::GetStride(buffer));
+      EXPECT_TRUE(DuplicateFileHandle(memory.get()));
+    }
   });
 }
 

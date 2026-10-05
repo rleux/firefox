@@ -56,6 +56,15 @@ pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
 
 impl Texture {
     #[cfg(target_os = "linux")]
+    pub fn from_foreign_rgb(
+        image: &super::ForeignRgbImage,
+        filter: TextureFilter,
+        force_opaque: bool,
+    ) -> Result<Rc<Self>, String> {
+        Self::from_dma_buf(&image.image, filter, force_opaque)
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn from_dma_buf(
         image: &Rc<super::DmaBufImage>,
         filter: TextureFilter,

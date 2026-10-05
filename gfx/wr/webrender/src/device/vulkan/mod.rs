@@ -28,6 +28,10 @@ mod dmabuf;
 #[cfg(target_os = "linux")]
 pub use self::dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
 #[cfg(target_os = "linux")]
+mod foreign_rgb;
+#[cfg(target_os = "linux")]
+pub use self::foreign_rgb::{ForeignRgbImage, ForeignRgbLayout};
+#[cfg(target_os = "linux")]
 mod timeline;
 #[cfg(target_os = "linux")]
 pub use self::timeline::{SharedTimeline, TimelineHandle};
