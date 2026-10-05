@@ -31,7 +31,9 @@ pub use self::dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImag
 #[path = "vulkan/foreign_rgb.rs"]
 mod foreign_rgb;
 #[cfg(target_os = "linux")]
-pub use self::foreign_rgb::{ForeignRgbImage, ForeignRgbLayout};
+pub use self::foreign_rgb::{
+    ForeignReleaseStatus, ForeignRgbImage, ForeignRgbLayout, PendingForeignRelease,
+};
 #[cfg(target_os = "linux")]
 #[path = "vulkan/timeline.rs"]
 mod timeline;
