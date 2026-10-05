@@ -4,9 +4,16 @@
 
 use ash::vk;
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::rc::Rc;
-use webrender::vulkan::{Device, ForeignRgbLayout, Options, Texture, TextureFilter};
+use std::time::Duration;
+use webrender::vulkan::{
+    Device, ForeignRgbLayout, Options, SharedTimeline, Submission, SyncFileWait, Texture, TextureFilter,
+};
+
+unsafe fn ready_fence(owner: &Rc<Device>) -> OwnedFd {
+    super::sync_file::ready_fence(owner).unwrap()
+}
 
 pub struct Fixture {
     device: Rc<Device>,
@@ -62,6 +69,45 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(fixture: &Fixture, fd: i32, 
     let alpha = Texture::from_foreign_rgb(&image, TextureFilter::Linear, false).unwrap();
     let opaque = Texture::from_foreign_rgb(&image, TextureFilter::Nearest, true).unwrap();
     assert!(Texture::from_foreign_rgb(&image, TextureFilter::Trilinear, false).is_err());
+    let ready = ready_fence(&fixture.device);
+    let released = SharedTimeline::new(&fixture.device).unwrap();
+    let clone = image.clone();
+    {
+        let mut abandoned = Submission::new(&fixture.device).unwrap();
+        let mut commands = abandoned.recording().unwrap();
+        assert!(image.release(&mut commands, &released, 1).is_err());
+        image
+            .acquire(
+                &mut commands,
+                SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap(),
+            )
+            .unwrap();
+        assert!(clone
+            .acquire(
+                &mut commands,
+                SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap()
+            )
+            .is_err());
+        drop(commands);
+        let mut other = Submission::new(&fixture.device).unwrap();
+        assert!(clone.release(&mut other.recording().unwrap(), &released, 1).is_err());
+    }
+    for value in 1..=2 {
+        let mut submission = Submission::new(&fixture.device).unwrap();
+        {
+            let mut commands = submission.recording().unwrap();
+            image
+                .acquire(
+                    &mut commands,
+                    SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap(),
+                )
+                .unwrap();
+            clone.release(&mut commands, &released, value).unwrap();
+            assert!(image.release(&mut commands, &released, value).is_err());
+        }
+        submission.submit().unwrap();
+        assert!(submission.wait(Some(Duration::from_secs(5))).unwrap());
+    }
     drop(image);
     drop(alpha);
     drop(opaque);
