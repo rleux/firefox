@@ -683,7 +683,11 @@ void DMABufSurface::FenceWait(mozilla::gl::GLContext* aGLContext) {
           << "DMABufSurface::FenceWait() failed: missing GL context";
       return;
     }
-    syncFd = mSyncFd.forget();
+    if (mForeignRGB) {
+      syncFd = mSyncFd;
+    } else {
+      syncFd = mSyncFd.forget();
+    }
   }
 
   LOGDMABUF("DMABufSurface::FenceWait() UID %d", mUID);
