@@ -3,6 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod foreign_rgb;
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod sync_file;
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod vulkan;
