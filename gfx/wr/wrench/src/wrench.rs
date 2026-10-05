@@ -136,6 +136,7 @@ impl RenderNotifier for Notifier {
 }
 
 pub trait WrenchThing {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, _scale: f32) {}
     fn next_frame(&mut self);
     fn prev_frame(&mut self);
     fn do_frame(&mut self, _: &mut Wrench) -> u32;
@@ -227,7 +228,7 @@ pub struct Wrench {
 
     /// The GL context the renderer draws with, shared so that wrench can
     /// create GL textures to hand to the renderer as external images.
-    gl: Rc<dyn gl::Gl>,
+    gl: Option<Rc<dyn gl::Gl>>,
     pub renderer: webrender::Renderer,
     pub api: RenderApi,
     pub document_id: DocumentId,
@@ -273,7 +274,9 @@ pub struct Wrench {
 
 impl Wrench {
     pub fn gl(&self) -> &dyn gl::Gl {
-        &*self.gl
+        self.gl
+            .as_deref()
+            .expect("This test requires an OpenGL context")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -335,7 +338,7 @@ impl Wrench {
             clear_caches_with_quads: !window.is_software(),
             enable_shared_instance_buffer: !cfg!(target_os = "windows"),
             compositor_config,
-            enable_debugger: true,
+            enable_debugger: !window.is_vulkan(),
             ..Default::default()
         };
 
@@ -351,12 +354,37 @@ impl Wrench {
             Box::new(Notifier(data))
         });
 
-        let gl = window.clone_gl();
+        let (backend, gl) = match window {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan {
+                window,
+                display,
+                adapter,
+                validation,
+                vsync,
+            } => (
+                webrender::GpuBackendConfig::Vulkan(webrender::vulkan::Options {
+                    adapter_name: adapter.clone(),
+                    validation: *validation,
+                    window: Some(window.clone()),
+                    display_owner: Some(Rc::new(display.clone())),
+                    surface_options: webrender::vulkan::SurfaceOptions {
+                        vsync: *vsync,
+                        ..Default::default()
+                    },
+                }),
+                None,
+            ),
+            _ => {
+                let gl = window.clone_gl();
+                (webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.clone())), Some(gl))
+            }
+        };
 
         // Build the shaders on a device of their own and share them with the
         // renderer, as Gecko does, so that programs created or linked through
         // one device are drawn with through another.
-        let shaders = {
+        let shaders = gl.as_ref().map(|gl| {
             let mut device = webrender::Device::new(
                 webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.clone())),
                 webrender::DeviceOptions {
@@ -382,14 +410,11 @@ impl Wrench {
             while shaders.resume_precache(&mut device, &mut pending).unwrap() {}
             device.end_frame();
             Rc::new(RefCell::new(shaders))
-        };
+        });
 
-        let (renderer, sender) = webrender::create_webrender_instance(
-            webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.clone())),
-            notifier,
-            opts,
-            Some(&shaders),
-        ).unwrap();
+        let (renderer, sender) =
+            webrender::create_webrender_instance(backend, notifier, opts, shaders.as_ref())
+                .unwrap();
         // The renderer now holds the only reference, so its deinit releases them.
         drop(shaders);
 

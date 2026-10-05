@@ -2356,6 +2356,11 @@ impl YamlFrameReader {
 }
 
 impl WrenchThing for YamlFrameReader {
+    fn on_window_changed(&mut self, _size: DeviceIntSize, scale: f32) {
+        self.set_device_pixel_scale(scale);
+        self.built_frame = usize::MAX;
+    }
+
     fn do_frame(&mut self, wrench: &mut Wrench) -> u32 {
         let mut should_build_yaml = false;
 

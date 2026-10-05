@@ -4,6 +4,22 @@ author: Vladimir Vukicevic <vladimir@pobox.com>
 about: WebRender testing and debugging utility
 
 args:
+  - backend:
+      long: backend
+      takes_value: true
+      possible_values: [gl, vulkan]
+      default_value: gl
+      global: true
+      help: Select the graphics backend
+  - adapter:
+      long: adapter
+      takes_value: true
+      global: true
+      help: Select a Vulkan adapter by name substring
+  - validation:
+      long: validation
+      global: true
+      help: Require Vulkan validation support
   - precache:
       short: c
       long: precache
@@ -49,7 +65,7 @@ args:
       takes_value: true
   - vsync:
       long: vsync
-      help: Enable vsync for OpenGL window
+      help: Enable vsync for the window
   - no_scissor:
       long: no-scissor
       help: Disable scissors when clearing render targets

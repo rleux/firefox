@@ -7,6 +7,15 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(wrench_vulkan)");
+    if env::var_os("CARGO_FEATURE_VULKAN").is_some()
+        && matches!(
+            env::var("CARGO_CFG_TARGET_OS").unwrap().as_str(),
+            "linux" | "windows" | "android"
+        )
+    {
+        println!("cargo:rustc-cfg=wrench_vulkan");
+    }
     let target = env::var("TARGET").unwrap();
     let out_dir = env::var_os("OUT_DIR").unwrap();
     let out_dir = PathBuf::from(out_dir);
