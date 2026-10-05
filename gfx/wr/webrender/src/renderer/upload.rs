@@ -119,6 +119,9 @@ pub fn upload_to_texture_cache(
                         ExternalImageSource::NativeTexture(eid) => {
                             panic!("Unexpected external texture {:?} for the texture cache update of {:?}", eid, id);
                         }
+                        ExternalImageSource::Pending => {
+                            panic!("Pending external image is only supported for texture handles");
+                        }
                     }
                 }
                 TextureUpdateSource::DebugClear => {

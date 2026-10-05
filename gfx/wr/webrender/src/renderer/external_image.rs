@@ -17,12 +17,13 @@ pub(super) fn update_deferred_resolves(
     device: &mut Device,
     deferred_resolves: &[DeferredResolve],
     gpu_buffer: &mut GpuBufferF,
-) {
+) -> bool {
     if deferred_resolves.is_empty() {
-        return;
+        return true;
     }
 
     let handler = external_image_handler.expect("Found external image, but no handler set!");
+    let mut ready = true;
 
     for (i, deferred_resolve) in deferred_resolves.iter().enumerate() {
         gpu_profiler.place_marker("deferred resolve");
@@ -64,6 +65,15 @@ pub(super) fn update_deferred_resolves(
                     deferred_resolve.rendering,
                 )
             }
+            ExternalImageSource::Pending => {
+                ready = false;
+                ExternalTexture::new(
+                    api::ExternalTextureHandle(0),
+                    texture_target,
+                    image.uv,
+                    deferred_resolve.rendering,
+                )
+            }
             ExternalImageSource::RawData(_) => {
                 panic!("Raw external data is not expected for deferred resolves!");
             }
@@ -76,6 +86,7 @@ pub(super) fn update_deferred_resolves(
         gpu_buffer.data[index] = image.uv.to_array().into();
         gpu_buffer.data[index + 1] = [0f32; 4].into();
     }
+    ready
 }
 
 #[inline]

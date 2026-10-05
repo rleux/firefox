@@ -401,6 +401,7 @@ enum WrExternalImageType {
     RawData,
     NativeTexture,
     Invalid,
+    Pending,
 }
 
 #[repr(C)]
@@ -450,6 +451,7 @@ impl ExternalImageHandler for WrExternalImageHandler {
                     ExternalImageSource::RawData(unsafe { make_slice(image.buff, image.size) })
                 },
                 WrExternalImageType::Invalid => ExternalImageSource::Invalid,
+                WrExternalImageType::Pending => ExternalImageSource::Pending,
             },
         }
     }
@@ -639,8 +641,8 @@ pub extern "C" fn wr_renderer_set_external_image_handler(
 }
 
 #[no_mangle]
-pub extern "C" fn wr_renderer_update(renderer: &mut Renderer) {
-    renderer.update();
+pub extern "C" fn wr_renderer_update(renderer: &mut Renderer) -> bool {
+    renderer.update()
 }
 
 #[no_mangle]
