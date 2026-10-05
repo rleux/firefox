@@ -27,7 +27,7 @@ pub struct DmaBufImageDescriptor {
 }
 
 impl DmaBufImageDescriptor {
-    fn validate_plane(&self, bytes: u64) -> Result<(), String> {
+    pub(in crate::device::wgpu) fn validate_plane(&self, bytes: u64) -> Result<(), String> {
         if self.size.contains(&0)
             || self.size.iter().any(|&size| size > i32::MAX as u32)
             || self.row_pitch == 0
@@ -133,6 +133,15 @@ impl Device {
         fd: BorrowedFd<'_>,
         descriptor: DmaBufImageDescriptor,
     ) -> Result<Rc<DmaBufImage>, String> {
+        self.import_dma_buf_impl(fd, descriptor, true)
+    }
+
+    pub(in crate::device::wgpu) unsafe fn import_dma_buf_impl(
+        self: &Rc<Self>,
+        fd: BorrowedFd<'_>,
+        descriptor: DmaBufImageDescriptor,
+        check_vulkan_identity: bool,
+    ) -> Result<Rc<DmaBufImage>, String> {
         if self.is_lost() {
             return Err("Vulkan device requires recreation".into());
         }
@@ -144,7 +153,9 @@ impl Device {
         if !supported.supports_extent(descriptor.size) {
             return Err("DMA-BUF dimensions exceed device limits".into());
         }
-        if identity(self) != (descriptor.device_uuid, descriptor.driver_uuid) {
+        if check_vulkan_identity
+            && identity(self) != (descriptor.device_uuid, descriptor.driver_uuid)
+        {
             return Err("DMA-BUF device or driver identity mismatch".into());
         }
         let file = File::from(
