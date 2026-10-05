@@ -33,6 +33,8 @@ mod rawtests;
 mod reftest;
 mod test_invalidation;
 mod test_shaders;
+#[cfg(wrench_vulkan)]
+mod vulkan_images;
 mod wrench;
 mod yaml_frame_reader;
 mod yaml_helper;
@@ -182,9 +184,9 @@ pub enum WindowWrapper {
         vsync: bool,
     },
     Windowed {
-        window: Window,
-        gl_surface: Surface<WindowSurface>,
         gl_context: PossiblyCurrentContext,
+        gl_surface: Surface<WindowSurface>,
+        window: Window,
         is_gles: bool,
         gl: Rc<dyn gl::Gl>,
         sw_ctx: Option<swgl::Context>,
