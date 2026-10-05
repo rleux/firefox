@@ -29,12 +29,14 @@
 
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include <fcntl.h>
+#  include <sys/eventfd.h>
 #  include <sys/syscall.h>
 #  include <unistd.h>
 
 #  include "base/linux_memfd_defs.h"
 
 #  include "mozilla/webgpu/SharedTextureVulkan.h"
+#  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
 #  include "mozilla/widget/DMABufDevice.h"
 #  include "mozilla/widget/DMABufAccess.h"
@@ -1039,6 +1041,151 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
   });
 }
 
+static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(
+    int aMemory, int aReady, uint32_t aFormat, uint32_t aStride,
+    widget::DMABufAccess& aAccess) {
+  layers::SurfaceDescriptorDMABuf desc;
+  desc.bufferType() = DMABufSurface::SURFACE_RGBA;
+  desc.fourccFormat() = aFormat;
+  desc.modifier().AppendElement(0);
+  desc.fds().AppendElement(
+      WrapNotNull(MakeRefPtr<FileHandleWrapper>(DuplicateFileHandle(aMemory))));
+  desc.width().AppendElement(17);
+  desc.height().AppendElement(9);
+  desc.strides().AppendElement(aStride);
+  desc.offsets().AppendElement(0);
+  desc.fence().AppendElement(
+      WrapNotNull(MakeRefPtr<FileHandleWrapper>(DuplicateFileHandle(aReady))));
+  UniqueFileHandle counter(
+      eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE));
+  MOZ_RELEASE_ASSERT(counter);
+  desc.refCount().AppendElement(ipc::FileDescriptor(counter.get()));
+  desc.foreignRGBImageState() = Some(
+      layers::ForeignRGBImageState(1, WrapNotNull(RefPtr{aAccess.Handle()})));
+  return desc;
+}
+
+static void CheckForeignRenderHost(void* aFixture, int aMemory,
+                                   uint32_t aFormat, uint32_t aStride) {
+  UniqueFileHandle ready(wr_test_foreign_rgb_ready(aFixture));
+  ASSERT_TRUE(ready);
+  for (bool abandon : {false, true}) {
+    auto access = widget::DMABufAccess::Create();
+    ASSERT_TRUE(access);
+    auto desc = ForeignPublicationForTest(aMemory, ready.get(), aFormat,
+                                          aStride, *access);
+    RefPtr<DMABufSurface> surface = DMABufSurface::CreateDMABufSurface(desc);
+    ASSERT_TRUE(surface);
+    RefPtr<RenderDMABUFTextureHost> host = new RenderDMABUFTextureHost(surface);
+    auto* first = wr_test_vulkan_renderer_new();
+    auto* second = wr_test_vulkan_renderer_new();
+    auto* context = wr_vulkan_external_images_new(first);
+    auto* alias = wr_vulkan_external_images_new(first);
+    auto* next = wr_vulkan_external_images_new(second);
+    auto cleanup = MakeScopeExit([&] {
+      wr_vulkan_external_images_delete(context);
+      wr_vulkan_external_images_delete(alias);
+      wr_vulkan_external_images_delete(next);
+      wr_test_vulkan_renderer_delete(first);
+      wr_test_vulkan_renderer_delete(second);
+    });
+    ASSERT_TRUE(context && alias && next);
+    VulkanImageReleaseQueue<> releases;
+    ASSERT_TRUE(access->TryLock());
+    EXPECT_EQ(host->LockVulkan(0, context).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_FALSE(host->UnlockVulkan(context));
+    EXPECT_TRUE(access->IsUsable());
+    access->Unlock();
+    const auto original = host->LockVulkan(0, context);
+    ASSERT_EQ(original.image_type, WrExternalImageType::NativeTexture);
+    const auto opaque = host->LockVulkan(1, alias);
+    EXPECT_EQ(opaque.image_type, WrExternalImageType::NativeTexture);
+    EXPECT_NE(original.handle, opaque.handle);
+    EXPECT_FALSE(host->UnlockVulkan(alias));
+    auto release = host->UnlockVulkan(context);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    EXPECT_EQ(host->LockVulkan(1, context).handle, opaque.handle);
+    release = host->UnlockVulkan(context);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    releases.Poll();
+    EXPECT_TRUE(releases.HasPending());
+    EXPECT_FALSE(access->TryLock());
+    EXPECT_EQ(host->LockVulkan(0, next).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_FALSE(host->UnlockVulkan(next));
+    EXPECT_TRUE(access->IsUsable());
+    if (abandon) {
+      releases.Poll(true);
+      EXPECT_FALSE(access->IsUsable());
+      EXPECT_EQ(host->LockVulkan(0, context).image_type,
+                WrExternalImageType::Invalid);
+      EXPECT_FALSE(host->UnlockVulkan(context));
+      continue;
+    }
+    wr_test_vulkan_renderer_delete(first);
+    first = nullptr;
+    releases.Poll();
+    EXPECT_FALSE(releases.HasPending());
+    ASSERT_TRUE(access->TryLock());
+    access->Unlock();
+    EXPECT_EQ(host->LockVulkan(0, next).image_type,
+              WrExternalImageType::NativeTexture);
+    release = host->UnlockVulkan(next);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    host = nullptr;
+    EXPECT_FALSE(access->TryLock());
+    wr_test_vulkan_renderer_delete(second);
+    second = nullptr;
+    releases.Poll();
+    EXPECT_FALSE(releases.HasPending());
+    ASSERT_TRUE(access->TryLock());
+    access->Unlock();
+  }
+}
+
+static void CheckForeignCompositorShutdown(void* aFixture, int aMemory,
+                                          uint32_t aFormat, uint32_t aStride) {
+  UniqueFileHandle ready(wr_test_foreign_rgb_ready(aFixture));
+  ASSERT_TRUE(ready);
+  for (bool cancel : {false, true}) {
+    auto access = widget::DMABufAccess::Create();
+    ASSERT_TRUE(access);
+    auto desc = ForeignPublicationForTest(aMemory, ready.get(), aFormat,
+                                         aStride, *access);
+    RefPtr<DMABufSurface> surface = DMABufSurface::CreateDMABufSurface(desc);
+    ASSERT_TRUE(surface);
+    RefPtr<RenderDMABUFTextureHost> host = new RenderDMABUFTextureHost(surface);
+    RenderCompositorVulkan compositor(nullptr, DetachedConfig());
+    auto* renderer = wr_test_vulkan_renderer_new();
+    const WindowId window{0};
+    compositor.SetRenderer(renderer, window);
+    auto cleanup = MakeScopeExit([&] {
+      wr_test_vulkan_renderer_delete(renderer);
+      compositor.SetRenderer(nullptr, window);
+    });
+    ASSERT_EQ(compositor.LockExternalImage(host, 0).image_type,
+              WrExternalImageType::NativeTexture);
+    compositor.UnlockExternalImage(host);
+    compositor.AfterRender(true);
+    EXPECT_FALSE(access->TryLock());
+    if (cancel) {
+      compositor.SetRenderer(nullptr, window);
+    }
+    wr_test_vulkan_renderer_delete(renderer);
+    renderer = nullptr;
+    compositor.SetRenderer(nullptr, window);
+    EXPECT_EQ(access->IsUsable(), !cancel);
+    EXPECT_EQ(access->TryLock(), !cancel);
+    if (!cancel) {
+      access->Unlock();
+    }
+  }
+}
+
 TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
   ASSERT_TRUE(widget::GbmLib::IsAvailable());
   OnRenderThread([] {
@@ -1122,6 +1269,10 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
                 WrVulkanReleaseStatus::Complete);
       EXPECT_TRUE(DuplicateFileHandle(memory.get()));
       EXPECT_TRUE(DuplicateFileHandle(ready.get()));
+      CheckForeignRenderHost(fixture, memory.get(), format,
+                             widget::GbmLib::GetStride(buffer));
+      CheckForeignCompositorShutdown(fixture, memory.get(), format,
+                                     widget::GbmLib::GetStride(buffer));
     }
   });
 }
