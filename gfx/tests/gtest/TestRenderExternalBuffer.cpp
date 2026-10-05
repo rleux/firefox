@@ -965,6 +965,15 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanForeignRGBImport) {
           MakeScopeExit([&] { widget::GbmLib::Destroy(buffer); });
       ASSERT_EQ(widget::GbmLib::GetModifier(buffer), 0u);
       ASSERT_EQ(widget::GbmLib::GetPlaneCount(buffer), 1);
+      uint32_t mapStride = 0;
+      void* mapData = nullptr;
+      auto* pixels = static_cast<uint8_t*>(widget::GbmLib::Map(
+          buffer, 0, 0, 17, 9, GBM_BO_TRANSFER_WRITE, &mapStride, &mapData));
+      ASSERT_TRUE(pixels);
+      for (size_t row = 0; row < 9; ++row) {
+        memset(pixels + row * mapStride, 0x7f, 17 * 4);
+      }
+      widget::GbmLib::Unmap(buffer, mapData);
       UniqueFileHandle memory(widget::GbmLib::GetFd(buffer));
       ASSERT_TRUE(memory);
       wr_test_foreign_rgb_import(fixture, memory.get(), format,

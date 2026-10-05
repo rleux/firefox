@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{wgt, Device, DmaBufImage, DmaBufImageDescriptor};
+use super::{wgt, Device, DmaBufImage, DmaBufImageDescriptor, Recording, SharedTimeline, SyncFileWait};
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 
@@ -67,6 +67,49 @@ pub struct ForeignRgbImage {
 impl ForeignRgbImage {
     pub fn layout(&self) -> ForeignRgbLayout {
         self.layout
+    }
+
+    /// # Safety
+    /// The fence must cover submitted producer writes to the initialized allocation.
+    /// Hold exclusive publication access until GPU completion of its ownership return.
+    pub unsafe fn acquire(
+        &self,
+        commands: &mut Recording<'_>,
+        ready: SyncFileWait,
+    ) -> Result<(), String> {
+        let recording = commands.recording_id(&self.image.owner)?;
+        self.image.states[0].check_recording(&recording)?;
+        if self.image.states[0].current().initialized {
+            return Err("Foreign RGB image is already acquired".into());
+        }
+        commands.wait_sync_file(ready)?;
+        self.image.record_access(
+            commands,
+            &recording,
+            true,
+            ash::vk::QUEUE_FAMILY_FOREIGN_EXT,
+        )
+    }
+
+    /// The foreign producer may reuse the allocation only after this signal completes.
+    pub fn release(
+        &self,
+        commands: &mut Recording<'_>,
+        released: &Rc<SharedTimeline>,
+        value: u64,
+    ) -> Result<(), String> {
+        let recording = commands.recording_id(&self.image.owner)?;
+        self.image.states[0].check_recording(&recording)?;
+        if !self.image.states[0].current().initialized {
+            return Err("Foreign RGB image is not acquired".into());
+        }
+        commands.signal_timeline(released, value)?;
+        self.image.record_access(
+            commands,
+            &recording,
+            false,
+            ash::vk::QUEUE_FAMILY_FOREIGN_EXT,
+        )
     }
 }
 

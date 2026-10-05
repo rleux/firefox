@@ -2,11 +2,44 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use ash::vk;
+use ash::{khr, vk};
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
-use webrender::vulkan::{Device, ForeignRgbLayout, Options, Texture, TextureFilter};
+use std::time::Duration;
+use webrender::vulkan::{
+    Device, ForeignRgbLayout, Options, SharedTimeline, Submission, SyncFileWait, Texture,
+    TextureFilter,
+};
+
+unsafe fn ready_fence(owner: &Rc<Device>) -> OwnedFd {
+    let device = owner.raw_device();
+    let raw = device.raw_device();
+    let mut export = vk::ExportSemaphoreCreateInfo::default()
+        .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+    let semaphore = raw
+        .create_semaphore(
+            &vk::SemaphoreCreateInfo::default().push_next(&mut export),
+            None,
+        )
+        .unwrap();
+    let mut send = Submission::new(owner).unwrap();
+    owner.queue().add_signal_semaphore(semaphore, None);
+    let result = send.submit();
+    owner.queue().remove_signal_semaphore(semaphore);
+    result.unwrap();
+    let fd = khr::external_semaphore_fd::Device::new(device.shared_instance().raw_instance(), raw)
+        .get_semaphore_fd(
+            &vk::SemaphoreGetFdInfoKHR::default()
+                .semaphore(semaphore)
+                .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
+        )
+        .unwrap();
+    assert!(send.wait(Some(Duration::from_secs(5))).unwrap());
+    raw.destroy_semaphore(semaphore, None);
+    assert!(fd >= 0);
+    OwnedFd::from_raw_fd(fd)
+}
 
 pub struct Fixture {
     device: Rc<Device>,
@@ -72,6 +105,47 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(
     let alpha = Texture::from_foreign_rgb(&image, TextureFilter::Linear, false).unwrap();
     let opaque = Texture::from_foreign_rgb(&image, TextureFilter::Nearest, true).unwrap();
     assert!(Texture::from_foreign_rgb(&image, TextureFilter::Trilinear, false).is_err());
+    let ready = ready_fence(&fixture.device);
+    let released = SharedTimeline::new(&fixture.device).unwrap();
+    let clone = image.clone();
+    {
+        let mut abandoned = Submission::new(&fixture.device).unwrap();
+        let mut commands = abandoned.recording().unwrap();
+        assert!(image.release(&mut commands, &released, 1).is_err());
+        image
+            .acquire(
+                &mut commands,
+                SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap(),
+            )
+            .unwrap();
+        assert!(clone
+            .acquire(
+                &mut commands,
+                SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap()
+            )
+            .is_err());
+        drop(commands);
+        let mut other = Submission::new(&fixture.device).unwrap();
+        assert!(clone
+            .release(&mut other.recording().unwrap(), &released, 1)
+            .is_err());
+    }
+    for value in 1..=2 {
+        let mut submission = Submission::new(&fixture.device).unwrap();
+        {
+            let mut commands = submission.recording().unwrap();
+            image
+                .acquire(
+                    &mut commands,
+                    SyncFileWait::import(&fixture.device, ready.as_fd()).unwrap(),
+                )
+                .unwrap();
+            clone.release(&mut commands, &released, value).unwrap();
+            assert!(image.release(&mut commands, &released, value).is_err());
+        }
+        submission.submit().unwrap();
+        assert!(submission.wait(Some(Duration::from_secs(5))).unwrap());
+    }
     drop(image);
     drop(alpha);
     drop(opaque);

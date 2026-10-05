@@ -25,7 +25,7 @@ impl DmaBufImage {
             return Err("DMA-BUF image is already acquired".into());
         }
         commands.wait_timeline(ready, value)?;
-        self.record_access(commands, &recording, true)
+        self.record_access(commands, &recording, true, vk::QUEUE_FAMILY_EXTERNAL)
     }
 
     /// Publish the release value to the producer only after successful submission.
@@ -41,14 +41,15 @@ impl DmaBufImage {
             return Err("DMA-BUF image is not acquired".into());
         }
         commands.signal_timeline(released, value)?;
-        self.record_access(commands, &recording, false)
+        self.record_access(commands, &recording, false, vk::QUEUE_FAMILY_EXTERNAL)
     }
 
-    fn record_access(
+    pub(in crate::device::vulkan) fn record_access(
         self: &Rc<Self>,
         commands: &mut Recording<'_>,
         recording: &Rc<()>,
         acquire: bool,
+        external_family: u32,
     ) -> Result<(), String> {
         let (_, first) = self.states[0].prepare(
             recording,
@@ -72,7 +73,7 @@ impl DmaBufImage {
                 commands,
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::GENERAL,
-                vk::QUEUE_FAMILY_EXTERNAL,
+                external_family,
                 family,
                 vk::AccessFlags::empty(),
                 vk::AccessFlags::SHADER_READ,
@@ -101,7 +102,7 @@ impl DmaBufImage {
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::GENERAL,
                 family,
-                vk::QUEUE_FAMILY_EXTERNAL,
+                external_family,
                 vk::AccessFlags::SHADER_READ,
                 vk::AccessFlags::empty(),
             );
