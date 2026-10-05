@@ -880,6 +880,8 @@ void wr_test_webgpu_dmabuf_allocation();
 bool wr_test_webgpu_import_initialization();
 void wr_test_webgpu_dmabuf_import();
 void wr_test_webgpu_global_init(const webgpu::ffi::WGPUGlobal*);
+Renderer* wr_test_vulkan_renderer_new();
+void wr_test_vulkan_renderer_delete(Renderer*);
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
@@ -1102,6 +1104,83 @@ TEST_F(RenderExternalBuffer,
        DISABLED_WebGPUPublicationReturnsSubmittedTimeline) {
   OnRenderThread([] { CheckVulkanPublication(true); });
 }
+TEST_F(RenderExternalBuffer, DISABLED_WebGPUImageChangesRenderer) {
+  OnRenderThread([] {
+    TestVulkanImage source{};
+    auto* fixture = wr_test_webgpu_image_new(&source);
+    ASSERT_TRUE(fixture);
+    auto cleanup = MakeScopeExit([&] { wr_test_webgpu_image_delete(fixture); });
+    auto* second = wr_test_vulkan_renderer_new();
+    auto cleanupSecond =
+        MakeScopeExit([&] { wr_test_vulkan_renderer_delete(second); });
+    auto* firstContext =
+        wr_vulkan_external_images_new(wr_test_webgpu_image_renderer(fixture));
+    auto* secondContext = wr_vulkan_external_images_new(second);
+    ASSERT_TRUE(firstContext && secondContext);
+    auto cleanupContexts = MakeScopeExit([&] {
+      wr_vulkan_external_images_delete(firstContext);
+      wr_vulkan_external_images_delete(secondContext);
+    });
+    auto publication = PublicationForTest(source.mMemoryFd);
+    publication.size() = IntSize(2, 2);
+    publication.format() = SurfaceFormat::R8G8B8A8;
+    publication.offset() = source.mOffset;
+    publication.stride() = source.mStride;
+    publication.copySrc() = source.mCopySrc;
+    publication.copyDst() = true;
+    publication.colorTarget() = false;
+    publication.ready().handle() =
+        new FileHandleWrapper(DuplicateFileHandle(source.mReadyFd));
+    publication.ready().value() = 1;
+    std::copy_n(source.mDeviceUUID, 16,
+                publication.ready().deviceUUID().begin());
+    std::copy_n(source.mDriverUUID, 16,
+                publication.ready().driverUUID().begin());
+    Maybe<layers::VulkanImageReturnMessage> returned;
+    RefPtr<RenderTextureHost> host = CreateVulkanImageHost(
+        publication, [&](layers::VulkanImageReturnMessage&& aReturn) {
+          returned.emplace(std::move(aReturn));
+        });
+    ASSERT_TRUE(host);
+    VulkanImageReleaseQueue<> releases;
+    for (size_t i = 0; i < 2; ++i) {
+      ASSERT_EQ(host->LockVulkan(1, firstContext).image_type,
+                WrExternalImageType::NativeTexture);
+      auto release = host->UnlockVulkan(firstContext);
+      ASSERT_TRUE(release);
+      releases.Add(host, std::move(release.ref()));
+    }
+    wr_test_webgpu_image_submit(fixture);
+    releases.Poll();
+    EXPECT_FALSE(returned);
+    const auto opaque = host->LockVulkan(1, secondContext);
+    ASSERT_EQ(opaque.image_type, WrExternalImageType::NativeTexture);
+    const auto alpha = host->LockVulkan(0, secondContext);
+    EXPECT_EQ(alpha.image_type, WrExternalImageType::NativeTexture);
+    EXPECT_NE(alpha.handle, opaque.handle);
+    EXPECT_FALSE(host->UnlockVulkan(secondContext));
+    auto release = host->UnlockVulkan(secondContext);
+    ASSERT_TRUE(release);
+    releases.Add(host, std::move(release.ref()));
+    host = nullptr;
+    wr_vulkan_external_images_delete(firstContext);
+    wr_vulkan_external_images_delete(secondContext);
+    firstContext = secondContext = nullptr;
+    wr_test_vulkan_renderer_delete(second);
+    second = nullptr;
+    releases.Poll();
+    ASSERT_TRUE(returned);
+    EXPECT_TRUE(ValidateVulkanImageReturn(returned.ref(), publication));
+    ASSERT_EQ(returned->status(), VulkanImageReturnStatus::Submitted);
+    ASSERT_TRUE(returned->signal());
+    const auto& signal = returned->signal().ref();
+    EXPECT_EQ(signal.value(), 1u);
+    EXPECT_TRUE(wr_test_webgpu_image_wait(
+        fixture, signal.handle()->GetHandle(), signal.deviceUUID().data(),
+        signal.driverUUID().data(), signal.value()));
+  });
+}
+
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUReadTransitionInitializes) {
   OnRenderThread(
       [] { EXPECT_TRUE(wr_test_webgpu_read_transition_initializes()); });

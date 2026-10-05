@@ -70,6 +70,18 @@ pub(super) fn renderer() -> webrender::Renderer {
 }
 
 #[no_mangle]
+pub extern "C" fn wr_test_vulkan_renderer_new() -> *mut webrender::Renderer {
+    Box::into_raw(Box::new(renderer()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_vulkan_renderer_delete(renderer: *mut webrender::Renderer) {
+    if !renderer.is_null() {
+        (*Box::from_raw(renderer)).deinit();
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut Fixture {
     let renderer = renderer();
     let producer = Rc::new(
