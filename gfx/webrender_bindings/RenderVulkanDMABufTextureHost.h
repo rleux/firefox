@@ -43,6 +43,7 @@ class RenderVulkanDMABufTextureHost final : public RenderTextureHost {
                                 ReturnCallback&& aReturn);
   ~RenderVulkanDMABufTextureHost() override;
   bool Import(WrVulkanExternalImages* aImages);
+  bool SwitchContext(WrVulkanExternalImages* aImages);
   void ReturnPublication();
 
   struct ImageDeleter {
@@ -62,7 +63,7 @@ class RenderVulkanDMABufTextureHost final : public RenderTextureHost {
   WrVulkanTimelineDescriptor mReadyDescriptor;
   UniqueFileHandle mImageFd;
   UniqueFileHandle mReadyFd;
-  const uint64_t mReadyValue;
+  uint64_t mReadyValue;
   const size_t mBytes;
   ReturnCallback mReturn;
   VulkanImageReturn mReturnInfo;
