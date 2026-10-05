@@ -105,6 +105,9 @@ pub enum ExternalImageSource<'a> {
     RawData(&'a [u8]),
     /// A texture created by the application.
     NativeTexture(ExternalTextureHandle),
+    /// A texture handle is temporarily unavailable. Defer the frame and retry;
+    /// unlock is still called. This is not valid for buffer uploads.
+    Pending,
     /// An invalid source.
     Invalid,
 }

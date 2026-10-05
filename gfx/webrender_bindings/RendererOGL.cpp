@@ -167,7 +167,12 @@ void RendererOGL::SetFramePublishId(FramePublishId aPublishId) {
 void RendererOGL::Update() {
   mCompositor->Update();
   if (mCompositor->MakeCurrent()) {
-    wr_renderer_update(mRenderer);
+    const bool retry = wr_renderer_update(mRenderer);
+    mCompositor->AfterRender(true);
+    if (retry) {
+      mBridge->ScheduleRenderOnCompositorThread(
+          wr::RenderReasons::SKIPPED_COMPOSITE);
+    }
     FlushPipelineInfo();
   }
 }
