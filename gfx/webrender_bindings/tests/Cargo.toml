@@ -5,11 +5,14 @@ edition = "2021"
 license = "MPL-2.0"
 
 [features]
-vulkan = ["dep:webrender", "dep:ash", "webrender/vulkan"]
+vulkan = ["dep:libc", "dep:webrender", "dep:ash", "webrender/vulkan"]
 
 [dependencies]
 webrender = { path = "../../wr/webrender", default-features = false, optional = true }
 ash = { version = "0.38", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true, default-features = false }
 
 [lib]
 path = "lib.rs"
