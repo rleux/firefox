@@ -43,6 +43,8 @@ fail-if = [
 ["browser_aboutsupport_codec_extension_link.js"]
 run-if = ["os == 'win'"]
 
+["browser_aboutsupport_webrender.js"]
+
 ["browser_autoscroll_disabled.js"]
 
 ["browser_autoscroll_disabled_on_editable_content.js"]
