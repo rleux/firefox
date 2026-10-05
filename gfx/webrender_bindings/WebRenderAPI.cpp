@@ -7,6 +7,7 @@
 #include "GLContext.h"
 #include "TextDrawTarget.h"
 #include "malloc_decls.h"
+#include "mozilla/JSONStringWriteFuncs.h"
 #include "mozilla/Logging.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_webgl.h"
@@ -324,6 +325,29 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         MOZ_ASSERT(wrRenderer);
         MOZ_ASSERT(docHandle);
 
+        nsAutoCString backendName, adapter, driver;
+        wr_renderer_get_backend_info(wrRenderer, &backendName, &adapter,
+                                     &driver);
+        if (swgl) {
+          backendName.AssignLiteral("SWGL");
+          driver.AssignLiteral("SWGL");
+        } else if (gl && gl->IsGLES()) {
+          backendName.AssignLiteral("OpenGL ES");
+        }
+        JSONStringWriteFunc<nsCString> backendInfo;
+        JSONWriter json(backendInfo);
+        json.Start();
+        json.StringProperty("backend", backendName);
+        json.StringProperty("renderer", adapter);
+        json.StringProperty("driver", driver);
+        json.IntProperty("maxTextureSize", maxTextureSize);
+        if (XRE_IsGPUProcess()) {
+          json.StringProperty("process", "GPU");
+        } else {
+          json.StringProperty("process", "Parent");
+        }
+        json.End();
+
         const WebRenderBackend backend = compositor->BackendType();
         const WebRenderCompositor compositorType = compositor->CompositorType();
         const bool useANGLE = compositor->UseANGLE();
@@ -379,6 +403,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         };
         RefPtr<WebRenderAPI> api =
             new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle);
+        api->mBackendInfo = backendInfo.StringCRef();
         return CreatePromise::CreateAndResolve(std::move(api), __func__);
       });
 }
@@ -389,6 +414,7 @@ already_AddRefed<WebRenderAPI> WebRenderAPI::Clone() {
 
   RefPtr<WebRenderAPI> renderApi =
       new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle, this, this);
+  renderApi->mBackendInfo = mBackendInfo;
 
   return renderApi.forget();
 }
