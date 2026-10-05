@@ -29,8 +29,12 @@
 
 #if defined(XP_LINUX) && !defined(ANDROID)
 #  include <fcntl.h>
+#  include <sys/syscall.h>
+#  include <unistd.h>
 
+#  include "base/linux_memfd_defs.h"
 #  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
+#  include "mozilla/widget/DMABufAccess.h"
 #  include "mozilla/widget/DMABufDevice.h"
 #endif
 
@@ -455,6 +459,79 @@ layers::VulkanImagePublication PublicationForTest(int aFd) {
 }
 
 }  // namespace
+
+TEST_F(RenderExternalBuffer, DMABufAccessSharesStateAndLifetime) {
+  auto first = widget::DMABufAccess::Create();
+  ASSERT_TRUE(first);
+  RefPtr<FileHandleWrapper> handle = first->Handle();
+  auto second = widget::DMABufAccess::Import(handle);
+  ASSERT_TRUE(second);
+  EXPECT_TRUE(first->IsUsable());
+  ASSERT_TRUE(second->TryLock());
+  EXPECT_FALSE(first->TryLock());
+  EXPECT_FALSE(first->TryRetire());
+  EXPECT_FALSE(first->WaitLock(1));
+  second->Unlock();
+  ASSERT_TRUE(first->WaitLock(0));
+  first->Unlock();
+  first = nullptr;
+  ASSERT_TRUE(second->TryLock());
+  second->Unlock(true);
+  EXPECT_FALSE(second->IsUsable());
+  second->Unlock();
+  EXPECT_FALSE(second->TryLock());
+  auto third = widget::DMABufAccess::Import(handle);
+  ASSERT_TRUE(third);
+  EXPECT_FALSE(third->IsUsable());
+}
+
+TEST_F(RenderExternalBuffer, DMABufAccessWakesAndRetires) {
+  auto first = widget::DMABufAccess::Create();
+  ASSERT_TRUE(first);
+  auto second = widget::DMABufAccess::Import(first->Handle());
+  ASSERT_TRUE(second);
+  ASSERT_TRUE(first->TryLock());
+  bool acquired = false;
+  std::thread waiter([&] {
+    acquired = second->WaitLock(1000);
+    if (acquired) {
+      second->Unlock();
+    }
+  });
+  first->Unlock();
+  waiter.join();
+  EXPECT_TRUE(acquired);
+  ASSERT_TRUE(first->TryRetire());
+  EXPECT_FALSE(second->IsUsable());
+  EXPECT_FALSE(second->WaitLock(0));
+  first->Unlock();
+  EXPECT_FALSE(first->IsUsable());
+}
+
+TEST_F(RenderExternalBuffer, DMABufAccessRejectsUnsealedOrWrongSize) {
+  EXPECT_FALSE(widget::DMABufAccess::Import(nullptr));
+  for (const size_t size : {sizeof(uint32_t), sizeof(uint64_t)}) {
+    UniqueFileHandle fd(syscall(SYS_memfd_create, "wr-access-test",
+                                MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    ASSERT_TRUE(fd);
+    ASSERT_EQ(ftruncate(fd.get(), size), 0);
+    RefPtr<FileHandleWrapper> handle = new FileHandleWrapper(std::move(fd));
+    EXPECT_FALSE(widget::DMABufAccess::Import(handle));
+    ASSERT_EQ(fcntl(handle->GetHandle(), F_ADD_SEALS,
+                    F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL),
+              0);
+    auto access = widget::DMABufAccess::Import(handle);
+    EXPECT_EQ(bool(access), size == sizeof(uint32_t));
+    EXPECT_EQ(ftruncate(handle->GetHandle(), 0), -1);
+    if (access) {
+      const uint32_t invalid = UINT32_MAX;
+      ASSERT_EQ(pwrite(handle->GetHandle(), &invalid, sizeof(invalid), 0),
+                ssize_t(sizeof(invalid)));
+      EXPECT_FALSE(access->IsUsable());
+      EXPECT_FALSE(access->TryLock());
+    }
+  }
+}
 
 TEST_F(RenderExternalBuffer, VulkanPublicationWireValidation) {
   UniqueFileHandle fd(open("/dev/null", O_RDONLY | O_CLOEXEC));
