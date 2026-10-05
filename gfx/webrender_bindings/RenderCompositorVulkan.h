@@ -10,6 +10,9 @@
 #include "RenderCompositor.h"
 #include "base/timer.h"
 #include "mozilla/Maybe.h"
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+#  include "X11WindowVisibility.h"
+#endif
 
 namespace mozilla::wr {
 
@@ -113,6 +116,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
     return mConfig ? &mConfig->Raw() : nullptr;
   }
   bool UsesBackendPresentation() const override { return true; }
+  bool IsWindowHidden() override;
   bool SetSurface(const WrVulkanConfig* aConfig);
   void SetRenderer(Renderer* aRenderer, WindowId aWindowId) override;
   bool BeginFrame() override;
@@ -134,6 +138,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
 
  private:
   bool PollCompletions();
+  void UpdateWindowVisibility();
   void PollPendingFrames();
   void Fail();
   void WakeUp();
@@ -154,6 +159,8 @@ class RenderCompositorVulkan final : public RenderCompositor {
 #endif
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
   RefPtr<VulkanX11Display> mX11Display;
+  Maybe<X11WindowVisibility> mWindowVisibility;
+  bool mWindowWasHidden = false;
 #endif
 };
 

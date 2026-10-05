@@ -145,6 +145,7 @@ RenderCompositorVulkan::RenderCompositorVulkan(
     const WrVulkanConfig& aConfig)
     : RenderCompositor(aWidget) {
   mConfig.emplace(aConfig);
+  UpdateWindowVisibility();
   mValidation = aConfig.validation;
   mVsync = aConfig.vsync;
   mTransparent = aConfig.transparent;
@@ -153,6 +154,34 @@ RenderCompositorVulkan::RenderCompositorVulkan(
 RenderCompositorVulkan::~RenderCompositorVulkan() {
   MOZ_ASSERT(!mRenderer);
   mCompletionTimer.Stop();
+}
+
+void RenderCompositorVulkan::UpdateWindowVisibility() {
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  mWindowVisibility.reset();
+  mWindowWasHidden = false;
+  if (mConfig && mConfig->Raw().window.IsXlib()) {
+    const auto& window = mConfig->Raw().window.xlib;
+    mWindowVisibility.emplace(window.display, window.window);
+  }
+#endif
+}
+
+bool RenderCompositorVulkan::IsWindowHidden() {
+  if (!mRenderer || mFailed || IsPaused()) {
+    return false;
+  }
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  const bool hidden = mWindowVisibility &&
+      mWindowVisibility->Query() == X11WindowVisibility::State::Hidden;
+  if (mWindowWasHidden && !hidden) {
+    wr_renderer_force_redraw(mRenderer);
+  }
+  mWindowWasHidden = hidden;
+  return hidden;
+#else
+  return false;
+#endif
 }
 
 void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
@@ -182,6 +211,7 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
     mVsync = mConfig->Raw().vsync;
     mTransparent = mConfig->Raw().transparent;
   }
+  UpdateWindowVisibility();
   auto previous = mFrames.CompletedFrame();
   if (!PollCompletions()) {
     return false;
