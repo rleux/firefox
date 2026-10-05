@@ -45,6 +45,8 @@ core-foundation = "0.9"
 
 [features]
 default = [ "env_logger" ]
+vulkan = [ "webrender/vulkan" ]
+vulkan-naga = [ "vulkan", "webrender/vulkan-naga" ]
 headless = [ "osmesa-sys", "osmesa-src" ]
 software = [ "swgl" ]
 debugger = [ "webrender/debugger" ]

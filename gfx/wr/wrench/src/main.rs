@@ -71,6 +71,8 @@ use webrender::render_api::*;
 use webrender::api::units::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
+#[cfg(wrench_vulkan)]
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
@@ -171,6 +173,14 @@ mod swgl {
 }
 
 pub enum WindowWrapper {
+    #[cfg(wrench_vulkan)]
+    Vulkan {
+        window: Rc<Window>,
+        display: winit::event_loop::OwnedDisplayHandle,
+        adapter: Option<String>,
+        validation: bool,
+        vsync: bool,
+    },
     Windowed {
         window: Window,
         gl_surface: Surface<WindowSurface>,
@@ -195,6 +205,14 @@ pub enum WindowWrapper {
 pub struct HeadlessEventIterater;
 
 impl WindowWrapper {
+    fn is_vulkan(&self) -> bool {
+        match self {
+            #[cfg(wrench_vulkan)]
+            Self::Vulkan { .. } => true,
+            _ => false,
+        }
+    }
+
     #[cfg(feature = "software")]
     fn upload_software_to_native(&self) {
         if matches!(self, WindowWrapper::Headless { .. }) { return }
@@ -225,6 +243,8 @@ impl WindowWrapper {
 
     fn swap_buffers(&self) {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { .. } => {}
             WindowWrapper::Windowed { gl_surface, gl_context, .. } => {
                 gl_surface.swap_buffers(gl_context).unwrap()
             }
@@ -239,6 +259,8 @@ impl WindowWrapper {
             DeviceIntSize::new(size.width as i32, size.height as i32)
         }
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { window, .. } => inner_size(window),
             WindowWrapper::Windowed { window, .. } => inner_size(window),
             WindowWrapper::Angle { window, .. } => inner_size(window),
             WindowWrapper::Headless { context, .. } => DeviceIntSize::new(context.width, context.height),
@@ -247,6 +269,8 @@ impl WindowWrapper {
 
     fn hidpi_factor(&self) -> f32 {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { window, .. } => window.scale_factor() as f32,
             WindowWrapper::Windowed { window, .. } => window.scale_factor() as f32,
             WindowWrapper::Angle { window, .. } => window.scale_factor() as f32,
             WindowWrapper::Headless { .. } => 1.0,
@@ -255,6 +279,11 @@ impl WindowWrapper {
 
     fn resize(&mut self, size: DeviceIntSize) {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { window, .. } => {
+                let _ = window
+                    .request_inner_size(PhysicalSize::new(size.width as u32, size.height as u32));
+            }
             WindowWrapper::Windowed { window, .. } => {
                 let _ = window.request_inner_size(LogicalSize::new(size.width as f64, size.height as f64));
             },
@@ -267,6 +296,8 @@ impl WindowWrapper {
 
     fn set_title(&mut self, title: &str) {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { window, .. } => window.set_title(title),
             WindowWrapper::Windowed { window, .. } => window.set_title(title),
             WindowWrapper::Angle { window, .. } => window.set_title(title),
             WindowWrapper::Headless { .. } => (),
@@ -275,6 +306,8 @@ impl WindowWrapper {
 
     pub fn software_gl(&self) -> Option<&swgl::Context> {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { .. } => None,
             WindowWrapper::Windowed { sw_ctx, .. } |
             WindowWrapper::Angle { sw_ctx, .. } |
             WindowWrapper::Headless { sw_ctx, .. } => sw_ctx.as_ref(),
@@ -283,6 +316,8 @@ impl WindowWrapper {
 
     pub fn native_gl(&self) -> &dyn gl::Gl {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { .. } => panic!("The Vulkan window has no OpenGL context"),
             WindowWrapper::Windowed { gl, .. } |
             WindowWrapper::Angle { gl, .. } |
             WindowWrapper::Headless { gl, .. } => &**gl,
@@ -309,6 +344,8 @@ impl WindowWrapper {
 
     pub fn clone_gl(&self) -> Rc<dyn gl::Gl> {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { .. } => panic!("The Vulkan window has no OpenGL context"),
             WindowWrapper::Windowed { gl, sw_ctx, .. } |
             WindowWrapper::Angle { gl, sw_ctx, .. } |
             WindowWrapper::Headless { gl, sw_ctx, .. } => {
@@ -343,6 +380,8 @@ impl WindowWrapper {
     #[cfg(target_os = "windows")]
     pub fn get_d3d11_device(&self) -> *const c_void {
         match self {
+            #[cfg(wrench_vulkan)]
+            WindowWrapper::Vulkan { .. } => unreachable!(),
             WindowWrapper::Windowed { .. } |
             WindowWrapper::Headless { .. } => unreachable!(),
             WindowWrapper::Angle { context, .. } => context.get_d3d11_device(),
@@ -656,6 +695,7 @@ struct ShowState {
     do_loop: bool,
     do_render: bool,
     do_frame: bool,
+    resize_pending: bool,
     cursor_position: WorldPoint,
 }
 
@@ -672,6 +712,11 @@ static ANDROID_APP: std::sync::OnceLock<AndroidApp> = std::sync::OnceLock::new()
 
 struct WrenchApp {
     // -- Config --
+    vulkan: bool,
+    #[cfg(wrench_vulkan)]
+    adapter: Option<String>,
+    #[cfg(wrench_vulkan)]
+    validation: bool,
     size: DeviceIntSize,
     vsync: bool,
     angle: bool,
@@ -746,8 +791,31 @@ impl ApplicationHandler for WrenchApp {
             return;
         }
 
-        // Create window / GL context.
-        let mut window = if self.headless {
+        // Create the window and any context owned by the embedder.
+        let mut window = if self.vulkan {
+            #[cfg(wrench_vulkan)]
+            {
+                let window = event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("WRench")
+                            .with_inner_size(PhysicalSize::new(
+                                self.size.width as u32,
+                                self.size.height as u32,
+                            )),
+                    )
+                    .expect("failed to create Vulkan window");
+                WindowWrapper::Vulkan {
+                    window: Rc::new(window),
+                    display: event_loop.owned_display_handle(),
+                    adapter: self.adapter.clone(),
+                    validation: self.validation,
+                    vsync: self.vsync,
+                }
+            }
+            #[cfg(not(wrench_vulkan))]
+            unreachable!("Vulkan arguments must be rejected before startup")
+        } else if self.headless {
             let sw_ctx = if self.software { Some(make_software_context()) } else { None };
             #[cfg_attr(not(feature = "software"), allow(unused_variables))]
             let gl: Rc<dyn gl::Gl> = if let Some(ref sw_ctx) = sw_ctx {
@@ -805,9 +873,40 @@ impl ApplicationHandler for WrenchApp {
             make_window_with_fallback(event_loop, self.size, self.vsync, self.gl_request, self.software)
         };
 
-        let gl = window.gl();
-        gl.clear_color(0.3, 0.0, 0.0, 1.0);
-        println!("OpenGL version {}, {}", gl.get_string(gl::VERSION), gl.get_string(gl::RENDERER));
+        #[cfg(wrench_vulkan)]
+        if let (Some(wrench), WindowWrapper::Vulkan { window: native, .. }) =
+            (self.wrench.as_mut(), &window)
+        {
+            wrench
+                .renderer
+                .set_vulkan_surface(
+                    Some(native.clone()),
+                    webrender::vulkan::SurfaceOptions {
+                        vsync: self.vsync,
+                        ..Default::default()
+                    },
+                )
+                .expect("reattaching Vulkan surface");
+            wrench
+                .renderer
+                .set_surface_paused(false)
+                .expect("resuming Vulkan surface");
+            if let Some(show) = self.show_state.as_mut() {
+                show.do_render = true;
+            }
+            self.window = Some(window);
+            return;
+        }
+
+        if !self.vulkan {
+            let gl = window.gl();
+            gl.clear_color(0.3, 0.0, 0.0, 1.0);
+            println!(
+                "OpenGL version {}, {}",
+                gl.get_string(gl::VERSION),
+                gl.get_string(gl::RENDERER)
+            );
+        }
         println!("hidpi factor: {}", window.hidpi_factor());
 
         let init_target_dbg = self.color_target_init || matches!(
@@ -893,7 +992,7 @@ impl ApplicationHandler for WrenchApp {
                 debug_flags.set(DebugFlags::DISABLE_COMPOSITOR_CLIPS, !compositor_clips);
                 wrench.set_compositor_clips_enabled(compositor_clips);
 
-                if cfg!(target_os = "android") {
+                if cfg!(target_os = "android") && !self.vulkan {
                     debug_flags.toggle(DebugFlags::PROFILER_DBG);
                     wrench.api.send_debug_cmd(DebugCommand::SetFlags(debug_flags));
                 }
@@ -904,6 +1003,9 @@ impl ApplicationHandler for WrenchApp {
                 // initial proxy send fires before any content is queued, and
                 // wrench.render() presents a transparent frame.
                 let mut thing = thing;
+                if self.vulkan {
+                    thing.on_window_changed(dim, window.hidpi_factor());
+                }
                 thing.do_frame(&mut wrench);
                 if let Some(fb_size) = wrench.renderer.device_size() {
                     window.resize(fb_size);
@@ -917,6 +1019,7 @@ impl ApplicationHandler for WrenchApp {
                     do_loop: false,
                     do_render: false,
                     do_frame: false,
+                    resize_pending: false,
                     cursor_position: WorldPoint::zero(),
                 });
 
@@ -1008,6 +1111,20 @@ impl ApplicationHandler for WrenchApp {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(_) | WindowEvent::RedrawRequested => show.do_render = true,
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.vulkan => {
+                show.thing.on_window_changed(self.size, scale_factor as f32);
+                show.do_frame = true;
+                show.do_render = true;
+                show.resize_pending = true;
+            }
+            WindowEvent::Occluded(occluded) if self.vulkan => {
+                wrench
+                    .renderer
+                    .set_surface_paused(occluded)
+                    .expect("pausing Vulkan surface");
+                show.do_render = !occluded;
+            }
             WindowEvent::Focused(..) => show.do_render = true,
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(ref window) = self.window {
@@ -1031,6 +1148,27 @@ impl ApplicationHandler for WrenchApp {
             } => {
                 let key = key.clone();
                 match key.as_ref() {
+                    Key::Character(key)
+                        if self.vulkan
+                            && matches!(
+                                key.to_lowercase().as_str(),
+                                "b" | "p"
+                                    | "o"
+                                    | "i"
+                                    | "d"
+                                    | "f"
+                                    | "q"
+                                    | "v"
+                                    | "g"
+                                    | "h"
+                                    | "c"
+                                    | "z"
+                            ) =>
+                    {
+                        eprintln!(
+                            "Debug overlays, GPU queries and capture are unavailable with Vulkan"
+                        );
+                    }
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character("b") | Key::Character("B") => {
                         show.debug_flags.toggle(DebugFlags::INVALIDATION_DBG);
@@ -1140,6 +1278,24 @@ impl ApplicationHandler for WrenchApp {
         let Some(ref mut wrench) = self.wrench else { return };
         let Some(ref mut window) = self.window else { return };
 
+        let dim = window.get_inner_size();
+        if self.vulkan {
+            if dim.width == 0 || dim.height == 0 {
+                event_loop.set_control_flow(ControlFlow::Wait);
+                return;
+            }
+            if dim != self.size {
+                self.size = dim;
+                show.thing.on_window_changed(dim, window.hidpi_factor());
+                let mut txn = Transaction::new();
+                txn.set_document_view(DeviceIntRect::from_size(dim));
+                wrench.api.send_transaction(wrench.document_id, txn);
+                show.do_frame = true;
+                show.do_render = true;
+                show.resize_pending = true;
+            }
+        }
+
         if show.no_block || cfg!(target_os = "android") {
             event_loop.set_control_flow(ControlFlow::Poll);
             // On Android the notifier never fires send_event() (see wrench.rs),
@@ -1157,6 +1313,12 @@ impl ApplicationHandler for WrenchApp {
             unsafe { CURRENT_FRAME_NUMBER = frame_num; }
         }
 
+        if show.resize_pending {
+            // The old document viewport may exceed the resized swapchain.
+            wrench.api.flush_scene_builder();
+            show.resize_pending = false;
+        }
+
         if show.do_render {
             show.do_render = false;
 
@@ -1164,7 +1326,16 @@ impl ApplicationHandler for WrenchApp {
                 wrench.show_onscreen_help();
             }
 
-            wrench.render();
+            let result = wrench.render();
+            if matches!(
+                result.present_result,
+                Some(webrender::PresentResult::Retry | webrender::PresentResult::SizeMismatch)
+            ) {
+                show.do_render = true;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(16),
+                ));
+            }
             window.upload_software_to_native();
             window.swap_buffers();
 
@@ -1182,6 +1353,19 @@ impl ApplicationHandler for WrenchApp {
         // On Android, force-exit the process.
         #[cfg(target_os = "android")]
         process::exit(self.exit_code);
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(wrench_vulkan)]
+        if self.vulkan {
+            if let Some(wrench) = self.wrench.as_mut() {
+                wrench
+                    .renderer
+                    .set_vulkan_surface(None, Default::default())
+                    .expect("detaching Vulkan surface");
+            }
+            self.window = None;
+        }
     }
 }
 
@@ -1337,6 +1521,11 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
     };
 
     WrenchApp {
+        vulkan: args.value_of("backend") == Some("vulkan"),
+        #[cfg(wrench_vulkan)]
+        adapter: args.value_of("adapter").map(str::to_owned),
+        #[cfg(wrench_vulkan)]
+        validation: args.is_present("validation"),
         size, vsync, angle, software, using_compositor, gl_request, headless,
         res_path, use_optimized_shaders, rebuild, no_subpixel_aa, verbose,
         no_scissor, no_batch_global, color_target_init, precache, dump_shader_source, profiler_ui,
@@ -1358,7 +1547,7 @@ fn parse_args() -> clap::ArgMatches {
     let clap_app = clap::Command::from_yaml(args_yaml).arg_required_else_help(true);
 
     #[cfg(target_os = "android")]
-    {
+    let args = {
         std::env::set_var("RUST_BACKTRACE", "full");
 
         let mut args = vec!["wrench".to_string()];
@@ -1383,10 +1572,111 @@ fn parse_args() -> clap::ArgMatches {
         }
 
         clap_app.get_matches_from(&args)
-    }
+    };
 
     #[cfg(not(target_os = "android"))]
-    clap_app.get_matches()
+    let args = clap_app.get_matches();
+    if let Err(message) = validate_backend_args(&args) {
+        clap::Error::raw(clap::ErrorKind::ArgumentConflict, message).exit();
+    }
+    args
+}
+
+fn validate_backend_args(args: &clap::ArgMatches) -> Result<(), &'static str> {
+    if args.value_of("backend") != Some("vulkan") {
+        if args.is_present("adapter") || args.is_present("validation") {
+            return Err("--adapter and --validation require --backend vulkan");
+        }
+        return Ok(());
+    }
+    if !cfg!(wrench_vulkan) {
+        return Err(
+            "Vulkan requires the vulkan or vulkan-naga feature on Linux, Windows or Android",
+        );
+    }
+    if [
+        "angle",
+        "software",
+        "compositor",
+        "renderer",
+        "headless",
+        "profiler_ui",
+        "shaders",
+        "dump_shader_source",
+        "use_unoptimized_shaders",
+    ]
+    .iter()
+    .any(|option| args.is_present(option))
+    {
+        return Err("Vulkan requires a native window without GL, software, shader override or profiler options");
+    }
+    if !matches!(
+        args.subcommand_name(),
+        Some("show" | "test_init" | "test_invalidation")
+    ) {
+        return Err("Vulkan supports show, test_init and test_invalidation; readback and performance commands are unavailable");
+    }
+    if let Some(show) = args.subcommand_matches("show") {
+        if Path::new(show.value_of("INPUT").unwrap()).is_dir() {
+            return Err("Vulkan capture replay is unavailable; provide a YAML scene");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod backend_args_tests {
+    use super::*;
+
+    fn validate(arguments: &[&str]) -> Result<(), &'static str> {
+        #[allow(deprecated)]
+        let yaml = load_yaml!("args.yaml");
+        #[allow(deprecated)]
+        let args = clap::Command::from_yaml(yaml)
+            .try_get_matches_from(arguments)
+            .unwrap();
+        validate_backend_args(&args)
+    }
+
+    #[test]
+    fn gl_remains_the_default() {
+        assert!(validate(&["wrench", "--headless", "--software", "test_init"]).is_ok());
+        assert!(validate(&["wrench", "--validation", "test_init"]).is_err());
+        assert!(validate(&["wrench", "--adapter", "Intel", "test_init"]).is_err());
+    }
+
+    #[test]
+    fn vulkan_requires_compiled_support() {
+        for command in ["test_init", "test_invalidation"] {
+            assert_eq!(
+                validate(&["wrench", "--backend", "vulkan", command]).is_ok(),
+                cfg!(wrench_vulkan)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(wrench_vulkan)]
+    fn vulkan_rejects_unavailable_paths() {
+        for option in ["--software", "--angle", "--compositor", "--headless"] {
+            assert!(validate(&["wrench", "--backend", "vulkan", option, "test_init"]).is_err());
+        }
+        for command in ["rawtest", "reftest"] {
+            assert!(validate(&["wrench", "--backend", "vulkan", command]).is_err());
+        }
+        assert!(validate(&["wrench", "--backend", "vulkan", "show", "."]).is_err());
+        assert!(validate(&[
+            "wrench",
+            "--backend",
+            "vulkan",
+            "--adapter",
+            "Intel",
+            "--validation",
+            "show",
+            "scene.yaml"
+        ])
+        .is_ok());
+    }
 }
 
 fn run(event_loop: EventLoop<()>, args: clap::ArgMatches) -> i32 {
@@ -1566,7 +1856,13 @@ pub fn main() {
     let exit_code = if args.is_present("headless") {
         run_headless(args)
     } else {
-        let event_loop = EventLoop::new().expect("failed to create event loop");
+        let mut builder = EventLoop::builder();
+        #[cfg(target_os = "linux")]
+        if args.value_of("backend") == Some("vulkan") {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }
+        let event_loop = builder.build().expect("failed to create event loop");
         run(event_loop, args)
     };
     if exit_code != 0 {
