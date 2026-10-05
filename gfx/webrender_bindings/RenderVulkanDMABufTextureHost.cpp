@@ -101,6 +101,27 @@ bool RenderVulkanDMABufTextureHost::Import(WrVulkanExternalImages* aImages) {
   return true;
 }
 
+bool RenderVulkanDMABufTextureHost::SwitchContext(
+    WrVulkanExternalImages* aImages) {
+  if (mAcquired || mLocks != 1 || mPendingReleases ||
+      mReturnInfo.mStatus != VulkanImageReturnStatus::Submitted ||
+      !mReturnInfo.mSemaphore || !mReturnInfo.mValue) {
+    return false;
+  }
+  mReadyFd = std::move(mReturnInfo.mSemaphore);
+  mReadyDescriptor.fd = mReadyFd.get();
+  mReadyValue = mReturnInfo.mValue;
+  mImage.reset();
+  mReady.reset();
+  mReleased.reset();
+  mHandle = {};
+  mOpaqueHandle = {};
+  mLastIssued = 0;
+  mLastNotified = 0;
+  mReturnInfo = {};
+  return Import(aImages);
+}
+
 WrExternalImage RenderVulkanDMABufTextureHost::LockVulkan(
     uint8_t aChannelIndex, WrVulkanExternalImages* aImages) {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
@@ -110,7 +131,8 @@ WrExternalImage RenderVulkanDMABufTextureHost::LockVulkan(
     return InvalidToWrExternalImage();
   }
   if ((!mImage && !Import(aImages)) ||
-      !wr_vulkan_dmabuf_matches_context(mImage.get(), aImages)) {
+      (!wr_vulkan_dmabuf_matches_context(mImage.get(), aImages) &&
+       !SwitchContext(aImages))) {
     mFailed = true;
     return InvalidToWrExternalImage();
   }

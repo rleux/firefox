@@ -3,10 +3,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use ash::vk;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, IntoRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::Duration;
-use webrender::api::*;
+use webrender::api::{units::*, *};
+use webrender::render_api::{RenderApi, RenderApiSender, Transaction};
 use webrender::vulkan::{Device, Options, SharedTimeline, Submission, TimelineHandle};
 
 #[repr(C)]
@@ -22,6 +24,7 @@ pub struct TestVulkanImage {
 
 pub struct Fixture {
     renderer: Option<webrender::Renderer>,
+    next: Option<MigrationRenderer>,
     producer: Rc<Device>,
     submission: Submission,
     image: vk::Image,
@@ -32,6 +35,7 @@ pub struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        drop(self.next.take());
         if let Some(renderer) = self.renderer.take() {
             renderer.deinit();
         }
@@ -43,30 +47,117 @@ impl Drop for Fixture {
     }
 }
 
-struct Notice;
+struct Notice(Option<mpsc::Sender<()>>);
 impl RenderNotifier for Notice {
     fn clone(&self) -> Box<dyn RenderNotifier> {
-        Box::new(Self)
+        Box::new(Self(self.0.clone()))
     }
     fn wake_up(&self, _: bool) {}
-    fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {}
+    fn new_frame_ready(&self, _: DocumentId, _: FramePublishId, _: &FrameReadyParams) {
+        if let Some(ready) = &self.0 { let _ = ready.send(()); }
+    }
 }
 
 pub(super) fn renderer() -> webrender::Renderer {
-    let (renderer, _) = webrender::create_webrender_instance(
+    renderer_pair(None).0
+}
+
+fn renderer_pair(ready: Option<mpsc::Sender<()>>) -> (webrender::Renderer, RenderApiSender) {
+    webrender::create_webrender_instance(
         webrender::GpuBackendConfig::Vulkan(Options {
             validation: true,
             ..Default::default()
         }),
-        Box::new(Notice),
+        Box::new(Notice(ready)),
         webrender::WebRenderOptions {
             enable_debugger: false,
             ..Default::default()
         },
         None,
     )
-    .unwrap();
-    renderer
+    .unwrap()
+}
+
+struct MigrationRenderer {
+    renderer: Option<webrender::Renderer>,
+    api: RenderApi,
+    document: DocumentId,
+    ready: mpsc::Receiver<()>,
+}
+
+impl MigrationRenderer {
+    fn new() -> Self {
+        let (notify, ready) = mpsc::channel();
+        let (renderer, sender) = renderer_pair(Some(notify));
+        let mut api = sender.create_api();
+        let document = api.add_document(DeviceIntSize::new(2, 2));
+        Self { renderer: Some(renderer), api, document, ready }
+    }
+
+    fn sample(&mut self, handle: ExternalTextureHandle) {
+        struct Handle(ExternalTextureHandle);
+        impl ExternalImageHandler for Handle {
+            fn lock(&mut self, _: ExternalImageId, _: u8, _: bool) -> ExternalImage<'_> {
+                ExternalImage {
+                    uv: TexelRect::new(0., 0., 2., 2.),
+                    source: ExternalImageSource::NativeTexture(self.0),
+                }
+            }
+            fn unlock(&mut self, _: ExternalImageId, _: u8) {}
+        }
+        let renderer = self.renderer.as_mut().unwrap();
+        renderer.set_external_image_handler(Box::new(Handle(handle)));
+        let pipeline = PipelineId(0, 0);
+        let mut transaction = Transaction::new();
+        let key = self.api.generate_image_key();
+        transaction.add_image(
+            key,
+            ImageDescriptor::new(2, 2, ImageFormat::RGBA8, ImageDescriptorFlags::empty()),
+            ImageData::External(ExternalImageData {
+                id: ExternalImageId(1),
+                channel_index: 0,
+                image_type: ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),
+                normalized_uvs: false,
+            }),
+            None,
+        );
+        let mut builder = DisplayListBuilder::new(pipeline);
+        builder.begin(60.);
+        let rect = LayoutRect::from_size(LayoutSize::new(2., 2.));
+        builder.push_image(
+            &CommonItemProperties::new(rect, SpaceAndClipInfo::root_scroll(pipeline)),
+            rect, ImageRendering::Pixelated, AlphaType::PremultipliedAlpha,
+            key, ColorF::WHITE,
+        );
+        transaction.set_root_pipeline(pipeline);
+        transaction.set_display_list(Epoch(0), self.api.get_namespace_id(), builder.end());
+        transaction.generate_frame(1, true, false, RenderReasons::TESTING);
+        self.api.send_transaction(self.document, transaction);
+        self.ready.recv_timeout(Duration::from_secs(15)).unwrap();
+        renderer.update();
+        renderer.render(DeviceIntSize::new(2, 2), 0).unwrap();
+    }
+}
+
+impl Drop for MigrationRenderer {
+    fn drop(&mut self) {
+        self.api.delete_document(self.document);
+        if let Some(renderer) = self.renderer.take() {
+            renderer.deinit();
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_vulkan_renderer_new() -> *mut webrender::Renderer {
+    Box::into_raw(Box::new(renderer()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_vulkan_renderer_delete(renderer: *mut webrender::Renderer) {
+    if !renderer.is_null() {
+        (*Box::from_raw(renderer)).deinit();
+    }
 }
 
 #[no_mangle]
@@ -213,6 +304,7 @@ pub extern "C" fn wr_test_vulkan_image_new(output: &mut TestVulkanImage) -> *mut
         };
         Box::into_raw(Box::new(Fixture {
             renderer: Some(renderer),
+        next: None,
             producer,
             submission,
             image,
@@ -253,4 +345,58 @@ pub unsafe extern "C" fn wr_test_vulkan_image_wait(
 #[no_mangle]
 pub unsafe extern "C" fn wr_test_vulkan_image_delete(fixture: *mut Fixture) {
     drop(Box::from_raw(fixture));
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_vulkan_image_next_renderer(fixture: &mut Fixture) -> &mut webrender::Renderer {
+    fixture.next.get_or_insert_with(MigrationRenderer::new).renderer.as_mut().unwrap()
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_vulkan_image_sample(fixture: &mut Fixture, handle: u64) {
+    fixture.next.as_mut().unwrap().sample(ExternalTextureHandle(handle));
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_vulkan_image_submit_next(fixture: &mut Fixture) {
+    drop(fixture.next.take());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_vulkan_image_value(
+    fixture: &Fixture,
+    fd: i32,
+    device_uuid: &[u8; 16],
+    driver_uuid: &[u8; 16],
+) -> u64 {
+    let fd = BorrowedFd::borrow_raw(fd).try_clone_to_owned().unwrap();
+    let handle = TimelineHandle::from_fd(fd, *device_uuid, *driver_uuid);
+    let _validated = SharedTimeline::import(&fixture.producer, &handle).unwrap();
+    let fd = handle.as_fd().try_clone_to_owned().unwrap();
+    let device = fixture.producer.raw_device();
+    let raw = device.raw_device();
+    let mut kind = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+    let semaphore = raw.create_semaphore(
+        &vk::SemaphoreCreateInfo::default().push_next(&mut kind), None,
+    ).unwrap();
+    let imported = ash::khr::external_semaphore_fd::Device::new(
+        device.shared_instance().raw_instance(), raw,
+    ).import_semaphore_fd(
+        &vk::ImportSemaphoreFdInfoKHR::default()
+            .semaphore(semaphore)
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
+            .fd(fd.as_raw_fd()),
+    );
+    if imported.is_ok() { let _ = fd.into_raw_fd(); }
+    let value = imported.and_then(|_| {
+        if device.enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME) {
+            ash::khr::timeline_semaphore::Device::new(
+                device.shared_instance().raw_instance(), raw,
+            ).get_semaphore_counter_value(semaphore)
+        } else {
+            raw.get_semaphore_counter_value(semaphore)
+        }
+    });
+    raw.destroy_semaphore(semaphore, None);
+    value.unwrap()
 }

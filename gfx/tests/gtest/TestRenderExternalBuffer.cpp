@@ -860,13 +860,19 @@ struct TestVulkanImage {
 extern "C" {
 void* wr_test_vulkan_image_new(TestVulkanImage*);
 Renderer* wr_test_vulkan_image_renderer(void*);
+Renderer* wr_test_vulkan_image_next_renderer(void*);
+void wr_test_vulkan_image_sample(void*, uint64_t);
+void wr_test_vulkan_image_submit_next(void*);
+uint64_t wr_test_vulkan_image_value(void*, int32_t, const uint8_t*, const uint8_t*);
 void wr_test_vulkan_image_submit(void*);
 bool wr_test_vulkan_image_wait(void*, int32_t, const uint8_t*, const uint8_t*,
                                uint64_t);
 void wr_test_vulkan_image_delete(void*);
+Renderer* wr_test_vulkan_renderer_new();
+void wr_test_vulkan_renderer_delete(Renderer*);
 }
 
-static void CheckVulkanPublication() {
+static void CheckVulkanPublication(bool aMigrate) {
   for (bool fail : {false, true}) {
     TestVulkanImage source{};
     auto* fixture = wr_test_vulkan_image_new(&source);
@@ -875,11 +881,15 @@ static void CheckVulkanPublication() {
     auto* renderer = wr_test_vulkan_image_renderer(fixture);
     auto* context = wr_vulkan_external_images_new(renderer);
     auto* alias = wr_vulkan_external_images_new(renderer);
+    auto* next = aMigrate ? wr_vulkan_external_images_new(
+        wr_test_vulkan_image_next_renderer(fixture)) : nullptr;
     ASSERT_NE(context, nullptr);
     ASSERT_NE(alias, nullptr);
+    ASSERT_TRUE(!aMigrate || next);
     auto cleanupContexts = MakeScopeExit([&] {
       wr_vulkan_external_images_delete(context);
       wr_vulkan_external_images_delete(alias);
+      wr_vulkan_external_images_delete(next);
     });
     auto capabilities = VulkanImageCapabilities::Register(context);
     ASSERT_TRUE(capabilities);
@@ -957,17 +967,33 @@ static void CheckVulkanPublication() {
     releases.Poll();
     EXPECT_FALSE(returned);
     if (fail) {
-      EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+      EXPECT_EQ(host->LockVulkan(0, aMigrate ? next : nullptr).image_type,
                 WrExternalImageType::Invalid);
-      EXPECT_FALSE(host->UnlockVulkan(nullptr));
+      EXPECT_FALSE(host->UnlockVulkan(aMigrate ? next : nullptr));
+    }
+    if (aMigrate && !fail) {
+      wr_test_vulkan_image_submit(fixture);
+      releases.Poll();
+      EXPECT_FALSE(releases.HasPending());
+      EXPECT_FALSE(returned);
+      const auto migrated = host->LockVulkan(0, next);
+      ASSERT_EQ(migrated.image_type, WrExternalImageType::NativeTexture);
+      wr_test_vulkan_image_sample(fixture, migrated.handle);
+      release = host->UnlockVulkan(next);
+      ASSERT_TRUE(release);
+      releases.Add(host, std::move(release.ref()));
     }
     layersHost = nullptr;
     host = nullptr;
     EXPECT_FALSE(returned);
     wr_vulkan_external_images_delete(context);
     wr_vulkan_external_images_delete(alias);
-    context = alias = nullptr;
-    wr_test_vulkan_image_submit(fixture);
+    wr_vulkan_external_images_delete(next);
+    context = alias = next = nullptr;
+    if (!aMigrate || fail) {
+      wr_test_vulkan_image_submit(fixture);
+    }
+    if (aMigrate) { wr_test_vulkan_image_submit_next(fixture); }
     releases.Poll();
     EXPECT_TRUE(VulkanImageCapabilities::Supports(supported));
     capabilities = nullptr;
@@ -978,18 +1004,26 @@ static void CheckVulkanPublication() {
     if (!fail) {
       ASSERT_TRUE(returned->signal());
       const auto& signal = returned->signal().ref();
-      EXPECT_EQ(signal.value(), 2U);
+      EXPECT_EQ(signal.value(), aMigrate ? 1U : 2U);
       ASSERT_TRUE(signal.handle());
       EXPECT_TRUE(wr_test_vulkan_image_wait(
           fixture, signal.handle()->GetHandle(), signal.deviceUUID().data(),
           signal.driverUUID().data(), signal.value()));
+      if (aMigrate) {
+        EXPECT_EQ(wr_test_vulkan_image_value(
+            fixture, signal.handle()->GetHandle(), signal.deviceUUID().data(),
+            signal.driverUUID().data()), 1U);
+      }
     }
   }
 }
 
 TEST_F(RenderExternalBuffer,
        DISABLED_VulkanPublicationReturnsSubmittedTimeline) {
-  OnRenderThread([] { CheckVulkanPublication(); });
+  OnRenderThread([] {
+    CheckVulkanPublication(false);
+    CheckVulkanPublication(true);
+  });
 }
 #  endif
 #endif
