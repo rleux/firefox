@@ -882,6 +882,7 @@ void wr_test_webgpu_dmabuf_import();
 void wr_test_webgpu_global_init(const webgpu::ffi::WGPUGlobal*);
 Renderer* wr_test_vulkan_renderer_new();
 void wr_test_vulkan_renderer_delete(Renderer*);
+void wr_test_vulkan_sync_file_wait();
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
@@ -939,6 +940,10 @@ TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTextureVulkanLifecycle) {
     callback(layers::VulkanImageReturnMessage(
         4, VulkanImageReturnStatus::Abandoned, Nothing()));
   });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanSyncFileWait) {
+  OnRenderThread([] { wr_test_vulkan_sync_file_wait(); });
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_WebGPUSharedTimelineLifecycle) {

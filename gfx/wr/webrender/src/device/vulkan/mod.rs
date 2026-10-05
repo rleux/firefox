@@ -31,6 +31,10 @@ pub use self::dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImag
 mod timeline;
 #[cfg(target_os = "linux")]
 pub use self::timeline::{SharedTimeline, TimelineHandle};
+#[cfg(target_os = "linux")]
+mod sync_file;
+#[cfg(target_os = "linux")]
+pub use self::sync_file::SyncFileWait;
 mod surface_config;
 pub use self::surface_config::SurfaceOptions;
 mod window_surface;

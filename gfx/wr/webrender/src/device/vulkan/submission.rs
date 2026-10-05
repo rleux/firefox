@@ -64,6 +64,14 @@ impl DerefMut for SubmissionBorrow<'_> {
 
 impl Recording<'_> {
     #[cfg(target_os = "linux")]
+    pub fn wait_sync_file(&mut self, wait: super::SyncFileWait) -> Result<(), String> {
+        let submission = &mut *self.submission;
+        submission
+            .external_sync
+            .wait_sync_file(&submission.owner, wait)
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn wait_timeline(
         &mut self, timeline: &Rc<super::SharedTimeline>, value: u64,
     ) -> Result<(), String> {
