@@ -41,13 +41,16 @@ void VulkanTextureHost::PushResourceUpdates(
   const auto format = wr::SurfaceFormatToImageFormat(mFormat);
   MOZ_RELEASE_ASSERT(format);
   wr::ImageDescriptor descriptor(mSize, *format,
-                                 wr::OpacityType::HasAlphaChannel);
+                                 (GetFlags() & TextureFlags::IS_OPAQUE)
+                                     ? wr::OpacityType::Opaque
+                                     : wr::OpacityType::HasAlphaChannel);
   const auto type =
       wr::ExternalImageType::TextureHandle(wr::ImageBufferKind::Texture2D);
   const auto method = aOp == ADD_IMAGE
                           ? &wr::TransactionBuilder::AddExternalImage
                           : &wr::TransactionBuilder::UpdateExternalImage;
-  (aResources.*method)(aImageKeys[0], descriptor, aExtID, type, 0,
+  const uint8_t channel = (GetFlags() & TextureFlags::IS_OPAQUE) ? 1 : 0;
+  (aResources.*method)(aImageKeys[0], descriptor, aExtID, type, channel,
                        /* aNormalizedUvs */ false);
 }
 

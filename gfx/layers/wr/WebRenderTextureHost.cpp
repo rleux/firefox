@@ -173,6 +173,9 @@ void WebRenderTextureHost::PushResourceUpdates(
     const Range<wr::ImageKey>& aImageKeys, const wr::ExternalImageId& aExtID) {
   MOZ_ASSERT(GetExternalImageKey() == aExtID);
 
+  mWrappedTextureHost->SetFlags(
+      (mWrappedTextureHost->GetFlags() & ~TextureFlags::IS_OPAQUE) |
+      (GetFlags() & TextureFlags::IS_OPAQUE));
   mWrappedTextureHost->PushResourceUpdates(aResources, aOp, aImageKeys, aExtID);
 }
 

@@ -921,13 +921,14 @@ static void CheckVulkanPublication() {
     VulkanImageReleaseQueue<> releases;
     const auto first = host->LockVulkan(0, context);
     ASSERT_EQ(first.image_type, WrExternalImageType::NativeTexture);
-    const auto nested = host->LockVulkan(0, alias);
-    EXPECT_EQ(nested.handle, first.handle);
+    const auto nested = host->LockVulkan(1, alias);
+    EXPECT_EQ(nested.image_type, WrExternalImageType::NativeTexture);
+    EXPECT_NE(nested.handle, first.handle);
     EXPECT_FALSE(host->UnlockVulkan(context));
     auto release = host->UnlockVulkan(alias);
     ASSERT_TRUE(release);
     releases.Add(host, std::move(release.ref()));
-    EXPECT_EQ(host->LockVulkan(0, alias).handle, first.handle);
+    EXPECT_EQ(host->LockVulkan(1, alias).handle, nested.handle);
     release = host->UnlockVulkan(alias);
     ASSERT_TRUE(release);
     releases.Add(host, std::move(release.ref()));
