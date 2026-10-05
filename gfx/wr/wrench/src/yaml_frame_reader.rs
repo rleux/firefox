@@ -8,11 +8,13 @@ use gleam::gl;
 use image::GenericImageView;
 use crate::parse_function::parse_function;
 use crate::premultiply::premultiply;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::usize;
 use webrender::api::*;
 use webrender::render_api::*;
@@ -94,15 +96,16 @@ fn gl_target(target: ImageBufferKind) -> gl::GLenum {
     }
 }
 
-struct LocalExternalImageHandler {
-    texture_ids: Vec<(gl::GLuint, ImageDescriptor)>,
+#[derive(Clone)]
+enum LocalExternalImageHandler {
+    Gl(Rc<RefCell<Vec<(gl::GLuint, ImageDescriptor)>>>),
+    #[cfg(wrench_vulkan)]
+    Vulkan(Rc<crate::vulkan_images::VulkanImages>),
 }
 
 impl LocalExternalImageHandler {
     pub fn new() -> LocalExternalImageHandler {
-        LocalExternalImageHandler {
-            texture_ids: Vec::new(),
-        }
+        Self::Gl(Rc::new(RefCell::new(Vec::new())))
     }
 
     fn init_gl_texture(
@@ -134,11 +137,35 @@ impl LocalExternalImageHandler {
     }
 
     pub fn add_image(&mut self,
-        gl: &dyn gl::Gl,
+        wrench: &Wrench,
         desc: ImageDescriptor,
         target: ImageBufferKind,
         image_data: ImageData,
     ) -> ImageData {
+        #[cfg(wrench_vulkan)]
+        if let Some(registry) = wrench.renderer.wgpu_external_textures() {
+            if matches!(self, Self::Gl(_)) {
+                *self = Self::Vulkan(Rc::new(
+                    crate::vulkan_images::VulkanImages::new(registry.clone())
+                        .expect("Creating Vulkan image uploader"),
+                ));
+            }
+            if let Self::Vulkan(images) = self {
+                assert!(
+                    images.uses_registry(&registry),
+                    "External images cannot change devices"
+                );
+                return images
+                    .add(desc, target, image_data)
+                    .expect("Uploading Vulkan external image");
+            }
+        }
+        let images = match self {
+            Self::Gl(images) => images,
+            #[cfg(wrench_vulkan)]
+            Self::Vulkan(_) => panic!("Vulkan images require their original renderer"),
+        };
+        let gl = wrench.gl();
         let (image_id, channel_idx) = match image_data {
             ImageData::Raw(ref data) => {
                 let texture_ids = gl.gen_textures(1);
@@ -162,8 +189,9 @@ impl LocalExternalImageHandler {
                     data,
                     gl,
                 );
-                self.texture_ids.push((texture_ids[0], desc));
-                (ExternalImageId((self.texture_ids.len() - 1) as u64), 0)
+                let mut images = images.borrow_mut();
+                images.push((texture_ids[0], desc));
+                (ExternalImageId((images.len() - 1) as u64), 0)
             },
             _ => panic!("unsupported!"),
         };
@@ -183,10 +211,15 @@ impl ExternalImageHandler for LocalExternalImageHandler {
     fn lock(
         &mut self,
         key: ExternalImageId,
-        _channel_index: u8,
+        channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let (id, desc) = self.texture_ids[key.0 as usize];
+        let (id, desc) = match self {
+            Self::Gl(images) => images.borrow()[key.0 as usize],
+            #[cfg(wrench_vulkan)]
+            Self::Vulkan(images) => return images.lock(key, channel_index),
+        };
+        let _ = channel_index;
         ExternalImage {
             uv: TexelRect::new(0.0, 0.0, desc.size.width as f32, desc.size.height as f32),
             source: ExternalImageSource::NativeTexture(ExternalTextureHandle(id as u64)),
@@ -401,7 +434,7 @@ pub struct YamlFrameReader {
     yaml_string: String,
     keyframes: Option<Yaml>,
 
-    external_image_handler: Option<Box<LocalExternalImageHandler>>,
+    external_image_handler: LocalExternalImageHandler,
 }
 
 impl YamlFrameReader {
@@ -430,7 +463,7 @@ impl YamlFrameReader {
             requested_frame: 0,
             built_frame: usize::MAX,
             keyframes: None,
-            external_image_handler: Some(Box::new(LocalExternalImageHandler::new())),
+            external_image_handler: LocalExternalImageHandler::new(),
             next_external_scroll_id: 1000,      // arbitrary to easily see in logs which are implicit
         }
     }
@@ -546,11 +579,9 @@ impl YamlFrameReader {
 
         wrench.put_dl_builder(root_pipeline_id, builder);
 
-        // If replaying the same frame during interactive use, the frame gets rebuilt,
-        // but the external image handler has already been consumed by the renderer.
-        if let Some(external_image_handler) = self.external_image_handler.take() {
-            wrench.renderer.set_external_image_handler(external_image_handler);
-        }
+        wrench
+            .renderer
+            .set_external_image_handler(Box::new(self.external_image_handler.clone()));
     }
 
     fn build_pipeline(
@@ -871,13 +902,12 @@ impl YamlFrameReader {
                 None => ImageBufferKind::Texture2D,
             };
 
-            let external_image_data =
-                self.external_image_handler.as_mut().unwrap().add_image(
-                    wrench.gl(),
-                    descriptor,
-                    external_target,
-                    image_data
-                );
+            let external_image_data = self.external_image_handler.add_image(
+                wrench,
+                descriptor,
+                external_target,
+                image_data,
+            );
             txn.add_image(image_key, descriptor, external_image_data, tiling);
         } else {
             txn.add_image(image_key, descriptor, image_data, tiling);
