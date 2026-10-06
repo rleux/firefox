@@ -136,6 +136,10 @@ impl MigrationRenderer {
         self.ready.recv_timeout(Duration::from_secs(15)).unwrap();
         renderer.update();
         renderer.render(DeviceIntSize::new(2, 2), 0).unwrap();
+        assert_eq!(
+            renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(2, 2))),
+            [255, 0, 0, 255].repeat(4),
+        );
     }
 }
 

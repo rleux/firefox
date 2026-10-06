@@ -3518,9 +3518,10 @@ impl GpuBackend for GlDevice {
         rect: FramebufferIntRect,
         format: ImageFormat,
         output: &mut [u8],
-    ) {
+    ) -> bool {
         self.bind_read_target(target);
         self.read_pixels_impl(rect, format, output);
+        true
     }
 
     fn read_texture(&mut self, texture: &Texture, format: ImageFormat, output: &mut [u8]) {

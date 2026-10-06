@@ -425,6 +425,9 @@ impl Renderer {
         &mut self,
         image_format: ImageFormat,
     ) -> Option<(RecordedFrameHandle, DeviceIntSize)> {
+        if !self.device.supports_async_readback() {
+            return None;
+        }
         let device_size = self.device_size()?;
         self.device.begin_frame();
 
@@ -482,12 +485,16 @@ impl Renderer {
     /// Requesting `BGRA8` requires `supports_bgra_readback()`. When that is
     /// false the caller must request `RGBA8` instead and have
     /// `map_and_recycle_screenshot` swap the channels into the desired format.
+    /// Unsupported backends return an empty size and an unmappable handle.
     pub fn get_screenshot_async(
         &mut self,
         window_rect: DeviceIntRect,
         buffer_size: DeviceIntSize,
         image_format: ImageFormat,
     ) -> (AsyncScreenshotHandle, DeviceIntSize) {
+        if !self.device.supports_async_readback() {
+            return (AsyncScreenshotHandle(0), DeviceIntSize::zero());
+        }
         self.device.begin_frame();
 
         let handle = self

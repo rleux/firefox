@@ -2170,8 +2170,9 @@ void WebRenderBridgeParent::MaybeCaptureScreenPixels() {
 #endif
 
 mozilla::ipc::IPCResult WebRenderBridgeParent::RecvGetSnapshot(
-    NotNull<PTextureParent*> aTexture, bool* aNeedsYFlip) {
+    NotNull<PTextureParent*> aTexture, bool* aNeedsYFlip, bool* aSuccess) {
   *aNeedsYFlip = false;
+  *aSuccess = false;
   CompositorBridgeParent* cbp = GetRootCompositorBridgeParent();
   if (!EnsureInitialized() || !cbp || cbp->IsPaused()) {
     return IPC_OK();
@@ -2242,9 +2243,9 @@ mozilla::ipc::IPCResult WebRenderBridgeParent::RecvGetSnapshot(
 
   FlushSceneBuilds();
   FlushFrameGeneration(wr::RenderReasons::SNAPSHOT);
-  mLateInit->mApi->Readback(start, size, bufferTexture->GetFormat(),
-                            Range<uint8_t>(buffer, buffer_size.value()),
-                            aNeedsYFlip);
+  *aSuccess = mLateInit->mApi->Readback(
+      start, size, bufferTexture->GetFormat(),
+      Range<uint8_t>(buffer, buffer_size.value()), aNeedsYFlip);
 
   return IPC_OK();
 }
