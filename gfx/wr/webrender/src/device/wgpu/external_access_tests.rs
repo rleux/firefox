@@ -293,3 +293,73 @@ mod window {
         assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
     }
 }
+
+#[test]
+#[cfg(feature = "capture")]
+#[ignore = "Requires Vulkan DMA-BUF images, shared timelines and validation"]
+fn external_readback_preserves_dma_buf_publication_ownership() {
+    use api::{ImageBufferKind, ImageDescriptor, ImageDescriptorFlags, ImageFormat};
+
+    let producer = device();
+    let consumer = device();
+    let ready = SharedTimeline::new(&producer).unwrap();
+    let ready_import = SharedTimeline::import(&consumer, &ready.export().unwrap()).unwrap();
+    let released = SharedTimeline::new(&consumer).unwrap();
+    let release_import = SharedTimeline::import(&producer, &released.export().unwrap()).unwrap();
+    let (source, fd) = export_image(&producer, wgt::TextureFormat::Rgba8Unorm, 0, [2, 2]);
+    let image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
+    let mut renderer = RenderDevice::new(&consumer).unwrap();
+    let registry = renderer.textures.external_textures();
+    let descriptor = ImageDescriptor::new(2, 2, ImageFormat::RGBA8, ImageDescriptorFlags::empty());
+    for value in 1..=2 {
+        let color = if value == 1 {
+            [1., 0., 0., 0.]
+        } else {
+            [0., 0., 1., 0.]
+        };
+        let mut send = publish(
+            &source,
+            &ready,
+            value,
+            if value == 1 {
+                None
+            } else {
+                Some((&release_import, value - 1))
+            },
+            color,
+        );
+        renderer.begin_frame().unwrap();
+        unsafe { registry.acquire_dma_buf(&image, &ready_import, value) }.unwrap();
+        for opaque in [false, true] {
+            let texture = Texture::from_dma_buf(&image, TextureFilter::Nearest, opaque).unwrap();
+            let handle = registry.register(&texture).unwrap();
+            let mut pixel = if value == 1 {
+                [255, 0, 0, 0]
+            } else {
+                [0, 0, 255, 0]
+            };
+            if opaque {
+                pixel[3] = 255;
+            }
+            assert_eq!(
+                GpuBackend::read_external_texture(
+                    &mut renderer,
+                    handle,
+                    ImageBufferKind::Texture2D,
+                    &descriptor
+                ),
+                pixel.repeat(4),
+            );
+            assert!(texture.sample_initialized());
+            assert_eq!(texture.current_usage(), wgt::TextureUses::RESOURCE);
+            registry.unregister(handle).unwrap();
+        }
+        let receipt = registry.release_dma_buf(&image, &released, value).unwrap();
+        renderer.end_frame().unwrap();
+        assert_eq!(receipt.status(), ExternalReleaseStatus::Submitted(value));
+        renderer.submissions.wait().unwrap();
+        assert!(send.wait(Some(Duration::from_secs(5))).unwrap());
+        assert!(renderer.failure().is_none());
+    }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}

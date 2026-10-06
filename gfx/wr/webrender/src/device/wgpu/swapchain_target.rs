@@ -7,6 +7,7 @@ use super::super::draw::ColorAttachment;
 use super::super::resources::Owned;
 use super::super::state::UsageState;
 use super::super::{hal, wgt, Device, Recording, SubmissionQueue, Texture};
+use super::super::TextureFilter;
 use std::rc::Rc;
 
 #[derive(Clone, Copy)]
@@ -19,6 +20,7 @@ pub(super) struct AttachmentResources {
     view: Owned<dyn hal::DynTextureView>,
     size: wgt::Extent3d,
     format: wgt::TextureFormat,
+    copy_src: bool,
     state: UsageState<AttachmentState>,
 }
 
@@ -57,6 +59,7 @@ impl Swapchain {
             view: Owned::new(owner, view, <dyn hal::DynDevice>::destroy_texture_view),
             size: config.extent,
             format: config.format,
+            copy_src: config.usage.contains(wgt::TextureUses::COPY_SRC),
             state: UsageState::new(AttachmentState {
                 usage: wgt::TextureUses::UNINITIALIZED,
                 initialized: false,
@@ -139,6 +142,40 @@ impl SurfaceTarget<'_> {
 }
 
 impl SurfaceView<'_> {
+    pub fn snapshot(&self, commands: &mut Recording<'_>) -> Result<Rc<Texture>, String> {
+        if !self.resources.copy_src {
+            return Err("Vulkan surface does not support readback".into());
+        }
+        if !self.initialized() {
+            return Err("Cannot read an uninitialized Vulkan window".into());
+        }
+        let size = self.resources.size;
+        let texture = Texture::new(self.owner(), size.width, size.height,
+            self.resources.format, TextureFilter::Nearest, false)?;
+        self.transition(commands, wgt::TextureUses::COPY_SRC)?;
+        texture.transition(commands, wgt::TextureUses::COPY_DST)?;
+        unsafe {
+            commands.encoder().copy_texture_to_texture(
+                self.texture, wgt::TextureUses::COPY_SRC, texture.raw_texture(),
+                &[hal::TextureCopy {
+                    src_base: hal::TextureCopyBase {
+                        mip_level: 0, array_layer: 0, origin: wgt::Origin3d::ZERO,
+                        aspect: hal::FormatAspects::COLOR,
+                    },
+                    dst_base: hal::TextureCopyBase {
+                        mip_level: 0, array_layer: 0, origin: wgt::Origin3d::ZERO,
+                        aspect: hal::FormatAspects::COLOR,
+                    },
+                    size: size.into(),
+                }],
+            );
+        }
+        texture.initialize(commands)?;
+        texture.transition(commands, wgt::TextureUses::RESOURCE)?;
+        self.transition(commands, wgt::TextureUses::COLOR_TARGET)?;
+        Ok(texture)
+    }
+
     pub fn invalidate(&self, commands: &mut Recording<'_>) -> Result<(), String> {
         self.update(
             commands,

@@ -121,7 +121,8 @@ impl wr::GpuBackend for RenderDevice {
                 swapchain.set_paused(paused)?;
             }
             Ok(())
-        }).ok_or_else(|| self.failure().unwrap().to_owned())
+        })
+        .ok_or_else(|| self.failure().unwrap().to_owned())
     }
     fn set_wgpu_surface(
         &mut self,
@@ -133,10 +134,13 @@ impl wr::GpuBackend for RenderDevice {
                 return Err("Cannot replace a Vulkan window during a frame".into());
             }
             device.submissions.status()?;
-            device.swapchain.as_mut()
+            device
+                .swapchain
+                .as_mut()
                 .ok_or("Vulkan surface replacement requires a windowed Renderer")?
                 .set_window(window, options)
-        }).ok_or_else(|| self.failure().unwrap().to_owned())
+        })
+        .ok_or_else(|| self.failure().unwrap().to_owned())
     }
     #[cfg(test)]
     fn wgpu_test_output(&self) -> Option<Rc<Texture>> {
@@ -419,7 +423,7 @@ impl wr::GpuBackend for RenderDevice {
     }
     fn set_shader_texture_size(&self, _: &Program, _: DeviceSize) {}
     fn create_transfer_buffer_with_size(&mut self, size: usize) -> TransferBuffer {
-        self.unsupported("capture readback");
+        warn!("Vulkan asynchronous readback is not supported");
         TransferBuffer {
             id: 0,
             reserved_size: size,
@@ -432,7 +436,7 @@ impl wr::GpuBackend for RenderDevice {
         _: ImageFormat,
         _: &TransferBuffer,
     ) {
-        self.unsupported("capture readback");
+        warn!("Vulkan asynchronous readback is not supported");
     }
     fn map_transfer_buffer<'a>(
         &'a mut self,
@@ -519,29 +523,58 @@ impl wr::GpuBackend for RenderDevice {
     fn upload_texture_immediate(&mut self, texture: &wr::Texture, data: &[u8]) {
         self.operation(|device| RenderDevice::upload_texture_immediate(device, texture, data));
     }
+    fn prepare_frame_readback(&mut self, enabled: bool) {
+        self.prepare_readback(enabled);
+    }
+    fn supports_async_readback(&self) -> bool {
+        false
+    }
     #[cfg(feature = "capture")]
     fn read_external_texture(
         &mut self,
-        _: ExternalTextureHandle,
-        _: ImageBufferKind,
-        _: &ImageDescriptor,
+        handle: ExternalTextureHandle,
+        target: ImageBufferKind,
+        descriptor: &ImageDescriptor,
     ) -> Vec<u8> {
-        self.unsupported("external textures");
-        Vec::new()
+        self.external_readback_source(handle, target)
+            .and_then(|source| {
+                self.capture_pixels(
+                    source,
+                    DeviceIntRect::from_size(descriptor.size),
+                    descriptor.format,
+                )
+            })
+            .unwrap_or_else(|error| {
+                warn!("Vulkan readback failed: {error}");
+                Vec::new()
+            })
     }
     fn read_pixels_into(
         &mut self,
-        _: ReadTarget,
-        _: FramebufferIntRect,
-        _: ImageFormat,
+        target: ReadTarget,
+        rect: FramebufferIntRect,
+        format: ImageFormat,
         output: &mut [u8],
-    ) {
-        self.unsupported("capture readback");
-        output.fill(0);
+    ) -> bool {
+        self.capture_source(target)
+            .and_then(|source| self.capture_into(source, rect.cast_unit(), format, output))
+            .map_err(|error| {
+                warn!("Vulkan readback failed: {error}");
+            })
+            .is_ok()
     }
-    fn read_texture(&mut self, _: &wr::Texture, _: ImageFormat, output: &mut [u8]) {
-        self.unsupported("capture readback");
-        output.fill(0);
+    fn read_texture(&mut self, texture: &wr::Texture, format: ImageFormat, output: &mut [u8]) {
+        let result = self.textures.image(texture).and_then(|source| {
+            self.capture_into(
+                source,
+                DeviceIntRect::from_size(texture.get_dimensions()),
+                format,
+                output,
+            )
+        });
+        if let Err(error) = result {
+            warn!("Vulkan readback failed: {error}");
+        }
     }
     fn create_buffer(&mut self, kind: wr::BufferKind) -> wr::Buffer {
         self.operation(|device| device.vertex_arrays.create_buffer(kind))

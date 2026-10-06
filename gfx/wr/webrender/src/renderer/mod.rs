@@ -4385,14 +4385,21 @@ impl Renderer {
         self.profiler.set_ui(ui_str);
     }
 
+    /// Preserve the next window frame for synchronous readback after presentation.
+    pub fn prepare_frame_readback(&mut self, enabled: bool) {
+        self.device.prepare_frame_readback(enabled);
+    }
+
     /// Reads back the presented frame; used by Gecko's WR bindings.
-    pub fn read_pixels_into(&mut self, rect: FramebufferIntRect, format: ImageFormat, output: &mut [u8]) {
-        self.device.read_pixels_into(ReadTarget::Default, rect, format, output);
+    pub fn read_pixels_into(&mut self, rect: FramebufferIntRect, format: ImageFormat, output: &mut [u8]) -> bool {
+        self.device.read_pixels_into(ReadTarget::Default, rect, format, output)
     }
 
     pub fn read_pixels_rgba8(&mut self, rect: FramebufferIntRect) -> Vec<u8> {
         let mut pixels = vec![0; (rect.area() * 4) as usize];
-        self.device.read_pixels_into(ReadTarget::Default, rect, ImageFormat::RGBA8, &mut pixels);
+        if !self.device.read_pixels_into(ReadTarget::Default, rect, ImageFormat::RGBA8, &mut pixels) {
+            pixels.clear();
+        }
         pixels
     }
 

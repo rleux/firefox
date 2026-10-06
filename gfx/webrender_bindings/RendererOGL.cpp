@@ -181,7 +181,11 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     const Maybe<gfx::IntSize>& aReadbackSize,
     const Maybe<wr::ImageFormat>& aReadbackFormat,
     const Maybe<Range<uint8_t>>& aReadbackBuffer, bool* aNeedsYFlip,
-    const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats) {
+    const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats,
+    bool* aReadbackSuccess) {
+  if (aReadbackSuccess) {
+    *aReadbackSuccess = false;
+  }
   mozilla::widget::WidgetRenderingContext widgetContext;
 
 #if defined(XP_MACOSX)
@@ -258,6 +262,7 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
   WrPresentResult presentResult;
+  wr_renderer_prepare_readback(mRenderer, present && aReadbackBuffer.isSome());
   bool rendered = wr_renderer_render(
       mRenderer, renderSize.width, renderSize.height, bufferAge, aOutStats,
       &dirtyRects, &didRasterize, &presentResult);
@@ -297,16 +302,20 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     if (aReadbackBuffer.isSome() && !mThread->IsHandlingDeviceReset()) {
       MOZ_ASSERT(aReadbackSize.isSome());
       MOZ_ASSERT(aReadbackFormat.isSome());
-      if (!mCompositor->MaybeReadback(aReadbackSize.ref(),
-                                      aReadbackFormat.ref(),
-                                      aReadbackBuffer.ref(), aNeedsYFlip)) {
-        wr_renderer_readback(mRenderer, aReadbackSize.ref().width,
-                             aReadbackSize.ref().height, aReadbackFormat.ref(),
-                             &aReadbackBuffer.ref()[0],
-                             aReadbackBuffer.ref().length());
+      bool readbackSuccess =
+          mCompositor->MaybeReadback(aReadbackSize.ref(), aReadbackFormat.ref(),
+                                     aReadbackBuffer.ref(), aNeedsYFlip);
+      if (!readbackSuccess) {
+        readbackSuccess = wr_renderer_readback(
+            mRenderer, aReadbackSize.ref().width, aReadbackSize.ref().height,
+            aReadbackFormat.ref(), &aReadbackBuffer.ref()[0],
+            aReadbackBuffer.ref().length());
         if (aNeedsYFlip != nullptr) {
           *aNeedsYFlip = !mCompositor->SurfaceOriginIsTopLeft();
         }
+      }
+      if (aReadbackSuccess) {
+        *aReadbackSuccess = readbackSuccess;
       }
     }
 

@@ -295,7 +295,7 @@ class WebRenderAPI final {
 
   void RunOnRenderThread(UniquePtr<RendererEvent> aEvent);
 
-  void Readback(const TimeStamp& aStartTime, gfx::IntSize aSize,
+  bool Readback(const TimeStamp& aStartTime, gfx::IntSize aSize,
                 const gfx::SurfaceFormat& aFormat,
                 const mozilla::Range<uint8_t>& aBuffer, bool* aNeedsYFlip);
 

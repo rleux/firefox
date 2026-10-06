@@ -267,8 +267,10 @@ fn shared_backend_reports_failures_and_allows_cleanup() {
     assert!(device.failure().is_none());
     let capture = device.create_transfer_buffer_with_size(16);
     assert_eq!(capture.get_reserved_size(), 16);
+    assert!(device.failure().is_none());
+    device.set_initialize_color_targets_with_pink(true);
     let failure = device.failure().unwrap().to_owned();
-    assert!(failure.contains("capture readback"));
+    assert!(failure.contains("pink target initialization"));
     assert!(wr::GpuBackend::link_program(&mut *device, &mut unlinked, &desc::SCALE, &[]).is_err());
     assert_eq!(unlinked.id, 0);
     device.delete_program(unlinked);

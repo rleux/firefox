@@ -857,6 +857,11 @@ pub extern "C" fn wr_renderer_release_profiler_structures(renderer: &mut Rendere
     renderer.release_profiler_structures();
 }
 
+#[no_mangle]
+pub extern "C" fn wr_renderer_prepare_readback(renderer: &mut Renderer, enabled: bool) {
+    renderer.prepare_frame_readback(enabled);
+}
+
 // Call wr_renderer_render() before calling this function.
 #[no_mangle]
 pub unsafe extern "C" fn wr_renderer_readback(
@@ -866,11 +871,11 @@ pub unsafe extern "C" fn wr_renderer_readback(
     format: ImageFormat,
     dst_buffer: *mut u8,
     buffer_size: usize,
-) {
+) -> bool {
     assert!(is_in_render_thread());
 
     let mut slice = make_slice_mut(dst_buffer, buffer_size);
-    renderer.read_pixels_into(FramebufferIntSize::new(width, height).into(), format, &mut slice);
+    renderer.read_pixels_into(FramebufferIntSize::new(width, height).into(), format, &mut slice)
 }
 
 #[no_mangle]

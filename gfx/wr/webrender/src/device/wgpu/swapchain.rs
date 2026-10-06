@@ -21,6 +21,7 @@ pub(super) struct Swapchain {
     reconfigure: bool,
     paused: bool,
     present_result: Option<PresentResult>,
+    readback_enabled: bool,
 }
 
 pub(super) struct AcquiredImage<'a> {
@@ -50,6 +51,7 @@ impl Swapchain {
             reconfigure: false,
             paused: false,
             present_result: None,
+            readback_enabled: false,
         })
     }
 
@@ -77,7 +79,11 @@ impl Swapchain {
         } else {
             let caps = unsafe { owner.adapter.surface_capabilities(surface.raw.as_ref()) }
                 .ok_or("Vulkan adapter no longer supports the window surface")?;
-            Some(owner.surface_configuration(&caps, size, options)?)
+            let mut config = owner.surface_configuration(&caps, size, options)?;
+            if !self.readback_enabled {
+                config.usage.remove(super::wgt::TextureUses::COPY_SRC);
+            }
+            Some(config)
         };
         if self.config.is_some() {
             self.queue.wait()?;
@@ -219,6 +225,13 @@ impl Swapchain {
 
     pub fn begin_frame(&mut self) {
         self.present_result = None;
+    }
+
+    pub fn enable_readback(&mut self) {
+        if !self.readback_enabled {
+            self.readback_enabled = true;
+            self.reconfigure = true;
+        }
     }
 
     pub fn present_result(&self) -> Option<PresentResult> {
