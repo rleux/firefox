@@ -432,19 +432,26 @@ pub trait GpuBackend {
     /// Performs an immediate (non-PBO) upload of the whole texture.
     fn upload_texture_immediate(&mut self, texture: &Texture, pixels: &[u8]);
 
+    fn prepare_frame_readback(&mut self, _enabled: bool) {}
+
+    fn supports_async_readback(&self) -> bool {
+        true
+    }
+
     /// Reads `rect` of `target` into `output`. The default target may also
     /// be read outside a frame, once it has been presented.
     ///
     /// Reading back `BGRA8` requires `Capabilities::supports_bgra_read`. When
     /// that is false the caller must instead read `RGBA8` and swap the red and
     /// blue channels itself.
+    /// Returns false if no pixels could be read; the output remains unchanged.
     fn read_pixels_into(
         &mut self,
         target: ReadTarget,
         rect: FramebufferIntRect,
         format: ImageFormat,
         output: &mut [u8],
-    );
+    ) -> bool;
 
     /// Reads the whole of `texture`, which need not be a render target, into
     /// `output` as `format`.

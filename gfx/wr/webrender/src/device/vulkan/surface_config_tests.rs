@@ -26,7 +26,7 @@ fn config(caps: &hal::SurfaceCapabilities, options: SurfaceOptions) -> hal::Surf
 }
 
 #[test]
-fn direct_rendering_only_requests_color_attachment_usage() {
+fn direct_rendering_enables_readback_when_supported() {
     let mut caps = capabilities();
     for format in [
         wgt::TextureFormat::Rgba8Unorm,
@@ -35,11 +35,15 @@ fn direct_rendering_only_requests_color_attachment_usage() {
         caps.formats[0].format = format;
         for copy in [false, true] {
             caps.usage.set(wgt::TextureUses::COPY_DST, copy);
-            let chosen = config(&caps, SurfaceOptions::default());
-            assert_eq!(chosen.format, format);
-            assert_eq!(chosen.color_space, wgt::SurfaceColorSpace::Srgb);
-            assert_eq!(chosen.usage, wgt::TextureUses::COLOR_TARGET);
-            assert!(chosen.view_formats.is_empty());
+            for readback in [false, true] {
+                caps.usage.set(wgt::TextureUses::COPY_SRC, readback);
+                let chosen = config(&caps, SurfaceOptions::default());
+                assert_eq!(chosen.format, format);
+                assert_eq!(chosen.color_space, wgt::SurfaceColorSpace::Srgb);
+                assert_eq!(chosen.usage, wgt::TextureUses::COLOR_TARGET
+                    | if readback { wgt::TextureUses::COPY_SRC } else { wgt::TextureUses::empty() });
+                assert!(chosen.view_formats.is_empty());
+            }
         }
     }
     caps.usage = wgt::TextureUses::COPY_DST;

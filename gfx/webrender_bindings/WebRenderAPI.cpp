@@ -672,20 +672,22 @@ std::vector<WrHitResult> WebRenderAPI::HitTest(const wr::WorldPoint& aPoint) {
   return geckoResults;
 }
 
-void WebRenderAPI::Readback(const TimeStamp& aStartTime, gfx::IntSize size,
+bool WebRenderAPI::Readback(const TimeStamp& aStartTime, gfx::IntSize size,
                             const gfx::SurfaceFormat& aFormat,
                             const Range<uint8_t>& buffer, bool* aNeedsYFlip) {
   class Readback : public RendererEvent {
    public:
     explicit Readback(layers::SynchronousTask* aTask, TimeStamp aStartTime,
                       gfx::IntSize aSize, const gfx::SurfaceFormat& aFormat,
-                      const Range<uint8_t>& aBuffer, bool* aNeedsYFlip)
+                      const Range<uint8_t>& aBuffer, bool* aNeedsYFlip,
+                      bool* aSuccess)
         : mTask(aTask),
           mStartTime(aStartTime),
           mSize(aSize),
           mFormat(aFormat),
           mBuffer(aBuffer),
-          mNeedsYFlip(aNeedsYFlip) {
+          mNeedsYFlip(aNeedsYFlip),
+          mSuccess(aSuccess) {
       MOZ_COUNT_CTOR(Readback);
     }
 
@@ -699,10 +701,10 @@ void WebRenderAPI::Readback(const TimeStamp& aStartTime, gfx::IntSize size,
           .scrolled = false,
           .tracked = false,
       };
-      aRenderThread.UpdateAndRender(aWindowId, VsyncId(), mStartTime, params,
-                                    Some(mSize),
-                                    wr::SurfaceFormatToImageFormat(mFormat),
-                                    Some(mBuffer), &stats, mNeedsYFlip);
+      aRenderThread.UpdateAndRender(
+          aWindowId, VsyncId(), mStartTime, params, Some(mSize),
+          wr::SurfaceFormatToImageFormat(mFormat), Some(mBuffer), &stats,
+          mNeedsYFlip, mSuccess);
       layers::AutoCompleteTask complete(mTask);
     }
 
@@ -715,14 +717,16 @@ void WebRenderAPI::Readback(const TimeStamp& aStartTime, gfx::IntSize size,
     gfx::SurfaceFormat mFormat;
     const Range<uint8_t>& mBuffer;
     bool* mNeedsYFlip;
+    bool* mSuccess;
   };
 
   // Disable debug flags during readback. See bug 1436020.
   UpdateDebugFlags(0);
 
   layers::SynchronousTask task("Readback");
+  bool success = false;
   auto event = MakeUnique<Readback>(&task, aStartTime, size, aFormat, buffer,
-                                    aNeedsYFlip);
+                                    aNeedsYFlip, &success);
   // This event will be passed from wr_backend thread to renderer thread. That
   // implies that all frame data have been processed when the renderer runs this
   // read-back event. Then, we could make sure this read-back event gets the
@@ -732,6 +736,7 @@ void WebRenderAPI::Readback(const TimeStamp& aStartTime, gfx::IntSize size,
   task.Wait();
 
   UpdateDebugFlags(gfx::gfxVars::WebRenderDebugFlags());
+  return success;
 }
 
 void WebRenderAPI::ClearAllCaches() { wr_api_clear_all_caches(mDocHandle); }

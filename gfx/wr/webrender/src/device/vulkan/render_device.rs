@@ -23,6 +23,9 @@ use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::rc::Rc;
 
+#[path = "readback.rs"]
+mod readback;
+
 pub(in crate::device) struct RenderDevice {
     pub properties: RendererProperties,
     pub programs: ProgramStore,
@@ -40,6 +43,7 @@ pub(in crate::device) struct RenderDevice {
     inside_frame: bool,
     blitter: Option<(wgt::TextureFormat, TextureBlitter)>,
     scratch: TexturePool,
+    readback: readback::ReadbackState,
     failure: Option<String>,
 }
 
@@ -89,6 +93,7 @@ impl RenderDevice {
             inside_frame: false,
             blitter: None,
             scratch: TexturePool::new(owner),
+            readback: readback::ReadbackState::default(),
             failure: None,
         })
     }
@@ -300,6 +305,7 @@ impl RenderDevice {
         if !self.inside_frame || self.passes.is_active() {
             return Err("Vulkan frame must be active with no unfinished render pass".into());
         }
+        self.capture_window();
         if let Some(swapchain) = &mut self.swapchain {
             swapchain.finish_target()?;
         }
