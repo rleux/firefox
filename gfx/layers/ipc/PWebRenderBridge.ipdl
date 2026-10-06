@@ -63,7 +63,7 @@ parent:
   async UpdateResources(IdNamespace aIdNamespace, OpUpdateResource[] aResourceUpdates,
                         RefCountedShmem[] aSmallShmems, Shmem[] aLargeShmems);
   async ParentCommands(IdNamespace aIdNamespace, WebRenderParentCommand[] commands);
-  sync GetSnapshot(PTexture texture) returns (bool aNeedsYFlip);
+  sync GetSnapshot(PTexture texture) returns (bool aNeedsYFlip, bool aSuccess);
   async ClearCachedResources();
   async SetDefaultClearColor(uint32_t aColor);
   // Invalidate rendered frame

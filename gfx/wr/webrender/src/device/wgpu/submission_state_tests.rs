@@ -85,7 +85,7 @@ fn restart_uses_a_new_recording_token_and_abandonment_rolls_back() {
     assert!(submission.submit().is_err());
     submission.wait(None).unwrap();
     assert!(submission.poll().unwrap());
-    submission.restart(2).unwrap();
+    submission.restart_completed().unwrap();
     let second = {
         let mut commands = submission.recording().unwrap();
         let id = commands.recording_id(&owner).unwrap();

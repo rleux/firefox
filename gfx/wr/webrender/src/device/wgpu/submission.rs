@@ -220,6 +220,14 @@ impl Submission {
         })
     }
 
+    pub(super) fn restart_completed(&mut self) -> Result<(), String> {
+        if self.data.owner.is_lost() || !self.poll()? {
+            return Err("Readback submission is not reusable".into());
+        }
+        let next = self.data.fence_value.checked_add(1).ok_or("Readback fence value overflow")?;
+        self.restart(next)
+    }
+
     fn restart(&mut self, fence_value: u64) -> Result<(), String> {
         assert!(matches!(self.state, SubmissionState::Retired));
         unsafe {

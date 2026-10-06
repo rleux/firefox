@@ -65,7 +65,8 @@ class RendererOGL {
                                   const Maybe<Range<uint8_t>>& aReadbackBuffer,
                                   bool* aNeedsYFlip,
                                   const wr::FrameReadyParams& aFrameParams,
-                                  RendererStats* aOutStats);
+                                  RendererStats* aOutStats,
+                                  bool* aReadbackSuccess = nullptr);
 
   /// This can be called on the render thread only.
   void WaitForGPU();

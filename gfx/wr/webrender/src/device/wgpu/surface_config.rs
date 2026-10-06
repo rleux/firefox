@@ -110,7 +110,7 @@ fn negotiate(
         format,
         color_space: wgt::SurfaceColorSpace::Srgb,
         extent,
-        usage: wgt::TextureUses::COLOR_TARGET,
+        usage: wgt::TextureUses::COLOR_TARGET | (caps.usage & wgt::TextureUses::COPY_SRC),
         view_formats: Vec::new(),
     })
 }

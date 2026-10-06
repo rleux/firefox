@@ -106,6 +106,17 @@ fn render_display_list(enable_shared_instance_buffer: bool) {
         rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
         renderer.update();
         assert_eq!(renderer.render(size, 0).unwrap().present_result, None);
+        assert!(renderer.record_frame(ImageFormat::RGBA8).is_none());
+        let (screenshot, screenshot_size) = renderer.get_screenshot_async(
+            DeviceIntRect::from_size(size),
+            size,
+            ImageFormat::RGBA8,
+        );
+        assert!(screenshot_size.is_empty());
+        assert!(!renderer.map_and_recycle_screenshot(
+            screenshot, &mut [17; 4], 4, ImageFormat::RGBA8,
+        ));
+        assert!(renderer.device.failure().is_none());
         let status = renderer.gpu_submission_status().unwrap().unwrap();
         assert!(status.submitted > previous_submission);
         assert!(status.completed <= status.submitted);

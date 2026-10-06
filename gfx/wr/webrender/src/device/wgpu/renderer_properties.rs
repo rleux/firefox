@@ -46,7 +46,7 @@ impl RendererProperties {
                 supports_texture_external: false,
                 supports_texture_external_bt709: false,
                 readback_rows_top_down: true,
-                supports_bgra_read: false,
+                supports_bgra_read: true,
                 supports_base_instance: true,
                 renderer_name: info.name.clone(),
             },

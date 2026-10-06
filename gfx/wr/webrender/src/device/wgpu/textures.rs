@@ -22,6 +22,10 @@ mod buffer_to_texture_copy;
 mod readback;
 pub use self::readback::PendingReadback;
 
+#[cfg(all(test, feature = "capture"))]
+#[path = "external_readback_tests.rs"]
+mod external_readback_tests;
+
 #[derive(Clone, Copy)]
 pub(super) struct TextureState {
     pub(super) usage: wgt::TextureUses,
@@ -476,6 +480,11 @@ impl Texture {
 
     pub fn raw_texture(&self) -> &dyn hal::DynTexture {
         &**self.raw
+    }
+
+    #[cfg(feature = "capture")]
+    pub(super) fn supports_copy_src(&self) -> bool {
+        self.usage.contains(wgt::TextureUses::COPY_SRC)
     }
 
     pub fn target_view(&self) -> Option<&dyn hal::DynTextureView> {

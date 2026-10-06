@@ -43,11 +43,18 @@ pub struct PendingReadback {
     submission: Submission,
     buffer: Rc<Owned<dyn hal::DynBuffer>>,
     layout: ReadbackLayout,
+    capacity: u64,
 }
 
 impl Texture {
     /// Submit a base-level color readback, preserving native channel order and row order.
     pub fn readback(self: &Rc<Self>, rect: DeviceIntRect) -> Result<PendingReadback, String> {
+        self.readback_reusing(rect, None)
+    }
+
+    pub(in crate::device::wgpu) fn readback_reusing(
+        self: &Rc<Self>, rect: DeviceIntRect, previous: Option<PendingReadback>,
+    ) -> Result<PendingReadback, String> {
         let source = self.copy_source()?;
         if rect.min.x < 0
             || rect.min.y < 0
@@ -71,12 +78,6 @@ impl Texture {
             return Err("Reading uninitialized Vulkan texture contents".into());
         }
         let owner = &self.raw.owner;
-        let mut submission = Submission::new(owner)?;
-        let mut commands = submission.recording()?;
-        let recording = commands.recording_id(owner)?;
-        for state in self.states() {
-            state.check_recording(&recording)?;
-        }
         let layout = ReadbackLayout::new(
             rect.width() as u32,
             rect.height() as u32,
@@ -84,7 +85,13 @@ impl Texture {
             owner.capabilities.alignments.buffer_copy_pitch.get(),
             owner.capabilities.limits.max_buffer_size,
         )?;
-        let (raw, _) = unsafe {
+        let (mut submission, buffer, capacity, reused) = if let Some(mut previous) = previous.filter(|previous|
+            Rc::ptr_eq(&previous.buffer.owner, owner) && previous.capacity >= layout.size
+        ) {
+            previous.submission.restart_completed()?;
+            (previous.submission, previous.buffer, previous.capacity, true)
+        } else {
+        let (raw, capacity) = unsafe {
             owner.open.device.create_buffer(&hal::BufferDescriptor {
                 label: Some("WR Vulkan texture readback"),
                 size: layout.size,
@@ -94,6 +101,21 @@ impl Texture {
         }
         .map_err(|error| format!("Creating readback buffer: {error:?}"))?;
         let buffer = Rc::new(Owned::new(owner, raw, <dyn hal::DynDevice>::destroy_buffer));
+            (Submission::new(owner)?, buffer, capacity, false)
+        };
+        let mut commands = submission.recording()?;
+        let recording = commands.recording_id(owner)?;
+        for state in self.states() {
+            state.check_recording(&recording)?;
+        }
+        if reused {
+            unsafe {
+                commands.encoder().transition_buffers(&[hal::BufferBarrier {
+                    buffer: &**buffer,
+                    usage: hal::StateTransition { from: wgt::BufferUses::MAP_READ, to: wgt::BufferUses::COPY_DST },
+                }]);
+            }
+        }
         commands.keep(&buffer);
         let previous = self.current_usage();
         source.prepare(&mut commands)?;
@@ -142,6 +164,7 @@ impl Texture {
             submission,
             buffer,
             layout,
+            capacity,
         })
     }
 }
@@ -161,16 +184,33 @@ impl PendingReadback {
         self.read_pixels()
     }
 
+    pub fn wait_into(&mut self, pixels: &mut [u8]) -> Result<(), String> {
+        if pixels.len() != self.pixel_length() {
+            return Err("Vulkan readback output size does not match the rectangle".into());
+        }
+        if !self.submission.wait(None)? {
+            return Err("Vulkan readback did not complete".into());
+        }
+        self.read_pixels_into(pixels)
+    }
+
+    fn pixel_length(&self) -> usize {
+        self.layout.row_bytes as usize * (self.layout.size / u64::from(self.layout.pitch)) as usize
+    }
+
     fn read_pixels(&self) -> Result<Vec<u8>, String> {
+        let mut pixels = vec![0; self.pixel_length()];
+        self.read_pixels_into(&mut pixels)?;
+        Ok(pixels)
+    }
+
+    fn read_pixels_into(&self, pixels: &mut [u8]) -> Result<(), String> {
         let owner = &self.buffer.owner;
         if owner.is_lost() {
             return Err("Vulkan device requires recreation".into());
         }
         let device = owner.open.device.as_ref();
         let layout = &self.layout;
-        let mut pixels = Vec::with_capacity(
-            layout.row_bytes as usize * (layout.size / u64::from(layout.pitch)) as usize,
-        );
         unsafe {
             let mapping = device
                 .map_buffer(&**self.buffer, 0..layout.size)
@@ -182,7 +222,8 @@ impl PendingReadback {
                 device.invalidate_mapped_ranges(&**self.buffer, &[0..layout.size]);
             }
             for y in 0..layout.size / u64::from(layout.pitch) {
-                pixels.extend_from_slice(std::slice::from_raw_parts(
+                let start = y as usize * layout.row_bytes as usize;
+                pixels[start..start + layout.row_bytes as usize].copy_from_slice(std::slice::from_raw_parts(
                     mapping
                         .ptr
                         .as_ptr()
@@ -192,7 +233,7 @@ impl PendingReadback {
             }
             device.unmap_buffer(&**self.buffer);
         }
-        Ok(pixels)
+        Ok(())
     }
 }
 
@@ -216,4 +257,37 @@ fn readback_layout_limits_and_padding() {
     ] {
         assert!(ReadbackLayout::new(width, height, bpp, alignment, limit).is_err());
     }
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn completed_readback_reuses_storage_without_stale_rows() {
+    use crate::device::wgpu::{BufferPool, Device, Options, SubmissionQueue, TextureFilter};
+    use crate::device::wgpu::tests::{validation_logging, ERRORS};
+    use api::units::{DeviceIntPoint, DeviceIntSize};
+    use std::sync::atomic::Ordering;
+    validation_logging();
+    let owner = Rc::new(Device::new(&Options { validation: true, ..Default::default() }).unwrap());
+    let queue = SubmissionQueue::new(&Rc::new(BufferPool::new(&owner)), 2).unwrap();
+    let texture = Texture::new(&owner, 3, 2, wgt::TextureFormat::Rgba8Unorm, TextureFilter::Nearest, false).unwrap();
+    let full = DeviceIntRect::from_size(DeviceIntSize::new(3, 2));
+    texture.upload(&queue, full, &[1; 24], None, 0, None).unwrap();
+    queue.wait().unwrap();
+    let mut pending = texture.readback(full).unwrap();
+    assert_eq!(pending.wait().unwrap(), [1; 24]);
+    let allocation = Rc::as_ptr(&pending.buffer);
+    for byte in [3, 7, 19] {
+        texture.upload(&queue, full, &[byte; 24], None, 0, None).unwrap();
+        queue.wait().unwrap();
+        let crop = DeviceIntRect::from_origin_and_size(DeviceIntPoint::new(1, 0), DeviceIntSize::new(2, 2));
+        pending = texture.readback_reusing(crop, Some(pending)).unwrap();
+        assert_eq!(Rc::as_ptr(&pending.buffer), allocation);
+        let mut wrong = [17; 15];
+        assert!(pending.wait_into(&mut wrong).is_err());
+        assert_eq!(wrong, [17; 15]);
+        let mut pixels = [0; 16];
+        pending.wait_into(&mut pixels).unwrap();
+        assert_eq!(pixels, [byte; 16]);
+    }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
