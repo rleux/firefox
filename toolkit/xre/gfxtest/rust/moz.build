@@ -1,0 +1,13 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+RustLibrary("wr_startup_probe")
+NO_PGO = True
+
+if CONFIG["COMPILE_ENVIRONMENT"]:
+    CbindgenHeader(
+        "wr_startup_probe_ffi_generated.h",
+        inputs=["/toolkit/xre/gfxtest/rust"],
+    )
+    EXPORTS.mozilla.gfx += ["!wr_startup_probe_ffi_generated.h"]

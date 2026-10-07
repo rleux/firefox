@@ -55,6 +55,7 @@ class GfxInfo final : public GfxInfoBase {
   const nsTArray<uint64_t>& GetDMABufEGLModifiers(uint32_t aDrmFourcc) const;
 
   static bool FireGLXTestProcess();
+  static bool IsVulkanWebRenderSupported();
 
 #ifdef DEBUG
   NS_DECL_ISUPPORTS_INHERITED

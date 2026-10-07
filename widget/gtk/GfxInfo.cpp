@@ -814,6 +814,44 @@ void GfxInfo::GetDataV4L2() {
 #endif  // MOZ_ENABLE_V4L2
 }
 
+bool GfxInfo::IsVulkanWebRenderSupported() {
+  MOZ_ASSERT(XRE_IsParentProcess());
+  MOZ_ASSERT(NS_IsMainThread());
+  static const bool supported = [] {
+#if defined(MOZ_WEBRENDER_VULKAN) && defined(MOZ_X11)
+    int pipe = -1;
+    const char* args[] = {"vulkan", "--webrender", nullptr};
+    int pid = FireTestProcess(GFX_PROBE_BINARY, &pipe, args);
+    char* data = nullptr;
+    auto freeData = MakeScopeExit([&] { g_free(data); });
+    if (!pid ||
+        !ManageChildProcess("vulkanwrtest", &pid, &pipe, VULKAN_TEST_TIMEOUT,
+                            &data) ||
+        !data) {
+      gfxCriticalNote << "Vulkan WebRender capability probe failed";
+      return false;
+    }
+    bool result = false;
+    char* cursor = data;
+    while (char* key = NS_strtok("\n", &cursor)) {
+      char* value = NS_strtok("\n", &cursor);
+      if (!value || !strcmp(key, "ERROR") || !strcmp(key, "WARNING")) {
+        gfxCriticalNote << "Vulkan WebRender probe: "
+                        << (value ? value : "incomplete result");
+        return false;
+      }
+      if (!strcmp(key, "VULKAN_WEBRENDER")) {
+        result = !strcmp(value, "TRUE");
+      }
+    }
+    return result;
+#else
+    return false;
+#endif
+  }();
+  return supported;
+}
+
 void GfxInfo::GetDataVulkan() {
   if (mIsVulkanSupported.isSome()) {
     return;

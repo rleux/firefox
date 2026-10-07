@@ -1,0 +1,24 @@
+[package]
+name = "wr_startup_probe"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+mozilla-central-workspace-hack = { version = "0.1", features = ["wr_startup_probe"], optional = true }
+raw-window-handle = "0.6"
+
+[dependencies.wgpu-hal]
+git = "https://github.com/gfx-rs/wgpu"
+rev = "49325ca0a13bdc0787b1601138096cce743dd29e"
+default-features = false
+features = ["vulkan"]
+
+[dependencies.wgpu-types]
+git = "https://github.com/gfx-rs/wgpu"
+rev = "49325ca0a13bdc0787b1601138096cce743dd29e"
+default-features = false
