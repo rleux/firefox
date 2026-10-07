@@ -29,6 +29,10 @@ int v4l2test(const char* aDevice);
 int vulkantest(const char* aDrmDevice);
 #endif
 
+#ifdef MOZ_WEBRENDER_VULKAN
+int vulkanwrtest();
+#endif
+
 static void PrintUsage() {
   printf(
       "Firefox graphics probe utility\n"
@@ -46,6 +50,9 @@ static void PrintUsage() {
 #endif
 #ifdef MOZ_ENABLE_VULKAN_VIDEO
       "  vulkan [-d <drm_device>]  probe Vulkan video decode\n"
+#endif
+#ifdef MOZ_WEBRENDER_VULKAN
+      "  vulkan --webrender       probe Vulkan WebRender on X11\n"
 #endif
       "\n");
 }
@@ -139,20 +146,25 @@ static int RunV4l2(int argc, char** argv) {
 }
 #endif
 
-#ifdef MOZ_ENABLE_VULKAN_VIDEO
+#if defined(MOZ_ENABLE_VULKAN_VIDEO) || defined(MOZ_WEBRENDER_VULKAN)
 static int RunVulkan(int argc, char** argv) {
   struct option longOptions[] = {{"help", no_argument, nullptr, 'h'},
                                  {"probe", no_argument, nullptr, 'p'},
+                                 {"webrender", no_argument, nullptr, 'w'},
                                  {"drm", required_argument, nullptr, 'd'},
                                  {nullptr, 0, nullptr, 0}};
   int c;
   optind = 1;
   bool doProbe = false;
-  const char* drmDevice = nullptr;
-  while ((c = getopt_long(argc, argv, "hpd:", longOptions, nullptr)) != -1) {
+  bool webRender = false;
+  [[maybe_unused]] const char* drmDevice = nullptr;
+  while ((c = getopt_long(argc, argv, "hpwd:", longOptions, nullptr)) != -1) {
     switch (c) {
       case 'p':
         doProbe = true;
+        break;
+      case 'w':
+        webRender = true;
         break;
       case 'd':
         doProbe = true;
@@ -165,11 +177,24 @@ static int RunVulkan(int argc, char** argv) {
         break;
     }
   }
+  if (webRender) {
+#  ifdef MOZ_WEBRENDER_VULKAN
+    return vulkanwrtest();
+#  else
+    fprintf(stderr, "gfxtest: Vulkan WebRender probe is not built\n");
+    return 1;
+#  endif
+  }
   if (!doProbe && optind >= argc) {
     PrintUsage();
     return 1;
   }
+#  ifdef MOZ_ENABLE_VULKAN_VIDEO
   return vulkantest(drmDevice);
+#  else
+  fprintf(stderr, "gfxtest: Vulkan video probe is not built\n");
+  return 1;
+#  endif
 }
 #endif
 
@@ -200,7 +225,7 @@ int main(int argc, char** argv) {
     return RunV4l2(argc, argv);
   }
 #endif
-#ifdef MOZ_ENABLE_VULKAN_VIDEO
+#if defined(MOZ_ENABLE_VULKAN_VIDEO) || defined(MOZ_WEBRENDER_VULKAN)
   if (!strcmp(cmd, "vulkan")) {
     return RunVulkan(argc, argv);
   }
