@@ -21,6 +21,11 @@ if CONFIG["MOZ_ENABLE_V4L2"]:
 
 if CONFIG["MOZ_ENABLE_VULKAN_VIDEO"]:
     SOURCES += ["vulkantest.cpp"]
+
+if CONFIG["MOZ_WEBRENDER_VULKAN"]:
+    SOURCES += ["vulkanwrtest.cpp"]
+
+if CONFIG["MOZ_ENABLE_VULKAN_VIDEO"] or CONFIG["MOZ_WEBRENDER_VULKAN"]:
     LOCAL_INCLUDES += ["/third_party/khronos/vulkan-headers/include"]
 
 CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
