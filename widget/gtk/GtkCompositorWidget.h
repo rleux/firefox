@@ -78,6 +78,7 @@ class GtkCompositorWidget : public CompositorWidget,
 #if defined(MOZ_X11)
   Window XWindow() const { return mProvider.GetXWindow(); }
 #endif
+  bool VulkanNeedsAlpha() const { return mVulkanNeedsAlpha; }
 #if defined(MOZ_WAYLAND)
   mozilla::layers::NativeLayerRoot* GetNativeLayerRoot() override;
 #endif
@@ -111,6 +112,8 @@ class GtkCompositorWidget : public CompositorWidget,
   // ensures we only ever use the old or new size, and not some weird synthesis
   // of the two.
   DataMutex<LayoutDeviceIntSize> mClientSize;
+
+  const bool mVulkanNeedsAlpha;
 
   // Holds rendering resources
   WindowSurfaceProvider mProvider;

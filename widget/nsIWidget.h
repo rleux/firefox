@@ -2100,6 +2100,7 @@ class nsIWidget : public nsSupportsWeakReference {
 
   bool ComputeShouldAccelerate();
   virtual bool WidgetTypeSupportsAcceleration() { return true; }
+  virtual bool RequiresSoftwareWebRender() { return false; }
   virtual bool WidgetTypeSupportsNativeCompositing() { return true; }
 
   /*

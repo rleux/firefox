@@ -50,10 +50,11 @@ class VulkanX11Surface : public ::testing::Test {
     task.Wait();
   }
 
-  static RefPtr<widget::CompositorWidget> Widget(Window aWindow) {
+  static RefPtr<widget::CompositorWidget> Widget(Window aWindow,
+                                                 bool aNeedsAlpha = false) {
     widget::GtkCompositorWidgetInitData data(
         aWindow, nsCString(XDisplayString(DefaultXDisplay())), true,
-        LayoutDeviceIntSize(64, 48));
+        aNeedsAlpha, LayoutDeviceIntSize(64, 48));
     return new TestGtkCompositorWidget(data);
   }
 };
@@ -101,6 +102,40 @@ TEST_F(VulkanX11Surface, DISABLED_RejectsUnavailableWindow) {
     EXPECT_EQ(RenderCompositorVulkan::Create(widget, error), nullptr);
     EXPECT_FALSE(error.IsEmpty());
   });
+}
+
+TEST_F(VulkanX11Surface, DISABLED_TransparencyRequirementIsIndependentOfDepth) {
+  auto* display = DefaultXDisplay();
+  XVisualInfo visual = {};
+  if (!XMatchVisualInfo(display, DefaultScreen(display), 32, TrueColor,
+                        &visual)) {
+    GTEST_SKIP() << "No 32-bit X11 visual";
+  }
+  XSetWindowAttributes attributes = {};
+  attributes.colormap = XCreateColormap(display, DefaultRootWindow(display),
+                                        visual.visual, AllocNone);
+  auto freeColormap =
+      MakeScopeExit([&] { XFreeColormap(display, attributes.colormap); });
+  auto window = XCreateWindow(display, DefaultRootWindow(display), 0, 0, 64, 48,
+                              0, 32, InputOutput, visual.visual,
+                              CWColormap | CWBorderPixel, &attributes);
+  auto destroy = MakeScopeExit([&] {
+    XDestroyWindow(display, window);
+    XSync(display, false);
+  });
+  XSync(display, false);
+  for (bool needsAlpha : {false, true}) {
+    OnRenderThread([window, needsAlpha] {
+      auto widget = Widget(window, needsAlpha);
+      nsCString error;
+      auto compositor = RenderCompositorVulkan::Create(widget, error);
+      ASSERT_TRUE(compositor)
+      << error.get();
+      const auto* config = compositor->GetVulkanConfig();
+      ASSERT_NE(config, nullptr);
+      EXPECT_EQ(config->transparent, needsAlpha);
+    });
+  }
 }
 
 }  // namespace mozilla::wr
