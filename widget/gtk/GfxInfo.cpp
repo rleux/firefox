@@ -815,9 +815,20 @@ void GfxInfo::GetDataV4L2() {
 }
 
 bool GfxInfo::IsVulkanWebRenderSupported() {
+  return GetVulkanWebRenderSupport().supported;
+}
+
+bool GfxInfo::IsVulkanWebRenderAlphaSupported(uint32_t aScreen,
+                                              uint32_t aVisual) {
+  return GetVulkanWebRenderSupport().alphaVisuals.Contains(
+      (uint64_t(aScreen) << 32) | aVisual);
+}
+
+const GfxInfo::VulkanWebRenderSupport& GfxInfo::GetVulkanWebRenderSupport() {
   MOZ_ASSERT(XRE_IsParentProcess());
   MOZ_ASSERT(NS_IsMainThread());
-  static const bool supported = [] {
+  static const VulkanWebRenderSupport supported =
+      []() -> VulkanWebRenderSupport {
 #if defined(MOZ_WEBRENDER_VULKAN) && defined(MOZ_X11)
     int pipe = -1;
     const char* args[] = {"vulkan", "--webrender", nullptr};
@@ -829,24 +840,31 @@ bool GfxInfo::IsVulkanWebRenderSupported() {
                             &data) ||
         !data) {
       gfxCriticalNote << "Vulkan WebRender capability probe failed";
-      return false;
+      return {};
     }
-    bool result = false;
+    VulkanWebRenderSupport result;
     char* cursor = data;
     while (char* key = NS_strtok("\n", &cursor)) {
       char* value = NS_strtok("\n", &cursor);
       if (!value || !strcmp(key, "ERROR") || !strcmp(key, "WARNING")) {
         gfxCriticalNote << "Vulkan WebRender probe: "
                         << (value ? value : "incomplete result");
-        return false;
+        return {};
       }
       if (!strcmp(key, "VULKAN_WEBRENDER")) {
-        result = !strcmp(value, "TRUE");
+        result.supported = !strcmp(value, "TRUE");
+      } else if (!strcmp(key, "VULKAN_WEBRENDER_ALPHA_VISUAL")) {
+        nsresult rv;
+        int64_t visual = nsCString(value).ToInteger64(&rv);
+        if (NS_FAILED(rv) || visual < 0) {
+          return {};
+        }
+        result.alphaVisuals.Insert(uint64_t(visual));
       }
     }
     return result;
 #else
-    return false;
+    return {};
 #endif
   }();
   return supported;

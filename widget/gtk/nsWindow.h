@@ -13,6 +13,7 @@
 #include "LookAndFeel.h"
 #include "MozContainer.h"
 #include "VsyncSource.h"
+#include "VulkanWindowPolicy.h"
 #include "WaylandSurfaceLock.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/Maybe.h"
@@ -490,6 +491,8 @@ class nsWindow : public nsIWidget {
   LayoutDeviceIntPoint GdkEventCoordsToDevicePixels(gdouble aX, gdouble aY);
 
   bool WidgetTypeSupportsAcceleration() override;
+  bool RequiresSoftwareWebRender() override;
+  mozilla::widget::VulkanWindowPolicy GetVulkanWindowPolicy() const;
   bool WidgetTypeSupportsNativeCompositing() override;
 
   nsresult SetSystemFont(const nsCString& aFontName) override;
@@ -763,6 +766,7 @@ class nsWindow : public nsIWidget {
   // True when we're on compositing window manager and this
   // window is using visual with alpha channel.
   bool mHasAlphaVisual : 1;
+  bool mVulkanNeedsAlpha : 1;
 
   // Whether we've configured default clear color already.
   bool mConfiguredClearColor : 1;

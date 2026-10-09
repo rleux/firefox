@@ -32,17 +32,43 @@ fn supported_device() -> Requirements {
 }
 
 #[test]
+fn alpha_support_preserves_compatible_modes() {
+    for mode in [
+        wgt::CompositeAlphaMode::PreMultiplied,
+        wgt::CompositeAlphaMode::Inherit,
+    ] {
+        let mut requirements = supported_device();
+        requirements.surface.composite_alpha_modes = vec![mode];
+        assert_eq!(requirements.failure(true), None);
+        requirements
+            .surface
+            .composite_alpha_modes
+            .push(wgt::CompositeAlphaMode::Opaque);
+        assert_eq!(requirements.failure(true), None);
+    }
+    for modes in [
+        vec![],
+        vec![wgt::CompositeAlphaMode::Opaque],
+        vec![wgt::CompositeAlphaMode::PostMultiplied],
+    ] {
+        let mut requirements = supported_device();
+        requirements.surface.composite_alpha_modes = modes;
+        assert!(requirements.failure(true).is_some());
+    }
+}
+
+#[test]
 fn baseline_without_optional_features() {
     let mut requirements = supported_device();
-    assert_eq!(requirements.failure(), None);
+    assert_eq!(requirements.failure(false), None);
     requirements.surface.current_extent = None;
-    assert_eq!(requirements.failure(), None);
+    assert_eq!(requirements.failure(false), None);
     requirements.surface.current_extent = Some(wgt::Extent3d {
         width: 4096,
         height: 4096,
         depth_or_array_layers: 1,
     });
-    assert_eq!(requirements.failure(), None);
+    assert_eq!(requirements.failure(false), None);
     for format in [
         wgt::TextureFormat::Bgra8Unorm,
         wgt::TextureFormat::Rgba8Unorm,
@@ -51,7 +77,7 @@ fn baseline_without_optional_features() {
             format,
             color_spaces: wgt::SurfaceColorSpaces::SRGB | wgt::SurfaceColorSpaces::DISPLAY_P3,
         }];
-        assert_eq!(requirements.failure(), None);
+        assert_eq!(requirements.failure(false), None);
     }
 }
 
@@ -59,14 +85,15 @@ fn baseline_without_optional_features() {
 fn reject_software_adapters() {
     let mut requirements = supported_device();
     requirements.device_type = wgt::DeviceType::Cpu;
-    assert!(requirements.failure().is_some());
+    assert!(requirements.failure(false).is_some());
+    assert!(requirements.failure(true).is_some());
 }
 
 #[test]
 fn reject_missing_swapchain() {
     let mut requirements = supported_device();
     requirements.swapchain = false;
-    assert!(requirements.failure().is_some());
+    assert!(requirements.failure(false).is_some());
 }
 
 #[test]
@@ -77,7 +104,7 @@ fn reject_missing_texture_usages() {
     ] {
         let mut requirements = supported_device();
         requirements.color.remove(usage);
-        assert!(requirements.failure().is_some());
+        assert!(requirements.failure(false).is_some());
     }
     for usage in [
         hal::TextureFormatCapabilities::DEPTH_STENCIL_ATTACHMENT,
@@ -85,7 +112,7 @@ fn reject_missing_texture_usages() {
     ] {
         let mut requirements = supported_device();
         requirements.depth.remove(usage);
-        assert!(requirements.failure().is_some());
+        assert!(requirements.failure(false).is_some());
     }
 }
 
@@ -93,10 +120,10 @@ fn reject_missing_texture_usages() {
 fn reject_unusable_surface() {
     let mut requirements = supported_device();
     requirements.surface.usage = wgt::TextureUses::COPY_SRC;
-    assert!(requirements.failure().is_some());
+    assert!(requirements.failure(false).is_some());
     requirements = supported_device();
     requirements.surface.composite_alpha_modes = vec![wgt::CompositeAlphaMode::PreMultiplied];
-    assert!(requirements.failure().is_some());
+    assert!(requirements.failure(false).is_some());
     for formats in [
         vec![],
         vec![wgt::SurfaceFormatCapabilities {
@@ -120,11 +147,11 @@ fn reject_unusable_surface() {
     ] {
         requirements = supported_device();
         requirements.surface.formats = formats;
-        assert!(requirements.failure().is_some());
+        assert!(requirements.failure(false).is_some());
     }
     requirements = supported_device();
     requirements.surface.present_modes = vec![wgt::PresentMode::Immediate];
-    assert!(requirements.failure().is_some());
+    assert!(requirements.failure(false).is_some());
     for (width, height) in [(0, 16), (16, 0), (4097, 16), (16, 4097)] {
         requirements = supported_device();
         requirements.surface.current_extent = Some(wgt::Extent3d {
@@ -132,12 +159,12 @@ fn reject_unusable_surface() {
             height,
             depth_or_array_layers: 1,
         });
-        assert!(requirements.failure().is_some());
+        assert!(requirements.failure(false).is_some());
     }
 }
 
 #[test]
-fn adapter_selection_prefers_type_then_name() {
+fn adapter_selection_preserves_enumeration_order() {
     let mut selected = wgt::AdapterInfo {
         name: "Z adapter".into(),
         vendor: 0,
@@ -154,11 +181,25 @@ fn adapter_selection_prefers_type_then_name() {
     };
     let mut candidate = selected.clone();
     candidate.name = "A adapter".into();
-    assert!(prefer_adapter(&candidate, &selected));
+    assert!(!prefer_adapter(&candidate, &selected));
     assert!(!prefer_adapter(&selected, &candidate));
     selected.device_type = wgt::DeviceType::IntegratedGpu;
     assert!(prefer_adapter(&candidate, &selected));
     assert!(!prefer_adapter(&selected, &candidate));
+}
+
+#[test]
+fn alpha_visual_requires_usable_surface() {
+    let mut requirements = supported_device();
+    requirements.surface.composite_alpha_modes = vec![wgt::CompositeAlphaMode::PreMultiplied];
+    assert_eq!(requirements.failure(true), None);
+    assert!(requirements.failure(false).is_some());
+    requirements.surface.formats.clear();
+    assert!(requirements.failure(true).is_some());
+    requirements = supported_device();
+    requirements.surface.composite_alpha_modes = vec![wgt::CompositeAlphaMode::PreMultiplied];
+    requirements.surface.present_modes.clear();
+    assert!(requirements.failure(true).is_some());
 }
 
 #[test]

@@ -43,6 +43,38 @@ static bool ProbeWebRender() {
     record_error("%s", report.error);
     return false;
   }
+  for (int screen = 0; screen < ScreenCount(display); ++screen) {
+    XVisualInfo query = {};
+    query.screen = screen;
+    query.depth = 32;
+    query.c_class = TrueColor;
+    int count = 0;
+    XVisualInfo* visuals = XGetVisualInfo(
+        display, VisualScreenMask | VisualDepthMask | VisualClassMask, &query,
+        &count);
+    if (!visuals) {
+      continue;
+    }
+    auto freeVisuals = mozilla::MakeScopeExit([&] { XFree(visuals); });
+    for (int i = 0; i < count; ++i) {
+      const auto& visual = visuals[i];
+      XSetWindowAttributes attributes = {};
+      attributes.colormap = XCreateColormap(
+          display, RootWindow(display, screen), visual.visual, AllocNone);
+      auto freeColormap = mozilla::MakeScopeExit(
+          [&] { XFreeColormap(display, attributes.colormap); });
+      Window alphaWindow = XCreateWindow(
+          display, RootWindow(display, screen), 0, 0, 16, 16, 0, visual.depth,
+          InputOutput, visual.visual, CWColormap | CWBorderPixel, &attributes);
+      auto destroyAlphaWindow =
+          mozilla::MakeScopeExit([&] { XDestroyWindow(display, alphaWindow); });
+      if (wr_startup_probe_alpha_xlib(probe, display, uint64_t(alphaWindow),
+                                      screen)) {
+        uint64_t key = (uint64_t(screen) << 32) | visual.visualid;
+        record_value("VULKAN_WEBRENDER_ALPHA_VISUAL\n%" PRIu64 "\n", key);
+      }
+    }
+  }
   if (!wr_startup_probe_finish(probe, &report)) {
     record_error("%s", report.error);
     return false;

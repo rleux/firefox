@@ -16,6 +16,13 @@ LOCAL_INCLUDES += [
     "/toolkit/components/remote",
 ]
 
+if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk" and CONFIG["MOZ_WEBRENDER_VULKAN"]:
+    UNIFIED_SOURCES += ["TestVulkanWebRenderRequirements.cpp"]
+    LOCAL_INCLUDES += [
+        "/widget",
+        "/widget/gtk",
+    ]
+
 if CONFIG["OS_TARGET"] == "WINNT":
     UNIFIED_SOURCES += [
         "TestAssembleCommandLineWin.cpp",

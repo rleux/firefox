@@ -45,7 +45,7 @@ impl Requirements {
         }
     }
 
-    fn failure(&self) -> Option<&'static str> {
+    fn failure(&self, transparent: bool) -> Option<&'static str> {
         if self.device_type == wgt::DeviceType::Cpu {
             return Some("Vulkan WebRender requires a hardware adapter");
         }
@@ -61,13 +61,24 @@ impl Requirements {
         ) {
             return Some("Vulkan adapter lacks required texture format usages");
         }
-        if !self.surface.usage.contains(wgt::TextureUses::COLOR_TARGET)
-            || !self
-                .surface
+        let alpha_supported = if transparent {
+            self.surface.composite_alpha_modes.iter().any(|mode| {
+                matches!(
+                    mode,
+                    wgt::CompositeAlphaMode::PreMultiplied | wgt::CompositeAlphaMode::Inherit
+                )
+            })
+        } else {
+            self.surface
                 .composite_alpha_modes
                 .contains(&wgt::CompositeAlphaMode::Opaque)
-        {
-            return Some("Vulkan surface lacks direct opaque rendering support");
+        };
+        if !self.surface.usage.contains(wgt::TextureUses::COLOR_TARGET) || !alpha_supported {
+            return Some(if transparent {
+                "Vulkan surface lacks direct alpha rendering support"
+            } else {
+                "Vulkan surface lacks direct opaque rendering support"
+            });
         }
         let direct_format = self.surface.formats.iter().any(|entry| {
             matches!(
@@ -102,8 +113,7 @@ fn device_rank(kind: wgt::DeviceType) -> u8 {
 }
 
 fn prefer_adapter(candidate: &wgt::AdapterInfo, selected: &wgt::AdapterInfo) -> bool {
-    (device_rank(candidate.device_type), candidate.name.as_str())
-        < (device_rank(selected.device_type), selected.name.as_str())
+    device_rank(candidate.device_type) < device_rank(selected.device_type)
 }
 
 pub struct WrStartupProbe {
@@ -178,10 +188,25 @@ impl WrStartupProbe {
         let (selected, caps) = best.ok_or("No HAL Vulkan graphics adapter can present to X11")?;
         let requirements = Requirements::for_surface(&selected, caps);
         self.selected = Some(selected);
-        match requirements.failure() {
+        match requirements.failure(false) {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+
+    unsafe fn alpha_xlib(&self, display: *mut c_void, window: u64, screen: i32) -> bool {
+        let Some(selected) = self.selected.as_ref() else {
+            return false;
+        };
+        let Ok(surface) = (unsafe { self.surface(display, window, screen) }) else {
+            return false;
+        };
+        let Some(caps) = (unsafe { selected.adapter.surface_capabilities(&surface) }) else {
+            return false;
+        };
+        Requirements::for_surface(selected, caps)
+            .failure(true)
+            .is_none()
     }
 
     fn finish(&self) -> Result<(), String> {
@@ -271,6 +296,18 @@ pub unsafe extern "C" fn wr_startup_probe_select_xlib(
 ) -> bool {
     let result = unsafe { probe.select_xlib(display, window, screen) };
     report(probe, result, output)
+}
+
+/// # Safety
+/// Display/window are borrowed live Xlib objects for this call only.
+#[no_mangle]
+pub unsafe extern "C" fn wr_startup_probe_alpha_xlib(
+    probe: &WrStartupProbe,
+    display: *mut c_void,
+    window: u64,
+    screen: i32,
+) -> bool {
+    unsafe { probe.alpha_xlib(display, window, screen) }
 }
 
 #[no_mangle]

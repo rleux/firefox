@@ -109,7 +109,7 @@ static Maybe<OwnedVulkanConfig> AcquireX11Surface(
        [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->Release(); }},
       aValidation,
       aVsync,
-      attributes.depth == 32};
+      gtk->VulkanNeedsAlpha()};
   return Some(OwnedVulkanConfig(config));
 }
 #endif
@@ -216,7 +216,8 @@ bool RenderCompositorVulkan::IsWindowHidden() {
     return false;
   }
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
-  const bool hidden = mWindowVisibility &&
+  const bool hidden =
+      mWindowVisibility &&
       mWindowVisibility->Query() == X11WindowVisibility::State::Hidden;
   if (mWindowWasHidden && !hidden) {
     wr_renderer_force_redraw(mRenderer);
@@ -268,8 +269,7 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
   if (aConfig) {
     next.emplace(*aConfig);
   }
-  if (!wr_renderer_set_wgpu_surface(mRenderer,
-                                      next ? &next->Raw() : nullptr)) {
+  if (!wr_renderer_set_wgpu_surface(mRenderer, next ? &next->Raw() : nullptr)) {
     Fail();
     return false;
   }
