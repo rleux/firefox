@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include <cinttypes>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -9,6 +10,7 @@
 
 #ifdef MOZ_X11
 #  define VK_USE_PLATFORM_XLIB_KHR
+#  include <X11/Xutil.h>
 #endif
 #include <vulkan/vulkan.h>
 
@@ -39,21 +41,6 @@ static bool HasExtension(const std::vector<VkExtensionProperties>& aExtensions,
     }
   }
   return false;
-}
-
-static int DeviceRank(VkPhysicalDeviceType aType) {
-  switch (aType) {
-    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
-      return 0;
-    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
-      return 1;
-    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
-      return 2;
-    case VK_PHYSICAL_DEVICE_TYPE_CPU:
-      return 3;
-    default:
-      return 4;
-  }
 }
 
 static bool ProbeWebRender() {
@@ -174,12 +161,9 @@ static bool ProbeWebRender() {
     }
     VkPhysicalDeviceProperties properties = {};
     vkGetPhysicalDeviceProperties(device, &properties);
-    // Match Device::select_adapter: device type, then adapter name.
-    int rank = DeviceRank(properties.deviceType);
-    int selectedRank = DeviceRank(selectedProperties.deviceType);
-    if (!selected || rank < selectedRank ||
-        (rank == selectedRank &&
-         strcmp(properties.deviceName, selectedProperties.deviceName) < 0)) {
+    // Preserve enumeration order for equally ranked adapters.
+    if (!selected || VulkanWebRenderRequirements::PreferDevice(
+                         properties, selectedProperties)) {
       selected = device;
       selectedProperties = properties;
     }
@@ -245,6 +229,79 @@ static bool ProbeWebRender() {
   if (const char* failure = requirements.Failure()) {
     record_error("%s", failure);
     return false;
+  }
+  auto alphaRequirements = requirements;
+  for (int screen = 0; screen < ScreenCount(display); ++screen) {
+    XVisualInfo query = {};
+    query.screen = screen;
+    query.depth = 32;
+    query.c_class = TrueColor;
+    int count = 0;
+    XVisualInfo* visuals = XGetVisualInfo(
+        display, VisualScreenMask | VisualDepthMask | VisualClassMask, &query,
+        &count);
+    if (!visuals) {
+      continue;
+    }
+    auto freeVisuals = mozilla::MakeScopeExit([&] { XFree(visuals); });
+    for (int i = 0; i < count; ++i) {
+      const auto& visual = visuals[i];
+      XSetWindowAttributes attributes = {};
+      attributes.colormap = XCreateColormap(
+          display, RootWindow(display, screen), visual.visual, AllocNone);
+      auto freeColormap = mozilla::MakeScopeExit(
+          [&] { XFreeColormap(display, attributes.colormap); });
+      Window alphaWindow = XCreateWindow(
+          display, RootWindow(display, screen), 0, 0, 16, 16, 0, visual.depth,
+          InputOutput, visual.visual, CWColormap | CWBorderPixel, &attributes);
+      auto destroyAlphaWindow =
+          mozilla::MakeScopeExit([&] { XDestroyWindow(display, alphaWindow); });
+      surfaceInfo.window = alphaWindow;
+      VkSurfaceKHR alphaSurface = VK_NULL_HANDLE;
+      if (vkCreateXlibSurfaceKHR(instance, &surfaceInfo, nullptr,
+                                 &alphaSurface) != VK_SUCCESS) {
+        continue;
+      }
+      auto destroyAlphaSurface = mozilla::MakeScopeExit(
+          [&] { vkDestroySurfaceKHR(instance, alphaSurface, nullptr); });
+      VkSurfaceCapabilitiesKHR alphaCaps = {};
+      VkBool32 present = VK_FALSE;
+      if (vkGetPhysicalDeviceSurfaceSupportKHR(selected, 0, alphaSurface,
+                                               &present) == VK_SUCCESS &&
+          present &&
+          vkGetPhysicalDeviceSurfaceCapabilitiesKHR(selected, alphaSurface,
+                                                    &alphaCaps) == VK_SUCCESS &&
+          VulkanWebRenderRequirements::SupportsAlpha(
+              alphaCaps.supportedCompositeAlpha)) {
+        alphaRequirements.surface = alphaCaps;
+        if (!Enumerate(formats,
+                       [&](auto count, auto values) {
+                         return vkGetPhysicalDeviceSurfaceFormatsKHR(
+                             selected, alphaSurface, count, values);
+                       }) ||
+            !Enumerate(modes, [&](auto count, auto values) {
+              return vkGetPhysicalDeviceSurfacePresentModesKHR(
+                  selected, alphaSurface, count, values);
+            })) {
+          continue;
+        }
+        alphaRequirements.directFormat = false;
+        for (const auto& format : formats) {
+          alphaRequirements.directFormat |=
+              (format.format == VK_FORMAT_R8G8B8A8_UNORM ||
+               format.format == VK_FORMAT_B8G8R8A8_UNORM) &&
+              format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        }
+        alphaRequirements.fifo = false;
+        for (auto mode : modes) {
+          alphaRequirements.fifo |= mode == VK_PRESENT_MODE_FIFO_KHR;
+        }
+        if (!alphaRequirements.Failure(true)) {
+          uint64_t key = (uint64_t(screen) << 32) | visual.visualid;
+          record_value("VULKAN_WEBRENDER_ALPHA_VISUAL\n%" PRIu64 "\n", key);
+        }
+      }
+    }
   }
   LOAD_VK(vkCreateDevice);
   LOAD_VK(vkDestroyDevice);

@@ -114,6 +114,16 @@ Window nsWindowX11::GetX11Window() {
 // Configure GL visual on X11.
 bool nsWindowX11::ConfigureX11GLVisual() {
   auto* screen = gtk_widget_get_screen(mShell);
+  if (gfxVars::UseWebRenderVulkan() && !gfxVars::UseSoftwareWebRender()) {
+    auto* visual = mVulkanNeedsAlpha ? gdk_screen_get_rgba_visual(screen)
+                                     : gdk_screen_get_system_visual(screen);
+    if (!visual) {
+      return false;
+    }
+    gtk_widget_set_visual(mShell, visual);
+    mHasAlphaVisual = mVulkanNeedsAlpha;
+    return true;
+  }
   int visualId = 0;
   bool haveVisual = false;
 

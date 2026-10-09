@@ -8,6 +8,31 @@
 #include <vulkan/vulkan.h>
 
 struct VulkanWebRenderRequirements {
+  static int DeviceRank(VkPhysicalDeviceType aType) {
+    switch (aType) {
+      case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        return 0;
+      case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        return 1;
+      case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        return 2;
+      case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        return 3;
+      default:
+        return 4;
+    }
+  }
+
+  static bool PreferDevice(const VkPhysicalDeviceProperties& aCandidate,
+                           const VkPhysicalDeviceProperties& aSelected) {
+    return DeviceRank(aCandidate.deviceType) < DeviceRank(aSelected.deviceType);
+  }
+
+  static bool SupportsAlpha(VkCompositeAlphaFlagsKHR aModes) {
+    return aModes & (VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR |
+                     VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR);
+  }
+
   VkPhysicalDeviceProperties device = {};
   VkFormatFeatureFlags color = 0;
   VkFormatFeatureFlags depth = 0;
@@ -16,7 +41,7 @@ struct VulkanWebRenderRequirements {
   bool directFormat = false;
   bool fifo = false;
 
-  const char* Failure() const {
+  const char* Failure(bool aTransparent = false) const {
     if (device.apiVersion < VK_API_VERSION_1_1 ||
         device.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
       return "Vulkan WebRender requires a hardware Vulkan 1.1 adapter";
@@ -32,10 +57,15 @@ struct VulkanWebRenderRequirements {
         (depth & depthFlags) != depthFlags) {
       return "Vulkan adapter lacks required texture format usages";
     }
+    const bool alphaSupported =
+        aTransparent ? SupportsAlpha(surface.supportedCompositeAlpha)
+                     : (surface.supportedCompositeAlpha &
+                        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR);
     if (!(surface.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
-        !(surface.supportedCompositeAlpha &
-          VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)) {
-      return "Vulkan surface lacks direct opaque rendering support";
+        !alphaSupported) {
+      return aTransparent
+                 ? "Vulkan surface lacks direct alpha rendering support"
+                 : "Vulkan surface lacks direct opaque rendering support";
     }
     if (!directFormat || !fifo) {
       return "Vulkan surface lacks UNORM/sRGB or FIFO presentation";

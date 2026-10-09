@@ -34,6 +34,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/Components.h"
 #include "mozilla/GRefPtr.h"
+#include "mozilla/GfxInfo.h"
 #include "mozilla/Likely.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MiscEvents.h"
@@ -421,6 +422,7 @@ nsWindow::nsWindow()
       mWidgetCursorLocked(false),
       mUndecorated(false),
       mHasAlphaVisual(false),
+      mVulkanNeedsAlpha(false),
       mConfiguredClearColor(false),
       mGotNonBlankPaint(false),
       mNeedsToRetryCapturingMouse(false),
@@ -654,7 +656,46 @@ DesktopToLayoutDeviceScale nsWindow::GetDesktopToDeviceScale() const {
   return DesktopToLayoutDeviceScale(FractionalScaleFactor());
 }
 
+static mozilla::widget::VulkanWindowPolicy VulkanWindowPolicyForType(
+    bool aIsTopLevel, GdkScreen* aScreen = nullptr) {
+  const bool useVulkan = gfxVars::UseWebRenderVulkan() &&
+                         !gfxVars::UseSoftwareWebRender() && GdkIsX11Display();
+  bool supportsAlpha = false;
+#ifdef MOZ_X11
+  if (useVulkan) {
+    auto* screen = aScreen ? aScreen : gdk_screen_get_default();
+    if (auto* visual = gdk_screen_get_rgba_visual(screen)) {
+      supportsAlpha = GfxInfo::IsVulkanWebRenderAlphaSupported(
+          GDK_SCREEN_XNUMBER(screen),
+          XVisualIDFromVisual(gdk_x11_visual_get_xvisual(visual)));
+    }
+  }
+#endif
+  return mozilla::widget::SelectVulkanWindowPolicy(
+      useVulkan, supportsAlpha, aIsTopLevel,
+      Preferences::HasUserValue("mozilla.widget.use-argb-visuals") &&
+          Preferences::GetBool("mozilla.widget.use-argb-visuals"));
+}
+
+mozilla::widget::VulkanWindowPolicy nsWindow::GetVulkanWindowPolicy() const {
+  return VulkanWindowPolicyForType(
+      mWindowType == WindowType::TopLevel,
+      mShell ? gtk_widget_get_screen(mShell) : nullptr);
+}
+
+bool nsWindow::RequiresSoftwareWebRender() {
+  return GetVulkanWindowPolicy() ==
+             mozilla::widget::VulkanWindowPolicy::Software ||
+         (gfxVars::UseWebRenderVulkan() && !gfxVars::UseSoftwareWebRender() &&
+          GdkIsX11Display() && mGdkWindow &&
+          (mVulkanNeedsAlpha || mIsTransparent) && !mHasAlphaVisual);
+}
+
 bool nsWindow::WidgetTypeSupportsAcceleration() {
+  if (GetVulkanWindowPolicy() ==
+      mozilla::widget::VulkanWindowPolicy::Software) {
+    return false;
+  }
   if (IsSmallPopup() || mIsDragPopup) {
     return false;
   }
@@ -4134,6 +4175,10 @@ gboolean nsWindow::OnTouchEvent(GdkEventTouch* aEvent) {
 // It's transparent when we're running on composited screens
 // and we can draw main window without system titlebar.
 bool nsWindow::IsToplevelWindowTransparent() {
+  if (VulkanWindowPolicyForType(true) ==
+      mozilla::widget::VulkanWindowPolicy::OpaqueVisual) {
+    return false;
+  }
   static bool transparencyConfigured = false;
 
   if (!transparencyConfigured) {
@@ -4303,6 +4348,8 @@ nsresult nsWindow::Create(nsIWidget* aParent, const LayoutDeviceIntRect& aRect,
     toplevelNeedsAlphaVisual = IsToplevelWindowTransparent();
   }
 
+  mVulkanNeedsAlpha =
+      mCompositedScreen && (popupNeedsAlphaVisual || toplevelNeedsAlphaVisual);
   bool isGLVisualSet = false;
   mIsAccelerated = ComputeShouldAccelerate();
 #ifdef MOZ_X11
@@ -7292,7 +7339,8 @@ void nsWindow::GetCompositorWidgetInitData(
                                                      GetDesktopToDeviceScale());
 
   *aInitData = mozilla::widget::GtkCompositorWidgetInitData(
-      GetX11Window(), displayName, GdkIsX11Display(), clientSize);
+      GetX11Window(), displayName, GdkIsX11Display(), mVulkanNeedsAlpha,
+      clientSize);
 }
 
 nsresult nsWindow::SetSystemFont(const nsCString& aFontName) {
