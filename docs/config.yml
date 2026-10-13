@@ -123,6 +123,7 @@ redirects:
     dom/dom: dom
     layout/layout: layout
     gfx/gfx: gfx
+    gfx/VulkanWebRenderArchitecture.html: gfx/VulkanWebRenderOverview.html
     intl/l10n/l10n: l10n
     l10n/glossary.html: glossary/index.html
     ipc/ipc: ipc
