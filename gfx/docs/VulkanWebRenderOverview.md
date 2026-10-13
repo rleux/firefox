@@ -66,5 +66,7 @@ without reading pixels. Native correctness checks must use compositor readback o
 observe the actual rendered window: software automation snapshots do not prove
 hardware WebRender output.
 
-See the [implementation guide](VulkanWebRenderImplementation.md) for ownership,
+See the [architecture summary](VulkanWebRenderArchitecture.md) for the main
+design decisions and limitations, and the
+[implementation guide](VulkanWebRenderImplementation.md) for ownership,
 synchronization, failure and validation contracts.

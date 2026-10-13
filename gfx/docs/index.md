@@ -16,6 +16,7 @@ Silk
 Moz2D
 DebuggingWebRenderScreenshots
 VulkanWebRenderOverview
+VulkanWebRenderArchitecture
 VulkanWebRenderImplementation
 GraphicsOverview
 VendoringANGLE
