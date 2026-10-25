@@ -1941,10 +1941,12 @@ fn window_backend_config(
     swgl_context: *mut c_void,
     gl_context: *mut c_void,
     vulkan_config: Option<&WrVulkanConfig>,
+    unified_webgpu_requested: bool,
     panic_on_gl_error: bool,
 ) -> Result<(GpuBackendConfig, Option<swgl::Context>), String> {
     if let Some(config) = vulkan_config {
-        if !static_prefs::pref!("gfx.webrender.vulkan") {
+        // Opted-in renderers use the parent's startup compositor selection.
+        if !unified_webgpu_requested && !static_prefs::pref!("gfx.webrender.vulkan") {
             return Err("Vulkan requires gfx.webrender.vulkan to be enabled".into());
         }
         return unsafe { ::vulkan::create_backend(config) }.map(|backend| (backend, None));
@@ -2001,6 +2003,7 @@ pub extern "C" fn wr_window_new(
     swgl_context: *mut c_void,
     gl_context: *mut c_void,
     vulkan_config: Option<&WrVulkanConfig>,
+    unified_webgpu_requested: bool,
     surface_origin_is_top_left: bool,
     program_cache: Option<&mut WrProgramCache>,
     shaders: Option<&mut WrShaders>,
@@ -2050,7 +2053,13 @@ pub extern "C" fn wr_window_new(
         }
     }
 
-    let (backend, sw_gl) = match window_backend_config(swgl_context, gl_context, vulkan_config, panic_on_gl_error) {
+    let (backend, sw_gl) = match window_backend_config(
+        swgl_context,
+        gl_context,
+        vulkan_config,
+        unified_webgpu_requested,
+        panic_on_gl_error,
+    ) {
         Ok(config) => config,
         Err(error) => return window_creation_failed(out_err, error),
     };

@@ -2478,6 +2478,9 @@ void gfxPlatform::InitWebRenderConfig() {
     return;
   }
 
+  gfxVars::SetWebRenderUnifiedWebGPURequested(
+      StaticPrefs::gfx_webrender_vulkan_unified_webgpu_AtStartup());
+
   // Update the gfxConfig feature states.
   gfxConfigManager manager;
   manager.Init();
@@ -3247,6 +3250,20 @@ void gfxPlatform::InitWebGPUConfig() {
     } else {
       featureWebGPU.Disable(FeatureStatus::Blocklisted, message.get(),
                             failureId);
+    }
+  }
+
+  if (gfxVars::WebRenderUnifiedWebGPURequested()) {
+    if (!gfxVars::UseWebRenderVulkan()) {
+      featureWebGPU.ForceDisable(
+          FeatureStatus::Unavailable,
+          "Unified WebGPU rendering requires Vulkan WebRender",
+          "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_VULKAN"_ns);
+    } else {
+      featureWebGPU.ForceDisable(
+          FeatureStatus::Unavailable,
+          "Unified WebGPU rendering is not implemented",
+          "FEATURE_FAILURE_WEBGPU_UNIFIED_NOT_IMPLEMENTED"_ns);
     }
   }
 
