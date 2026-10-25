@@ -33,10 +33,10 @@ mod drm;
 mod instance;
 mod memory;
 mod pnext_chain;
+pub(crate) mod renderer;
 mod sampler;
 mod semaphore_list;
 pub(crate) mod shared;
-pub(crate) mod renderer;
 mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;
@@ -756,7 +756,8 @@ pub struct Queue {
     raw: vk::Queue,
     device: Arc<DeviceShared>,
     family_index: u32,
-    relay_semaphores: Mutex<RelaySemaphores>,
+    relay_semaphores: Option<Mutex<RelaySemaphores>>,
+    progress: Option<Arc<shared::QueueProgress>>,
     signal_semaphores: Mutex<SemaphoreList>,
     wait_semaphores: Mutex<SemaphoreList>,
     /// A caller-provided `pNext` chain to attach to the [`vk::SubmitInfo`] of the
@@ -773,6 +774,7 @@ impl fmt::Debug for Queue {
             device: _,
             family_index,
             relay_semaphores: _,
+            progress: _,
             signal_semaphores: _,
             wait_semaphores: _,
             next_submit_chain: _,
@@ -791,7 +793,9 @@ impl Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        unsafe { self.relay_semaphores.lock().destroy(&self.device.raw) };
+        if let Some(relay) = &self.relay_semaphores {
+            unsafe { relay.lock().destroy(&self.device.raw) };
+        }
     }
 }
 #[derive(Debug)]
@@ -1185,6 +1189,7 @@ struct TempTextureViewKey {
 // be reset for reused encoders in `begin_encoding`.
 pub struct CommandEncoder {
     raw: vk::CommandPool,
+    family_index: u32,
     device: Arc<DeviceShared>,
 
     /// The current command buffer, if `self` is in the ["recording"]
@@ -1278,6 +1283,8 @@ impl fmt::Debug for CommandEncoder {
 #[derive(Debug)]
 pub struct CommandBuffer {
     raw: vk::CommandBuffer,
+    device: vk::Device,
+    family_index: u32,
 }
 
 impl crate::DynCommandBuffer for CommandBuffer {}
@@ -1511,12 +1518,22 @@ impl Queue {
         &self,
         command_buffers: &[&CommandBuffer],
         surface_textures: &[&SurfaceTexture],
-        (signal_fence, signal_value): (&Fence, crate::FenceValue),
+        signal: Option<(&Fence, crate::FenceValue)>,
+        extra_waits: &[SemaphoreType],
+        extra_signals: &[SemaphoreType],
+        completion_signals: &[SemaphoreType],
     ) -> Result<(), crate::DeviceError> {
+        let signal_value = signal.map_or(0, |(_, value)| value);
         let mut fence_raw = vk::Fence::null();
 
         let mut wait_semaphores = SemaphoreList::new(SemaphoreListMode::Wait);
         let mut signal_semaphores = SemaphoreList::new(SemaphoreListMode::Signal);
+        for semaphore in extra_waits {
+            wait_semaphores.push_wait(*semaphore, vk::PipelineStageFlags::ALL_COMMANDS);
+        }
+        for semaphore in extra_signals {
+            signal_semaphores.push_signal(*semaphore);
+        }
 
         // Assert that we will not deadlock as we try to lock each `SurfaceTexture`'s
         // metadata.
@@ -1570,46 +1587,48 @@ impl Queue {
 
         // In order for submissions to be strictly ordered, we encode a dependency between each submission
         // using a pair of semaphores. This adds a wait if it is needed, and signals the next semaphore.
-        let semaphore_state = self.relay_semaphores.lock().advance(&self.device)?;
-
-        if let Some(sem) = semaphore_state.wait {
-            wait_semaphores.push_wait(
-                SemaphoreType::Binary(sem),
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-            );
+        if let Some(relay) = &self.relay_semaphores {
+            let semaphore_state = relay.lock().advance(&self.device)?;
+            if let Some(sem) = semaphore_state.wait {
+                wait_semaphores.push_wait(
+                    SemaphoreType::Binary(sem),
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                );
+            }
+            signal_semaphores.push_signal(SemaphoreType::Binary(semaphore_state.signal));
         }
 
-        signal_semaphores.push_signal(SemaphoreType::Binary(semaphore_state.signal));
-
         // We need to signal our wgpu::Fence if we have one, this adds it to the signal list.
-        signal_fence.maintain(&self.device.raw)?;
         // Keeping the Arc around is probably unneeded - the fence should never be signaled as it was reset,
         // and newer submits should not happen until this submit is done. Therefore, it should be too high
         // to be reset.
         let shared_fence;
-        match *signal_fence {
-            Fence::TimelineSemaphore(raw) => {
-                signal_semaphores.push_signal(SemaphoreType::Timeline(raw, signal_value));
-            }
-            Fence::FencePool(ref pool) => {
-                let FencePool {
-                    ref mut active,
-                    ref mut free,
-                    ..
-                } = *pool.write();
-                shared_fence = match free.pop() {
-                    Some(raw) => Arc::new(raw),
-                    None => unsafe {
-                        let fence = self
-                            .device
-                            .raw
-                            .create_fence(&vk::FenceCreateInfo::default(), None)
-                            .map_err(map_host_device_oom_err)?;
-                        Arc::new(fence)
-                    },
-                };
-                fence_raw = *shared_fence;
-                active.push((signal_value, shared_fence.clone()));
+        if let Some((signal_fence, signal_value)) = signal {
+            signal_fence.maintain(&self.device.raw)?;
+            match *signal_fence {
+                Fence::TimelineSemaphore(raw) => {
+                    signal_semaphores.push_signal(SemaphoreType::Timeline(raw, signal_value));
+                }
+                Fence::FencePool(ref pool) => {
+                    let FencePool {
+                        ref mut active,
+                        ref mut free,
+                        ..
+                    } = *pool.write();
+                    shared_fence = match free.pop() {
+                        Some(raw) => Arc::new(raw),
+                        None => unsafe {
+                            let fence = self
+                                .device
+                                .raw
+                                .create_fence(&vk::FenceCreateInfo::default(), None)
+                                .map_err(map_host_device_oom_err)?;
+                            Arc::new(fence)
+                        },
+                    };
+                    fence_raw = *shared_fence;
+                    active.push((signal_value, shared_fence.clone()));
+                }
             }
         }
 
@@ -1634,11 +1653,26 @@ impl Queue {
             vk_info.p_next = unsafe { chain.splice_into(vk_info.p_next) };
         }
 
+        let mut completion_waits = SemaphoreList::new(SemaphoreListMode::Wait);
+        let mut completion = SemaphoreList::new(SemaphoreListMode::Signal);
+        for semaphore in completion_signals {
+            completion.push_signal(*semaphore);
+        }
+        let mut completion_timeline = mem::MaybeUninit::uninit();
+        let completion_info = SemaphoreList::add_to_submit(
+            &mut completion_waits,
+            &mut completion,
+            vk::SubmitInfo::default(),
+            &mut completion_timeline,
+        );
+        // Sibling signals are unordered; private markers must follow caller signals.
+        let infos = [vk_info, completion_info];
+        let count = if completion_signals.is_empty() { 1 } else { 2 };
         profiling::scope!("vkQueueSubmit");
         unsafe {
             self.device
                 .raw
-                .queue_submit(self.raw, &[vk_info], fence_raw)
+                .queue_submit(self.raw, &infos[..count], fence_raw)
                 .map_err(map_host_device_oom_and_lost_err)?
         };
         Ok(())
@@ -1655,14 +1689,25 @@ impl crate::Queue for Queue {
         signal_fence: (&Fence, crate::FenceValue),
     ) -> Result<(), crate::DeviceError> {
         if let Some(group) = &self.device.shared_queue_group {
-            if !surface_textures.is_empty() {
+            if !surface_textures.is_empty()
+                || !matches!(signal_fence.0, Fence::TimelineSemaphore(_))
+            {
                 return Err(crate::DeviceError::Unexpected);
             }
             group.submit(self.device.queue_index as usize, || unsafe {
-                self.submit_impl(command_buffers, surface_textures, signal_fence)
+                shared::submit_single(self, command_buffers, signal_fence)
             })
         } else {
-            unsafe { self.submit_impl(command_buffers, surface_textures, signal_fence) }
+            unsafe {
+                self.submit_impl(
+                    command_buffers,
+                    surface_textures,
+                    Some(signal_fence),
+                    &[],
+                    &[],
+                    &[],
+                )
+            }
         }
     }
 
@@ -1686,18 +1731,12 @@ impl crate::Queue for Queue {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
-        let group = self.device.shared_queue_group.as_ref();
-        let _host = group.map(|group| group.host[self.device.queue_index as usize].lock());
-        let result = unsafe { self.device.raw.queue_wait_idle(self.raw) }
-            .map_err(map_host_device_oom_and_lost_err);
-        if result.is_err() {
-            if let Some(group) = group {
-                group
-                    .closed
-                    .store(true, core::sync::atomic::Ordering::Release);
-            }
+        if self.device.shared_queue_group.is_some() {
+            shared::wait_for_idle(self)
+        } else {
+            unsafe { self.device.raw.queue_wait_idle(self.raw) }
+                .map_err(map_host_device_oom_and_lost_err)
         }
-        result
     }
 }
 

@@ -3067,13 +3067,23 @@ impl super::Adapter {
             empty_descriptor_set_layout,
         });
 
-        let relay_semaphores = super::RelaySemaphores::new(&shared)?;
+        let relay_semaphores = if shared.shared_queue_group.is_some() {
+            None
+        } else {
+            Some(Mutex::new(super::RelaySemaphores::new(&shared)?))
+        };
+        let progress = if shared.shared_queue_group.is_some() {
+            Some(Arc::new(super::shared::QueueProgress::new(shared.clone())?))
+        } else {
+            None
+        };
 
         let queue = super::Queue {
             raw: raw_queue,
             device: Arc::clone(&shared),
             family_index,
-            relay_semaphores: Mutex::new(relay_semaphores),
+            relay_semaphores,
+            progress,
             signal_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Signal)),
             wait_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Wait)),
             next_submit_chain: Mutex::new(None),

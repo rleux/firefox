@@ -1,3 +1,8 @@
+mod progress;
+mod submit;
+pub(super) use progress::{wait_for_idle, QueueProgress};
+pub(super) use submit::submit_single;
+
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     fmt,
@@ -15,6 +20,7 @@ use crate::shared::{
 pub(super) struct QueueGroup {
     pub(super) host: [Mutex<()>; 2],
     pub(super) closed: AtomicBool,
+    pub(super) uncertain: AtomicBool,
     pub(super) texture_ids: Arc<ResourceIdentityFactory<vk::Image>>,
     pub(super) view_ids: Arc<ResourceIdentityFactory<vk::ImageView>>,
     identity: SharedDeviceIdentity,
@@ -24,6 +30,8 @@ pub(super) struct QueueGroup {
     compute_wrapper_attempts: core::sync::atomic::AtomicUsize,
     #[cfg(test)]
     compute_open_waiters: core::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    graphics_idle_waiters: core::sync::atomic::AtomicUsize,
 }
 
 impl QueueGroup {
@@ -31,6 +39,7 @@ impl QueueGroup {
         Self {
             host: [Mutex::new(()), Mutex::new(())],
             closed: AtomicBool::new(false),
+            uncertain: AtomicBool::new(false),
             texture_ids: Arc::new(ResourceIdentityFactory::new()),
             view_ids: Arc::new(ResourceIdentityFactory::new()),
             identity: SharedDeviceIdentity::new(),
@@ -40,6 +49,8 @@ impl QueueGroup {
             compute_wrapper_attempts: core::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             compute_open_waiters: core::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            graphics_idle_waiters: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -54,12 +65,17 @@ impl QueueGroup {
         }
         let result = operation();
         if result.is_err() {
-            self.closed.store(true, Ordering::Release);
+            self.close_uncertain();
         }
         result
     }
 
-    fn wait_for_idle(&self, device: &ash::Device) -> Result<(), crate::DeviceError> {
+    pub(super) fn close_uncertain(&self) {
+        self.uncertain.store(true, Ordering::Release);
+        self.closed.store(true, Ordering::Release);
+    }
+
+    pub(super) fn wait_for_idle(&self, device: &ash::Device) -> Result<(), crate::DeviceError> {
         let _graphics = self.host[0].lock();
         let _compute = self.host[1].lock();
         unsafe { device.device_wait_idle() }.map_err(super::map_host_device_oom_and_lost_err)
@@ -165,9 +181,24 @@ impl SharedDeviceContext for NativeDevice {
         Ok(open.into())
     }
 
+    unsafe fn submit_ordered(
+        &self,
+        logical_compute_queue: &dyn crate::DynQueue,
+        segments: &[crate::shared::SharedSubmitSegment<'_>],
+        terminal: (&dyn crate::DynFence, crate::FenceValue),
+    ) -> Result<Box<dyn crate::shared::SharedSubmissionReceipt>, crate::shared::SharedSubmitError>
+    {
+        unsafe { submit::submit_ordered(self, logical_compute_queue, segments, terminal) }
+    }
+
     fn drain(&self) -> Result<(), crate::DeviceError> {
         self.queues.closed.store(true, Ordering::Release);
-        self.queues.wait_for_idle(&self.raw)
+        let result = self.queues.wait_for_idle(&self.raw);
+        self.queues.uncertain.store(
+            !matches!(result, Ok(()) | Err(crate::DeviceError::Lost)),
+            Ordering::Release,
+        );
+        result
     }
 }
 
@@ -194,6 +225,9 @@ pub(crate) unsafe fn open_shared_device(
     };
     if !supports_independent_queues(&families) {
         return Err(SharedDeviceError::IndependentQueuesUnavailable);
+    }
+    if !adapter.private_caps.timeline_semaphores {
+        return Err(SharedDeviceError::TimelineSemaphoresUnavailable);
     }
     let extensions = adapter.required_device_extensions(features);
     let mut device_features = adapter.physical_device_features(&extensions, features);

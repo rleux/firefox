@@ -810,3 +810,6 @@ fn shared_compute_endpoint_waiting_for_host_lock_observes_drain_closure() {
     assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
     assert_validation_clean();
 }
+
+#[path = "submit_tests.rs"]
+mod ordered;

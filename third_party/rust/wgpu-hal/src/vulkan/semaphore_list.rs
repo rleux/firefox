@@ -212,6 +212,7 @@ impl SemaphoreList {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum SemaphoreType {
     Binary(vk::Semaphore),
     Timeline(vk::Semaphore, u64),

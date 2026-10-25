@@ -1449,6 +1449,7 @@ impl crate::Device for super::Device {
 
         Ok(super::CommandEncoder {
             raw,
+            family_index: desc.queue.family_index,
             device: Arc::clone(&self.shared),
             active: vk::CommandBuffer::null(),
             bind_point: vk::PipelineBindPoint::default(),

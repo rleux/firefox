@@ -21,6 +21,42 @@ impl PartialEq for SharedDeviceIdentity {
 }
 impl Eq for SharedDeviceIdentity {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharedQueueLane {
+    Graphics,
+    Compute,
+}
+
+pub struct SharedSubmitSegment<'a> {
+    pub lane: SharedQueueLane,
+    pub queue: &'a dyn crate::DynQueue,
+    pub command_buffers: &'a [&'a dyn crate::DynCommandBuffer],
+}
+
+impl fmt::Debug for SharedSubmitSegment<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SharedSubmitSegment")
+            .field("lane", &self.lane)
+            .field("command_buffer_count", &self.command_buffers.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Owns native synchronization until the submitted work has retired.
+/// Partial-error receipts cannot be waited on; use a real context drain.
+/// Dropping a receipt requires confirmed retirement of all accepted work.
+pub trait SharedSubmissionReceipt: fmt::Debug + wgt::WasmNotSendSync {
+    fn poll(&self) -> Result<bool, DeviceError>;
+    fn wait(&self, timeout: Option<core::time::Duration>) -> Result<bool, DeviceError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Shared submission failed: {error}")]
+pub struct SharedSubmitError {
+    pub error: DeviceError,
+    pub receipt: Option<alloc::boxed::Box<dyn SharedSubmissionReceipt>>,
+}
+
 pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     fn identity(&self) -> SharedDeviceIdentity;
 
@@ -31,8 +67,8 @@ pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     /// Open a private logical device on the reserved compute queue.
     ///
     /// This does not create a native device or enable additional native features.
-    /// Waiting for this endpoint's queue currently also waits for other logical
-    /// endpoints sharing that native queue.
+    /// Queue idle waits normally cover this logical endpoint's accepted work.
+    /// Closed or uncertain contexts require a real shared native drain instead.
     ///
     /// # Safety
     ///
@@ -46,6 +82,22 @@ pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
         limits: &wgt::Limits,
         memory_hints: &wgt::MemoryHints,
     ) -> Result<DynOpenDevice, SharedDeviceError>;
+
+    /// Enqueue an ordered sequence and signal the caller's fence only at its end.
+    ///
+    /// # Safety
+    ///
+    /// Queues and buffers must be valid and live; their backend, native context
+    /// and queue-family compatibility are checked before enqueue. The fence must
+    /// belong to this context, and recorded command states must be truthful.
+    /// Retain all encoders, resources, queues, fence and receipt until confirmed native retirement.
+    /// An error carrying a receipt may have accepted work and requires real drain.
+    unsafe fn submit_ordered(
+        &self,
+        logical_compute_queue: &dyn crate::DynQueue,
+        segments: &[SharedSubmitSegment<'_>],
+        terminal: (&dyn crate::DynFence, crate::FenceValue),
+    ) -> Result<alloc::boxed::Box<dyn SharedSubmissionReceipt>, SharedSubmitError>;
 
     /// Permanently close submission admission and wait for accepted native work.
     ///
@@ -74,6 +126,8 @@ pub enum SharedDeviceError {
     UnsupportedBackend,
     #[error("Shared devices require two graphics/compute queues in the presentation-compatible queue family")]
     IndependentQueuesUnavailable,
+    #[error("Shared devices require native timeline semaphores")]
+    TimelineSemaphoresUnavailable,
     #[error("The adapter is not the shared context's original instance and physical device")]
     IncompatibleAdapter,
     #[error("Native features were not enabled when the shared context was created: {0:?}")]
