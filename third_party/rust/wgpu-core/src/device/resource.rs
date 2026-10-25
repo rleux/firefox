@@ -320,6 +320,7 @@ pub struct Device {
     //  - The device must be dropped before the adapter.
     //  - Any member whose drop might write into the trace must be dropped
     //    before the trace.
+    pub(crate) graphics_provider: Option<Arc<dyn crate::graphics::GraphicsRecordingProvider>>,
     raw: Box<dyn hal::DynDevice>,
     pub(crate) adapter: Arc<Adapter>,
     #[cfg(feature = "trace")]
@@ -364,6 +365,7 @@ const _: () = {
             indirect_validation,
             timestamp_normalizer,
             default_external_texture_params_buffer,
+            graphics_provider,
             raw,
             adapter,
             #[cfg(feature = "trace")]
@@ -397,6 +399,7 @@ const _: () = {
         _check_bound(indirect_validation);
         _check_bound(timestamp_normalizer);
         _check_bound(default_external_texture_params_buffer);
+        _check_bound(graphics_provider);
         _check_bound(raw);
         _check_bound(adapter);
         #[cfg(feature = "trace")]
@@ -531,6 +534,7 @@ impl Device {
         adapter: &Arc<Adapter>,
         desc: &DeviceDescriptor,
         instance_flags: wgt::InstanceFlags,
+        graphics_provider: Option<Arc<dyn crate::graphics::GraphicsRecordingProvider>>,
     ) -> Result<Self, DeviceError> {
         #[cfg(not(feature = "trace"))]
         match &desc.trace {
@@ -686,6 +690,7 @@ impl Device {
             let indirect_validation = indirect_validation.map(ScopeGuard::into_inner);
 
             Ok(Self {
+                graphics_provider,
                 raw: raw_device,
                 adapter: adapter.clone(),
                 queue: OnceCell::new(),
@@ -2914,7 +2919,7 @@ impl Device {
 
         let encoder = self
             .command_allocator
-            .acquire_encoder(self.raw(), queue.raw())
+            .acquire_encoder(self, queue.raw())
             .map_err(|e| self.handle_hal_error(e))?;
 
         let cmd_enc = command::CommandEncoder::new(encoder, self, label);

@@ -212,6 +212,31 @@ impl Global {
         device_id_in: DeviceId,
         queue_id_in: QueueId,
     ) -> Result<(DeviceId, QueueId), RequestDeviceError> {
+        unsafe {
+            self.create_device_from_hal_with_graphics(
+                adapter_id,
+                hal_device,
+                desc,
+                device_id_in,
+                queue_id_in,
+                None,
+            )
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The requirements of create_device_from_hal apply. The graphics provider
+    /// must bind a compatible graphics queue/context for the supplied device.
+    pub unsafe fn create_device_from_hal_with_graphics<'a>(
+        &self,
+        adapter_id: AdapterId,
+        hal_device: hal::DynOpenDevice,
+        desc: &wgt::DeviceDescriptor<Label<'a>>,
+        device_id_in: DeviceId,
+        queue_id_in: QueueId,
+        graphics_provider: Option<Arc<dyn wgpu_core::graphics::GraphicsRecordingProvider>>,
+    ) -> Result<(DeviceId, QueueId), RequestDeviceError> {
         let mut hub = self.hub.borrow_mut();
         let Hub {
             adapters,
@@ -221,8 +246,14 @@ impl Global {
         } = &mut *hub;
 
         let adapter = adapters.get(adapter_id);
-        let (device, queue) = unsafe { adapter.create_device_and_queue_from_hal(hal_device, desc) }
-            .map_err(map_request_device_error)?;
+        let (device, queue) = unsafe {
+            adapter.create_device_and_queue_from_hal_with_graphics(
+                hal_device,
+                desc,
+                graphics_provider,
+            )
+        }
+        .map_err(map_request_device_error)?;
 
         let device_id = devices.assign(device_id_in, device);
 

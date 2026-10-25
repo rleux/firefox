@@ -63,7 +63,7 @@ impl Queue {
     ) -> Result<Self, DeviceError> {
         let pending_encoder = device
             .command_allocator
-            .acquire_encoder(device.raw(), raw.as_ref())
+            .acquire_encoder(&device, raw.as_ref())
             .map_err(DeviceError::from_hal);
 
         let pending_encoder = match pending_encoder {
@@ -610,7 +610,7 @@ impl PendingWrites {
             self.is_recording = false;
 
             let new_encoder = command_allocator
-                .acquire_encoder(device.raw(), queue.raw())
+                .acquire_encoder(device, queue.raw())
                 .map_err(|e| device.handle_hal_error(e))?;
 
             let mut encoder = EncoderInFlight {
@@ -2028,6 +2028,10 @@ impl Queue {
             }
             Ok(None) => {}
             Err(e) => return Err(e),
+        }
+        if self.device.graphics_provider.is_some() {
+            log::error!("Renderer-owned graphics submission is not implemented");
+            return Err(self.device.handle_hal_error(hal::DeviceError::Unexpected));
         }
         let hal_command_buffers = executions
             .iter()

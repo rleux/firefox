@@ -17,6 +17,8 @@ mod compute_command;
 mod draw;
 mod encoder;
 mod encoder_command;
+#[cfg(all(test, feature = "noop", feature = "std"))]
+mod graphics_tests;
 mod memory_init;
 mod pass;
 mod query;
@@ -808,7 +810,9 @@ impl Drop for InnerCommandEncoder {
         }
         // SAFETY: We are in the Drop impl and we don't use self.raw anymore after this point.
         let raw = unsafe { ManuallyDrop::take(&mut self.raw) };
-        self.device.command_allocator.release_encoder(raw);
+        if self.device.graphics_provider.is_none() {
+            self.device.command_allocator.release_encoder(raw);
+        }
     }
 }
 

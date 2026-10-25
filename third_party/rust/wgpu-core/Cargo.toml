@@ -264,3 +264,6 @@ check-cfg = [
     "cfg(wgpu_validate_locks)",
     "cfg(wgpu_validate_locks_debug)",
 ]
+
+[dev-dependencies.wgpu_graphics]
+path = "../../../gfx/wgpu_graphics"

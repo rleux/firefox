@@ -73,6 +73,7 @@ pub mod command;
 mod conv;
 pub mod device;
 pub mod error;
+pub mod graphics;
 pub mod id;
 mod indirect_validation;
 mod init_tracker;

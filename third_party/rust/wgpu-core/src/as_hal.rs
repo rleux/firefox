@@ -243,6 +243,10 @@ impl crate::command::CommandEncoder {
     ) -> R {
         profiling::scope!("CommandEncoder::as_hal");
 
+        if self.device.graphics_provider.is_some() {
+            return hal_command_encoder_callback(None);
+        }
+
         let mut cmd_buf_data = self.data.lock();
         cmd_buf_data.record_as_hal_mut(|opt_cmd_buf| -> R {
             hal_command_encoder_callback(opt_cmd_buf.and_then(|cmd_buf| {

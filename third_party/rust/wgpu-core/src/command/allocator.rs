@@ -31,7 +31,7 @@ impl CommandAllocator {
     /// [`wgpu_hal::CommandEncoder`]: hal::CommandEncoder
     pub(crate) fn acquire_encoder(
         &self,
-        device: &dyn hal::DynDevice,
+        device: &crate::device::Device,
         queue: &dyn hal::DynQueue,
     ) -> Result<Box<dyn hal::DynCommandEncoder>, hal::DeviceError> {
         let mut free_encoders = self.free_encoders.lock();
@@ -39,7 +39,12 @@ impl CommandAllocator {
             Some(encoder) => Ok(encoder),
             None => unsafe {
                 let hal_desc = hal::CommandEncoderDescriptor { label: None, queue };
-                device.create_command_encoder(&hal_desc)
+                let native = device.raw().create_command_encoder(&hal_desc)?;
+                if let Some(provider) = &device.graphics_provider {
+                    provider.create_encoder(device.raw(), native)
+                } else {
+                    Ok(native)
+                }
             },
         }
     }

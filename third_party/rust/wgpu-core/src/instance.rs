@@ -1216,6 +1216,19 @@ impl Adapter {
         hal_device: hal::DynOpenDevice,
         desc: &DeviceDescriptor,
     ) -> Result<(Arc<Device>, Arc<Queue>), RequestDeviceError> {
+        unsafe { self.create_device_and_queue_from_hal_with_graphics(hal_device, desc, None) }
+    }
+
+    /// # Safety
+    ///
+    /// The requirements of create_device_and_queue_from_hal apply. The graphics
+    /// provider must bind a compatible graphics queue/context for this device.
+    pub unsafe fn create_device_and_queue_from_hal_with_graphics(
+        self: &Arc<Self>,
+        hal_device: hal::DynOpenDevice,
+        desc: &DeviceDescriptor,
+        graphics_provider: Option<Arc<dyn crate::graphics::GraphicsRecordingProvider>>,
+    ) -> Result<(Arc<Device>, Arc<Queue>), RequestDeviceError> {
         profiling::scope!("Adapter::create_device_and_queue_from_hal");
         api_log!("Adapter::create_device_and_queue_from_hal");
 
@@ -1230,7 +1243,13 @@ impl Adapter {
 
         let default_queue_desc = desc.default_queue.clone();
 
-        let device = Device::new(hal_device.device, self, desc, self.instance.flags)?;
+        let device = Device::new(
+            hal_device.device,
+            self,
+            desc,
+            self.instance.flags,
+            graphics_provider,
+        )?;
         let device = Arc::new(device);
 
         let queue = Queue::new(
