@@ -278,6 +278,7 @@ pub mod api {
 
 mod dynamic;
 mod graphics;
+pub mod shared;
 pub use graphics::{
     GraphicsCommand, GraphicsExecution, GraphicsRecorder, GraphicsRecorderFactory,
 };

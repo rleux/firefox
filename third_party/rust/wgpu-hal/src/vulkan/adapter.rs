@@ -2655,6 +2655,34 @@ impl super::Adapter {
         family_index: u32,
         queue_index: u32,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
+        unsafe {
+            self.device_from_raw_shared(
+                raw_device,
+                drop_callback,
+                enabled_extensions,
+                features,
+                limits,
+                memory_hints,
+                family_index,
+                queue_index,
+                None,
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn device_from_raw_shared(
+        &self,
+        raw_device: ash::Device,
+        drop_callback: Option<crate::DropCallback>,
+        enabled_extensions: &[&'static CStr],
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+        family_index: u32,
+        queue_index: u32,
+        shared_queue_group: Option<Arc<super::shared::QueueGroup>>,
+    ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -3027,8 +3055,15 @@ impl super::Adapter {
             )),
             memory_allocations_counter: Default::default(),
 
-            texture_identity_factory: super::ResourceIdentityFactory::new(),
-            texture_view_identity_factory: super::ResourceIdentityFactory::new(),
+            texture_identity_factory: shared_queue_group.as_ref().map_or_else(
+                || Arc::new(super::ResourceIdentityFactory::new()),
+                |group| group.texture_ids.clone(),
+            ),
+            texture_view_identity_factory: shared_queue_group.as_ref().map_or_else(
+                || Arc::new(super::ResourceIdentityFactory::new()),
+                |group| group.view_ids.clone(),
+            ),
+            shared_queue_group,
             empty_descriptor_set_layout,
         });
 

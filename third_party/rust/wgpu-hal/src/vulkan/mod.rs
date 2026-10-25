@@ -35,6 +35,7 @@ mod memory;
 mod pnext_chain;
 mod sampler;
 mod semaphore_list;
+pub(crate) mod shared;
 mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;
@@ -626,11 +627,12 @@ struct DeviceShared {
     /// the device is destroyed, if the implementation of vulkan re-uses handles
     /// we need some way to differentiate between the old handle and the new handle.
     /// This factory allows us to have a dedicated identity value for each texture.
-    texture_identity_factory: ResourceIdentityFactory<vk::Image>,
+    texture_identity_factory: Arc<ResourceIdentityFactory<vk::Image>>,
     /// As above, for texture views.
-    texture_view_identity_factory: ResourceIdentityFactory<vk::ImageView>,
+    texture_view_identity_factory: Arc<ResourceIdentityFactory<vk::ImageView>>,
 
     empty_descriptor_set_layout: vk::DescriptorSetLayout,
+    shared_queue_group: Option<Arc<shared::QueueGroup>>,
 
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
@@ -1502,10 +1504,8 @@ impl Fence {
     }
 }
 
-impl crate::Queue for Queue {
-    type A = Api;
-
-    unsafe fn submit(
+impl Queue {
+    unsafe fn submit_impl(
         &self,
         command_buffers: &[&CommandBuffer],
         surface_textures: &[&SurfaceTexture],
@@ -1641,12 +1641,39 @@ impl crate::Queue for Queue {
         };
         Ok(())
     }
+}
+
+impl crate::Queue for Queue {
+    type A = Api;
+
+    unsafe fn submit(
+        &self,
+        command_buffers: &[&CommandBuffer],
+        surface_textures: &[&SurfaceTexture],
+        signal_fence: (&Fence, crate::FenceValue),
+    ) -> Result<(), crate::DeviceError> {
+        if let Some(group) = &self.device.shared_queue_group {
+            if !surface_textures.is_empty() {
+                return Err(crate::DeviceError::Unexpected);
+            }
+            group.submit(self.device.queue_index as usize, || unsafe {
+                self.submit_impl(command_buffers, surface_textures, signal_fence)
+            })
+        } else {
+            unsafe { self.submit_impl(command_buffers, surface_textures, signal_fence) }
+        }
+    }
 
     unsafe fn present(
         &self,
         surface: &Surface,
         texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
+        if self.device.shared_queue_group.is_some() {
+            return Err(crate::SurfaceError::Other(
+                "Shared-device presentation is not implemented",
+            ));
+        }
         let mut swapchain = surface.swapchain.write();
 
         unsafe { swapchain.as_mut().unwrap().present(self, texture) }
@@ -1657,8 +1684,18 @@ impl crate::Queue for Queue {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
-        unsafe { self.device.raw.queue_wait_idle(self.raw) }
-            .map_err(map_host_device_oom_and_lost_err)
+        let group = self.device.shared_queue_group.as_ref();
+        let _host = group.map(|group| group.host[self.device.queue_index as usize].lock());
+        let result = unsafe { self.device.raw.queue_wait_idle(self.raw) }
+            .map_err(map_host_device_oom_and_lost_err);
+        if result.is_err() {
+            if let Some(group) = group {
+                group
+                    .closed
+                    .store(true, core::sync::atomic::Ordering::Release);
+            }
+        }
+        result
     }
 }
 

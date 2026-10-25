@@ -1222,6 +1222,11 @@ impl crate::Surface for super::Surface {
         device: &super::Device,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
+        if device.shared.shared_queue_group.is_some() {
+            return Err(crate::SurfaceError::Other(
+                "Shared-device presentation is not implemented",
+            ));
+        }
         // SAFETY: `configure`'s contract guarantees there are no resources derived from the swapchain in use.
         let mut swap_chain = self.swapchain.write();
 
