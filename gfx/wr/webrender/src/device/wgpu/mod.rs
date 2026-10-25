@@ -54,6 +54,8 @@ mod swapchain;
 #[cfg(test)]
 pub(crate) use self::swapchain::testing as surface_testing;
 mod draw;
+mod graphics;
+pub use self::graphics::GraphicsRecorderFactory;
 mod clear;
 mod render_pass;
 mod render_device;

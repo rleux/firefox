@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::bindings::DrawBindings;
+use super::graphics;
 use super::pipeline::DrawPipeline;
 use super::{hal, wgt, Buffer, Device, Recording, Samplers, SubmissionQueue, Texture, TextureFilter};
 use api::units::{DeviceIntPoint, DeviceIntRect};
@@ -444,46 +445,66 @@ impl<T: ColorAttachment> ValidatedPass<'_, '_, T> {
                 let instance_binding = (Rc::as_ptr(&draw.instances), instances.offset, instances.size);
                 let state = (Rc::as_ptr(pipeline), scissor, instance_binding);
                 if draw_state.is_none() {
-                    encoder.set_viewport(
-                        &hal::Rect {
+                    graphics::record(encoder, hal::GraphicsCommand::SetViewport {
+                        rect: hal::Rect {
                             x: viewport.min.x as f32,
                             y: viewport.min.y as f32,
                             w: viewport.width() as f32,
                             h: viewport.height() as f32,
                         },
-                        pass.depth_range.clone(),
-                    );
-                    encoder.set_vertex_buffer(0, quad.binding());
+                        depth_range: pass.depth_range.clone(),
+                    });
+                    graphics::record(encoder, hal::GraphicsCommand::SetVertexBuffer {
+                        index: 0,
+                        binding: quad.binding(),
+                    });
                     #[cfg(test)]
                     owner.trace.borrow_mut().push(super::tests::Command::DrawInvariant);
                 }
                 if draw_state.map_or(true, |previous: (_, _, _)| previous.0 != state.0) {
-                    encoder.set_render_pipeline(&*pipeline.raw);
+                    graphics::record(encoder, hal::GraphicsCommand::SetRenderPipeline {
+                        pipeline: &*pipeline.raw,
+                    });
                     #[cfg(test)]
                     owner.trace.borrow_mut().push(super::tests::Command::DrawPipeline);
                 }
                 if draw_state.map_or(true, |previous| previous.1 != scissor) {
-                    encoder.set_scissor_rect(&hal::Rect {
-                        x: (scissor.min.x - pass.origin.x) as u32,
-                        y: (scissor.min.y - pass.origin.y) as u32,
-                        w: scissor.width() as u32,
-                        h: scissor.height() as u32,
+                    graphics::record(encoder, hal::GraphicsCommand::SetScissorRect {
+                        rect: hal::Rect {
+                            x: (scissor.min.x - pass.origin.x) as u32,
+                            y: (scissor.min.y - pass.origin.y) as u32,
+                            w: scissor.width() as u32,
+                            h: scissor.height() as u32,
+                        },
                     });
                     #[cfg(test)]
                     owner.trace.borrow_mut().push(super::tests::Command::DrawScissor);
                 }
                 if draw_state.map_or(true, |previous| previous.2 != instance_binding) {
-                    encoder.set_vertex_buffer(1, instances);
+                    graphics::record(encoder, hal::GraphicsCommand::SetVertexBuffer {
+                        index: 1,
+                        binding: instances,
+                    });
                     #[cfg(test)]
                     owner.trace.borrow_mut().push(super::tests::Command::DrawInstances);
                 }
                 draw_state = Some(state);
                 let binding = (Rc::as_ptr(&pipeline.layouts), Rc::as_ptr(&draw.bindings.resources), draw.bindings.projection_offset);
                 if bound != Some(binding) {
-                    encoder.set_bind_group(&*pipeline.layouts.layout, 0, &*draw.bindings.resources.raw, draw.bindings.projection_offset.as_slice());
+                    graphics::record(encoder, hal::GraphicsCommand::SetBindGroup {
+                        layout: &*pipeline.layouts.layout,
+                        index: 0,
+                        group: &*draw.bindings.resources.raw,
+                        dynamic_offsets: draw.bindings.projection_offset.as_slice(),
+                    });
                     bound = Some(binding);
                 }
-                encoder.draw(0, 4, 0, draw.instance_count);
+                graphics::record(encoder, hal::GraphicsCommand::Draw {
+                    first_vertex: 0,
+                    vertex_count: 4,
+                    first_instance: 0,
+                    instance_count: draw.instance_count,
+                });
             }
         })
     }
@@ -512,8 +533,7 @@ impl<T: ColorAttachment> ValidatedPass<'_, '_, T> {
         let depth_ops = attachment_ops.map_or_else(|| ops(pass.depth.map_or(false, |depth| depth.initialized()), pass.clear_depth.is_some()), |ops| ops.1);
         unsafe {
             let encoder = commands.encoder();
-            encoder
-                .begin_render_pass(&hal::RenderPassDescriptor {
+            graphics::begin_render_pass(encoder, &hal::RenderPassDescriptor {
                     label: Some("WR draw pass"),
                     extent: size,
                     sample_count: 1,
@@ -547,7 +567,7 @@ impl<T: ColorAttachment> ValidatedPass<'_, '_, T> {
             #[cfg(test)]
             pass.target.owner().trace.borrow_mut().push(super::tests::Command::BeginPass(color_ops, depth_ops));
             record(encoder);
-            encoder.end_render_pass();
+            graphics::end_render_pass(encoder);
             #[cfg(test)]
             pass.target.owner().trace.borrow_mut().push(super::tests::Command::EndPass);
         }

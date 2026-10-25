@@ -266,7 +266,7 @@ reflection/layout information and generates the artifacts consumed by WebRender.
 The backend reuses WebRender's GLSL and data layouts.
 
 Shaders are compiled at build time using `glslangValidator`, `spirv-val` and
-`spirv-dis`. Vendored Naga and wgpu sources are used without local modifications.
+`spirv-dis`. Vendored wgpu includes local native integration changes; Naga remains unmodified.
 
 For glslang, tool lookup uses `GLSLANG_VALIDATOR`, `SPIRV_VAL` and `SPIRV_DIS`, then
 `MOZ_FETCHES_DIR/shader-tools/bin` when configured, otherwise `PATH`. The pinned

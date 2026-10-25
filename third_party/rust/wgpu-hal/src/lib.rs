@@ -277,6 +277,10 @@ pub mod api {
 }
 
 mod dynamic;
+mod graphics;
+pub use graphics::{
+    GraphicsCommand, GraphicsExecution, GraphicsRecorder, GraphicsRecorderFactory,
+};
 #[cfg(feature = "validation_canary")]
 mod validation_canary;
 

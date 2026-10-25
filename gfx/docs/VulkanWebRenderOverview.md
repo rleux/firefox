@@ -73,7 +73,7 @@ paths select software decoding for Vulkan and use the ordinary buffer-image path
 Existing GLSL shaders are compiled into embedded SPIR-V with glslang at build
 time. Shader tools run on the build host and are not required by the installed
 browser.
-Upstream wgpu and Naga dependencies remain unmodified.
+Vendored wgpu includes local native integration changes; Naga remains unmodified.
 
 Add `ac_add_options --enable-webrender-vulkan=glslang` to the mozconfig. Compilation
 requires the external shader tools. Selection and tool requirements are described in the
