@@ -22,7 +22,10 @@ and suitable device and surface capabilities.
 | `wgpu-hal` dynamic interfaces | Device, queue, resource and presentation operations |
 
 `Device::new` constructs the backend from `GpuBackendConfig`. Ordinary WebRender
-owns its Vulkan device independently of WebGPU. Native image producers use explicit
+owns its Vulkan device independently of WebGPU. The shared HAL path can bind
+WebRender graphics and independent logical Core devices to one native Vulkan
+device, using distinct graphics and compute queues. Firefox canvas presentation
+still uses the ordinary readback path. Native image producers use explicit
 image-publication and synchronization protocols.
 
 GPU commands are batched with explicit synchronization and resource retention
@@ -45,7 +48,7 @@ gradients, filters, YUV sampling and native-window presentation. CPU images use
 the upload path, including WebGPU canvas frames presented through readback. Linux
 GL producers can publish compatible linear RGB DMA-BUF images for direct sampling. This
 path still has producer-side work and does not make the whole browser pipeline
-copy-free. Native WebGPU image publication is deferred pending upstream support.
+copy-free. Native WebGPU canvas publication is not yet selected for Firefox.
 
 Vulkan startup supports Linux/GTK/X11 and Windows. Android window/lifecycle paths
 are present in the code, but Android keeps accelerated OpenGL until Vulkan can

@@ -2,12 +2,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, sync::Arc};
 use core::{fmt, ops::Range};
 
 use crate::{
-    BufferBinding, DeviceError, DynBindGroup, DynBuffer, DynCommandBuffer, DynDevice,
-    DynPipelineLayout, DynQuerySet, DynQueue, DynRenderPipeline, DynTextureView, Label, Rect,
+    BufferBinding, DeviceError, DynBindGroup, DynBuffer, DynCommandBuffer, DynOpenDevice,
+    DynPipelineLayout, DynQuerySet, DynRenderPipeline, DynTextureView, Label, Rect,
     RenderPassDescriptor,
 };
 
@@ -151,11 +151,11 @@ pub trait GraphicsRecorder: fmt::Debug + wgt::WasmNotSendSync {
 
 pub trait GraphicsRecorderFactory: fmt::Debug + wgt::WasmNotSendSync {
     /// # Safety
-    /// The queue must support graphics on this device. The caller must retain
-    /// the device/resources for the recorder and every finished execution token.
+    /// The endpoint's queue must support graphics on its device. The recorder
+    /// and execution retain the endpoint; callers must retain referenced logical
+    /// resources and execution tokens until confirmed native retirement.
     unsafe fn create(
         &self,
-        device: &dyn DynDevice,
-        queue: &dyn DynQueue,
+        owner: Arc<DynOpenDevice>,
     ) -> Result<Box<dyn GraphicsRecorder>, DeviceError>;
 }

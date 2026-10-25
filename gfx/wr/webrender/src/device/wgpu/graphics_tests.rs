@@ -86,8 +86,7 @@ unsafe fn record_segment(recorder: &mut dyn hal::GraphicsRecorder) -> usize {
 fn graphics_recorder_keeps_segments_in_one_execution() {
     let (_instance, open) = noop_device();
     let mut recorder =
-        unsafe { GraphicsRecorderFactory.create(open.device.as_ref(), open.queue.as_ref()) }
-            .unwrap();
+        unsafe { GraphicsRecorderFactory.create(std::sync::Arc::new(open)) }.unwrap();
     assert_eq!(unsafe { record_segment(recorder.as_mut()) }, 0);
     assert_eq!(unsafe { record_segment(recorder.as_mut()) }, 1);
     let execution = recorder.finish().unwrap();
@@ -98,8 +97,7 @@ fn graphics_recorder_keeps_segments_in_one_execution() {
 fn graphics_recorder_rejects_unclosed_encoding() {
     let (_instance, open) = noop_device();
     let mut recorder =
-        unsafe { GraphicsRecorderFactory.create(open.device.as_ref(), open.queue.as_ref()) }
-            .unwrap();
+        unsafe { GraphicsRecorderFactory.create(std::sync::Arc::new(open)) }.unwrap();
     unsafe { recorder.begin_encoding(None) }.unwrap();
     assert!(matches!(
         recorder.finish(),
@@ -128,7 +126,7 @@ fn graphics_recorder_retains_native_pool_until_gpu_completion() {
         );
         let device = owner.open.device.as_ref();
         let queue = owner.open.queue.as_ref();
-        let mut recorder = unsafe { GraphicsRecorderFactory.create(device, queue) }.unwrap();
+        let mut recorder = unsafe { GraphicsRecorderFactory.create(owner.open.clone()) }.unwrap();
         assert_eq!(unsafe { record_segment(recorder.as_mut()) }, 0);
         assert_eq!(unsafe { record_segment(recorder.as_mut()) }, 1);
         let execution = recorder.finish().unwrap();
@@ -171,10 +169,7 @@ fn graphics_recorder_discards_unfinished_native_pass() {
             ..Default::default()
         })
         .unwrap();
-        let mut recorder = unsafe {
-            GraphicsRecorderFactory.create(owner.open.device.as_ref(), owner.open.queue.as_ref())
-        }
-        .unwrap();
+        let mut recorder = unsafe { GraphicsRecorderFactory.create(owner.open.clone()) }.unwrap();
         unsafe {
             recorder.begin_encoding(None).unwrap();
             recorder.begin_render_pass(&empty_pass()).unwrap();
@@ -182,4 +177,19 @@ fn graphics_recorder_discards_unfinished_native_pass() {
         drop(recorder);
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn owned_graphics_recorder_retains_endpoint_through_execution_drop() {
+    use std::sync::Arc;
+
+    let (_instance, open) = noop_device();
+    let owner = Arc::new(open);
+    let weak = Arc::downgrade(&owner);
+    let mut recorder = unsafe { GraphicsRecorderFactory.create(owner) }.unwrap();
+    assert_eq!(unsafe { record_segment(recorder.as_mut()) }, 0);
+    let execution = recorder.finish().unwrap();
+    assert!(weak.upgrade().is_some());
+    drop(execution);
+    assert!(weak.upgrade().is_none());
 }

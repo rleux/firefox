@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::hal;
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 #[derive(Debug, Default)]
 pub struct GraphicsRecorderFactory;
@@ -11,14 +11,15 @@ pub struct GraphicsRecorderFactory;
 impl hal::GraphicsRecorderFactory for GraphicsRecorderFactory {
     unsafe fn create(
         &self,
-        device: &dyn hal::DynDevice,
-        queue: &dyn hal::DynQueue,
+        owner: Arc<hal::DynOpenDevice>,
     ) -> Result<Box<dyn hal::GraphicsRecorder>, hal::DeviceError> {
         let encoder = unsafe {
-            device.create_command_encoder(&hal::CommandEncoderDescriptor {
-                label: Some("WR graphics recorder"),
-                queue,
-            })
+            owner
+                .device
+                .create_command_encoder(&hal::CommandEncoderDescriptor {
+                    label: Some("WR graphics recorder"),
+                    queue: &*owner.queue,
+                })
         }?;
         Ok(Box::new(Recorder {
             encoder: Some(encoder),
@@ -26,6 +27,7 @@ impl hal::GraphicsRecorderFactory for GraphicsRecorderFactory {
             recording: false,
             pass: false,
             failed: false,
+            owner,
         }))
     }
 }
@@ -167,6 +169,7 @@ struct Recorder {
     recording: bool,
     pass: bool,
     failed: bool,
+    owner: Arc<hal::DynOpenDevice>,
 }
 
 impl fmt::Debug for Recorder {
@@ -240,6 +243,7 @@ impl hal::GraphicsRecorder for Recorder {
         Ok(Box::new(Execution {
             encoder: self.encoder.take().unwrap(),
             buffers: std::mem::take(&mut self.buffers),
+            _owner: self.owner.clone(),
         }))
     }
 }
@@ -260,6 +264,7 @@ impl Drop for Recorder {
 struct Execution {
     encoder: Box<dyn hal::DynCommandEncoder>,
     buffers: Vec<Box<dyn hal::DynCommandBuffer>>,
+    _owner: Arc<hal::DynOpenDevice>,
 }
 
 impl fmt::Debug for Execution {

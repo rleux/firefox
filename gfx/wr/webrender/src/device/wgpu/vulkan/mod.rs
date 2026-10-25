@@ -36,27 +36,6 @@ impl<T> Drop for Owned<T> {
 }
 
 impl Device {
-    pub(super) unsafe fn clear_color_copy_destination(
-        &self,
-        encoder: &mut dyn hal::DynCommandEncoder,
-        texture: &dyn hal::DynTexture,
-        mip_level: u32,
-    ) {
-        self.raw_device().raw_device().cmd_clear_color_image(
-            encoder.as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-            texture.as_any().downcast_ref::<hal::vulkan::Texture>().unwrap().raw_handle(),
-            ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &ash::vk::ClearColorValue { uint32: [0; 4] },
-            &[ash::vk::ImageSubresourceRange {
-                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
-                base_mip_level: mip_level,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            }],
-        );
-    }
-
     pub fn new(options: &Options) -> Result<Self, String> {
         if let Some(name) = &options.adapter_name {
             if name.trim().is_empty() {
@@ -162,11 +141,7 @@ impl Device {
             }
         }
 
-        let features = exposed.features
-            & (wgt::Features::DUAL_SOURCE_BLENDING
-                | wgt::Features::FLOAT32_FILTERABLE
-                | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
-            );
+        let features = Self::shared_features(exposed.features);
         #[cfg(target_os = "linux")]
         let (open, features) = external::open_adapter(&exposed, features)
             .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
@@ -186,10 +161,9 @@ impl Device {
             .properties()
             .limits;
         Ok(Self {
-            open: open.into(),
+            open: std::sync::Arc::new(open.into()),
             #[cfg(test)]
             trace: Default::default(),
-            shader_module: spirv_module,
             prepared_shaders: Default::default(),
             #[cfg(target_os = "linux")]
             native_cache: Default::default(),
@@ -237,15 +211,6 @@ fn supports_shader_api_version(version: u32) -> bool {
 #[cfg(test)]
 #[path = "device_tests.rs"]
 mod tests;
-
-fn spirv_module(device: &dyn hal::DynDevice, label: &str, words: &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String> {
-    unsafe {
-        device.create_shader_module(&hal::ShaderModuleDescriptor {
-            label: Some(label),
-            runtime_checks: wgt::ShaderRuntimeChecks::unchecked(),
-        }, hal::ShaderInput::SpirV(words))
-    }.map_err(|error| format!("Creating shader module {label}: {error:?}"))
-}
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]

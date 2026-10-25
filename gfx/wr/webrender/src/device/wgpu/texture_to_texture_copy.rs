@@ -20,7 +20,18 @@ impl CopyDestination<'_> {
             && destination_rect.max.y as u32 == texture.size.height;
         if !texture.initialized() && !full_destination {
             unsafe {
-                texture.raw.owner.clear_color_copy_destination(commands.encoder(), texture.raw_texture(), texture.base_mip);
+                hal::renderer::clear_texture_zero(
+                    commands.encoder(),
+                    texture.raw_texture(),
+                    wgt::ImageSubresourceRange {
+                        aspect: wgt::TextureAspect::All,
+                        base_mip_level: texture.base_mip,
+                        mip_level_count: Some(1),
+                        base_array_layer: 0,
+                        array_layer_count: Some(1),
+                    },
+                )
+                .map_err(|error| format!("Clearing partial copy destination: {error:?}"))?;
             }
             self.transition(commands)?;
         }

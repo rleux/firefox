@@ -107,12 +107,11 @@ enum InitialSurface {
 
 /// An opened Vulkan adapter, device and queue.
 pub struct Device {
-    open: hal::DynOpenDevice,
+    open: std::sync::Arc<hal::DynOpenDevice>,
     #[cfg(target_os = "linux")]
     native_cache: native::Cache,
     #[cfg(test)]
     trace: std::cell::RefCell<Vec<tests::Command>>,
-    shader_module: fn(&dyn hal::DynDevice, &str, &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String>,
     prepared_shaders: std::cell::RefCell<crate::internal_types::FastHashMap<*const webrender_build::vulkan::ShaderArtifact, std::rc::Weak<shader::PreparedShader>>>,
     shader_layouts: std::cell::RefCell<crate::internal_types::FastHashMap<Vec<wgt::BindGroupLayoutEntry>, std::rc::Weak<shader::ShaderLayouts>>>,
     graphics_api: crate::device::GraphicsApi,
@@ -132,12 +131,94 @@ pub struct Device {
 }
 
 impl Device {
-    pub(super) fn create_shader_module(&self, label: &str, words: &[u32]) -> Result<Box<dyn hal::DynShaderModule>, String> {
-        (self.shader_module)(self.open.device.as_ref(), label, words)
+    pub fn shared_features(adapter_features: wgt::Features) -> wgt::Features {
+        adapter_features
+            & (wgt::Features::DUAL_SOURCE_BLENDING
+                | wgt::Features::FLOAT32_FILTERABLE
+                | wgt::Features::TEXTURE_FORMAT_16BIT_NORM)
     }
 
+    /// Construct an offscreen renderer from the shared owner's graphics endpoint.
+    ///
+    /// # Safety
+    ///
+    /// The open device/queue must be the graphics endpoint associated with the
+    /// supplied instance and selected adapter; submitted resources must outlive
+    /// their confirmed native retirement.
+    pub unsafe fn from_shared_endpoint(
+        open: std::sync::Arc<hal::DynOpenDevice>,
+        instance: Box<dyn hal::DynInstance>,
+        exposed: hal::DynExposedAdapter,
+    ) -> Result<Self, String> {
+        let native =
+            hal::renderer::graphics_capabilities(&*instance, &*exposed.adapter, &*open.device)
+                .map_err(|error| error.to_string())?;
+        if !native
+            .features
+            .contains(Self::shared_features(exposed.features))
+        {
+            return Err(
+                "Shared device did not enable WebRender's supported optional features".into(),
+            );
+        }
+        for (format, usage) in [
+            (
+                wgt::TextureFormat::Rgba8Unorm,
+                hal::TextureFormatCapabilities::COLOR_ATTACHMENT
+                    | hal::TextureFormatCapabilities::COPY_SRC,
+            ),
+            (
+                wgt::TextureFormat::Depth32Float,
+                hal::TextureFormatCapabilities::DEPTH_STENCIL_ATTACHMENT
+                    | hal::TextureFormatCapabilities::COPY_SRC,
+            ),
+        ] {
+            if !unsafe { exposed.adapter.texture_format_capabilities(format) }.contains(usage) {
+                return Err(format!(
+                    "Adapter does not support {format:?} with {usage:?}"
+                ));
+            }
+        }
+        Ok(Self {
+            open,
+            #[cfg(target_os = "linux")]
+            native_cache: Default::default(),
+            #[cfg(test)]
+            trace: Default::default(),
+            prepared_shaders: Default::default(),
+            shader_layouts: Default::default(),
+            graphics_api: crate::device::GraphicsApi::Vulkan,
+            flip_y: true,
+            depth_zero_to_one: true,
+            info: exposed.info,
+            capabilities: exposed.capabilities,
+            max_viewport_dimensions: native.max_viewport_dimensions,
+            viewport_bounds_range: native.viewport_bounds_range,
+            features: native.features,
+            lost: Cell::new(false),
+            adapter: exposed.adapter,
+            initial_surface: Cell::new(None),
+            instance,
+            display_owner: None,
+        })
+    }
 
-
+    pub(super) fn create_shader_module(
+        &self,
+        label: &str,
+        words: &[u32],
+    ) -> Result<Box<dyn hal::DynShaderModule>, String> {
+        unsafe {
+            self.open.device.create_shader_module(
+                &hal::ShaderModuleDescriptor {
+                    label: Some(label),
+                    runtime_checks: wgt::ShaderRuntimeChecks::unchecked(),
+                },
+                hal::ShaderInput::SpirV(words),
+            )
+        }
+        .map_err(|error| format!("Creating shader module {label}: {error:?}"))
+    }
     pub fn info(&self) -> &wgt::AdapterInfo {
         &self.info
     }
@@ -188,3 +269,6 @@ fn select_adapter<'a>(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod shared_device_tests;

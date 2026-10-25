@@ -1098,6 +1098,11 @@ pub struct Adapter {
 }
 
 impl Adapter {
+    /// Borrow the backend-neutral adapter for trusted embedding integrations.
+    pub fn as_hal_dynamic(&self) -> &dyn hal::DynAdapter {
+        self.raw.adapter.as_ref()
+    }
+
     pub(crate) fn new(raw: hal::DynExposedAdapter, instance: Arc<Instance>) -> Arc<Self> {
         Arc::new(Self {
             raw,

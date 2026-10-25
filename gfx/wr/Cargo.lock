@@ -3573,6 +3573,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "spirv 0.4.0+sdk-1.4.341.0",
  "thiserror 2.0.20",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -6382,8 +6383,10 @@ dependencies = [
  "webrender_api",
  "webrender_build",
  "webrender_shader_build",
+ "wgpu-core 30.0.0",
  "wgpu-hal 30.0.0",
  "wgpu-types 30.0.0",
+ "wgpu_graphics",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
@@ -6481,7 +6484,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "wgpu-core",
+ "wgpu-core 27.0.3",
  "wgpu-hal 27.0.4",
  "wgpu-types 27.0.1",
 ]
@@ -6519,6 +6522,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgpu-core"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=49325ca0a13bdc0787b1601138096cce743dd29e#49325ca0a13bdc0787b1601138096cce743dd29e"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.11.1",
+ "bit-vec 0.10.1",
+ "bitflags 2.13.2",
+ "bytemuck",
+ "cfg_aliases",
+ "document-features",
+ "hashbrown 0.17.1",
+ "indexmap 2.14.2",
+ "log",
+ "naga 30.0.0",
+ "naga-types",
+ "num-traits",
+ "profiling",
+ "raw-window-handle",
+ "rustc-hash 1.1.0",
+ "scopeguard",
+ "smallvec",
+ "thiserror 2.0.20",
+ "wgpu-core-deps-linux-android-bsd",
+ "wgpu-core-deps-windows",
+ "wgpu-hal 30.0.0",
+ "wgpu-naga-bridge",
+ "wgpu-sync",
+ "wgpu-types 30.0.0",
+]
+
+[[package]]
 name = "wgpu-core-deps-apple"
 version = "27.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6534,6 +6569,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b06ac3444a95b0813ecfd81ddb2774b66220b264b3e2031152a4a29fda4da6b5"
 dependencies = [
  "wgpu-hal 27.0.4",
+]
+
+[[package]]
+name = "wgpu-core-deps-linux-android-bsd"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=49325ca0a13bdc0787b1601138096cce743dd29e#49325ca0a13bdc0787b1601138096cce743dd29e"
+dependencies = [
+ "wgpu-hal 30.0.0",
+]
+
+[[package]]
+name = "wgpu-core-deps-windows"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=49325ca0a13bdc0787b1601138096cce743dd29e#49325ca0a13bdc0787b1601138096cce743dd29e"
+dependencies = [
+ "wgpu-hal 30.0.0",
 ]
 
 [[package]]
@@ -6675,6 +6726,14 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wgpu_graphics"
+version = "0.1.0"
+dependencies = [
+ "wgpu-hal 30.0.0",
+ "wgpu-types 30.0.0",
 ]
 
 [[package]]

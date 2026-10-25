@@ -36,6 +36,7 @@ mod pnext_chain;
 mod sampler;
 mod semaphore_list;
 pub(crate) mod shared;
+pub(crate) mod renderer;
 mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;

@@ -14,9 +14,12 @@ preference enabled, until Vulkan can consume its native video images. Android
 window and lifecycle support remains compiled but is not selected at startup.
 
 `RenderCompositorVulkan` supplies an owned native-window configuration to
-`wr_window_new`. The Rust binding selects `GpuBackendConfig::Vulkan`; the ordinary
-`Device::new` constructs the Vulkan backend. The same `Renderer` continues to
-consume scene-builder results, update caches and issue draws. Vulkan window
+`wr_window_new`. In ordinary mode the Rust binding selects
+`GpuBackendConfig::Vulkan`, and `Device::new` constructs the Vulkan backend.
+The shared HAL integration can instead use distinct graphics and compute
+endpoints on one native device while retaining independent logical Core devices.
+It is not yet selected for Firefox canvas presentation. The same `Renderer`
+continues to consume scene-builder results, update caches and issue draws. Vulkan window
 creation rejects GL/SWGL state and Native, Layer or partial-present compositor
 callbacks, because this integration uses the Draw compositor.
 
@@ -237,10 +240,11 @@ to make a texture usable. Producers and adapters select buffer paths where avail
 | WebGPU canvas | Read pixels through WebGPU's staging-buffer presentation path and upload the resulting CPU image | Reuse the staging buffer after readback completes |
 | GL RGB DMA-BUF | Acquire shared access, import the publication's EGL `SYNC_FD`, and transfer FOREIGN ownership | Return access only after the GPU read has completed; poison abandoned access |
 
-WebRender and WebGPU do not share a logical device. Native WebGPU publication is
-deferred until its imported-texture initialization requirements can be met with
-upstream wgpu APIs. GL retains its resolve/presentation work. Layout admission is
-deliberately narrower than all formats a producer might create.
+Logical Core devices remain independent on shared native HAL endpoints. Firefox
+canvas presentation still uses ordinary readback and upload; the native canvas
+integration is staged separately from these low-level interfaces. GL retains
+its resolve/presentation work. Layout admission is deliberately narrower than
+all formats a producer might create.
 
 GL publications carry generation, access and fence metadata. Fence descriptors
 remain serializable after a producer-side wait. The imported sync-file semaphore
