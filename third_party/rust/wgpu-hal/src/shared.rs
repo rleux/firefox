@@ -24,6 +24,10 @@ impl Eq for SharedDeviceIdentity {}
 pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     fn identity(&self) -> SharedDeviceIdentity;
 
+    /// Clone a lease on the original native instance without reconfiguring it.
+    /// Adapter enumeration still needs to select this context's physical device.
+    fn clone_instance(&self) -> (wgt::Backend, alloc::boxed::Box<dyn crate::DynInstance>);
+
     /// Permanently close submission admission and wait for accepted native work.
     ///
     /// An error is not proof of retirement: callers must retain all endpoint,

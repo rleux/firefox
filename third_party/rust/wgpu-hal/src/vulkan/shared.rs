@@ -85,6 +85,15 @@ impl SharedDeviceContext for NativeDevice {
         self.queues.identity.clone()
     }
 
+    fn clone_instance(&self) -> (wgt::Backend, Box<dyn crate::DynInstance>) {
+        (
+            wgt::Backend::Vulkan,
+            Box::new(super::Instance {
+                shared: self._instance.clone(),
+            }),
+        )
+    }
+
     fn drain(&self) -> Result<(), crate::DeviceError> {
         self.queues.closed.store(true, Ordering::Release);
         self.queues.wait_for_idle(&self.raw)

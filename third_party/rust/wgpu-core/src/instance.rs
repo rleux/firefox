@@ -151,6 +151,32 @@ impl Instance {
         })
     }
 
+    /// Import an existing native instance with an independent core device list.
+    ///
+    /// Flags govern core policy; the native instance's creation options remain fixed.
+    ///
+    /// # Safety
+    ///
+    /// The boxed instance must belong to the specified backend. Its native display
+    /// connection, if any, must remain valid for the lifetime of this core instance.
+    pub unsafe fn from_hal_instance_dynamic(
+        name: String,
+        backend: Backend,
+        hal_instance: Box<dyn hal::DynInstance>,
+        flags: InstanceFlags,
+        display: Option<Box<dyn wgt::WgpuHasDisplayHandle>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            _name: name,
+            instance_per_backend: vec![(backend, hal_instance)],
+            requested_backends: backend.into(),
+            supported_backends: backend.into(),
+            flags,
+            display,
+            devices: InstanceDevices::new(),
+        })
+    }
+
     pub fn raw(&self, backend: Backend) -> Option<&dyn hal::DynInstance> {
         self.instance_per_backend
             .iter()
@@ -1780,3 +1806,7 @@ mod tests {
         )
     }
 }
+
+#[cfg(all(test, feature = "noop"))]
+#[path = "instance_import_tests.rs"]
+mod import_tests;

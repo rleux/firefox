@@ -392,3 +392,43 @@ fn shared_encoder_lease_outlives_both_endpoint_wrappers() {
     assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
     assert_validation_clean();
 }
+
+#[test]
+#[ignore = "Requires Vulkan, two universal queues and the Khronos validation layer"]
+fn shared_instance_clone_outlives_native_device_context() {
+    let pair = native_factory().unwrap();
+    let group = native_group(&pair);
+    let graphics = pair
+        .graphics
+        .device
+        .as_any()
+        .downcast_ref::<crate::vulkan::Device>()
+        .unwrap();
+    let original_instance = Arc::downgrade(&graphics.shared.instance);
+    let physical_device = graphics.shared.physical_device;
+    let (backend, instance) = pair.context.clone_instance();
+    assert_eq!(backend, wgt::Backend::Vulkan);
+    let native = instance
+        .as_any()
+        .downcast_ref::<crate::vulkan::Instance>()
+        .unwrap();
+    assert!(Arc::ptr_eq(&native.shared, &graphics.shared.instance));
+    pair.context.drain().unwrap();
+    drop(pair);
+    assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
+    assert!(original_instance.upgrade().is_some());
+
+    let adapters = unsafe { instance.enumerate_adapters(None) };
+    assert!(adapters.iter().any(|adapter| {
+        let adapter = adapter
+            .adapter
+            .as_any()
+            .downcast_ref::<crate::vulkan::Adapter>()
+            .unwrap();
+        adapter.raw == physical_device && Arc::ptr_eq(&adapter.instance, &native.shared)
+    }));
+    drop(adapters);
+    drop(instance);
+    assert!(original_instance.upgrade().is_none());
+    assert_validation_clean();
+}
