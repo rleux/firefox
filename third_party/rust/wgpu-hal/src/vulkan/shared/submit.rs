@@ -40,6 +40,7 @@ struct Receipt {
     accepted: bool,
     crossings: Vec<vk::Semaphore>,
     progress_targets: Vec<(Arc<QueueProgress>, u64)>,
+    _synchronization: crate::external_sync::SubmissionSync,
 }
 
 impl fmt::Debug for Receipt {
@@ -107,6 +108,7 @@ struct Segment<'a> {
     buffers: Vec<&'a CommandBuffer>,
     incoming: Option<vk::Semaphore>,
     outgoing: Option<vk::Semaphore>,
+    synchronization: super::super::external_sync::Prepared,
 }
 
 fn same_context(context: &NativeDevice, queue: &Queue) -> bool {
@@ -142,10 +144,13 @@ pub(super) unsafe fn submit_ordered(
     }
     let _graphics_host = context.queues.host[0].lock();
     let _compute_host = context.queues.host[1].lock();
-    if context.queues.closed.load(Ordering::Acquire) {
+    if context.queues.closed.load(Ordering::Acquire) || logical.has_legacy_pending_sync() {
         return Err(bad());
     }
 
+    let empty_sync = crate::external_sync::SubmissionSync::default();
+    let mut signal_floor = Vec::new();
+    let mut binary_waits = Vec::new();
     let mut prepared = Vec::with_capacity(segments.len().max(1));
     let mut graphics = None;
     for segment in segments {
@@ -154,7 +159,7 @@ pub(super) unsafe fn submit_ordered(
             .as_any()
             .downcast_ref::<Queue>()
             .ok_or_else(bad)?;
-        if !same_context(context, queue) {
+        if !same_context(context, queue) || queue.has_legacy_pending_sync() {
             return Err(bad());
         }
         match segment.lane {
@@ -193,6 +198,13 @@ pub(super) unsafe fn submit_ordered(
             buffers,
             incoming: None,
             outgoing: None,
+            synchronization: super::super::external_sync::prepare(
+                queue,
+                segment.synchronization.unwrap_or(&empty_sync),
+                &mut signal_floor,
+                &mut binary_waits,
+            )
+            .map_err(|_| bad())?,
         });
     }
     if prepared.is_empty() {
@@ -201,6 +213,13 @@ pub(super) unsafe fn submit_ordered(
             buffers: Vec::new(),
             incoming: None,
             outgoing: None,
+            synchronization: super::super::external_sync::prepare(
+                logical,
+                &empty_sync,
+                &mut signal_floor,
+                &mut binary_waits,
+            )
+            .map_err(|_| bad())?,
         });
     }
 
@@ -230,11 +249,21 @@ pub(super) unsafe fn submit_ordered(
         .find(|(progress, _)| Arc::ptr_eq(progress, logical_progress))
         .unwrap()
         .1;
+    let mut retained_sync = crate::external_sync::SubmissionSync::default();
+    for segment in &prepared {
+        retained_sync
+            .waits
+            .extend(segment.synchronization.leases.waits.iter().cloned());
+        retained_sync
+            .signals
+            .extend(segment.synchronization.leases.signals.iter().cloned());
+    }
     let mut receipt = Receipt {
         terminal: logical_progress.clone(),
         value: logical_progress.accepted() + terminal_count,
         accepted: false,
         crossings: Vec::new(),
+        _synchronization: retained_sync,
         progress_targets: reservations
             .into_iter()
             .map(|(progress, count)| {
@@ -256,18 +285,22 @@ pub(super) unsafe fn submit_ordered(
         }
     }
 
+    for segment in &mut prepared {
+        segment.synchronization.reserve().map_err(|_| bad())?;
+    }
+    let segment_count = prepared.len();
     let mut failure = None;
-    for (index, segment) in prepared.iter().enumerate() {
+    for (index, segment) in prepared.iter_mut().enumerate() {
         #[cfg(test)]
         if let Err(error) = tests::before_segment(index) {
             failure = Some(error);
             break;
         }
-        let last = index + 1 == prepared.len();
+        let last = index + 1 == segment_count;
         let progress = segment.queue.progress.as_ref().unwrap();
         let previous = progress.accepted();
         let next = progress.next().unwrap();
-        let mut waits = Vec::new();
+        let mut waits = segment.synchronization.waits.clone();
         if previous != 0 {
             waits.push(SemaphoreType::Timeline(progress.semaphore, previous));
         }
@@ -284,7 +317,7 @@ pub(super) unsafe fn submit_ordered(
         if let Some(semaphore) = segment.incoming {
             waits.push(SemaphoreType::Binary(semaphore));
         }
-        let mut signals = Vec::new();
+        let mut signals = segment.synchronization.signals.clone();
         let mut completion = vec![SemaphoreType::Timeline(progress.semaphore, next)];
         if let Some(semaphore) = segment.outgoing {
             signals.push(SemaphoreType::Binary(semaphore));
@@ -295,6 +328,7 @@ pub(super) unsafe fn submit_ordered(
             completion.push(SemaphoreType::Timeline(logical_progress.semaphore, value));
         }
         let signal = last.then_some((fence, terminal.1));
+        segment.synchronization.attempted();
         match unsafe {
             segment
                 .queue
@@ -306,6 +340,7 @@ pub(super) unsafe fn submit_ordered(
                     failure = Some(error);
                     break;
                 }
+                segment.synchronization.accepted();
                 progress.commit(next);
                 if let Some(value) = logical_terminal {
                     logical_progress.commit(value);
@@ -360,3 +395,88 @@ mod tests {
 }
 #[cfg(test)]
 pub(super) use tests::{inject_after_native, inject_failure};
+
+pub(super) unsafe fn submit_graphics(
+    context: &NativeDevice,
+    queue: &dyn crate::DynQueue,
+    buffers: &[&dyn crate::DynCommandBuffer],
+    surfaces: &[&dyn crate::DynSurfaceTexture],
+    terminal: (&dyn crate::DynFence, crate::FenceValue),
+    synchronization: &crate::external_sync::SubmissionSync,
+) -> Result<Box<dyn SharedSubmissionReceipt>, SharedSubmitError> {
+    let bad = || rejected(crate::DeviceError::Unexpected);
+    let queue = queue.as_any().downcast_ref::<Queue>().ok_or_else(bad)?;
+    if !same_context(context, queue) || queue.device.queue_index != 0 || !surfaces.is_empty() {
+        return Err(bad());
+    }
+    let fence = terminal
+        .0
+        .as_any()
+        .downcast_ref::<Fence>()
+        .ok_or_else(bad)?;
+    if !matches!(fence, Fence::TimelineSemaphore(_)) {
+        return Err(bad());
+    }
+    let _host = context.queues.host[0].lock();
+    if context.queues.closed.load(Ordering::Acquire) || queue.has_legacy_pending_sync() {
+        return Err(bad());
+    }
+    let buffers = buffers
+        .iter()
+        .map(|buffer| {
+            let buffer = buffer
+                .as_any()
+                .downcast_ref::<CommandBuffer>()
+                .ok_or_else(bad)?;
+            if buffer.device != context.raw.handle() || buffer.family_index != queue.family_index {
+                return Err(bad());
+            }
+            Ok(buffer)
+        })
+        .collect::<Result<Vec<_>, SharedSubmitError>>()?;
+    let mut sync = super::super::external_sync::prepare(
+        queue,
+        synchronization,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .map_err(|_| bad())?;
+    let progress = queue.progress.as_ref().unwrap();
+    let previous = progress.accepted();
+    let next = progress.next().map_err(rejected)?;
+    let mut waits = sync.waits.clone();
+    if previous != 0 {
+        waits.push(SemaphoreType::Timeline(progress.semaphore, previous));
+    }
+    let completion = [SemaphoreType::Timeline(progress.semaphore, next)];
+    let mut receipt = Receipt {
+        terminal: progress.clone(),
+        value: next,
+        accepted: false,
+        crossings: Vec::new(),
+        progress_targets: vec![(progress.clone(), next)],
+        _synchronization: synchronization.clone(),
+    };
+    sync.reserve().map_err(|_| bad())?;
+    sync.attempted();
+    if let Err(error) = unsafe {
+        queue.submit_impl(
+            &buffers,
+            &[],
+            Some((fence, terminal.1)),
+            &waits,
+            &sync.signals,
+            &completion,
+        )
+    } {
+        context.queues.close_uncertain();
+        return Err(SharedSubmitError {
+            error,
+            receipt: Some(Box::new(receipt)),
+        });
+    }
+    sync.accepted();
+    progress.commit(next);
+    receipt.accepted = true;
+    Ok(Box::new(receipt))
+}

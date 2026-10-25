@@ -30,6 +30,7 @@ pub mod conv;
 mod descriptor;
 mod device;
 mod drm;
+pub(crate) mod external_sync;
 mod instance;
 mod memory;
 mod pnext_chain;
@@ -1514,6 +1515,13 @@ impl Fence {
 }
 
 impl Queue {
+    fn has_legacy_pending_sync(&self) -> bool {
+        let signals = self.signal_semaphores.lock();
+        let waits = self.wait_semaphores.lock();
+        let chain = self.next_submit_chain.lock();
+        !signals.is_empty() || !waits.is_empty() || chain.is_some()
+    }
+
     unsafe fn submit_impl(
         &self,
         command_buffers: &[&CommandBuffer],
@@ -1523,6 +1531,18 @@ impl Queue {
         extra_signals: &[SemaphoreType],
         completion_signals: &[SemaphoreType],
     ) -> Result<(), crate::DeviceError> {
+        let shared = self.device.shared_queue_group.is_some();
+        let mut shared_signal = shared.then(|| self.signal_semaphores.lock());
+        let mut shared_wait = shared.then(|| self.wait_semaphores.lock());
+        let shared_chain = shared.then(|| self.next_submit_chain.lock());
+        if shared_signal
+            .as_ref()
+            .is_some_and(|guard| !guard.is_empty())
+            || shared_wait.as_ref().is_some_and(|guard| !guard.is_empty())
+            || shared_chain.as_ref().is_some_and(|guard| guard.is_some())
+        {
+            return Err(crate::DeviceError::Unexpected);
+        }
         let signal_value = signal.map_or(0, |(_, value)| value);
         let mut fence_raw = vk::Fence::null();
 
@@ -1575,13 +1595,17 @@ impl Queue {
             signal_semaphores.push_signal(signal_semaphore);
         }
 
-        let mut guard = self.signal_semaphores.lock();
-        if !guard.is_empty() {
+        let mut guard = shared_signal
+            .take()
+            .unwrap_or_else(|| self.signal_semaphores.lock());
+        if !shared && !guard.is_empty() {
             signal_semaphores.append(&mut guard);
         }
 
-        let mut wait_guard = self.wait_semaphores.lock();
-        if !wait_guard.is_empty() {
+        let mut wait_guard = shared_wait
+            .take()
+            .unwrap_or_else(|| self.wait_semaphores.lock());
+        if !shared && !wait_guard.is_empty() {
             wait_semaphores.append(&mut wait_guard);
         }
 
@@ -1646,7 +1670,11 @@ impl Queue {
             &mut vk_timeline_info,
         );
 
-        let submit_chain = self.next_submit_chain.lock().take();
+        let submit_chain = if shared {
+            None
+        } else {
+            self.next_submit_chain.lock().take()
+        };
         if let Some(chain) = submit_chain {
             // SAFETY: The contract on `Queue::set_next_submit_chain()` keeps the chain
             // valid and unaliased until this submission is made.

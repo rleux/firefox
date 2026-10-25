@@ -19,28 +19,70 @@ fn device() -> Rc<Device> {
     )
 }
 
-struct UnblockOnFailure(Rc<SharedTimeline>, u64);
+fn native<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Native timeline operation failed: {error:?}");
+            std::process::abort();
+        }
+    }
+}
+
+fn complete(submission: &mut Submission) {
+    if !native(submission.wait(Some(Duration::from_secs(5)))) {
+        eprintln!("Native timeline submission did not retire");
+        std::process::abort();
+    }
+}
+
+struct UnblockOnFailure {
+    timeline: Rc<SharedTimeline>,
+    value: u64,
+    fence: Option<Box<dyn hal::DynFence>>,
+}
+
+impl UnblockOnFailure {
+    fn new(timeline: &Rc<SharedTimeline>, value: u64) -> Self {
+        assert!(timeline.last_signal.is_some());
+        let fence = native(unsafe { timeline.owner.open.device.create_fence() });
+        Self {
+            timeline: timeline.clone(),
+            value,
+            fence: Some(fence),
+        }
+    }
+}
+
 impl Drop for UnblockOnFailure {
     fn drop(&mut self) {
-        if self.0.last_signal.as_ref().unwrap().get() < self.1 {
-            let owner = &self.0.semaphore.owner;
-            let info = vk::SemaphoreSignalInfo::default()
-                .semaphore(*self.0.semaphore)
-                .value(self.1);
-            unsafe {
-                let extension = owner.native_cache.timeline.get_or_init(|| {
-                    owner.raw_device().enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME)
-                        .then(|| ash::khr::timeline_semaphore::Device::new(
-                            owner.raw_device().shared_instance().raw_instance(), owner.raw_device().raw_device(),
-                        ))
-                });
-                let _ = if let Some(extension) = extension {
-                    extension.signal_semaphore(&info)
-                } else {
-                    owner.raw_device().raw_device().signal_semaphore(&info)
-                };
-            }
+        let owner = &self.timeline.owner;
+        if owner.is_lost() {
+            std::process::abort();
         }
+        if self.timeline.last_signal.as_ref().unwrap().get() < self.value {
+            let sync = hal::external_sync::SubmissionSync {
+                waits: Vec::new(),
+                signals: vec![hal::external_sync::SemaphoreValue {
+                    semaphore: self.timeline.semaphore.clone(),
+                    value: Some(self.value),
+                }],
+            };
+            native(unsafe {
+                hal::external_sync::submit_legacy(
+                    &*owner.open.queue,
+                    &[],
+                    &[],
+                    (&**self.fence.as_ref().unwrap(), 1),
+                    &sync,
+                )
+            });
+        }
+        native(unsafe { owner.open.queue.wait_for_idle() });
+        if native(hal::external_sync::current_value(&*self.timeline.semaphore)) < self.value {
+            std::process::abort();
+        }
+        unsafe { owner.open.device.destroy_fence(self.fence.take().unwrap()) };
     }
 }
 
@@ -63,7 +105,7 @@ fn timeline_reuses_imports_and_waits_before_the_producer_submits() {
         for value in 1..=3 {
             let mut send = Submission::new(&producer).unwrap();
             let mut receive = Submission::new(&consumer).unwrap();
-            let _unblock = UnblockOnFailure(ready.clone(), value);
+            let _unblock = UnblockOnFailure::new(&ready, value);
             {
                 let mut recording = receive.recording().unwrap();
                 recording.wait_timeline(&imported_ready, value - 1).unwrap();
@@ -71,23 +113,23 @@ fn timeline_reuses_imports_and_waits_before_the_producer_submits() {
                 recording.signal_timeline(&release, value).unwrap();
                 recording.signal_timeline(&release, value).unwrap();
             }
-            receive.submit().unwrap();
-            assert!(!receive.wait(Some(Duration::from_millis(20))).unwrap());
+            native(receive.submit());
+            assert!(!native(receive.wait(Some(Duration::from_millis(20)))));
             send.recording()
                 .unwrap()
                 .signal_timeline(&ready, value)
                 .unwrap();
-            send.submit().unwrap();
+            native(send.submit());
             let mut returned = Submission::new(&producer).unwrap();
             returned
                 .recording()
                 .unwrap()
                 .wait_timeline(&imported_release, value)
                 .unwrap();
-            returned.submit().unwrap();
-            assert!(returned.wait(Some(Duration::from_secs(5))).unwrap());
-            assert!(receive.wait(Some(Duration::from_secs(5))).unwrap());
-            assert!(send.wait(Some(Duration::from_secs(5))).unwrap());
+            native(returned.submit());
+            complete(&mut returned);
+            complete(&mut receive);
+            complete(&mut send);
         }
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
@@ -100,13 +142,18 @@ fn timeline_rejects_wrong_devices_identities_and_out_of_order_signals() {
         let owner = device();
         let other = device();
         let timeline = SharedTimeline::new(&owner).unwrap();
-        let mut handle = timeline.export().unwrap();
-        handle.device_uuid[0] ^= 1;
-        assert!(SharedTimeline::import(&other, &handle).is_err());
-        handle.device_uuid[0] ^= 1;
-        handle.driver_uuid[0] ^= 1;
-        assert!(SharedTimeline::import(&other, &handle).is_err());
-        handle.driver_uuid[0] ^= 1;
+        let (fd, mut device_uuid, mut driver_uuid) = timeline.export().unwrap().into_parts();
+        device_uuid[0] ^= 1;
+        let wrong_device =
+            unsafe { TimelineHandle::from_fd(fd.try_clone().unwrap(), device_uuid, driver_uuid) };
+        assert!(SharedTimeline::import(&other, &wrong_device).is_err());
+        device_uuid[0] ^= 1;
+        driver_uuid[0] ^= 1;
+        let wrong_driver =
+            unsafe { TimelineHandle::from_fd(fd.try_clone().unwrap(), device_uuid, driver_uuid) };
+        assert!(SharedTimeline::import(&other, &wrong_driver).is_err());
+        driver_uuid[0] ^= 1;
+        let handle = unsafe { TimelineHandle::from_fd(fd, device_uuid, driver_uuid) };
         let imported = SharedTimeline::import(&other, &handle).unwrap();
         assert!(imported.export().is_err());
         let mut foreign = Submission::new(&other).unwrap();
@@ -137,10 +184,10 @@ fn timeline_rejects_wrong_devices_identities_and_out_of_order_signals() {
             .unwrap()
             .signal_timeline(&timeline, 2)
             .unwrap();
-        newer.submit().unwrap();
+        native(newer.submit());
         assert!(older.submit().is_err());
         assert!(!owner.is_lost());
-        assert!(newer.wait(Some(Duration::from_secs(5))).unwrap());
+        complete(&mut newer);
         let mut future = Submission::new(&owner).unwrap();
         future
             .recording()
@@ -166,14 +213,14 @@ fn timeline_discard_reuse_and_exported_payload_lifetime() {
             .signal_timeline(&timeline, 1)
             .unwrap();
         queue.discard_recording();
-        assert_eq!(timeline.last_signal.as_ref().unwrap().get(), 0);
+        assert_eq!(timeline.current_value().unwrap(), 0);
         for value in 1..=3 {
             queue
                 .recording()
                 .unwrap()
                 .signal_timeline(&timeline, value)
                 .unwrap();
-            queue.wait().unwrap();
+            native(queue.wait());
             assert_eq!(Rc::strong_count(&timeline), 1);
         }
         let weak = Rc::downgrade(&timeline);
@@ -183,9 +230,9 @@ fn timeline_discard_reuse_and_exported_payload_lifetime() {
             .signal_timeline(&timeline, 4)
             .unwrap();
         drop(timeline);
-        queue.submit().unwrap();
+        native(queue.submit());
         assert!(weak.upgrade().is_some());
-        queue.wait().unwrap();
+        native(queue.wait());
         assert!(weak.upgrade().is_none());
         let weak_owner = Rc::downgrade(&owner);
         drop(queue);
@@ -199,8 +246,8 @@ fn timeline_discard_reuse_and_exported_payload_lifetime() {
             .unwrap()
             .wait_timeline(&imported, 4)
             .unwrap();
-        receive.submit().unwrap();
-        assert!(receive.wait(Some(Duration::from_secs(5))).unwrap());
+        native(receive.submit());
+        complete(&mut receive);
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
@@ -209,26 +256,23 @@ fn timeline_discard_reuse_and_exported_payload_lifetime() {
 #[ignore = "Requires external Vulkan timelines and validation"]
 fn timeline_cancelled_staging_does_not_leak_to_another_submission() {
     {
+        let producer = device();
         let owner = device();
-        let timeline = SharedTimeline::new(&owner).unwrap();
-        let mut send = Submission::new(&owner).unwrap();
-        send.recording()
-            .unwrap()
-            .signal_timeline(&timeline, 1)
-            .unwrap();
-        send.submit().unwrap();
-        let mut sync = SubmissionSync::default();
-        sync.wait(&owner, &timeline, 1).unwrap();
-        sync.signal(&owner, &timeline, 2).unwrap();
-        sync.validate().unwrap();
-        drop(sync.stage(owner.queue()));
-        assert!(!owner.queue().remove_wait_semaphore(*timeline.semaphore));
-        assert!(!owner.queue().remove_signal_semaphore(*timeline.semaphore));
-        assert_eq!(timeline.last_signal.as_ref().unwrap().get(), 1);
-        assert!(send.wait(Some(Duration::from_secs(5))).unwrap());
+        let ready = SharedTimeline::new(&producer).unwrap();
+        let imported = SharedTimeline::import(&owner, &ready.export().unwrap()).unwrap();
+        let cancelled_signal = SharedTimeline::new(&owner).unwrap();
         let mut unrelated = Submission::new(&owner).unwrap();
-        unrelated.submit().unwrap();
-        assert!(unrelated.wait(Some(Duration::from_secs(5))).unwrap());
+        let _unblock = UnblockOnFailure::new(&ready, 1);
+        let mut sync = SubmissionSync::default();
+        sync.wait(&owner, &imported, 1).unwrap();
+        sync.signal(&owner, &cancelled_signal, 1).unwrap();
+        sync.validate().unwrap();
+        drop(sync.dependencies());
+        native(unrelated.submit());
+        complete(&mut unrelated);
+        assert_eq!(ready.current_value().unwrap(), 0);
+        assert_eq!(cancelled_signal.current_value().unwrap(), 0);
+        assert!(!owner.is_lost());
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
@@ -253,10 +297,10 @@ fn timeline_enforces_the_outstanding_value_limit() {
             .unwrap()
             .signal_timeline(&timeline, 1)
             .unwrap();
-        valid.submit().unwrap();
-        assert!(valid.wait(Some(Duration::from_secs(5))).unwrap());
-        invalid.submit().unwrap();
-        assert!(invalid.wait(Some(Duration::from_secs(5))).unwrap());
+        native(valid.submit());
+        complete(&mut valid);
+        native(invalid.submit());
+        complete(&mut invalid);
         assert!(!owner.is_lost());
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
@@ -269,12 +313,12 @@ fn timeline_failure_cleanup_releases_submitted_waits() {
     let consumer = device();
     let ready = SharedTimeline::new(&producer).unwrap();
     let imported = SharedTimeline::import(&consumer, &ready.export().unwrap()).unwrap();
-    let unblock = UnblockOnFailure(ready.clone(), 1);
+    let unblock = UnblockOnFailure::new(&ready, 1);
     let mut receive = Submission::new(&consumer).unwrap();
     receive.recording().unwrap().wait_timeline(&imported, 1).unwrap();
     receive.submit().unwrap();
     let premature = receive.wait(Some(Duration::from_millis(20)));
-    eprintln!("Timeline cleanup: {}", if producer.raw_device().enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME) { "KHR" } else { "core" });
+    eprintln!("Timeline cleanup: HAL legacy submit");
     drop(unblock);
     assert!(receive.wait(Some(Duration::from_secs(5))).unwrap());
     assert!(!premature.unwrap());

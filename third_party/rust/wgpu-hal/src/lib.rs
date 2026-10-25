@@ -280,6 +280,7 @@ mod dynamic;
 mod graphics;
 pub mod shared;
 pub mod renderer;
+pub mod external_sync;
 pub use graphics::{
     GraphicsCommand, GraphicsExecution, GraphicsRecorder, GraphicsRecorderFactory,
 };

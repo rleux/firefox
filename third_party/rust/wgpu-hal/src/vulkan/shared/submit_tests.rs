@@ -22,7 +22,10 @@ struct Resources {
     views: Vec<Box<dyn crate::DynTextureView>>,
     fences: Vec<Box<dyn crate::DynFence>>,
     receipts: Vec<Box<dyn SharedSubmissionReceipt>>,
+    native_semaphores: Vec<vk::Semaphore>,
     armed_gates: RefCell<Vec<usize>>,
+    gates: Vec<Arc<dyn crate::external_sync::Semaphore>>,
+    gate_bindings: RefCell<Vec<(Arc<crate::DynOpenDevice>, usize)>>,
 }
 
 struct Work {
@@ -62,7 +65,10 @@ impl Work {
                 views: Vec::new(),
                 fences: Vec::new(),
                 receipts: Vec::new(),
+                native_semaphores: Vec::new(),
                 armed_gates: RefCell::new(Vec::new()),
+                gates: Vec::new(),
+                gate_bindings: RefCell::new(Vec::new()),
             }),
             retired: false,
             quarantined: false,
@@ -126,6 +132,15 @@ impl Drop for Work {
             }
             data.encoders.clear();
             data.receipts.clear();
+            let native = data
+                .compute
+                .device
+                .as_any()
+                .downcast_ref::<crate::vulkan::Device>()
+                .unwrap();
+            for semaphore in data.native_semaphores.drain(..) {
+                native.shared.raw.destroy_semaphore(semaphore, None);
+            }
             let device = &*data.compute.device;
             for view in data.views.drain(..) {
                 device.destroy_texture_view(view);
@@ -225,6 +240,28 @@ impl Resources {
         endpoint
     }
 
+    fn synchronization(
+        &self,
+        endpoint: &Arc<crate::DynOpenDevice>,
+    ) -> crate::external_sync::SubmissionSync {
+        let mut waits = Vec::new();
+        self.gate_bindings.borrow_mut().retain(|(queue, gate)| {
+            if Arc::ptr_eq(queue, endpoint) {
+                waits.push(crate::external_sync::SemaphoreValue {
+                    semaphore: self.gates[*gate].clone(),
+                    value: Some(1),
+                });
+                false
+            } else {
+                true
+            }
+        });
+        crate::external_sync::SubmissionSync {
+            waits,
+            signals: Vec::new(),
+        }
+    }
+
     fn ordered(
         &self,
         parts: &[(Lane, usize, usize)],
@@ -235,16 +272,27 @@ impl Resources {
             .iter()
             .map(|&(_, encoder, buffer)| [&*self.encoders[encoder].buffers[buffer]])
             .collect();
+        let synchronizations: Vec<_> = parts
+            .iter()
+            .map(|(lane, _, _)| {
+                self.synchronization(match lane {
+                    Lane::Compute => &self.compute,
+                    Lane::Graphics => &self.graphics,
+                })
+            })
+            .collect();
         let segments: Vec<_> = parts
             .iter()
             .zip(&buffers)
-            .map(|(&(lane, _, _), buffers)| SharedSubmitSegment {
+            .zip(&synchronizations)
+            .map(|((&(lane, _, _), buffers), sync)| SharedSubmitSegment {
                 lane,
                 queue: match lane {
                     Lane::Compute => &*self.compute.queue,
                     Lane::Graphics => &*self.graphics.queue,
                 },
                 command_buffers: buffers,
+                synchronization: Some(sync),
             })
             .collect();
         unsafe {
@@ -256,29 +304,68 @@ impl Resources {
         }
     }
 
-    fn gate(&self, fence: usize) -> vk::Semaphore {
-        let native = self.fences[fence]
-            .as_any()
-            .downcast_ref::<crate::vulkan::Fence>()
-            .unwrap();
-        let crate::vulkan::Fence::TimelineSemaphore(raw) = *native else {
-            panic!("Timeline required");
-        };
-        raw
+    fn scoped(
+        &self,
+        endpoint: &Arc<crate::DynOpenDevice>,
+        encoder: usize,
+        buffer: usize,
+        fence: usize,
+        value: u64,
+    ) -> Result<Box<dyn SharedSubmissionReceipt>, crate::shared::SharedSubmitError> {
+        let sync = self.synchronization(endpoint);
+        let buffers = [&*self.encoders[encoder].buffers[buffer]];
+        if Arc::ptr_eq(endpoint, &self.graphics) {
+            unsafe {
+                self.context.submit_graphics(
+                    &*endpoint.queue,
+                    &buffers,
+                    &[],
+                    (&*self.fences[fence], value),
+                    &sync,
+                )
+            }
+        } else {
+            unsafe {
+                self.context.submit_ordered(
+                    &*endpoint.queue,
+                    &[SharedSubmitSegment {
+                        lane: Lane::Compute,
+                        queue: &*endpoint.queue,
+                        command_buffers: &buffers,
+                        synchronization: Some(&sync),
+                    }],
+                    (&*self.fences[fence], value),
+                )
+            }
+        }
     }
 
-    fn add_gate(&self, endpoint: &Arc<crate::DynOpenDevice>, fence: usize) {
-        let queue = endpoint
-            .queue
+    fn gate_token(&mut self) -> usize {
+        let device = self
+            .compute
+            .device
             .as_any()
-            .downcast_ref::<crate::vulkan::Queue>()
+            .downcast_ref::<crate::vulkan::Device>()
             .unwrap();
-        self.armed_gates.borrow_mut().push(fence);
-        queue.add_wait_semaphore(
-            self.gate(fence),
-            Some(1),
-            vk::PipelineStageFlags::ALL_COMMANDS,
-        );
+        let semaphore = crate::vulkan::external_sync::create(device, false, false).unwrap();
+        let index = self.gates.len();
+        self.gates.push(semaphore);
+        index
+    }
+
+    fn gate(&self, index: usize) -> vk::Semaphore {
+        self.gates[index]
+            .as_any()
+            .downcast_ref::<crate::vulkan::external_sync::Semaphore>()
+            .unwrap()
+            .raw
+    }
+
+    fn add_gate(&self, endpoint: &Arc<crate::DynOpenDevice>, gate: usize) {
+        self.armed_gates.borrow_mut().push(gate);
+        self.gate_bindings
+            .borrow_mut()
+            .push((endpoint.clone(), gate));
     }
 
     fn signal_gate(&self, fence: usize) -> Result<(), crate::DeviceError> {
@@ -606,7 +693,7 @@ fn ordered_compute_lane_graphics_compute_lane_preserves_pixels() {
 fn ordered_terminal_graphics_precedes_later_direct_compute() {
     let mut work = Work::new();
     let image = image_work(&mut work);
-    let gate = work.fence();
+    let gate = work.gate_token();
     work.add_gate(&work.graphics, gate);
     let result = work.ordered(&image.parts[..2], image.fence, 1);
     let submitted = work.retain(result);
@@ -666,15 +753,10 @@ fn scoped_compute_idle_does_not_wait_for_later_other_logical_queue() {
     work.begin(other_encoder);
     let other_buffer = work.end(other_encoder);
     let other_fence = work.fence();
-    let gate = work.fence();
+    let gate = work.gate_token();
     work.add_gate(&other, gate);
-    let later = unsafe {
-        other.queue.submit(
-            &[&*work.encoders[other_encoder].buffers[other_buffer]],
-            &[],
-            (&*work.fences[other_fence], 1),
-        )
-    };
+    let later = work.scoped(&other, other_encoder, other_buffer, other_fence, 1);
+    let later = work.retain(later);
     let endpoint = work.compute.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -783,6 +865,7 @@ fn ordered_preflight_rejects_foreign_buffers_and_other_logical_compute_queue() {
                 lane: Lane::Compute,
                 queue: &*work.compute.queue,
                 command_buffers: &[&*foreign.encoders[encoder].buffers[buffer]],
+                synchronization: None,
             }],
             (&*work.fences[fence], 1),
         )
@@ -799,6 +882,7 @@ fn ordered_preflight_rejects_foreign_buffers_and_other_logical_compute_queue() {
                 lane: Lane::Compute,
                 queue: &*other.queue,
                 command_buffers: &[],
+                synchronization: None,
             }],
             (&*work.fences[fence], 1),
         )
@@ -854,15 +938,10 @@ fn graphics_idle_rechecks_uncertainty_after_waiting_for_host_lock() {
     work.begin(encoder);
     let buffer = work.end(encoder);
     let fence = work.fence();
-    let gate = work.fence();
+    let gate = work.gate_token();
     work.add_gate(&other, gate);
-    let submitted = unsafe {
-        other.queue.submit(
-            &[&*work.encoders[encoder].buffers[buffer]],
-            &[],
-            (&*work.fences[fence], 1),
-        )
-    };
+    let submitted = work.scoped(&other, encoder, buffer, fence, 1);
+    let submitted = work.retain(submitted);
     let native = work
         .graphics
         .queue
@@ -921,15 +1000,10 @@ fn aggregate_receipt_uses_batch_targets_without_waiting_for_later_graphics() {
     work.begin(encoder);
     let buffer = work.end(encoder);
     let fence = work.fence();
-    let gate = work.fence();
+    let gate = work.gate_token();
     work.add_gate(&work.graphics, gate);
-    let later = unsafe {
-        work.graphics.queue.submit(
-            &[&*work.encoders[encoder].buffers[buffer]],
-            &[],
-            (&*work.fences[fence], 1),
-        )
-    };
+    let later = work.scoped(&work.graphics, encoder, buffer, fence, 1);
+    let later = work.retain(later);
     let original_complete = work.receipts[0].poll();
     let later_complete = unsafe {
         work.compute
@@ -947,6 +1021,10 @@ fn aggregate_receipt_uses_batch_targets_without_waiting_for_later_graphics() {
     drop(work);
     assert_validation_clean();
 }
+
+#[cfg(unix)]
+#[path = "sync_tests.rs"]
+mod sync_tests;
 
 #[test]
 #[ignore = "Requires Vulkan timeline semaphores and the Khronos validation layer"]
@@ -986,11 +1064,13 @@ fn ordered_empty_graphics_tails_preserve_logical_timeline_order() {
                         lane: Lane::Compute,
                         queue: &*work.compute.queue,
                         command_buffers: &[&*work.encoders[encoder].buffers[buffer]],
+                        synchronization: None,
                     },
                     SharedSubmitSegment {
                         lane: Lane::Graphics,
                         queue: &*work.graphics.queue,
                         command_buffers: &[],
+                        synchronization: None,
                     },
                 ],
                 (&*work.fences[fence], value),
@@ -1013,6 +1093,7 @@ fn ordered_empty_graphics_tails_preserve_logical_timeline_order() {
                         lane: Lane::Graphics,
                         queue: &*work.graphics.queue,
                         command_buffers: &[],
+                        synchronization: None,
                     }],
                     (&*work.fences[fence], value),
                 )

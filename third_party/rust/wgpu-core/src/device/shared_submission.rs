@@ -59,6 +59,7 @@ impl Queue {
                         lane: part.lane,
                         queue: part.queue,
                         command_buffers: buffers,
+                        synchronization: None,
                     })
                     .collect();
                 unsafe {

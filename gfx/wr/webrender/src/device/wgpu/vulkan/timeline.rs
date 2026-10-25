@@ -2,182 +2,88 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::native::Owned;
 use super::{hal, wgt, Device};
-use ash::vk;
-use std::cell::Cell;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
-pub struct TimelineHandle {
-    fd: OwnedFd,
-    device_uuid: [u8; 16],
-    driver_uuid: [u8; 16],
-}
-
-impl TimelineHandle {
-    /// # Safety
-    /// The FD must be an OPAQUE_FD timeline semaphore export with zero creation
-    /// flags and the supplied device/driver identities. Its original producer
-    /// must remain the sole signaller.
-    pub unsafe fn from_fd(fd: OwnedFd, device_uuid: [u8; 16], driver_uuid: [u8; 16]) -> Self {
-        Self {
-            fd,
-            device_uuid,
-            driver_uuid,
-        }
-    }
-
-    pub fn as_fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-
-    pub fn into_parts(self) -> (OwnedFd, [u8; 16], [u8; 16]) {
-        (self.fd, self.device_uuid, self.driver_uuid)
-    }
-}
+pub use hal::external_sync::TimelineHandle;
 
 /// One producer signals increasing values; imported timelines can only be waited on.
 pub struct SharedTimeline {
-    semaphore: Owned<vk::Semaphore>,
+    owner: Rc<Device>,
+    semaphore: Arc<dyn hal::external_sync::Semaphore>,
     last_signal: Option<Cell<u64>>,
     max_difference: u64,
 }
 
 pub(super) fn properties(owner: &Device) -> ([u8; 16], [u8; 16], u64) {
     *owner.native_cache.properties.get_or_init(|| {
-        let mut id = vk::PhysicalDeviceIDProperties::default();
-        let mut timeline = vk::PhysicalDeviceTimelineSemaphoreProperties::default();
-        unsafe {
-            owner
-                .raw_device()
-                .shared_instance()
-                .raw_instance()
-                .get_physical_device_properties2(
-                    owner.raw_device().raw_physical_device(),
-                    &mut vk::PhysicalDeviceProperties2::default()
-                        .push_next(&mut id)
-                        .push_next(&mut timeline),
-                );
-        }
+        let properties = hal::external_sync::properties(&*owner.open.device)
+            .expect("Renderer native semaphore properties");
         (
-            id.device_uuid,
-            id.driver_uuid,
-            timeline.max_timeline_semaphore_value_difference,
+            properties.device_uuid,
+            properties.driver_uuid,
+            properties.max_timeline_value_difference,
         )
     })
 }
 
-fn extension(owner: &Device) -> &ash::khr::external_semaphore_fd::Device {
-    owner.external_semaphore_fd()
-}
-
 impl SharedTimeline {
-    fn create(owner: &Rc<Device>, producer: bool) -> Result<Self, String> {
-        if owner.is_lost() || !owner.supports_dma_buf() {
-            return Err("External Vulkan timelines are unavailable".into());
-        }
-        let mut timeline =
-            vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
-        let mut export = vk::ExportSemaphoreCreateInfo::default()
-            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-        let mut info = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
-        if producer {
-            info = info.push_next(&mut export);
-        }
-        let raw = unsafe { owner.raw_device().raw_device().create_semaphore(&info, None) }
-            .map_err(|error| format!("Creating shared timeline: {error:?}"))?;
-        Ok(Self {
-            semaphore: Owned::new(owner, raw, |device, semaphore| unsafe {
-                device.raw_device().destroy_semaphore(semaphore, None);
-            }),
-            last_signal: producer.then(|| Cell::new(0)),
-            max_difference: properties(owner).2,
-        })
+    fn available(owner: &Device) -> bool {
+        !owner.is_lost()
+            && (owner.shared.is_some()
+                || owner.supports_dma_buf())
     }
 
     pub fn new(owner: &Rc<Device>) -> Result<Rc<Self>, String> {
-        Self::create(owner, true).map(Rc::new)
+        if !Self::available(owner) {
+            return Err("External Vulkan timelines are unavailable".into());
+        }
+        let semaphore = hal::external_sync::create_timeline(&*owner.open.device, true)
+            .map_err(|error| error.to_string())?;
+        Ok(Rc::new(Self {
+            owner: owner.clone(),
+            semaphore,
+            last_signal: Some(Cell::new(0)),
+            max_difference: properties(owner).2,
+        }))
     }
 
     pub fn export(&self) -> Result<TimelineHandle, String> {
-        if self.last_signal.is_none() || self.semaphore.owner.is_lost() {
+        if self.last_signal.is_none() || self.owner.is_lost() {
             return Err("Only a live timeline producer can export its handle".into());
         }
-        let fd = unsafe {
-            extension(&self.semaphore.owner).get_semaphore_fd(
-                &vk::SemaphoreGetFdInfoKHR::default()
-                    .semaphore(*self.semaphore)
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
-            )
-        }
-        .map_err(|error| format!("Exporting timeline: {error:?}"))?;
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let (device_uuid, driver_uuid, _) = properties(&self.semaphore.owner);
-        Ok(TimelineHandle {
-            fd,
-            device_uuid,
-            driver_uuid,
-        })
+        hal::external_sync::export_timeline(&*self.semaphore).map_err(|error| error.to_string())
     }
 
     pub fn import(owner: &Rc<Device>, handle: &TimelineHandle) -> Result<Rc<Self>, String> {
-        if !owner.supports_dma_buf() {
+        if !Self::available(owner) {
             return Err("External Vulkan timelines are unavailable".into());
         }
-        let (device_uuid, driver_uuid, _) = properties(owner);
-        if device_uuid != handle.device_uuid || driver_uuid != handle.driver_uuid {
-            return Err("Timeline device or driver identity mismatch".into());
-        }
-        let timeline = Self::create(owner, false)?;
-        let fd = handle
-            .fd
-            .try_clone()
-            .map_err(|error| format!("Duplicating timeline FD: {error}"))?;
-        unsafe {
-            extension(owner).import_semaphore_fd(
-                &vk::ImportSemaphoreFdInfoKHR::default()
-                    .semaphore(*timeline.semaphore)
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
-                    .fd(fd.as_raw_fd()),
-            )
-        }
-        .map_err(|error| format!("Importing timeline: {error:?}"))?;
-        let _ = fd.into_raw_fd();
-        Ok(Rc::new(timeline))
+        let semaphore = hal::external_sync::import_timeline(&*owner.open.device, handle)
+            .map_err(|error| error.to_string())?;
+        Ok(Rc::new(Self {
+            owner: owner.clone(),
+            semaphore,
+            last_signal: None,
+            max_difference: properties(owner).2,
+        }))
     }
 
     pub(super) fn current_value(&self) -> Result<u64, String> {
-        let owner = &self.semaphore.owner;
-        if owner.is_lost() {
+        if self.owner.is_lost() {
             return Err("Vulkan device requires recreation".into());
         }
-        let current = unsafe {
-            let extension = owner.native_cache.timeline.get_or_init(|| {
-                owner.raw_device().enabled_device_extensions().contains(&ash::khr::timeline_semaphore::NAME)
-                    .then(|| ash::khr::timeline_semaphore::Device::new(
-                        owner.raw_device().shared_instance().raw_instance(), owner.raw_device().raw_device(),
-                    ))
-            });
-            if let Some(extension) = extension {
-                extension.get_semaphore_counter_value(*self.semaphore)
-            } else {
-                owner
-                    .raw_device()
-                    .raw_device()
-                    .get_semaphore_counter_value(*self.semaphore)
-            }
-        }
-        .map_err(|error| format!("Querying shared timeline: {error:?}"))?;
-        Ok(current)
+        hal::external_sync::current_value(&*self.semaphore).map_err(|error| {
+            if self.owner.shared.is_some() { self.owner.mark_lost(); }
+            error.to_string()
+        })
     }
 
     fn validate_value(&self, value: u64) -> Result<(), String> {
         if self.max_difference == u64::MAX {
             return Ok(());
         }
-        let current = self.current_value()?;
-        if value.saturating_sub(current) > self.max_difference {
+        if value.saturating_sub(self.current_value()?) > self.max_difference {
             return Err("Timeline value exceeds the device's outstanding range".into());
         }
         Ok(())
@@ -208,7 +114,7 @@ impl SubmissionSync {
         owner: &Rc<Device>,
         wait: super::SyncFileWait,
     ) -> Result<(), String> {
-        if !Rc::ptr_eq(owner, &wait.semaphore.owner) {
+        if !Rc::ptr_eq(owner, &wait.owner) {
             return Err("Sync-file wait belongs to another Vulkan device".into());
         }
         self.sync_files.push(wait);
@@ -221,7 +127,7 @@ impl SubmissionSync {
         timeline: &Rc<SharedTimeline>,
         value: u64,
     ) -> Result<(), String> {
-        if !Rc::ptr_eq(owner, &timeline.semaphore.owner) {
+        if !Rc::ptr_eq(owner, &timeline.owner) {
             return Err("Timeline must be imported into the recording's device".into());
         }
         if value != 0 {
@@ -240,7 +146,7 @@ impl SubmissionSync {
             .last_signal
             .as_ref()
             .ok_or("An imported timeline cannot signal")?;
-        if !Rc::ptr_eq(owner, &timeline.semaphore.owner) || value <= last.get() {
+        if !Rc::ptr_eq(owner, &timeline.owner) || value <= last.get() {
             return Err("Timeline signal requires its producer and an increasing value".into());
         }
         add(&mut self.signals, timeline, value);
@@ -267,26 +173,30 @@ impl SubmissionSync {
         Ok(())
     }
 
-    pub fn stage<'a>(&'a self, queue: &'a dyn hal::DynQueue) -> Result<Option<StagedSync<'a>>, String> {
-        if self.sync_files.is_empty() && self.waits.is_empty() && self.signals.is_empty() {
-            return Ok(None);
-        }
-        let queue = queue.as_any().downcast_ref::<hal::vulkan::Queue>()
-            .ok_or("External Vulkan synchronization requires a Vulkan queue")?;
-        for wait in &self.sync_files {
-            queue.add_wait_semaphore(*wait.semaphore, None, vk::PipelineStageFlags::ALL_COMMANDS);
-        }
-        for (timeline, value) in &self.waits {
-            queue.add_wait_semaphore(
-                *timeline.semaphore,
-                Some(*value),
-                vk::PipelineStageFlags::ALL_COMMANDS,
-            );
-        }
-        for (timeline, value) in &self.signals {
-            queue.add_signal_semaphore(*timeline.semaphore, Some(*value));
-        }
-        Ok(Some(StagedSync { sync: self, queue }))
+    pub fn dependencies(&self) -> hal::external_sync::SubmissionSync {
+        let mut waits = self
+            .sync_files
+            .iter()
+            .map(|wait| hal::external_sync::SemaphoreValue {
+                semaphore: wait.semaphore.clone(),
+                value: None,
+            })
+            .collect::<Vec<_>>();
+        waits.extend(self.waits.iter().map(|(timeline, value)| {
+            hal::external_sync::SemaphoreValue {
+                semaphore: timeline.semaphore.clone(),
+                value: Some(*value),
+            }
+        }));
+        let signals = self
+            .signals
+            .iter()
+            .map(|(timeline, value)| hal::external_sync::SemaphoreValue {
+                semaphore: timeline.semaphore.clone(),
+                value: Some(*value),
+            })
+            .collect();
+        hal::external_sync::SubmissionSync { waits, signals }
     }
 
     pub fn submitted(&self) {
@@ -299,25 +209,6 @@ impl SubmissionSync {
         self.sync_files.clear();
         self.waits.clear();
         self.signals.clear();
-    }
-}
-
-pub(super) struct StagedSync<'a> {
-    sync: &'a SubmissionSync,
-    queue: &'a hal::vulkan::Queue,
-}
-
-impl Drop for StagedSync<'_> {
-    fn drop(&mut self) {
-        for wait in &self.sync.sync_files {
-            self.queue.remove_wait_semaphore(*wait.semaphore);
-        }
-        for (timeline, _) in &self.sync.waits {
-            self.queue.remove_wait_semaphore(*timeline.semaphore);
-        }
-        for (timeline, _) in &self.sync.signals {
-            self.queue.remove_signal_semaphore(*timeline.semaphore);
-        }
     }
 }
 

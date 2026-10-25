@@ -11,13 +11,15 @@ use std::cell::RefMut;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::time::Duration;
+use std::mem::ManuallyDrop;
 
 #[path = "submission_queue.rs"]
 mod queue;
 pub use self::queue::{InstanceBuffers, SubmissionQueue};
 
 pub struct Submission {
-    data: SubmissionData,
+    data: ManuallyDrop<SubmissionData>,
+    native_retired: bool,
     state: SubmissionState,
     #[cfg(test)]
     failure: Option<FailurePoint>,
@@ -26,6 +28,7 @@ pub struct Submission {
 enum SubmissionState {
     Recording { id: Rc<()> },
     EncodingFailed { id: Rc<()> },
+    Rejected { id: Rc<()>, buffer: Box<dyn hal::DynCommandBuffer> },
     Unconfirmed { id: Rc<()>, buffer: Box<dyn hal::DynCommandBuffer> },
     Submitted { buffer: Box<dyn hal::DynCommandBuffer> },
     Retired,
@@ -35,6 +38,7 @@ enum SubmissionState {
 #[derive(Clone, Copy, PartialEq)]
 enum FailurePoint {
     EndEncoding,
+    EndEncodingClosed,
     AfterSubmit,
 }
 
@@ -44,6 +48,7 @@ struct SubmissionData {
     encoder: Box<dyn hal::DynCommandEncoder>,
     fence: Rc<Owned<dyn hal::DynFence>>,
     fence_value: u64,
+    receipt: Option<Box<dyn hal::shared::SharedSubmissionReceipt>>,
     commits: Vec<Box<dyn FnOnce()>>,
     uniform_writes: Vec<Rc<super::Buffer>>,
     resources: FastHashMap<*const (), Rc<dyn Any>>,
@@ -200,12 +205,13 @@ impl Submission {
             }
         }
         Ok(Self {
-            data: SubmissionData {
+            data: ManuallyDrop::new(SubmissionData {
                 owner: owner.clone(),
                 pool: pool.clone(),
                 encoder,
                 fence,
                 fence_value,
+                receipt: None,
                 commits: Vec::new(),
                 uniform_writes: Vec::new(),
                 resources: FastHashMap::default(),
@@ -213,7 +219,8 @@ impl Submission {
                 bindings: BindingCache::default(),
                 #[cfg(target_os = "linux")]
                 external_sync: super::timeline::SubmissionSync::default(),
-            },
+            }),
+            native_retired: false,
             state: SubmissionState::Recording { id: Rc::new(()) },
             #[cfg(test)]
             failure: None,
@@ -233,10 +240,11 @@ impl Submission {
         unsafe {
             self.data.encoder.begin_encoding(Some("WR Vulkan submission"))
         }.map_err(|error| {
-            self.data.owner.lost.set(true);
+            self.data.owner.mark_lost();
             format!("Reusing submission encoder: {error:?}")
         })?;
         self.data.fence_value = fence_value;
+        self.native_retired = false;
         self.state = SubmissionState::Recording { id: Rc::new(()) };
         Ok(())
     }
@@ -247,7 +255,7 @@ impl Submission {
         }
         match &self.state {
             SubmissionState::Recording { id } => Ok(Recording {
-                submission: SubmissionBorrow::Direct(&mut self.data, id),
+                submission: SubmissionBorrow::Direct(&mut *self.data, id),
             }),
             _ => Err("Submission is no longer recording".into()),
         }
@@ -273,45 +281,103 @@ impl Submission {
         for buffer in &data.uniform_writes {
             buffer.flush_uniform_writes();
         }
-        let SubmissionState::Recording { id } = std::mem::replace(&mut self.state, SubmissionState::Retired) else {
+        #[cfg(test)]
+        if self.failure == Some(FailurePoint::EndEncoding) {
+            data.owner.mark_lost();
+            return Err("Injected end-encoding failure".into());
+        }
+        let SubmissionState::Recording { id } =
+            std::mem::replace(&mut self.state, SubmissionState::Retired)
+        else {
             unreachable!()
         };
         self.state = SubmissionState::EncodingFailed { id };
-        #[cfg(test)]
-        if self.failure == Some(FailurePoint::EndEncoding) {
-            data.owner.lost.set(true);
-            return Err("Injected end-encoding failure".into());
-        }
         let buffer = data.encoder.end_encoding().map_err(|error| {
-            data.owner.lost.set(true);
+            data.owner.mark_lost();
             format!("Finishing submission: {error:?}")
         })?;
-        let SubmissionState::EncodingFailed { id } = std::mem::replace(&mut self.state, SubmissionState::Retired) else {
+        #[cfg(test)]
+        if self.failure == Some(FailurePoint::EndEncodingClosed) {
+            data.encoder.reset_all(vec![buffer]);
+            data.owner.mark_lost();
+            return Err("Injected closed end-encoding failure".into());
+        }
+        let SubmissionState::EncodingFailed { id } =
+            std::mem::replace(&mut self.state, SubmissionState::Retired)
+        else {
             unreachable!()
         };
         self.state = SubmissionState::Unconfirmed { id, buffer };
         #[cfg(target_os = "linux")]
-        let staged = data.external_sync.stage(data.owner.open.queue.as_ref())?;
-        let SubmissionState::Unconfirmed { buffer, .. } = &self.state else { unreachable!() };
-        let result = data.owner.open.queue.submit(
-            &[&**buffer], surfaces, (&**data.fence, data.fence_value),
-        );
+        let synchronization = data.external_sync.dependencies();
+        #[cfg(not(target_os = "linux"))]
+        let synchronization = hal::external_sync::SubmissionSync::default();
+        let SubmissionState::Unconfirmed { buffer, .. } = &self.state else {
+            unreachable!()
+        };
+        let result = if let Some(shared) = &data.owner.shared {
+            match shared.options.context.submit_graphics(
+                &*data.owner.open.queue,
+                &[&**buffer],
+                surfaces,
+                (&**data.fence, data.fence_value),
+                &synchronization,
+            ) {
+                Ok(receipt) => {
+                    data.receipt = Some(receipt);
+                    Ok(())
+                }
+                Err(error) => {
+                    data.receipt = error.receipt;
+                    if data.receipt.is_none() {
+                        let SubmissionState::Unconfirmed { id, buffer } =
+                            std::mem::replace(&mut self.state, SubmissionState::Retired)
+                        else {
+                            unreachable!()
+                        };
+                        self.state = SubmissionState::Rejected { id, buffer };
+                    }
+                    Err(error.error)
+                }
+            }
+        } else {
+            #[cfg(target_os = "linux")]
+            let result = hal::external_sync::submit_legacy(
+                &*data.owner.open.queue,
+                &[&**buffer],
+                surfaces,
+                (&**data.fence, data.fence_value),
+                &synchronization,
+            );
+            #[cfg(not(target_os = "linux"))]
+            let result = data.owner.open.queue.submit(
+                &[&**buffer],
+                surfaces,
+                (&**data.fence, data.fence_value),
+            );
+            result
+        };
         #[cfg(test)]
         let result = if self.failure == Some(FailurePoint::AfterSubmit) {
             result.and(Err(hal::DeviceError::Lost))
         } else {
             result
         };
-        #[cfg(target_os = "linux")]
-        drop(staged);
-        result.map_err(|error| {
-            data.owner.lost.set(true);
-            format!("Submitting commands: {error:?}")
-        })?;
-        let SubmissionState::Unconfirmed { id, buffer } = std::mem::replace(&mut self.state, SubmissionState::Retired) else {
+        if let Err(error) = result {
+            if self.data.owner.shared.is_some() {
+                self.resolve_shared_failure();
+            } else {
+                self.data.owner.mark_lost();
+            }
+            return Err(format!("Submitting commands: {error:?}"));
+        }
+        let SubmissionState::Unconfirmed { id, buffer } =
+            std::mem::replace(&mut self.state, SubmissionState::Retired)
+        else {
             unreachable!()
         };
         self.state = SubmissionState::Submitted { buffer };
+        let data = &mut *self.data;
         data.uniform_writes.clear();
         #[cfg(target_os = "linux")]
         data.external_sync.submitted();
@@ -323,12 +389,33 @@ impl Submission {
         Ok(())
     }
 
+    fn resolve_shared_failure(&mut self) {
+        let owner = self.data.owner.clone();
+        let shared = owner.shared.as_ref().unwrap();
+        match shared.options.context.drain() {
+            Ok(()) | Err(hal::DeviceError::Lost) => {
+                self.native_retired = true;
+                owner.mark_lost_retired();
+            }
+            Err(_) => {
+                let state = std::mem::replace(&mut self.state, SubmissionState::Retired);
+                std::mem::forget(state);
+                unsafe { (shared.options.fatal_process)() };
+            }
+        }
+    }
+
     fn retire(&mut self) {
-        let SubmissionState::Submitted { buffer } = std::mem::replace(&mut self.state, SubmissionState::Retired) else {
+        let SubmissionState::Submitted { buffer } =
+            std::mem::replace(&mut self.state, SubmissionState::Retired)
+        else {
             unreachable!("Only submitted work can retire")
         };
         let data = &mut self.data;
-        unsafe { data.encoder.reset_all(vec![buffer]); }
+        unsafe {
+            data.encoder.reset_all(vec![buffer]);
+        }
+        data.receipt.take();
         data.resources.clear();
         data.uniform_writes.clear();
         data.uploads.clear();
@@ -342,14 +429,34 @@ impl Submission {
             SubmissionState::Submitted { .. } => (),
             _ => return Err("Cannot poll an unsubmitted recording".into()),
         }
-        let data = &self.data;
-        let completed = unsafe { data.owner.open.device.get_fence_value(&**data.fence) }
-            .map_err(|error| format!("Polling submission: {error:?}"))?;
-        if completed >= data.fence_value {
-            self.retire();
-            Ok(true)
+        let result = if self.data.owner.shared.is_some() {
+            self.data
+                .receipt
+                .as_ref()
+                .ok_or(hal::DeviceError::Unexpected)
+                .and_then(|receipt| receipt.poll())
         } else {
-            Ok(false)
+            unsafe {
+                self.data
+                    .owner
+                    .open
+                    .device
+                    .get_fence_value(&**self.data.fence)
+            }
+            .map(|value| value >= self.data.fence_value)
+        };
+        match result {
+            Ok(true) => {
+                self.retire();
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(error) => {
+                if self.data.owner.shared.is_some() {
+                    self.resolve_shared_failure();
+                }
+                Err(format!("Polling submission: {error:?}"))
+            }
         }
     }
 
@@ -359,35 +466,84 @@ impl Submission {
             SubmissionState::Submitted { .. } => (),
             _ => return Err("Cannot wait for an unsubmitted recording".into()),
         }
-        let data = &self.data;
-        let completed = unsafe { data.owner.open.device.wait(&**data.fence, data.fence_value, timeout) }
-            .map_err(|error| format!("Waiting for submission: {error:?}"))?;
-        if completed {
-            self.retire();
+        let result = if self.data.owner.shared.is_some() {
+            self.data
+                .receipt
+                .as_ref()
+                .ok_or(hal::DeviceError::Unexpected)
+                .and_then(|receipt| receipt.wait(timeout))
+        } else {
+            unsafe {
+                self.data
+                    .owner
+                    .open
+                    .device
+                    .wait(&**self.data.fence, self.data.fence_value, timeout)
+            }
+        };
+        match result {
+            Ok(true) => {
+                self.retire();
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(error) => {
+                if self.data.owner.shared.is_some() {
+                    self.resolve_shared_failure();
+                }
+                Err(format!("Waiting for submission: {error:?}"))
+            }
         }
-        Ok(completed)
     }
 }
 
 impl Drop for Submission {
     fn drop(&mut self) {
-        let data = &mut self.data;
+        let shared = self.data.owner.shared.is_some();
+        if shared
+            && !self.native_retired
+            && matches!(
+                self.state,
+                SubmissionState::Unconfirmed { .. } | SubmissionState::Submitted { .. }
+            )
+        {
+            let completed = if matches!(self.state, SubmissionState::Submitted { .. }) {
+                self.data.receipt.as_ref().map(|receipt| receipt.wait(None))
+            } else {
+                None
+            };
+            if !matches!(completed, Some(Ok(true))) {
+                self.resolve_shared_failure();
+            }
+        }
+        let data = &mut *self.data;
         unsafe {
-            if matches!(self.state, SubmissionState::EncodingFailed { .. }
-                | SubmissionState::Unconfirmed { .. } | SubmissionState::Submitted { .. })
+            if !shared
+                && matches!(
+                    self.state,
+                    SubmissionState::EncodingFailed { .. }
+                        | SubmissionState::Unconfirmed { .. }
+                        | SubmissionState::Submitted { .. }
+                )
             {
                 if data.owner.open.queue.wait_for_idle().is_err() {
-                    data.owner.lost.set(true);
+                    data.owner.mark_lost();
                 }
                 #[cfg(test)]
-                data.owner.trace.borrow_mut().push(super::tests::Command::SubmissionIdleWait);
+                data.owner
+                    .trace
+                    .borrow_mut()
+                    .push(super::tests::Command::SubmissionIdleWait);
             }
-            if matches!(self.state, SubmissionState::Recording { .. } | SubmissionState::EncodingFailed { .. }) {
+            if matches!(self.state, SubmissionState::Recording { .. }) {
                 data.encoder.discard_encoding();
             }
             let (id, buffers) = match std::mem::replace(&mut self.state, SubmissionState::Retired) {
-                SubmissionState::Recording { id } | SubmissionState::EncodingFailed { id } => (Some(id), Vec::new()),
-                SubmissionState::Unconfirmed { id, buffer } => (Some(id), vec![buffer]),
+                SubmissionState::Recording { id } | SubmissionState::EncodingFailed { id } => {
+                    (Some(id), Vec::new())
+                }
+                SubmissionState::Rejected { id, buffer }
+                | SubmissionState::Unconfirmed { id, buffer } => (Some(id), vec![buffer]),
                 SubmissionState::Submitted { buffer } => (None, vec![buffer]),
                 SubmissionState::Retired => (None, Vec::new()),
             };
@@ -399,9 +555,14 @@ impl Drop for Submission {
         data.resources.clear();
         data.uniform_writes.clear();
         data.uploads.clear();
+        unsafe { ManuallyDrop::drop(&mut self.data) };
     }
 }
 
 #[cfg(test)]
 #[path = "submission_state_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "shared_submission_tests.rs"]
+mod shared_tests;

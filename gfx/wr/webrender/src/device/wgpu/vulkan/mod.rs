@@ -162,6 +162,7 @@ impl Device {
             .limits;
         Ok(Self {
             open: std::sync::Arc::new(open.into()),
+            shared: None,
             #[cfg(test)]
             trace: Default::default(),
             prepared_shaders: Default::default(),
@@ -216,20 +217,9 @@ mod tests;
 #[derive(Default)]
 pub(super) struct Cache {
     pub(super) properties: std::cell::OnceCell<([u8; 16], [u8; 16], u64)>,
-    pub(super) semaphore_fd: std::cell::OnceCell<ash::khr::external_semaphore_fd::Device>,
-    pub(super) timeline: std::cell::OnceCell<Option<ash::khr::timeline_semaphore::Device>>,
     pub(super) sync_file: std::cell::OnceCell<bool>,
     pub(super) drm_node: std::cell::OnceCell<Option<[u64; 2]>>,
     pub(super) capabilities: std::cell::OnceCell<DmaBufCapabilities>,
     pub(super) formats: std::cell::RefCell<crate::internal_types::FastHashMap<(wgt::TextureFormat, wgt::TextureUses), Rc<[DmaBufFormat]>>>,
     pub(super) modifiers: std::cell::RefCell<crate::internal_types::FastHashMap<wgt::TextureFormat, Rc<[ash::vk::DrmFormatModifierPropertiesEXT]>>>,
-}
-
-#[cfg(target_os = "linux")]
-impl Device {
-    pub(super) fn external_semaphore_fd(&self) -> &ash::khr::external_semaphore_fd::Device {
-        self.native_cache.semaphore_fd.get_or_init(|| ash::khr::external_semaphore_fd::Device::new(
-            self.raw_device().shared_instance().raw_instance(), self.raw_device().raw_device(),
-        ))
-    }
 }

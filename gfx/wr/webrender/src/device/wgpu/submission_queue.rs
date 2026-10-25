@@ -94,12 +94,12 @@ impl SubmissionQueue {
         while let Some(front) = state.pending.front_mut() {
             let result = if wait { front.wait(None) } else { front.poll() };
             let complete = result.map_err(|error| {
-                front.data.owner.lost.set(true);
+                front.data.owner.mark_lost();
                 error
             })?;
             if !complete {
                 if wait {
-                    front.data.owner.lost.set(true);
+                    front.data.owner.mark_lost();
                     return Err("Vulkan submission did not complete".into());
                 }
                 break;
@@ -145,7 +145,7 @@ impl SubmissionQueue {
             let SubmissionState::Recording { id } = &mut submission.state else {
                 unreachable!("Queue active submission is not recording")
             };
-            (&mut submission.data, id)
+            (&mut *submission.data, id)
         });
         Ok(Recording {
             submission: SubmissionBorrow::Queued(data, id),
@@ -215,7 +215,7 @@ impl SubmissionQueue {
         let mut state = self.state.borrow_mut();
         if let Some(mut active) = state.active.take() {
             active.submit_with_surfaces(surfaces).map_err(|error| {
-                self.pool.owner.lost.set(true);
+                self.pool.owner.mark_lost();
                 error
             })?;
             state.submitted = active.data.fence_value;

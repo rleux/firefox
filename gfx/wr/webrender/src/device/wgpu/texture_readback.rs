@@ -219,7 +219,7 @@ impl PendingReadback {
             let mapping = device
                 .map_buffer(&**self.buffer, 0..layout.size)
                 .map_err(|error| {
-                    owner.lost.set(true);
+                    owner.mark_lost();
                     format!("Mapping readback: {error:?}")
                 })?;
             if !mapping.is_coherent {

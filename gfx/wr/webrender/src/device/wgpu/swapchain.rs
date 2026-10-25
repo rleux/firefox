@@ -88,7 +88,7 @@ impl Swapchain {
         if self.config.is_some() {
             self.queue.wait()?;
             unsafe { owner.open.queue.wait_for_idle() }.map_err(|error| {
-                owner.lost.set(true);
+                owner.mark_lost();
                 format!("Waiting to reconfigure Vulkan swapchain: {error:?}")
             })?;
             unsafe { surface.raw.unconfigure(owner.open.device.as_ref()) };
@@ -98,7 +98,7 @@ impl Swapchain {
             unsafe { surface.raw.configure(owner.open.device.as_ref(), &config) }.map_err(
                 |error| {
                     if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
-                        owner.lost.set(true);
+                        owner.mark_lost();
                     }
                     format!("Configuring Vulkan swapchain: {error}")
                 },
@@ -137,7 +137,7 @@ impl Swapchain {
         let surface = &self.surface.as_ref().unwrap().raw;
         let image = unsafe { self.queue.acquire_surface(surface.as_ref()) }.map_err(|error| {
             if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
-                self.queue.owner().lost.set(true);
+                self.queue.owner().mark_lost();
             }
             error
         })?;
@@ -269,7 +269,7 @@ impl Swapchain {
             .submit_surface()
             .and_then(|serial| queue.wait_for(serial));
         if result.is_err() {
-            queue.owner().lost.set(true);
+            queue.owner().mark_lost();
             let _ = unsafe { queue.owner().open.queue.wait_for_idle() };
         }
         let image =
@@ -321,7 +321,7 @@ impl AcquiredImage<'_> {
             Err(hal::SurfaceError::Lost) => Ok(PresentationStatus::Lost),
             Err(error) => {
                 if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
-                    owner.lost.set(true);
+                    owner.mark_lost();
                 }
                 Err(format!("Presenting Vulkan swapchain image: {error}"))
             }
@@ -381,7 +381,7 @@ impl Drop for Swapchain {
             let owner = self.queue.owner();
             unsafe {
                 if owner.open.queue.wait_for_idle().is_err() {
-                    owner.lost.set(true);
+                    owner.mark_lost();
                 }
                 self.surface.as_ref().unwrap().raw.unconfigure(owner.open.device.as_ref());
             }

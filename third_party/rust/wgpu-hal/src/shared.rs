@@ -22,6 +22,12 @@ impl PartialEq for SharedDeviceIdentity {
 impl Eq for SharedDeviceIdentity {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeRetirement {
+    Confirmed,
+    Unconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SharedQueueLane {
     Graphics,
     Compute,
@@ -31,6 +37,7 @@ pub struct SharedSubmitSegment<'a> {
     pub lane: SharedQueueLane,
     pub queue: &'a dyn crate::DynQueue,
     pub command_buffers: &'a [&'a dyn crate::DynCommandBuffer],
+    pub synchronization: Option<&'a crate::external_sync::SubmissionSync>,
 }
 
 impl fmt::Debug for SharedSubmitSegment<'_> {
@@ -97,6 +104,20 @@ pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
         logical_compute_queue: &dyn crate::DynQueue,
         segments: &[SharedSubmitSegment<'_>],
         terminal: (&dyn crate::DynFence, crate::FenceValue),
+    ) -> Result<alloc::boxed::Box<dyn SharedSubmissionReceipt>, SharedSubmitError>;
+
+    /// Submit ordinary renderer work with dependencies bound to this graphics call.
+    ///
+    /// # Safety
+    /// Queue::submit lifetime requirements apply. Synchronization must obey its
+    /// producer/consumer rules. Preserve every owner and receipt through retirement.
+    unsafe fn submit_graphics(
+        &self,
+        queue: &dyn crate::DynQueue,
+        buffers: &[&dyn crate::DynCommandBuffer],
+        surfaces: &[&dyn crate::DynSurfaceTexture],
+        terminal: (&dyn crate::DynFence, crate::FenceValue),
+        synchronization: &crate::external_sync::SubmissionSync,
     ) -> Result<alloc::boxed::Box<dyn SharedSubmissionReceipt>, SharedSubmitError>;
 
     /// Permanently close submission admission and wait for accepted native work.

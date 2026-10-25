@@ -8,11 +8,13 @@ use super::super::tests::{Command, ERRORS, map_upload, record_upload, validation
 use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
-struct RetainedUntilIdle(Rc<Device>);
+struct RetainedUntilIdle(Rc<Device>, bool);
 
 impl Drop for RetainedUntilIdle {
     fn drop(&mut self) {
-        assert!(self.0.trace.borrow().iter().any(|event| matches!(event, Command::SubmissionIdleWait)));
+        if self.1 {
+            assert!(self.0.trace.borrow().iter().any(|event| matches!(event, Command::SubmissionIdleWait)));
+        }
     }
 }
 
@@ -20,14 +22,14 @@ impl Drop for RetainedUntilIdle {
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
 fn failed_encoding_and_uncertain_submit_retain_resources_until_idle() {
     validation_logging();
-    for failure in [FailurePoint::EndEncoding, FailurePoint::AfterSubmit] {
+    for failure in [FailurePoint::EndEncoding, FailurePoint::EndEncodingClosed, FailurePoint::AfterSubmit] {
         let owner = Rc::new(Device::new(&Options { validation: true, ..Default::default() }).unwrap());
         let bytes = [37; 64];
         let source = Buffer::new(&owner, &bytes, wgt::BufferUses::COPY_SRC).unwrap();
         let weak_source = Rc::downgrade(&source);
         let (mut submission, target) = record_upload(&owner, &source);
         let committed = Rc::new(Cell::new(false));
-        let marker = Rc::new(RetainedUntilIdle(owner.clone()));
+        let marker = Rc::new(RetainedUntilIdle(owner.clone(), failure != FailurePoint::EndEncoding));
         let weak_marker = Rc::downgrade(&marker);
         {
             let mut commands = submission.recording().unwrap();

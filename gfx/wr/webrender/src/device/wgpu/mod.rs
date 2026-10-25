@@ -100,6 +100,19 @@ pub struct Options {
     pub surface_options: SurfaceOptions,
 }
 
+pub use hal::shared::NativeRetirement;
+
+pub struct SharedDeviceOptions {
+    pub context: std::sync::Arc<dyn hal::shared::SharedDeviceContext>,
+    pub recover: Rc<dyn Fn(NativeRetirement)>,
+    pub fatal_process: unsafe extern "C" fn() -> !,
+}
+
+struct SharedDeviceState {
+    options: SharedDeviceOptions,
+    notified: Cell<bool>,
+}
+
 enum InitialSurface {
     Detached,
     Attached(window_surface::WindowSurface),
@@ -108,6 +121,7 @@ enum InitialSurface {
 /// An opened Vulkan adapter, device and queue.
 pub struct Device {
     open: std::sync::Arc<hal::DynOpenDevice>,
+    shared: Option<SharedDeviceState>,
     #[cfg(target_os = "linux")]
     native_cache: native::Cache,
     #[cfg(test)]
@@ -143,12 +157,17 @@ impl Device {
     /// # Safety
     ///
     /// The open device/queue must be the graphics endpoint associated with the
-    /// supplied instance and selected adapter; submitted resources must outlive
-    /// their confirmed native retirement.
+    /// supplied instance and selected adapter. SharedDeviceOptions.context must
+    /// own that same device and queue; submitted resources must outlive
+    /// their confirmed native retirement. Use only on the renderer thread in an
+    /// isolated graphics process. Recovery must dispatch asynchronously without
+    /// reentering WR or strongly capturing Device/Submission/core owners. The
+    /// fatal C hook must terminate that process without returning or unwinding.
     pub unsafe fn from_shared_endpoint(
         open: std::sync::Arc<hal::DynOpenDevice>,
         instance: Box<dyn hal::DynInstance>,
         exposed: hal::DynExposedAdapter,
+        shared: SharedDeviceOptions,
     ) -> Result<Self, String> {
         let native =
             hal::renderer::graphics_capabilities(&*instance, &*exposed.adapter, &*open.device)
@@ -181,6 +200,7 @@ impl Device {
         }
         Ok(Self {
             open,
+            shared: Some(SharedDeviceState { options: shared, notified: Cell::new(false) }),
             #[cfg(target_os = "linux")]
             native_cache: Default::default(),
             #[cfg(test)]
@@ -225,6 +245,26 @@ impl Device {
 
     pub fn is_lost(&self) -> bool {
         self.lost.get()
+    }
+
+    fn mark_lost(&self) {
+        if self.lost.get() { return; }
+        if let Some(shared) = &self.shared {
+            match shared.options.context.drain() {
+                Ok(()) | Err(hal::DeviceError::Lost) => {}
+                Err(_) => unsafe { (shared.options.fatal_process)() },
+            }
+        }
+        self.mark_lost_retired();
+    }
+
+    fn mark_lost_retired(&self) {
+        self.lost.set(true);
+        if let Some(shared) = &self.shared {
+            if !shared.notified.replace(true) {
+                (shared.options.recover)(NativeRetirement::Confirmed);
+            }
+        }
     }
 
     pub fn capabilities(&self) -> &hal::Capabilities {

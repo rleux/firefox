@@ -2,15 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::native::Owned;
-use super::Device;
-use ash::{khr, vk};
-use std::os::fd::{AsRawFd, BorrowedFd, IntoRawFd};
-use std::rc::Rc;
+use super::{hal, Device};
+use std::{os::fd::BorrowedFd, rc::Rc, sync::Arc};
 
 /// A single-use GPU wait for a fence exported by EGL or another compatible API.
 pub struct SyncFileWait {
-    pub(super) semaphore: Owned<vk::Semaphore>,
+    pub(super) owner: Rc<Device>,
+    pub(super) semaphore: Arc<dyn hal::external_sync::Semaphore>,
 }
 
 impl SyncFileWait {
@@ -20,59 +18,20 @@ impl SyncFileWait {
         if owner.is_lost() || !owner.supports_sync_file_import() {
             return Err("Vulkan sync-file import is unavailable".into());
         }
-        let fd = fd
-            .try_clone_to_owned()
-            .map_err(|error| format!("Duplicating sync-file: {error}"))?;
-        let raw = owner.raw_device().raw_device();
-        let semaphore = raw
-            .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-            .map_err(|error| format!("Creating sync-file semaphore: {error:?}"))?;
-        let semaphore = Owned::new(owner, semaphore, |device, semaphore| unsafe {
-            device.raw_device().destroy_semaphore(semaphore, None);
-        });
-        owner.external_semaphore_fd()
-            .import_semaphore_fd(
-                &vk::ImportSemaphoreFdInfoKHR::default()
-                    .semaphore(*semaphore)
-                    .flags(vk::SemaphoreImportFlags::TEMPORARY)
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD)
-                    .fd(fd.as_raw_fd()),
-            )
-            .map_err(|error| format!("Importing sync-file semaphore: {error:?}"))?;
-        let _ = fd.into_raw_fd();
-        Ok(Self { semaphore })
+        let semaphore = unsafe { hal::external_sync::import_sync_file(&*owner.open.device, fd) }
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            owner: owner.clone(),
+            semaphore,
+        })
     }
 }
 
 impl Device {
     pub(super) fn supports_sync_file_import(&self) -> bool {
-        *self.native_cache.sync_file.get_or_init(|| self.query_sync_file_import())
-    }
-
-    fn query_sync_file_import(&self) -> bool {
-        if self.raw_device().shared_instance().instance_api_version() < vk::API_VERSION_1_1
-            || !self
-                .raw_device()
-                .enabled_device_extensions()
-                .contains(&khr::external_semaphore_fd::NAME)
-        {
-            return false;
-        }
-        let instance = self.raw_device().shared_instance().raw_instance();
-        let mut properties = vk::ExternalSemaphoreProperties::default();
-        unsafe {
-            instance.get_physical_device_external_semaphore_properties(
-                self.raw_device().raw_physical_device(),
-                &vk::PhysicalDeviceExternalSemaphoreInfo::default()
-                    .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD),
-                &mut properties,
-            );
-        }
-        properties
-            .external_semaphore_features
-            .contains(vk::ExternalSemaphoreFeatureFlags::IMPORTABLE)
-            && properties
-                .compatible_handle_types
-                .contains(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD)
+        *self
+            .native_cache
+            .sync_file
+            .get_or_init(|| hal::external_sync::supports_sync_file_import(&*self.open.device))
     }
 }

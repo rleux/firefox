@@ -23,11 +23,7 @@ pub trait GraphicsRecordingProvider: fmt::Debug + wgt::WasmNotSendSync {
     ) -> Result<Box<dyn hal::DynCommandEncoder>, hal::DeviceError>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NativeRetirement {
-    Confirmed,
-    Unconfirmed,
-}
+pub use hal::shared::NativeRetirement;
 
 pub struct GraphicsSubmitPart<'a> {
     pub lane: hal::shared::SharedQueueLane,

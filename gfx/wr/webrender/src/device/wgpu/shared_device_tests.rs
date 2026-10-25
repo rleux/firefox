@@ -6,6 +6,7 @@ use super::*;
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use std::{
     borrow::Cow,
+    cell::Cell,
     convert::TryInto,
     fmt,
     sync::{
@@ -438,8 +439,22 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
     drop(initial_compute);
     let graphics = Arc::new(graphics);
     let (_, wr_instance) = context.clone_instance();
+    let wr_recoveries = Rc::new(Cell::new(0));
+    let recoveries = wr_recoveries.clone();
     let owner = Rc::new(
-        unsafe { Device::from_shared_endpoint(graphics.clone(), wr_instance, exposed) }.unwrap(),
+        unsafe {
+            Device::from_shared_endpoint(
+                graphics.clone(),
+                wr_instance,
+                exposed,
+                SharedDeviceOptions {
+                    context: context.clone(),
+                    recover: Rc::new(move |_| recoveries.set(recoveries.get() + 1)),
+                    fatal_process: terminate_test_process,
+                },
+            )
+        }
+        .unwrap(),
     );
     assert!(Arc::ptr_eq(&owner.open, &graphics));
     assert!(
@@ -732,5 +747,6 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
     drop((core_queue, core_device, adapter, core_instance, provider));
     drop((submission, readback, target, owner, graphics, context));
     assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 0, 255]);
+    assert_eq!(wr_recoveries.get(), 0);
     assert_eq!(tests::ERRORS.load(Ordering::Relaxed), 0);
 }

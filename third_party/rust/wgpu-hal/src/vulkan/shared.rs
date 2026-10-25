@@ -191,6 +191,20 @@ impl SharedDeviceContext for NativeDevice {
         unsafe { submit::submit_ordered(self, logical_compute_queue, segments, terminal) }
     }
 
+    unsafe fn submit_graphics(
+        &self,
+        queue: &dyn crate::DynQueue,
+        buffers: &[&dyn crate::DynCommandBuffer],
+        surfaces: &[&dyn crate::DynSurfaceTexture],
+        terminal: (&dyn crate::DynFence, crate::FenceValue),
+        synchronization: &crate::external_sync::SubmissionSync,
+    ) -> Result<Box<dyn crate::shared::SharedSubmissionReceipt>, crate::shared::SharedSubmitError>
+    {
+        unsafe {
+            submit::submit_graphics(self, queue, buffers, surfaces, terminal, synchronization)
+        }
+    }
+
     fn drain(&self) -> Result<(), crate::DeviceError> {
         self.queues.closed.store(true, Ordering::Release);
         let result = self.queues.wait_for_idle(&self.raw);
@@ -229,7 +243,21 @@ pub(crate) unsafe fn open_shared_device(
     if !adapter.private_caps.timeline_semaphores {
         return Err(SharedDeviceError::TimelineSemaphoresUnavailable);
     }
-    let extensions = adapter.required_device_extensions(features);
+    let mut extensions = adapter.required_device_extensions(features);
+    #[cfg(unix)]
+    if adapter.instance.instance_api_version >= vk::API_VERSION_1_1
+        && adapter
+            .physical_device_capabilities()
+            .properties()
+            .api_version
+            >= vk::API_VERSION_1_1
+        && adapter
+            .physical_device_capabilities()
+            .supports_extension(ash::khr::external_semaphore_fd::NAME)
+        && !extensions.contains(&ash::khr::external_semaphore_fd::NAME)
+    {
+        extensions.push(ash::khr::external_semaphore_fd::NAME);
+    }
     let mut device_features = adapter.physical_device_features(&extensions, features);
     let priorities = [1.0, 1.0];
     let queues = [vk::DeviceQueueCreateInfo::default()
