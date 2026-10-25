@@ -14,6 +14,12 @@ use crate::{
     SubmissionIndex,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Completion {
+    Fence,
+    Unconfirmed,
+}
+
 /// A command submitted to the GPU for execution.
 ///
 /// ## Keeping resources alive while the GPU is using them
@@ -23,10 +29,13 @@ use crate::{
 ///
 /// [`wgpu_hal`]: hal
 struct ActiveSubmission {
+    completion: Completion,
+    receipt: Option<Arc<dyn hal::shared::SharedSubmissionReceipt>>,
+    receipt_ready: bool,
     /// The index of the submission we track.
     ///
     /// When `Device::fence`'s value is greater than or equal to this, our queue
-    /// submission has completed.
+    /// submission has completed, provided its native receipt is also ready.
     index: SubmissionIndex,
 
     /// Buffers to be mapped once this submission has completed.
@@ -220,13 +229,86 @@ impl LifetimeTracker {
 
     /// Start tracking resources associated with a new queue submission.
     pub fn track_submission(&mut self, index: SubmissionIndex, encoders: Vec<EncoderInFlight>) {
+        self.track_shared_submission(index, encoders, None, false);
+    }
+
+    pub(crate) fn track_shared_submission(
+        &mut self,
+        index: SubmissionIndex,
+        encoders: Vec<EncoderInFlight>,
+        receipt: Option<Arc<dyn hal::shared::SharedSubmissionReceipt>>,
+        unconfirmed: bool,
+    ) {
         self.active.push(ActiveSubmission {
+            completion: if unconfirmed {
+                Completion::Unconfirmed
+            } else {
+                Completion::Fence
+            },
+            receipt_ready: receipt.is_none() && !unconfirmed,
+            receipt,
             index,
             mapped: Vec::new(),
             compact_read_back: Vec::new(),
             encoders,
             work_done_closures: SmallVec::new(),
         });
+    }
+
+    pub(crate) fn receipt_snapshots(
+        &self,
+        through: SubmissionIndex,
+    ) -> Vec<(
+        SubmissionIndex,
+        Arc<dyn hal::shared::SharedSubmissionReceipt>,
+    )> {
+        self.active
+            .iter()
+            .take_while(|active| {
+                active.index <= through && active.completion != Completion::Unconfirmed
+            })
+            .filter(|active| !active.receipt_ready)
+            .filter_map(|active| {
+                active
+                    .receipt
+                    .as_ref()
+                    .map(|receipt| (active.index, receipt.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn mark_receipt_ready(&mut self, index: SubmissionIndex) {
+        if let Some(active) = self.active.iter_mut().find(|active| active.index == index) {
+            if active.completion != Completion::Unconfirmed {
+                active.receipt_ready = true;
+            }
+        }
+    }
+
+    pub(crate) fn submission_complete(&self, index: SubmissionIndex) -> bool {
+        self.active
+            .first()
+            .is_none_or(|active| active.index > index)
+    }
+
+    pub(crate) fn has_unconfirmed(&self) -> bool {
+        self.active
+            .iter()
+            .any(|active| active.completion == Completion::Unconfirmed)
+    }
+
+    pub(crate) fn quarantine_active(&mut self) {
+        for active in &mut self.active {
+            active.completion = Completion::Unconfirmed;
+            active.receipt_ready = false;
+        }
+    }
+
+    pub(crate) fn confirm_drained(&mut self) {
+        for active in &mut self.active {
+            active.completion = Completion::Fence;
+            active.receipt_ready = true;
+        }
     }
 
     /// Schedule a buffer for mapping.
@@ -332,7 +414,15 @@ impl LifetimeTracker {
         profiling::scope!("triage_submissions");
 
         debug_assert!(self.active.is_sorted_by_key(|a| a.index));
-        let done_count = self.active.partition_point(|a| a.index <= last_done);
+        let done_count = self
+            .active
+            .iter()
+            .take_while(|active| {
+                active.index <= last_done
+                    && active.completion == Completion::Fence
+                    && active.receipt_ready
+            })
+            .count();
 
         let mut work_done_closures: SmallVec<_> = self.work_done_closures.drain(..).collect();
         for a in self.active.drain(..done_count) {
@@ -433,3 +523,7 @@ impl LifetimeTracker {
         pending_callbacks
     }
 }
+
+#[cfg(all(test, feature = "std", feature = "noop", send_sync))]
+#[path = "shared_lifetime_tests.rs"]
+mod shared_tests;

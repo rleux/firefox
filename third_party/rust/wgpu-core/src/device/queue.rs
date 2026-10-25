@@ -274,6 +274,12 @@ impl Drop for Queue {
         api_log!("Queue::drop {:?}", self as *const _);
         resource_log!("Drop {}", self.error_ident());
 
+        #[cfg(feature = "std")]
+        if self.device.graphics_submission.is_some() {
+            self.drop_shared();
+            return;
+        }
+
         // On Vulkan, pending presents are not tracked by fences.
         // wait_for_idle covers both fence-tracked submissions and pending presents.
         match unsafe { self.raw.wait_for_idle() } {
@@ -2029,7 +2035,22 @@ impl Queue {
             Ok(None) => {}
             Err(e) => return Err(e),
         }
+        #[cfg(feature = "std")]
+        if self.device.graphics_submission.is_some() {
+            return self.submit_shared_pending(
+                pending_writes,
+                command_index_guard,
+                snatch_guard,
+                executions,
+                surface_textures,
+                submit_index,
+            );
+        }
         if self.device.graphics_provider.is_some() {
+            self.device.valid.store(false, Ordering::Release);
+            drop(pending_writes);
+            drop(command_index_guard);
+            drop(snatch_guard);
             log::error!("Renderer-owned graphics submission is not implemented");
             return Err(self.device.handle_hal_error(hal::DeviceError::Unexpected));
         }
@@ -2307,3 +2328,7 @@ fn validate_command_buffer(
     }
     Ok(())
 }
+
+#[cfg(feature = "std")]
+#[path = "shared_submission.rs"]
+mod shared_submission;

@@ -1253,7 +1253,14 @@ impl Adapter {
     /// # Safety
     ///
     /// The requirements of create_device_and_queue_from_hal apply. The graphics
-    /// provider must bind a compatible graphics queue/context for this device.
+    /// provider must bind a compatible graphics queue/context for this device and
+    /// honor the recording, submission and native-retirement contracts.
+    ///
+    /// Submission support is captured once for the device's lifetime and may
+    /// only be admitted with the std feature in an isolated graphics process. Its fatal hook must not
+    /// return, unwind or reenter core. The embedding must serialize final Queue
+    /// release with resource access; the last Arc disappears before Drop can
+    /// acquire snatch protection. Never expose core ownership to renderer threads.
     pub unsafe fn create_device_and_queue_from_hal_with_graphics(
         self: &Arc<Self>,
         hal_device: hal::DynOpenDevice,

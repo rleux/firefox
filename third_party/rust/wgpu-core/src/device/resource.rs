@@ -321,6 +321,8 @@ pub struct Device {
     //  - Any member whose drop might write into the trace must be dropped
     //    before the trace.
     pub(crate) graphics_provider: Option<Arc<dyn crate::graphics::GraphicsRecordingProvider>>,
+    pub(crate) graphics_submission: Option<Arc<dyn crate::graphics::GraphicsSubmissionProvider>>,
+    pub(crate) graphics_termination: Option<unsafe extern "C" fn() -> !>,
     raw: Box<dyn hal::DynDevice>,
     pub(crate) adapter: Arc<Adapter>,
     #[cfg(feature = "trace")]
@@ -366,6 +368,8 @@ const _: () = {
             timestamp_normalizer,
             default_external_texture_params_buffer,
             graphics_provider,
+            graphics_submission,
+            graphics_termination,
             raw,
             adapter,
             #[cfg(feature = "trace")]
@@ -400,6 +404,8 @@ const _: () = {
         _check_bound(timestamp_normalizer);
         _check_bound(default_external_texture_params_buffer);
         _check_bound(graphics_provider);
+        _check_bound(graphics_submission);
+        _check_bound(graphics_termination);
         _check_bound(raw);
         _check_bound(adapter);
         #[cfg(feature = "trace")]
@@ -536,6 +542,16 @@ impl Device {
         instance_flags: wgt::InstanceFlags,
         graphics_provider: Option<Arc<dyn crate::graphics::GraphicsRecordingProvider>>,
     ) -> Result<Self, DeviceError> {
+        let graphics_submission = graphics_provider
+            .as_ref()
+            .and_then(|provider| provider.clone().submission());
+        let graphics_termination = graphics_submission
+            .as_ref()
+            .map(|provider| provider.fatal_process_termination());
+        if graphics_termination.is_some() && !cfg!(feature = "std") {
+            return Err(DeviceError::Lost);
+        }
+
         #[cfg(not(feature = "trace"))]
         match &desc.trace {
             wgt::Trace::Off => {}
@@ -691,6 +707,8 @@ impl Device {
 
             Ok(Self {
                 graphics_provider,
+                graphics_submission,
+                graphics_termination,
                 raw: raw_device,
                 adapter: adapter.clone(),
                 queue: OnceCell::new(),
@@ -1034,6 +1052,13 @@ impl Device {
 
         self.deferred_buffer_map_pending_closures
             .swap(&mut user_closures.mappings);
+
+        #[cfg(feature = "std")]
+        if self.graphics_submission.is_some() {
+            if let Some(queue) = self.get_queue() {
+                return queue.maintain_shared(poll_type, snatch_guard, user_closures);
+            }
+        }
 
         // If a wait was requested, determine which submission index to wait for.
         let wait_submission_index = match poll_type {
@@ -5524,6 +5549,22 @@ impl Device {
         &self,
         submission_index: crate::SubmissionIndex,
     ) -> Result<(), DeviceError> {
+        #[cfg(feature = "std")]
+        if self.graphics_submission.is_some() {
+            let snatch = self.snatchable_lock.read();
+            let (closures, result) = self.maintain(
+                wgt::PollType::Wait {
+                    submission_index: Some(submission_index),
+                    timeout: None,
+                },
+                snatch,
+            );
+            closures.fire();
+            return result.map(|_| ()).map_err(|error| match error {
+                WaitIdleError::Device(error) => error,
+                _ => DeviceError::Lost,
+            });
+        }
         let last_done_index = unsafe { self.raw().get_fence_value(self.fence.as_ref()) }
             .map_err(|e| self.handle_hal_error(e))?;
         if last_done_index < submission_index {
@@ -5634,7 +5675,7 @@ impl Device {
         // until they are cleared, and then drop the device.
     }
 
-    fn release_gpu_resources(&self) {
+    pub(crate) fn release_gpu_resources(&self) {
         // This is called when the device is lost, which makes every associated
         // resource invalid and unusable. This is an opportunity to release all of
         // the underlying gpu resources, even though the objects remain visible to

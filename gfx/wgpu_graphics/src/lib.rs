@@ -42,6 +42,7 @@ impl DynCommandBuffer for RoutedCommandBuffer {}
 pub struct RoutedEncoder {
     native: Box<dyn DynCommandEncoder>,
     graphics: Option<Box<dyn GraphicsRecorder>>,
+    execution: Option<Box<dyn GraphicsExecution>>,
     segments: Vec<Segment>,
     discarded: Vec<Box<dyn DynCommandBuffer>>,
     label: Option<String>,
@@ -52,11 +53,62 @@ pub struct RoutedEncoder {
     error: Option<DeviceError>,
 }
 
+pub struct SubmitPart<'a> {
+    pub lane: hal::shared::SharedQueueLane,
+    pub queue: &'a dyn DynQueue,
+    pub buffer: &'a dyn DynCommandBuffer,
+}
+
 impl RoutedEncoder {
+    pub fn seal_graphics(&mut self) -> Result<(), DeviceError> {
+        if self.native_open || self.graphics_open || self.in_render_pass {
+            return Err(DeviceError::Unexpected);
+        }
+        if self.execution.is_none() {
+            let recorder = self.graphics.take().ok_or(DeviceError::Unexpected)?;
+            self.execution = Some(recorder.finish()?);
+        }
+        Ok(())
+    }
+
+    pub fn submit_parts<'a>(
+        &'a self,
+        buffers: &'a [Box<dyn DynCommandBuffer>],
+        native_queue: &'a dyn DynQueue,
+    ) -> Result<Vec<SubmitPart<'a>>, DeviceError> {
+        let execution = self.execution.as_ref().ok_or(DeviceError::Unexpected)?;
+        let mut parts = Vec::new();
+        for buffer in buffers {
+            let buffer = buffer
+                .as_any()
+                .downcast_ref::<RoutedCommandBuffer>()
+                .ok_or(DeviceError::Unexpected)?;
+            for segment in &buffer.segments {
+                match segment {
+                    Segment::Native(buffer) => parts.push(SubmitPart {
+                        lane: hal::shared::SharedQueueLane::Compute,
+                        queue: native_queue,
+                        buffer: &**buffer,
+                    }),
+                    Segment::Graphics(index) => parts.push(SubmitPart {
+                        lane: hal::shared::SharedQueueLane::Graphics,
+                        queue: execution.queue(),
+                        buffer: &**execution
+                            .command_buffers()
+                            .get(*index)
+                            .ok_or(DeviceError::Unexpected)?,
+                    }),
+                }
+            }
+        }
+        Ok(parts)
+    }
+
     pub fn new(native: Box<dyn DynCommandEncoder>, graphics: Box<dyn GraphicsRecorder>) -> Self {
         Self {
             native,
             graphics: Some(graphics),
+            execution: None,
             segments: Vec::new(),
             discarded: Vec::new(),
             label: None,
@@ -106,6 +158,9 @@ impl DynResource for RoutedEncoder {
 impl DynCommandEncoder for RoutedEncoder {
     unsafe fn begin_encoding(&mut self, label: Label) -> Result<(), DeviceError> {
         assert!(!self.native_open && !self.graphics_open);
+        if self.execution.is_some() {
+            return Err(DeviceError::Unexpected);
+        }
         self.label = label.map(String::from);
         self.native_open = true;
         if let Err(error) = unsafe { self.native.begin_encoding(label) } {
@@ -158,6 +213,7 @@ impl DynCommandEncoder for RoutedEncoder {
         }
         unsafe { self.native.reset_all(mem::take(&mut self.discarded)) };
         self.graphics.take();
+        self.execution.take();
     }
 
     unsafe fn begin_render_pass(

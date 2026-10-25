@@ -279,6 +279,10 @@ impl hal::GraphicsExecution for Execution {
     fn command_buffers(&self) -> &[Box<dyn hal::DynCommandBuffer>] {
         &self.buffers
     }
+
+    fn queue(&self) -> &dyn hal::DynQueue {
+        &*self._owner.queue
+    }
 }
 
 impl Drop for Execution {

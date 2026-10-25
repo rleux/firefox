@@ -7,7 +7,7 @@ use core::{fmt, ops::Range};
 
 use crate::{
     BufferBinding, DeviceError, DynBindGroup, DynBuffer, DynCommandBuffer, DynOpenDevice,
-    DynPipelineLayout, DynQuerySet, DynRenderPipeline, DynTextureView, Label, Rect,
+    DynPipelineLayout, DynQuerySet, DynQueue, DynRenderPipeline, DynTextureView, Label, Rect,
     RenderPassDescriptor,
 };
 
@@ -129,6 +129,7 @@ pub enum GraphicsCommand<'a> {
 /// A failed submission or logical device loss alone does not establish retirement.
 pub trait GraphicsExecution: fmt::Debug + wgt::WasmNotSendSync {
     fn command_buffers(&self) -> &[Box<dyn DynCommandBuffer>];
+    fn queue(&self) -> &dyn DynQueue;
 }
 
 /// Records only graphics work; compute, copies and preparation barriers remain separate.

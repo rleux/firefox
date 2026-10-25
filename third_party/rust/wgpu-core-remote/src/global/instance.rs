@@ -228,6 +228,9 @@ impl Global {
     ///
     /// The requirements of create_device_from_hal apply. The graphics provider
     /// must bind a compatible graphics queue/context for the supplied device.
+    /// Submission support also requires the isolated-process, fatal-hook and
+    /// serialized final-Queue-release contract of
+    /// [`wgpu_core::instance::Adapter::create_device_and_queue_from_hal_with_graphics`].
     pub unsafe fn create_device_from_hal_with_graphics<'a>(
         &self,
         adapter_id: AdapterId,
