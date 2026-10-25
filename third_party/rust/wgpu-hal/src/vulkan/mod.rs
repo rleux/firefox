@@ -226,6 +226,7 @@ impl fmt::Debug for InstanceShared {
 #[derive(Debug)]
 pub struct Instance {
     shared: Arc<InstanceShared>,
+    selected_physical_device: Option<vk::PhysicalDevice>,
 }
 
 #[expect(missing_debug_implementations, reason = "TODO?")]

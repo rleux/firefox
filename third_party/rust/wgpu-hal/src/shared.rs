@@ -24,9 +24,28 @@ impl Eq for SharedDeviceIdentity {}
 pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     fn identity(&self) -> SharedDeviceIdentity;
 
-    /// Clone a lease on the original native instance without reconfiguring it.
-    /// Adapter enumeration still needs to select this context's physical device.
+    /// Clone a lease on the original native instance, restricted to the selected
+    /// physical adapter, without reconfiguring the instance.
     fn clone_instance(&self) -> (wgt::Backend, alloc::boxed::Box<dyn crate::DynInstance>);
+
+    /// Open a private logical device on the reserved compute queue.
+    ///
+    /// This does not create a native device or enable additional native features.
+    /// Waiting for this endpoint's queue currently also waits for other logical
+    /// endpoints sharing that native queue.
+    ///
+    /// # Safety
+    ///
+    /// Returned resource and submission owners must remain alive until native
+    /// retirement is confirmed. Adapter membership and feature/limit subsets are
+    /// checked before backend calls.
+    unsafe fn open_compute_device(
+        self: Arc<Self>,
+        adapter: &dyn DynAdapter,
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+    ) -> Result<DynOpenDevice, SharedDeviceError>;
 
     /// Permanently close submission admission and wait for accepted native work.
     ///
@@ -55,6 +74,14 @@ pub enum SharedDeviceError {
     UnsupportedBackend,
     #[error("Shared devices require two graphics/compute queues in the presentation-compatible queue family")]
     IndependentQueuesUnavailable,
+    #[error("The adapter is not the shared context's original instance and physical device")]
+    IncompatibleAdapter,
+    #[error("Native features were not enabled when the shared context was created: {0:?}")]
+    UnsupportedFeatures(wgt::Features),
+    #[error("Requested limits exceed the shared context's native limits")]
+    LimitsExceeded,
+    #[error("The shared context no longer accepts new work")]
+    Closed,
     #[error(transparent)]
     Device(#[from] DeviceError),
 }

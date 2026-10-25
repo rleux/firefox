@@ -17,7 +17,7 @@ pub(super) fn after_graphics(device: &crate::vulkan::Device) -> Result<(), Share
     }
 }
 
-fn native_factory() -> Result<SharedDeviceEndpoints, SharedDeviceError> {
+fn native_instance() -> crate::vulkan::Instance {
     assert!(
         cfg!(all(feature = "validation_canary", debug_assertions)),
         "Native shared-device tests require validation_canary and debug assertions"
@@ -41,6 +41,11 @@ fn native_factory() -> Result<SharedDeviceEndpoints, SharedDeviceError> {
             .is_some_and(|debug| debug.callback_data.validation_layer_properties.is_some()),
         "Khronos validation layer must be enabled"
     );
+    instance
+}
+
+fn native_factory() -> Result<SharedDeviceEndpoints, SharedDeviceError> {
+    let instance = native_instance();
     let adapter = unsafe { instance.enumerate_adapters(None) }
         .into_iter()
         .next()
@@ -419,6 +424,7 @@ fn shared_instance_clone_outlives_native_device_context() {
     assert!(original_instance.upgrade().is_some());
 
     let adapters = unsafe { instance.enumerate_adapters(None) };
+    assert_eq!(adapters.len(), 1);
     assert!(adapters.iter().any(|adapter| {
         let adapter = adapter
             .adapter
@@ -430,5 +436,377 @@ fn shared_instance_clone_outlives_native_device_context() {
     drop(adapters);
     drop(instance);
     assert!(original_instance.upgrade().is_none());
+    assert_validation_clean();
+}
+
+fn device_uuid(adapter: &crate::vulkan::Adapter) -> [u8; vk::UUID_SIZE] {
+    assert!(adapter.instance.instance_api_version >= vk::API_VERSION_1_1);
+    let mut ids = vk::PhysicalDeviceIDProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut ids);
+    unsafe {
+        adapter
+            .instance
+            .raw
+            .get_physical_device_properties2(adapter.raw, &mut properties)
+    };
+    ids.device_uuid
+}
+
+#[test]
+#[ignore = "Requires Vulkan 1.1, two universal queues and the Khronos validation layer"]
+fn shared_compute_endpoint_rejects_foreign_instance_features_limits_and_closed_context() {
+    let pair = native_factory().unwrap();
+    let group = native_group(&pair);
+    let (_, selected_instance) = pair.context.clone_instance();
+    let mut selected_adapters = unsafe { selected_instance.enumerate_adapters(None) };
+    assert_eq!(selected_adapters.len(), 1);
+    let selected = selected_adapters.pop().unwrap();
+    let selected_native = selected
+        .adapter
+        .as_any()
+        .downcast_ref::<crate::vulkan::Adapter>()
+        .unwrap();
+    let missing = crate::vulkan::Instance {
+        shared: selected_native.instance.clone(),
+        selected_physical_device: Some(vk::PhysicalDevice::null()),
+    };
+    assert!(unsafe { missing.enumerate_adapters(None) }.is_empty());
+
+    let foreign_instance = native_instance();
+    assert!(foreign_instance.selected_physical_device.is_none());
+    let selected_uuid = device_uuid(selected_native);
+    assert_ne!(selected_uuid, [0; vk::UUID_SIZE]);
+    let foreign = unsafe { foreign_instance.enumerate_adapters(None) }
+        .into_iter()
+        .find(|candidate| device_uuid(&candidate.adapter) == selected_uuid)
+        .expect("The same physical GPU must be visible through the other instance");
+    assert!(!Arc::ptr_eq(
+        &foreign.adapter.instance,
+        &selected_native.instance
+    ));
+    let hints = wgt::MemoryHints::default();
+    let foreign_result = unsafe {
+        pair.context.clone().open_compute_device(
+            &foreign.adapter,
+            wgt::Features::empty(),
+            &selected.capabilities.limits,
+            &hints,
+        )
+    };
+    assert!(matches!(
+        foreign_result,
+        Err(SharedDeviceError::IncompatibleAdapter)
+    ));
+    let unsupported = unsafe {
+        pair.context.clone().open_compute_device(
+            &*selected.adapter,
+            wgt::Features::TIMESTAMP_QUERY,
+            &selected.capabilities.limits,
+            &hints,
+        )
+    };
+    assert!(matches!(
+        unsupported,
+        Err(SharedDeviceError::UnsupportedFeatures(_))
+    ));
+    let mut excessive = selected.capabilities.limits.clone();
+    excessive.max_bind_groups = excessive.max_bind_groups.checked_add(1).unwrap();
+    let limits_error = unsafe {
+        pair.context.clone().open_compute_device(
+            &*selected.adapter,
+            wgt::Features::empty(),
+            &excessive,
+            &hints,
+        )
+    };
+    assert!(matches!(
+        limits_error,
+        Err(SharedDeviceError::LimitsExceeded)
+    ));
+    for uniform in [true, false] {
+        let mut insufficient = selected.capabilities.limits.clone();
+        let alignment = if uniform {
+            &mut insufficient.min_uniform_buffer_offset_alignment
+        } else {
+            &mut insufficient.min_storage_buffer_offset_alignment
+        };
+        *alignment = alignment
+            .checked_sub(1)
+            .expect("Vulkan minimum alignment is nonzero");
+        let alignment_error = unsafe {
+            pair.context.clone().open_compute_device(
+                &*selected.adapter,
+                wgt::Features::empty(),
+                &insufficient,
+                &hints,
+            )
+        };
+        assert!(matches!(
+            alignment_error,
+            Err(SharedDeviceError::LimitsExceeded)
+        ));
+    }
+    assert_eq!(group.compute_wrapper_attempts.load(Ordering::SeqCst), 0);
+    pair.context.drain().unwrap();
+    let closed = unsafe {
+        pair.context.clone().open_compute_device(
+            &*selected.adapter,
+            wgt::Features::empty(),
+            &selected.capabilities.limits,
+            &hints,
+        )
+    };
+    assert!(matches!(closed, Err(SharedDeviceError::Closed)));
+    assert_eq!(group.compute_wrapper_attempts.load(Ordering::SeqCst), 0);
+    drop((
+        foreign,
+        foreign_instance,
+        selected,
+        selected_adapters,
+        selected_instance,
+        missing,
+    ));
+    drop(pair);
+    assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
+    assert_validation_clean();
+}
+
+fn endpoint_texture(open: &crate::DynOpenDevice) -> Box<dyn crate::DynTexture> {
+    unsafe {
+        open.device.create_texture(&crate::TextureDescriptor {
+            label: None,
+            size: wgt::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: wgt::TextureFormat::Rgba8Unorm,
+            usage: wgt::TextureUses::COPY_DST,
+            memory_flags: crate::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        })
+    }
+    .unwrap()
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two universal queues and the Khronos validation layer"]
+fn shared_compute_endpoints_keep_private_owners_on_one_native_device_and_queue() {
+    let pair = native_factory().unwrap();
+    let group = native_group(&pair);
+    let (_, instance) = pair.context.clone_instance();
+    let adapter = unsafe { instance.enumerate_adapters(None) }.pop().unwrap();
+    let open = || {
+        unsafe {
+            pair.context.clone().open_compute_device(
+                &*adapter.adapter,
+                wgt::Features::empty(),
+                &adapter.capabilities.limits,
+                &wgt::MemoryHints::default(),
+            )
+        }
+        .unwrap()
+    };
+    let first = open();
+    let second = open();
+    assert_eq!(group.compute_wrapper_attempts.load(Ordering::SeqCst), 2);
+    let original = pair
+        .compute
+        .device
+        .as_any()
+        .downcast_ref::<crate::vulkan::Device>()
+        .unwrap();
+    let first_native = first
+        .device
+        .as_any()
+        .downcast_ref::<crate::vulkan::Device>()
+        .unwrap();
+    let second_native = second
+        .device
+        .as_any()
+        .downcast_ref::<crate::vulkan::Device>()
+        .unwrap();
+    assert_eq!(
+        first_native.shared.raw.handle(),
+        original.shared.raw.handle()
+    );
+    assert_eq!(
+        second_native.shared.raw.handle(),
+        original.shared.raw.handle()
+    );
+    assert_eq!(first_native.shared.raw_queue, original.shared.raw_queue);
+    assert_eq!(second_native.shared.raw_queue, original.shared.raw_queue);
+    assert!(!Arc::ptr_eq(&first_native.shared, &second_native.shared));
+
+    let first_texture = endpoint_texture(&first);
+    let second_texture = endpoint_texture(&second);
+    let first_id = first_texture
+        .as_any()
+        .downcast_ref::<crate::vulkan::Texture>()
+        .unwrap()
+        .identity;
+    let second_id = second_texture
+        .as_any()
+        .downcast_ref::<crate::vulkan::Texture>()
+        .unwrap()
+        .identity;
+    assert_ne!(first_id, second_id);
+    let mut first_encoder = unsafe {
+        first
+            .device
+            .create_command_encoder(&crate::CommandEncoderDescriptor {
+                label: None,
+                queue: &*first.queue,
+            })
+    }
+    .unwrap();
+    let mut second_encoder = unsafe {
+        second
+            .device
+            .create_command_encoder(&crate::CommandEncoderDescriptor {
+                label: None,
+                queue: &*second.queue,
+            })
+    }
+    .unwrap();
+    unsafe { first_encoder.begin_encoding(None) }.unwrap();
+    let (second_data, _) = unsafe {
+        second.device.create_buffer(&crate::BufferDescriptor {
+            label: None,
+            size: 4,
+            usage: wgt::BufferUses::COPY_DST,
+            memory_flags: crate::MemoryFlags::empty(),
+        })
+    }
+    .unwrap();
+    unsafe {
+        second_encoder.begin_encoding(None).unwrap();
+        second_encoder.transition_buffers(&[crate::BufferBarrier {
+            buffer: &*second_data,
+            usage: crate::StateTransition {
+                from: wgt::BufferUses::empty(),
+                to: wgt::BufferUses::COPY_DST,
+            },
+        }]);
+        second_encoder.clear_buffer(&*second_data, 0..4);
+    }
+    let first_buffer = unsafe { first_encoder.end_encoding() }.unwrap();
+    let second_buffer = unsafe { second_encoder.end_encoding() }.unwrap();
+    let first_fence = unsafe { first.device.create_fence() }.unwrap();
+    let second_fence = unsafe { second.device.create_fence() }.unwrap();
+    let first_submitted = unsafe {
+        first
+            .queue
+            .submit(&[&*first_buffer], &[], (&*first_fence, 1))
+    };
+    let first_idle = unsafe { first.queue.wait_for_idle() };
+    if let Err(error) = first_idle {
+        core::mem::forget((
+            pair,
+            first,
+            second,
+            first_encoder,
+            second_encoder,
+            first_buffer,
+            second_buffer,
+            first_fence,
+            second_fence,
+            first_texture,
+            second_texture,
+            second_data,
+        ));
+        panic!("First logical endpoint retirement unconfirmed: {error:?}");
+    }
+    unsafe {
+        first_encoder.reset_all(vec![first_buffer]);
+        first.device.destroy_fence(first_fence);
+        first.device.destroy_texture(first_texture);
+    }
+    drop(first_encoder);
+    drop(first);
+    assert!(first_submitted.is_ok(), "{first_submitted:?}");
+    let second_submitted = unsafe {
+        second
+            .queue
+            .submit(&[&*second_buffer], &[], (&*second_fence, 1))
+    };
+    let retired = pair.context.drain();
+    if let Err(error) = retired {
+        core::mem::forget((
+            pair,
+            second,
+            second_encoder,
+            second_buffer,
+            second_fence,
+            second_texture,
+            second_data,
+        ));
+        panic!("Second logical endpoint retirement unconfirmed: {error:?}");
+    }
+    unsafe {
+        second_encoder.reset_all(vec![second_buffer]);
+        second.device.destroy_fence(second_fence);
+        second.device.destroy_texture(second_texture);
+        second.device.destroy_buffer(second_data);
+    }
+    drop(second_encoder);
+    drop(second);
+    drop((adapter, instance, pair));
+    assert!(second_submitted.is_ok(), "{second_submitted:?}");
+    assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
+    assert_validation_clean();
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two universal queues and the Khronos validation layer"]
+fn shared_compute_endpoint_waiting_for_host_lock_observes_drain_closure() {
+    let pair = native_factory().unwrap();
+    let group = native_group(&pair);
+    let (_, instance) = pair.context.clone_instance();
+    let adapter = unsafe { instance.enumerate_adapters(None) }.pop().unwrap();
+    let host = group.host[1].lock();
+    let opening_context = pair.context.clone();
+    let opening = std::thread::spawn(move || unsafe {
+        opening_context.open_compute_device(
+            &*adapter.adapter,
+            wgt::Features::empty(),
+            &adapter.capabilities.limits,
+            &wgt::MemoryHints::default(),
+        )
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while group.compute_open_waiters.load(Ordering::SeqCst) != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Open did not reach the held host lock"
+        );
+        std::thread::yield_now();
+    }
+    let draining_context = pair.context.clone();
+    let draining = std::thread::spawn(move || draining_context.drain());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !group.closed.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Drain did not close admission"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(group.compute_wrapper_attempts.load(Ordering::SeqCst), 0);
+    drop(host);
+    let opened = opening.join().unwrap();
+    let retired = draining.join().unwrap();
+    if let Err(error) = retired {
+        core::mem::forget((pair, opened));
+        panic!("Concurrent drain retirement unconfirmed: {error:?}");
+    }
+    assert!(matches!(opened, Err(SharedDeviceError::Closed)));
+    assert_eq!(group.compute_wrapper_attempts.load(Ordering::SeqCst), 0);
+    drop(instance);
+    drop(pair);
+    assert_eq!(group.native_device_drops.load(Ordering::SeqCst), 1);
     assert_validation_clean();
 }

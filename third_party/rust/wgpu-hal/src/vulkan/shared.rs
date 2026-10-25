@@ -20,6 +20,10 @@ pub(super) struct QueueGroup {
     identity: SharedDeviceIdentity,
     #[cfg(test)]
     native_device_drops: core::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    compute_wrapper_attempts: core::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    compute_open_waiters: core::sync::atomic::AtomicUsize,
 }
 
 impl QueueGroup {
@@ -32,6 +36,10 @@ impl QueueGroup {
             identity: SharedDeviceIdentity::new(),
             #[cfg(test)]
             native_device_drops: core::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            compute_wrapper_attempts: core::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            compute_open_waiters: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -61,6 +69,10 @@ impl QueueGroup {
 struct NativeDevice {
     raw: ash::Device,
     _instance: Arc<InstanceShared>,
+    physical_device: vk::PhysicalDevice,
+    extensions: Vec<&'static core::ffi::CStr>,
+    features: wgt::Features,
+    limits: wgt::Limits,
     queues: Arc<QueueGroup>,
 }
 
@@ -90,8 +102,67 @@ impl SharedDeviceContext for NativeDevice {
             wgt::Backend::Vulkan,
             Box::new(super::Instance {
                 shared: self._instance.clone(),
+                selected_physical_device: Some(self.physical_device),
             }),
         )
+    }
+
+    unsafe fn open_compute_device(
+        self: Arc<Self>,
+        adapter: &dyn crate::DynAdapter,
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+    ) -> Result<crate::DynOpenDevice, SharedDeviceError> {
+        let adapter = adapter
+            .as_any()
+            .downcast_ref::<super::Adapter>()
+            .ok_or(SharedDeviceError::IncompatibleAdapter)?;
+        if !Arc::ptr_eq(&adapter.instance, &self._instance) || adapter.raw != self.physical_device {
+            return Err(SharedDeviceError::IncompatibleAdapter);
+        }
+        if !self.features.contains(features) {
+            return Err(SharedDeviceError::UnsupportedFeatures(
+                features - self.features,
+            ));
+        }
+        if !limits.check_limits(&self.limits) {
+            return Err(SharedDeviceError::LimitsExceeded);
+        }
+        #[cfg(test)]
+        self.queues
+            .compute_open_waiters
+            .fetch_add(1, Ordering::SeqCst);
+        let _host = self.queues.host[1].lock();
+        #[cfg(test)]
+        self.queues
+            .compute_open_waiters
+            .fetch_sub(1, Ordering::SeqCst);
+        if self.queues.closed.load(Ordering::Acquire) {
+            return Err(SharedDeviceError::Closed);
+        }
+        #[cfg(test)]
+        self.queues
+            .compute_wrapper_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        let lease = self.clone();
+        let open = unsafe {
+            adapter.device_from_raw_shared(
+                self.raw.clone(),
+                Some(Box::new(move || drop(lease))),
+                &self.extensions,
+                features,
+                limits,
+                memory_hints,
+                0,
+                1,
+                Some(self.queues.clone()),
+            )
+        }?;
+        if self.queues.closed.load(Ordering::Acquire) {
+            return Err(SharedDeviceError::Closed);
+        }
+        Ok(open.into())
     }
 
     fn drain(&self) -> Result<(), crate::DeviceError> {
@@ -140,6 +211,10 @@ pub(crate) unsafe fn open_shared_device(
     let owner = Arc::new(NativeDevice {
         raw,
         _instance: adapter.instance.clone(),
+        physical_device: adapter.raw,
+        extensions: extensions.clone(),
+        features,
+        limits: limits.clone(),
         queues: Arc::new(QueueGroup::new()),
     });
     let open_endpoint = |index| {

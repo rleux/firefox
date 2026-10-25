@@ -458,6 +458,7 @@ impl super::Instance {
         let drop_guard = crate::DropGuard::from_option(drop_callback);
 
         Ok(Self {
+            selected_physical_device: None,
             shared: Arc::new(super::InstanceShared {
                 raw: raw_instance,
                 extensions,
@@ -1210,6 +1211,9 @@ impl crate::Instance for super::Instance {
             }
         }
 
+        if let Some(selected) = self.selected_physical_device {
+            exposed_adapters.retain(|adapter| adapter.adapter.raw == selected);
+        }
         exposed_adapters
     }
 }
