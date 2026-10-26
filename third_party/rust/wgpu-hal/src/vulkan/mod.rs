@@ -963,6 +963,7 @@ pub struct Texture {
     format: wgt::TextureFormat,
     copy_size: crate::CopyExtent,
     identity: ResourceIdentity<vk::Image>,
+    surface_generation: Option<Arc<swapchain::Generation>>,
 
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
@@ -999,6 +1000,7 @@ pub struct TextureView {
     dimension: wgt::TextureViewDimension,
     texture_identity: ResourceIdentity<vk::Image>,
     view_identity: ResourceIdentity<vk::ImageView>,
+    _surface_generation: Option<Arc<swapchain::Generation>>,
 }
 
 impl crate::DynTextureView for TextureView {}
@@ -1717,14 +1719,34 @@ impl crate::Queue for Queue {
         signal_fence: (&Fence, crate::FenceValue),
     ) -> Result<(), crate::DeviceError> {
         if let Some(group) = &self.device.shared_queue_group {
-            if !surface_textures.is_empty()
+            if (!surface_textures.is_empty()
+                && (self.device.queue_index != 0 || !group.presentation_fences_enabled))
                 || !matches!(signal_fence.0, Fence::TimelineSemaphore(_))
             {
                 return Err(crate::DeviceError::Unexpected);
             }
-            group.submit(self.device.queue_index as usize, || unsafe {
-                shared::submit_single(self, command_buffers, signal_fence)
-            })
+            group
+                .submit(self.device.queue_index as usize, || {
+                    let generations = match swapchain::validate_shared_submission(
+                        self,
+                        surface_textures,
+                        signal_fence.0,
+                    ) {
+                        Ok(generations) => generations,
+                        Err(error) => return Ok(Err(error)),
+                    };
+                    unsafe {
+                        shared::submit_single(
+                            self,
+                            command_buffers,
+                            surface_textures,
+                            signal_fence,
+                            &generations,
+                        )
+                    }?;
+                    Ok(Ok(()))
+                })
+                .and_then(|result| result)
         } else {
             unsafe {
                 self.submit_impl(
@@ -1744,14 +1766,41 @@ impl crate::Queue for Queue {
         surface: &Surface,
         texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
-        if self.device.shared_queue_group.is_some() {
+        let group = self.device.shared_queue_group.as_ref();
+        if group
+            .is_some_and(|group| self.device.queue_index != 0 || !group.presentation_fences_enabled)
+        {
             return Err(crate::SurfaceError::Other(
-                "Shared-device presentation is not implemented",
+                "Shared presentation requires its graphics endpoint",
             ));
         }
         let mut swapchain = surface.swapchain.write();
-
-        unsafe { swapchain.as_mut().unwrap().present(self, texture) }
+        let swapchain = swapchain.as_mut().ok_or(crate::SurfaceError::Outdated)?;
+        #[cfg(test)]
+        if let Some(group) = group {
+            group
+                .surface_present_waiters
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+        let _host = group.map(|group| group.host[0].lock());
+        #[cfg(test)]
+        if let Some(group) = group {
+            group
+                .surface_present_waiters
+                .fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        }
+        if group.is_some_and(|group| group.closed.load(core::sync::atomic::Ordering::Acquire)) {
+            return Err(crate::SurfaceError::Other("Shared context is closed"));
+        }
+        if group.is_some()
+            && !swapchain
+                .as_any()
+                .downcast_ref::<swapchain::NativeSwapchain>()
+                .is_some_and(|swapchain| swapchain.shared_generation().is_some())
+        {
+            return Err(crate::SurfaceError::Other("Incompatible shared swapchain"));
+        }
+        unsafe { swapchain.present(self, texture) }
     }
 
     unsafe fn get_timestamp_period(&self) -> f32 {

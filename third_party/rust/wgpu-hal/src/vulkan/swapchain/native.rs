@@ -15,10 +15,18 @@ use crate::vulkan::{
     DeviceShared, InstanceShared, PnextChain,
 };
 
-pub(crate) struct NativeSurface {
+#[path = "generation.rs"]
+mod generation;
+pub(crate) use generation::Generation;
+
+pub(crate) struct NativeSurfaceOwner {
     raw: vk::SurfaceKHR,
     functor: khr::surface::Instance,
     instance: Arc<InstanceShared>,
+}
+
+pub(crate) struct NativeSurface {
+    owner: Arc<NativeSurfaceOwner>,
     /// Built from the window's `HWND` (Windows only) to answer the display-HDR
     /// query; `None` for non-Win32 surfaces.
     #[cfg(windows)]
@@ -31,6 +39,13 @@ pub(crate) struct NativeSurface {
     next_swapchain_create_chain: Mutex<Option<PnextChain>>,
 }
 
+impl core::ops::Deref for NativeSurface {
+    type Target = NativeSurfaceOwner;
+    fn deref(&self) -> &Self::Target {
+        &self.owner
+    }
+}
+
 impl NativeSurface {
     pub fn from_vk_surface_khr(
         instance: &crate::vulkan::Instance,
@@ -41,13 +56,30 @@ impl NativeSurface {
         let _ = hwnd;
         let functor = khr::surface::Instance::new(&instance.shared.entry, &instance.shared.raw);
         Self {
-            raw,
-            functor,
-            instance: Arc::clone(&instance.shared),
+            owner: Arc::new(NativeSurfaceOwner {
+                raw,
+                functor,
+                instance: Arc::clone(&instance.shared),
+            }),
             #[cfg(windows)]
             hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
             next_swapchain_create_chain: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn supports_shared_device(&self, device: &crate::vulkan::Device) -> bool {
+        device.shared.queue_index == 0
+            && Arc::ptr_eq(&self.instance, &device.shared.instance)
+            && device
+                .shared
+                .shared_queue_group
+                .as_ref()
+                .is_some_and(|group| group.presentation_fences_enabled)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_weak(&self) -> alloc::sync::Weak<NativeSurfaceOwner> {
+        Arc::downgrade(&self.owner)
     }
 
     pub fn as_raw(&self) -> vk::SurfaceKHR {
@@ -62,7 +94,7 @@ impl NativeSurface {
     }
 }
 
-impl Drop for NativeSurface {
+impl Drop for NativeSurfaceOwner {
     fn drop(&mut self) {
         unsafe {
             self.functor.destroy_surface(self.raw, None);
@@ -275,14 +307,22 @@ impl Surface for NativeSurface {
             }
         };
 
-        let images = unsafe { functor.get_swapchain_images(raw) }
-            .map_err(crate::vulkan::map_host_device_oom_err)?;
+        let shared = device.shared.shared_queue_group.is_some();
+        let images = match unsafe { functor.get_swapchain_images(raw) } {
+            Ok(images) => images,
+            Err(error) => {
+                if shared {
+                    unsafe { functor.destroy_swapchain(raw, None) };
+                }
+                return Err(crate::vulkan::map_host_device_oom_err(error).into());
+            }
+        };
 
         // This fence is only used to throttle acquisition on Windows. It is very important to
         // avoid bad frame pacing when the Vulkan driver is using a DXGI swapchain. See
         // https://github.com/gfx-rs/wgpu/issues/8310 and
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        let fence = if cfg!(target_os = "windows") {
+        let fence = if cfg!(target_os = "windows") && !shared {
             let raw = unsafe {
                 device
                     .shared
@@ -297,17 +337,35 @@ impl Surface for NativeSurface {
 
         // NOTE: It's important that we define the same number of acquire/present semaphores
         // as we will need to index into them with the image index.
-        let acquire_semaphores = (0..images.len())
-            .map(|i| {
-                SwapchainAcquireSemaphore::new(&device.shared, i)
-                    .map(Mutex::new)
-                    .map(Arc::new)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let present_semaphores = (0..images.len())
-            .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(i))))
-            .collect::<Vec<_>>();
+        let generation = if shared {
+            Some(Generation::new(
+                raw,
+                functor.clone(),
+                device.shared.clone(),
+                self.owner.clone(),
+                images.len(),
+            )?)
+        } else {
+            None
+        };
+        let (acquire_semaphores, present_semaphores) = if let Some(generation) = &generation {
+            (
+                generation.acquire_semaphores(),
+                generation.present_semaphores(),
+            )
+        } else {
+            let acquire = (0..images.len())
+                .map(|i| {
+                    SwapchainAcquireSemaphore::new(&device.shared, i)
+                        .map(Mutex::new)
+                        .map(Arc::new)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let present = (0..images.len())
+                .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(i))))
+                .collect();
+            (acquire, present)
+        };
 
         Ok(Box::new(NativeSwapchain {
             raw,
@@ -321,6 +379,7 @@ impl Surface for NativeSurface {
             present_semaphores,
             next_present_time: None,
             next_present_chain: None,
+            generation,
         }))
     }
 
@@ -393,12 +452,14 @@ pub(crate) struct NativeSwapchain {
     /// Set only through
     /// [`Surface::set_next_present_chain()`](crate::vulkan::Surface::set_next_present_chain).
     next_present_chain: Option<PnextChain>,
+    // Shared semaphore vectors must drop before their generation owner.
+    generation: Option<Arc<Generation>>,
 }
 
 impl Drop for NativeSwapchain {
     fn drop(&mut self) {
-        unsafe {
-            self.functor.destroy_swapchain(self.raw, None);
+        if self.generation.is_none() {
+            unsafe { self.functor.destroy_swapchain(self.raw, None) };
         }
     }
 }
@@ -429,7 +490,13 @@ fn destroy_swapchain_semaphores(
 }
 
 impl Swapchain for NativeSwapchain {
-    unsafe fn release_resources(&mut self, device: &crate::vulkan::Device) {
+    unsafe fn release_resources(
+        &mut self,
+        device: &crate::vulkan::Device,
+    ) -> Result<(), crate::DeviceError> {
+        if let Some(generation) = &self.generation {
+            return generation.retire();
+        }
         profiling::scope!("Swapchain::release_resources");
         {
             profiling::scope!("vkDeviceWaitIdle");
@@ -453,6 +520,7 @@ impl Swapchain for NativeSwapchain {
             &mut self.present_semaphores,
             device,
         );
+        Ok(())
     }
 
     unsafe fn acquire(
@@ -460,6 +528,9 @@ impl Swapchain for NativeSwapchain {
         timeout: Option<core::time::Duration>,
         fence: &crate::vulkan::Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<crate::api::Vulkan>, crate::SurfaceError> {
+        if let Some(generation) = &self.generation {
+            generation.bind_public_fence(fence)?;
+        }
         let mut timeout_ns = match timeout {
             Some(duration) => duration.as_nanos() as u64,
             None => u64::MAX,
@@ -506,7 +577,12 @@ impl Swapchain for NativeSwapchain {
             return Err(crate::SurfaceError::Timeout);
         }
 
-        let acquire_fence = self.fence.unwrap_or_else(vk::Fence::null);
+        let acquire_slot = self.next_acquire_index;
+        let acquire_fence = if let Some(generation) = &self.generation {
+            generation.prepare_acquire(acquire_slot)?
+        } else {
+            self.fence.unwrap_or_else(vk::Fence::null)
+        };
 
         // will block if no image is available
         let (index, suboptimal) = match unsafe {
@@ -538,6 +614,18 @@ impl Swapchain for NativeSwapchain {
             }
         };
 
+        let shared_identity = if let Some(generation) = &self.generation {
+            generation.acquired(acquire_slot);
+            let identity = self.device.texture_identity_factory.next();
+            generation.begin_image(index, identity)?;
+            if cfg!(target_os = "windows") {
+                generation.wait_acquire(acquire_slot, timeout_ns)?;
+            }
+            Some(identity)
+        } else {
+            None
+        };
+
         if let Some(fence) = self.fence {
             unsafe {
                 // The `wait_all` argument must be `true` to avoid crash on some Android devices. See https://github.com/gfx-rs/wgpu/pull/8769
@@ -562,10 +650,14 @@ impl Swapchain for NativeSwapchain {
 
         // special case for Intel Vulkan returning bizarre values (ugh)
         if self.device.vendor_id == crate::auxil::db::intel::VENDOR && index > 0x100 {
+            if let Some(generation) = &self.generation {
+                generation.close();
+            }
             return Err(crate::SurfaceError::Outdated);
         }
 
-        let identity = self.device.texture_identity_factory.next();
+        let identity =
+            shared_identity.unwrap_or_else(|| self.device.texture_identity_factory.next());
 
         let texture = crate::vulkan::SurfaceTexture {
             index,
@@ -580,10 +672,12 @@ impl Swapchain for NativeSwapchain {
                     depth: 1,
                 },
                 identity,
+                surface_generation: self.generation.clone(),
             },
             metadata: Box::new(NativeSurfaceTextureMetadata {
                 acquire_semaphores: acquire_semaphore_arc,
                 present_semaphores: present_semaphore_arc,
+                generation: self.generation.clone(),
             }),
         };
         Ok(crate::AcquiredSurfaceTexture {
@@ -594,9 +688,21 @@ impl Swapchain for NativeSwapchain {
 
     unsafe fn discard_texture(
         &mut self,
-        _texture: crate::vulkan::SurfaceTexture,
+        texture: crate::vulkan::SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
-        // TODO: Current implementation no-ops
+        if let Some(generation) = &self.generation {
+            let metadata = texture
+                .metadata
+                .as_any()
+                .downcast_ref::<NativeSurfaceTextureMetadata>();
+            if !metadata
+                .and_then(|metadata| metadata.generation.as_ref())
+                .is_some_and(|owner| Arc::ptr_eq(owner, generation))
+            {
+                return Err(crate::SurfaceError::Outdated);
+            }
+            generation.close();
+        }
         Ok(())
     }
 
@@ -605,6 +711,9 @@ impl Swapchain for NativeSwapchain {
         queue: &crate::vulkan::Queue,
         texture: crate::vulkan::SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
+        if self.generation.is_some() {
+            return unsafe { self.present_shared(queue, texture) };
+        }
         let metadata = texture
             .metadata
             .as_any()
@@ -689,6 +798,128 @@ impl Swapchain for NativeSwapchain {
 }
 
 impl NativeSwapchain {
+    unsafe fn present_shared(
+        &mut self,
+        queue: &crate::vulkan::Queue,
+        texture: crate::vulkan::SurfaceTexture,
+    ) -> Result<(), crate::SurfaceError> {
+        let generation = self.generation.as_ref().unwrap();
+        let metadata = texture
+            .metadata
+            .as_any()
+            .downcast_ref::<NativeSurfaceTextureMetadata>()
+            .ok_or(crate::SurfaceError::Other(
+                "Incompatible shared surface texture",
+            ))?;
+        if !metadata
+            .generation
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, generation))
+        {
+            return Err(crate::SurfaceError::Other("Stale shared surface"));
+        }
+        generation.validate_image(queue, texture.index, texture.texture.identity)?;
+        if self.next_present_chain.is_some() {
+            generation.close();
+            return Err(crate::SurfaceError::Other(
+                "Unsupported shared present chain",
+            ));
+        }
+        let present_fence = match generation.prepare_present() {
+            Ok(fence) => fence,
+            Err(error) => {
+                generation.close();
+                return Err(error.into());
+            }
+        };
+        let mut acquire = metadata.acquire_semaphores.lock();
+        let mut present = metadata.present_semaphores.lock();
+        let waits = present.get_present_wait_semaphores();
+        let swapchains = [self.raw];
+        let indices = [texture.index];
+        let fences = [present_fence.raw()];
+        let mut completion = vk::SwapchainPresentFenceInfoEXT::default().fences(&fences);
+        let mut info = vk::PresentInfoKHR::default()
+            .swapchains(&swapchains)
+            .image_indices(&indices)
+            .wait_semaphores(&waits)
+            .push_next(&mut completion);
+        let times = self.next_present_time.take().map(|time| [time]);
+        let mut timing;
+        if let Some(times) = &times {
+            timing = vk::PresentTimesInfoGOOGLE::default().times(times);
+            info = info.push_next(&mut timing);
+        }
+        let result = unsafe { self.functor.queue_present(queue.raw, &info) };
+        #[cfg(test)]
+        let injected = result.is_ok()
+            && queue
+                .device
+                .shared_queue_group
+                .as_ref()
+                .unwrap()
+                .present_after_native_error
+                .swap(false, core::sync::atomic::Ordering::AcqRel);
+        #[cfg(test)]
+        let result = if injected {
+            Err(vk::Result::ERROR_UNKNOWN)
+        } else {
+            result
+        };
+        let accepted = matches!(
+            result,
+            Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::ERROR_SURFACE_LOST_KHR)
+        );
+        if accepted {
+            generation.presented(present_fence, false);
+            acquire.end_semaphore_usage();
+            present.end_semaphore_usage();
+            generation.finish_image(texture.index);
+        } else if matches!(
+            result,
+            Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+        ) {
+            drop(present_fence);
+        } else {
+            generation.presented(present_fence, true);
+            queue
+                .device
+                .shared_queue_group
+                .as_ref()
+                .unwrap()
+                .close_uncertain();
+        }
+        if result.is_err() {
+            generation.close();
+        }
+        match result {
+            Ok(_) => Ok(()),
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Err(crate::SurfaceError::Outdated),
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => Err(crate::SurfaceError::Lost),
+            Err(error) => {
+                #[cfg(test)]
+                if injected {
+                    return Err(crate::DeviceError::Unexpected.into());
+                }
+                Err(map_host_device_oom_and_lost_err(error).into())
+            }
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, device: &crate::vulkan::Device) -> bool {
+        self.device.raw.handle() == device.shared.raw.handle()
+            && self
+                .device
+                .shared_queue_group
+                .as_ref()
+                .zip(device.shared.shared_queue_group.as_ref())
+                .is_some_and(|(current, requested)| Arc::ptr_eq(current, requested))
+    }
+
+    pub(crate) fn shared_generation(&self) -> Option<Arc<Generation>> {
+        self.generation.clone()
+    }
+
     pub(crate) fn as_raw(&self) -> vk::SwapchainKHR {
         self.raw
     }
@@ -940,6 +1171,8 @@ impl SwapchainPresentSemaphores {
 struct NativeSurfaceTextureMetadata {
     acquire_semaphores: Arc<Mutex<SwapchainAcquireSemaphore>>,
     present_semaphores: Arc<Mutex<SwapchainPresentSemaphores>>,
+    // Keep the generation until its semaphore leases drop.
+    generation: Option<Arc<Generation>>,
 }
 
 impl SurfaceTextureMetadata for NativeSurfaceTextureMetadata {
@@ -985,4 +1218,33 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
             .get_submit_signal_semaphore(device)
             .map(SemaphoreType::Binary)
     }
+}
+
+pub(crate) fn validate_shared_submission(
+    queue: &crate::vulkan::Queue,
+    textures: &[&crate::vulkan::SurfaceTexture],
+    fence: &crate::vulkan::Fence,
+) -> Result<Vec<Arc<Generation>>, crate::DeviceError> {
+    let mut generations = Vec::new();
+    for texture in textures {
+        let metadata = texture
+            .metadata
+            .as_any()
+            .downcast_ref::<NativeSurfaceTextureMetadata>()
+            .ok_or(crate::DeviceError::Unexpected)?;
+        let generation = metadata
+            .generation
+            .as_ref()
+            .ok_or(crate::DeviceError::Unexpected)?;
+        generation.validate_image(queue, texture.index, texture.texture.identity)?;
+        generation.validate_fence(fence)?;
+        if generations
+            .iter()
+            .any(|previous| Arc::ptr_eq(previous, generation))
+        {
+            return Err(crate::DeviceError::Unexpected);
+        }
+        generations.push(generation.clone());
+    }
+    Ok(generations)
 }

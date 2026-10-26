@@ -1256,6 +1256,82 @@ impl crate::Instance for super::Instance {
     }
 }
 
+impl super::Surface {
+    pub(crate) unsafe fn configure_checked(
+        &self,
+        device: &super::Device,
+        config: &crate::SurfaceConfiguration,
+    ) -> Result<(), crate::SurfaceError> {
+        let group = device.shared.shared_queue_group.as_ref();
+        if group.is_some()
+            && !self
+                .inner
+                .as_any()
+                .downcast_ref::<super::swapchain::NativeSurface>()
+                .is_some_and(|surface| surface.supports_shared_device(device))
+        {
+            return Err(crate::SurfaceError::Other(
+                "Shared presentation capability is unavailable",
+            ));
+        }
+        let mut swapchain = self.swapchain.write();
+        if let Some(old) = swapchain.as_mut() {
+            if group.is_some()
+                && !old
+                    .as_any()
+                    .downcast_ref::<super::swapchain::NativeSwapchain>()
+                    .is_some_and(|old| old.belongs_to(device))
+            {
+                return Err(crate::SurfaceError::Other(
+                    "Surface belongs to another native device",
+                ));
+            }
+            unsafe { old.release_resources(device) }?;
+        }
+        let _host = group.map(|group| group.host[0].lock());
+        if group.is_some_and(|group| group.closed.load(core::sync::atomic::Ordering::Acquire)) {
+            return Err(crate::SurfaceError::Other("Shared context is closed"));
+        }
+        let old = swapchain.take();
+        let created = unsafe { self.inner.create_swapchain(device, config, old)? };
+        *swapchain = Some(created);
+        Ok(())
+    }
+
+    pub(crate) unsafe fn unconfigure_checked(
+        &self,
+        device: &super::Device,
+    ) -> Result<(), crate::SurfaceError> {
+        if device.shared.shared_queue_group.is_some()
+            && !self
+                .inner
+                .as_any()
+                .downcast_ref::<super::swapchain::NativeSurface>()
+                .is_some_and(|surface| surface.supports_shared_device(device))
+        {
+            return Err(crate::SurfaceError::Other(
+                "Incompatible shared graphics surface",
+            ));
+        }
+        let mut swapchain = self.swapchain.write();
+        if let Some(current) = swapchain.as_mut() {
+            if device.shared.shared_queue_group.is_some()
+                && !current
+                    .as_any()
+                    .downcast_ref::<super::swapchain::NativeSwapchain>()
+                    .is_some_and(|current| current.belongs_to(device))
+            {
+                return Err(crate::SurfaceError::Other(
+                    "Surface belongs to another native device",
+                ));
+            }
+            unsafe { current.release_resources(device) }?;
+        }
+        swapchain.take();
+        Ok(())
+    }
+}
+
 impl crate::Surface for super::Surface {
     type A = super::Api;
 
@@ -1264,30 +1340,11 @@ impl crate::Surface for super::Surface {
         device: &super::Device,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
-        if device.shared.shared_queue_group.is_some() {
-            return Err(crate::SurfaceError::Other(
-                "Shared-device presentation is not implemented",
-            ));
-        }
-        // SAFETY: `configure`'s contract guarantees there are no resources derived from the swapchain in use.
-        let mut swap_chain = self.swapchain.write();
-
-        let mut old = swap_chain.take();
-        if let Some(ref mut old) = old {
-            unsafe { old.release_resources(device) };
-        }
-
-        let swapchain = unsafe { self.inner.create_swapchain(device, config, old)? };
-        *swap_chain = Some(swapchain);
-
-        Ok(())
+        unsafe { self.configure_checked(device, config) }
     }
 
     unsafe fn unconfigure(&self, device: &super::Device) {
-        if let Some(mut sc) = self.swapchain.write().take() {
-            // SAFETY: `unconfigure`'s contract guarantees there are no resources derived from the swapchain in use.
-            unsafe { sc.release_resources(device) };
-        }
+        let _ = unsafe { self.unconfigure_checked(device) };
     }
 
     unsafe fn acquire_texture(
@@ -1296,19 +1353,35 @@ impl crate::Surface for super::Surface {
         fence: &super::Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let mut swapchain = self.swapchain.write();
-        let swapchain = swapchain.as_mut().unwrap();
-
+        let swapchain = swapchain.as_mut().ok_or(crate::SurfaceError::Outdated)?;
+        let generation = swapchain
+            .as_any()
+            .downcast_ref::<super::swapchain::NativeSwapchain>()
+            .and_then(|swapchain| swapchain.shared_generation());
+        let _host = generation
+            .as_ref()
+            .map(|generation| generation.group().host[0].lock());
+        if let Some(generation) = &generation {
+            generation.check_open()?;
+        }
         unsafe { swapchain.acquire(timeout, fence) }
     }
 
     unsafe fn discard_texture(&self, texture: super::SurfaceTexture) {
-        unsafe {
-            self.swapchain
-                .write()
-                .as_mut()
-                .unwrap()
-                .discard_texture(texture)
-                .unwrap()
+        let mut swapchain = self.swapchain.write();
+        let Some(swapchain) = swapchain.as_mut() else {
+            return;
         };
+        let generation = swapchain
+            .as_any()
+            .downcast_ref::<super::swapchain::NativeSwapchain>()
+            .and_then(|swapchain| swapchain.shared_generation());
+        let _host = generation
+            .as_ref()
+            .map(|generation| generation.group().host[0].lock());
+        let result = unsafe { swapchain.discard_texture(texture) };
+        if generation.is_none() {
+            result.unwrap();
+        }
     }
 }

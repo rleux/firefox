@@ -20,6 +20,7 @@ struct Resources {
     buffers: Vec<Box<dyn crate::DynBuffer>>,
     textures: Vec<Box<dyn crate::DynTexture>>,
     views: Vec<Box<dyn crate::DynTextureView>>,
+    graphics_views: Vec<Box<dyn crate::DynTextureView>>,
     fences: Vec<Box<dyn crate::DynFence>>,
     receipts: Vec<Box<dyn SharedSubmissionReceipt>>,
     native_semaphores: Vec<vk::Semaphore>,
@@ -48,11 +49,15 @@ impl DerefMut for Work {
 
 impl Work {
     fn new() -> Self {
+        Self::with_endpoints(native_factory().unwrap())
+    }
+
+    fn with_endpoints(endpoints: SharedDeviceEndpoints) -> Self {
         let SharedDeviceEndpoints {
             context,
             graphics,
             compute,
-        } = native_factory().unwrap();
+        } = endpoints;
         Self {
             resources: ManuallyDrop::new(Resources {
                 context,
@@ -63,6 +68,7 @@ impl Work {
                 buffers: Vec::new(),
                 textures: Vec::new(),
                 views: Vec::new(),
+                graphics_views: Vec::new(),
                 fences: Vec::new(),
                 receipts: Vec::new(),
                 native_semaphores: Vec::new(),
@@ -144,6 +150,9 @@ impl Drop for Work {
             let device = &*data.compute.device;
             for view in data.views.drain(..) {
                 device.destroy_texture_view(view);
+            }
+            for view in data.graphics_views.drain(..) {
+                data.graphics.device.destroy_texture_view(view);
             }
             for texture in data.textures.drain(..) {
                 device.destroy_texture(texture);
@@ -1025,6 +1034,10 @@ fn aggregate_receipt_uses_batch_targets_without_waiting_for_later_graphics() {
 #[cfg(unix)]
 #[path = "sync_tests.rs"]
 mod sync_tests;
+
+#[cfg(target_os = "linux")]
+#[path = "presentation_tests.rs"]
+mod presentation_tests;
 
 #[test]
 #[ignore = "Requires Vulkan timeline semaphores and the Khronos validation layer"]

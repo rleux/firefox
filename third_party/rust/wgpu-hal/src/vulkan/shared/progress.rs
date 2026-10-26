@@ -49,7 +49,7 @@ impl QueueProgress {
         *accepted = value;
     }
 
-    pub(super) fn wait(
+    pub(in crate::vulkan) fn wait(
         &self,
         value: u64,
         timeout: Option<Duration>,
@@ -90,8 +90,15 @@ pub(in crate::vulkan) fn wait_for_idle(
             drop(host);
             return group.wait_for_idle(&queue.device.raw);
         }
+        let generations = group.snapshot_generations()?;
         let result = unsafe { queue.device.raw.queue_wait_idle(queue.raw) }
-            .map_err(super::super::map_host_device_oom_and_lost_err);
+            .map_err(super::super::map_host_device_oom_and_lost_err)
+            .and_then(|()| {
+                for generation in &generations {
+                    generation.wait_presentation()?;
+                }
+                Ok(())
+            });
         if result.is_err() {
             group.close_uncertain();
             return result;

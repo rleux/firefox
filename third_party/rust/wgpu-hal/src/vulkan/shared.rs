@@ -3,7 +3,11 @@ mod submit;
 pub(super) use progress::{wait_for_idle, QueueProgress};
 pub(super) use submit::submit_single;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -22,9 +26,21 @@ pub(super) struct QueueGroup {
     pub(super) closed: AtomicBool,
     pub(super) uncertain: AtomicBool,
     pub(super) presentation_fences_enabled: bool,
+    pub(super) orphaned_presentation: AtomicBool,
+    pub(super) presentations: Mutex<Vec<(Weak<super::swapchain::Generation>, Arc<AtomicBool>)>>,
     pub(super) texture_ids: Arc<ResourceIdentityFactory<vk::Image>>,
     pub(super) view_ids: Arc<ResourceIdentityFactory<vk::ImageView>>,
     identity: SharedDeviceIdentity,
+    #[cfg(test)]
+    pub(super) generation_execution_error: AtomicBool,
+    #[cfg(test)]
+    pub(super) presentation_wait_error: AtomicBool,
+    #[cfg(test)]
+    pub(super) present_after_native_error: AtomicBool,
+    #[cfg(test)]
+    pub(super) surface_submit_waiters: core::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(super) surface_present_waiters: core::sync::atomic::AtomicUsize,
     #[cfg(test)]
     native_device_drops: core::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -42,9 +58,21 @@ impl QueueGroup {
             closed: AtomicBool::new(false),
             uncertain: AtomicBool::new(false),
             presentation_fences_enabled,
+            orphaned_presentation: AtomicBool::new(false),
+            presentations: Mutex::new(Vec::new()),
             texture_ids: Arc::new(ResourceIdentityFactory::new()),
             view_ids: Arc::new(ResourceIdentityFactory::new()),
             identity: SharedDeviceIdentity::new(),
+            #[cfg(test)]
+            generation_execution_error: AtomicBool::new(false),
+            #[cfg(test)]
+            presentation_wait_error: AtomicBool::new(false),
+            #[cfg(test)]
+            present_after_native_error: AtomicBool::new(false),
+            #[cfg(test)]
+            surface_submit_waiters: core::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            surface_present_waiters: core::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             native_device_drops: core::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -77,10 +105,57 @@ impl QueueGroup {
         self.closed.store(true, Ordering::Release);
     }
 
+    pub(super) fn snapshot_generations(
+        &self,
+    ) -> Result<Vec<Arc<super::swapchain::Generation>>, crate::DeviceError> {
+        if self.orphaned_presentation.load(Ordering::Acquire) {
+            return Err(crate::DeviceError::Unexpected);
+        }
+        let mut generations = Vec::new();
+        let mut unconfirmed = false;
+        self.presentations.lock().retain(|(weak, retired)| {
+            if let Some(generation) = weak.upgrade() {
+                generations.push(generation);
+                true
+            } else if retired.load(Ordering::Acquire) {
+                false
+            } else {
+                unconfirmed = true;
+                true
+            }
+        });
+        if unconfirmed {
+            self.orphaned_presentation.store(true, Ordering::Release);
+            self.close_uncertain();
+            return Err(crate::DeviceError::Unexpected);
+        }
+        Ok(generations)
+    }
+
     pub(super) fn wait_for_idle(&self, device: &ash::Device) -> Result<(), crate::DeviceError> {
-        let _graphics = self.host[0].lock();
-        let _compute = self.host[1].lock();
-        unsafe { device.device_wait_idle() }.map_err(super::map_host_device_oom_and_lost_err)
+        self.closed.store(true, Ordering::Release);
+        let generations;
+        let execution = {
+            let _graphics = self.host[0].lock();
+            let _compute = self.host[1].lock();
+            generations = self.snapshot_generations()?;
+            for generation in &generations {
+                generation.close();
+            }
+            unsafe { device.device_wait_idle() }.map_err(super::map_host_device_oom_and_lost_err)
+        };
+        let result = execution.and_then(|()| {
+            for generation in &generations {
+                generation.wait_presentation()?;
+            }
+            Ok(())
+        });
+        if matches!(result, Ok(()) | Err(crate::DeviceError::Lost)) {
+            for generation in &generations {
+                generation.mark_retired();
+            }
+        }
+        result
     }
 }
 

@@ -60,3 +60,34 @@ pub unsafe fn clear_texture_zero(
     let _ = (encoder, texture, range);
     Err(DeviceError::Unexpected)
 }
+
+/// Configure a shared renderer surface, or retire it when configuration is None.
+/// Closing a generation invalidates its tokens but permits retaining their views.
+///
+/// # Safety
+/// The configuration must be valid for this surface and graphics device. Existing
+/// native-device ownership is checked; another device cannot retire or replace it.
+/// Keep the OS window/display alive through surface/resource destruction and any
+/// concurrent context-retirement operation retaining the native generation.
+/// Retain submitted resource owners through retirement, including on error.
+/// Closed-generation resources permit no new views, recording or execution;
+/// metadata may only be checked for rejection and existing views later destroyed.
+pub unsafe fn configure_surface(
+    surface: &dyn crate::DynSurface,
+    device: &dyn DynDevice,
+    configuration: Option<&crate::SurfaceConfiguration>,
+) -> Result<(), crate::SurfaceError> {
+    #[cfg(vulkan)]
+    if let (Some(surface), Some(device)) = (
+        surface.as_any().downcast_ref::<crate::vulkan::Surface>(),
+        device.as_any().downcast_ref::<crate::vulkan::Device>(),
+    ) {
+        return unsafe {
+            crate::vulkan::renderer::configure_surface(surface, device, configuration)
+        };
+    }
+    let _ = (surface, device, configuration);
+    Err(crate::SurfaceError::Other(
+        "Checked surface configuration is unavailable",
+    ))
+}

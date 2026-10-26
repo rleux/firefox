@@ -58,7 +58,10 @@ pub(super) trait Swapchain: Send + Sync + 'static {
     /// either [`Surface::create_swapchain`] or dropping the swapchain.
     ///
     /// The swapchain must not be in use when this is called.
-    unsafe fn release_resources(&mut self, device: &super::Device);
+    unsafe fn release_resources(
+        &mut self,
+        device: &super::Device,
+    ) -> Result<(), crate::DeviceError>;
 
     /// Acquires the next available surface texture for rendering.
     ///

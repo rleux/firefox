@@ -109,8 +109,10 @@ pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     /// Submit ordinary renderer work with dependencies bound to this graphics call.
     ///
     /// # Safety
-    /// Queue::submit lifetime requirements apply. Synchronization must obey its
-    /// producer/consumer rules. Preserve every owner and receipt through retirement.
+    /// Buffer, surface-texture and fence objects must remain valid through native
+    /// retirement. Context, queue lane and open-generation ownership are checked
+    /// before mutation. Synchronization must obey its producer/consumer rules.
+    /// Preserve every owner and receipt through retirement.
     unsafe fn submit_graphics(
         &self,
         queue: &dyn crate::DynQueue,
@@ -120,7 +122,8 @@ pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
         synchronization: &crate::external_sync::SubmissionSync,
     ) -> Result<alloc::boxed::Box<dyn SharedSubmissionReceipt>, SharedSubmitError>;
 
-    /// Permanently close submission admission and wait for accepted native work.
+    /// Permanently close submission admission and wait for accepted native work,
+    /// including acquisition and presentation fences of registered generations.
     ///
     /// An error is not proof of retirement: callers must retain all endpoint,
     /// encoder and resource owners until retirement can be established.
@@ -164,7 +167,9 @@ pub enum SharedDeviceError {
 }
 
 /// Open independent graphics and compute endpoints on one native device.
-/// Surface configuration and presentation are not supported by these endpoints.
+/// Presentation requires an instance from create_presentation_instance and the
+/// corresponding native device support. Only the graphics endpoint may use
+/// surfaces; use renderer::configure_surface for checked configuration/retirement.
 ///
 /// The Vulkan implementation currently requires two universal queues in family
 /// zero, matching the existing adapter and presentation capability checks.
@@ -192,8 +197,6 @@ pub unsafe fn open_shared_device(
 
 /// Create an instance with the prerequisites for shared presentation.
 /// Native budgets, validation and backend policy come from the descriptor.
-/// Shared-device surface operations remain unavailable until generation retirement
-/// and presentation-fence tracking are installed.
 ///
 /// # Safety
 /// Instance::init requirements apply.

@@ -64,3 +64,19 @@ pub(crate) unsafe fn clear_texture_zero(
     }
     Ok(())
 }
+
+pub(crate) unsafe fn configure_surface(
+    surface: &super::Surface,
+    device: &super::Device,
+    configuration: Option<&crate::SurfaceConfiguration>,
+) -> Result<(), crate::SurfaceError> {
+    if device.shared.shared_queue_group.is_none() {
+        return Err(crate::SurfaceError::Other(
+            "Checked presentation requires a shared device",
+        ));
+    }
+    match configuration {
+        Some(configuration) => unsafe { surface.configure_checked(device, configuration) },
+        None => unsafe { surface.unconfigure_checked(device) },
+    }
+}

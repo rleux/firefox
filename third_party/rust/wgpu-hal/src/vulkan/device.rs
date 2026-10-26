@@ -330,6 +330,7 @@ impl super::Device {
             format: desc.format,
             copy_size: desc.copy_extent(),
             identity,
+            surface_generation: None,
         }
     }
 
@@ -1360,6 +1361,7 @@ impl crate::Device for super::Device {
             dimension: desc.dimension,
             texture_identity: texture.identity,
             view_identity: identity,
+            _surface_generation: texture.surface_generation.clone(),
         })
     }
     unsafe fn destroy_texture_view(&self, view: super::TextureView) {

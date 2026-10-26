@@ -18,7 +18,9 @@ fn rejected(error: crate::DeviceError) -> SharedSubmitError {
 pub(in crate::vulkan) unsafe fn submit_single(
     queue: &Queue,
     buffers: &[&CommandBuffer],
+    surfaces: &[&super::super::SurfaceTexture],
     signal: (&Fence, crate::FenceValue),
+    generations: &[Arc<super::super::swapchain::Generation>],
 ) -> Result<(), crate::DeviceError> {
     let progress = queue.progress.as_ref().unwrap();
     let previous = progress.accepted();
@@ -29,8 +31,14 @@ pub(in crate::vulkan) unsafe fn submit_single(
         vec![SemaphoreType::Timeline(progress.semaphore, previous)]
     };
     let signals = [SemaphoreType::Timeline(progress.semaphore, next)];
-    unsafe { queue.submit_impl(buffers, &[], Some(signal), &wait, &[], &signals) }?;
+    for generation in generations {
+        generation.submission_pending();
+    }
+    unsafe { queue.submit_impl(buffers, surfaces, Some(signal), &wait, &[], &signals) }?;
     progress.commit(next);
+    for generation in generations {
+        generation.submission_accepted(progress, next);
+    }
     Ok(())
 }
 
@@ -406,7 +414,10 @@ pub(super) unsafe fn submit_graphics(
 ) -> Result<Box<dyn SharedSubmissionReceipt>, SharedSubmitError> {
     let bad = || rejected(crate::DeviceError::Unexpected);
     let queue = queue.as_any().downcast_ref::<Queue>().ok_or_else(bad)?;
-    if !same_context(context, queue) || queue.device.queue_index != 0 || !surfaces.is_empty() {
+    if !same_context(context, queue)
+        || queue.device.queue_index != 0
+        || (!surfaces.is_empty() && !context.queues.presentation_fences_enabled)
+    {
         return Err(bad());
     }
     let fence = terminal
@@ -417,7 +428,21 @@ pub(super) unsafe fn submit_graphics(
     if !matches!(fence, Fence::TimelineSemaphore(_)) {
         return Err(bad());
     }
+    #[cfg(test)]
+    if !surfaces.is_empty() {
+        context
+            .queues
+            .surface_submit_waiters
+            .fetch_add(1, Ordering::SeqCst);
+    }
     let _host = context.queues.host[0].lock();
+    #[cfg(test)]
+    if !surfaces.is_empty() {
+        context
+            .queues
+            .surface_submit_waiters
+            .fetch_sub(1, Ordering::SeqCst);
+    }
     if context.queues.closed.load(Ordering::Acquire) || queue.has_legacy_pending_sync() {
         return Err(bad());
     }
@@ -434,6 +459,17 @@ pub(super) unsafe fn submit_graphics(
             Ok(buffer)
         })
         .collect::<Result<Vec<_>, SharedSubmitError>>()?;
+    let surfaces = surfaces
+        .iter()
+        .map(|surface| {
+            surface
+                .as_any()
+                .downcast_ref::<super::super::SurfaceTexture>()
+                .ok_or_else(bad)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let generations = super::super::swapchain::validate_shared_submission(queue, &surfaces, fence)
+        .map_err(rejected)?;
     let mut sync = super::super::external_sync::prepare(
         queue,
         synchronization,
@@ -459,10 +495,13 @@ pub(super) unsafe fn submit_graphics(
     };
     sync.reserve().map_err(|_| bad())?;
     sync.attempted();
+    for generation in &generations {
+        generation.submission_pending();
+    }
     if let Err(error) = unsafe {
         queue.submit_impl(
             &buffers,
-            &[],
+            &surfaces,
             Some((fence, terminal.1)),
             &waits,
             &sync.signals,
@@ -477,6 +516,9 @@ pub(super) unsafe fn submit_graphics(
     }
     sync.accepted();
     progress.commit(next);
+    for generation in generations {
+        generation.submission_accepted(progress, next);
+    }
     receipt.accepted = true;
     Ok(Box::new(receipt))
 }
