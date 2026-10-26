@@ -67,6 +67,14 @@ impl wr::GpuBackend for RenderDevice {
     fn wgpu_external_textures(&self) -> Option<Rc<super::super::ExternalTextureRegistry>> {
         Some(self.textures.external_textures())
     }
+    fn wgpu_snapshot_shared_image(
+        &mut self,
+        handle: api::ExternalTextureHandle,
+        rect: api::units::DeviceIntRect,
+    ) -> Result<(api::ImageFormat, Vec<u8>), String> {
+        self.snapshot_shared_image(handle, rect)
+    }
+
     fn textures_created(&self) -> u32 {
         self.textures.created()
     }

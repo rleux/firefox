@@ -43,6 +43,7 @@ pub struct Texture {
     base_mip: u32,
     mip_count: u32,
     usage: wgt::TextureUses,
+    copy_src_matches_view: bool,
     states: Rc<Vec<UsageState<TextureState>>>,
     #[cfg(target_os = "linux")]
     external: Option<Rc<super::DmaBufImage>>,
@@ -156,7 +157,8 @@ impl Texture {
             return Err("Unsupported shared canvas sampling format or filter".into());
         }
         let mut alias_descriptor = descriptor.clone();
-        alias_descriptor.usage = wgt::TextureUses::RESOURCE;
+        alias_descriptor.usage =
+            wgt::TextureUses::RESOURCE | (descriptor.usage & wgt::TextureUses::COPY_SRC);
         let alias = unsafe {
             hal::shared_image::create_alias(
                 lease.clone(),
@@ -199,7 +201,8 @@ impl Texture {
             filter,
             base_mip: 0,
             mip_count: 1,
-            usage: wgt::TextureUses::RESOURCE,
+            usage: alias_descriptor.usage,
+            copy_src_matches_view: view_format == descriptor.format && !force_opaque,
             states: Rc::new(vec![UsageState::new(TextureState {
                 usage: wgt::TextureUses::RESOURCE,
                 initialized: true,
@@ -271,6 +274,7 @@ impl Texture {
             base_mip: 0,
             mip_count: 1,
             usage: wgt::TextureUses::RESOURCE,
+            copy_src_matches_view: !force_opaque,
             states: image.states.clone(),
             external: Some(image.clone()),
         }))
@@ -414,6 +418,7 @@ impl Texture {
             base_mip: 0,
             mip_count,
             usage,
+            copy_src_matches_view: true,
             states: Rc::new(
                 (0..mip_count)
                     .map(|_| {
@@ -490,6 +495,7 @@ impl Texture {
             base_mip,
             mip_count: 1,
             usage: self.usage,
+            copy_src_matches_view: self.copy_src_matches_view,
             #[cfg(target_os = "linux")]
             external: self.external.clone(),
             states: self.states.clone(),
@@ -615,9 +621,13 @@ impl Texture {
         &**self.raw
     }
 
-    #[cfg(feature = "capture")]
     pub(super) fn supports_copy_src(&self) -> bool {
         self.usage.contains(wgt::TextureUses::COPY_SRC)
+    }
+
+    #[cfg(feature = "capture")]
+    pub(super) fn supports_view_copy_src(&self) -> bool {
+        self.supports_copy_src() && self.copy_src_matches_view
     }
 
     pub fn target_view(&self) -> Option<&dyn hal::DynTextureView> {

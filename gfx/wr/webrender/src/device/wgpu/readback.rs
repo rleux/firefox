@@ -22,6 +22,30 @@ impl RenderDevice {
         self.readback.completed.as_ref().map_or(0, |readback| readback.size_in_bytes())
     }
 
+    pub fn snapshot_shared_image(
+        &mut self,
+        handle: api::ExternalTextureHandle,
+        rect: DeviceIntRect,
+    ) -> Result<(ImageFormat, Vec<u8>), String> {
+        let id = u32::try_from(handle.0).map_err(|_| "Invalid shared image snapshot handle")?;
+        let source = self.textures.external_textures().get(id)?;
+        if !source.supports_copy_src() {
+            return Err("Registered image does not permit copy-source snapshots".into());
+        }
+        let format = match source.format() {
+            wgt::TextureFormat::Rgba8Unorm => ImageFormat::RGBA8,
+            wgt::TextureFormat::Bgra8Unorm => ImageFormat::BGRA8,
+            _ => return Err("Shared image snapshots require RGBA8 or BGRA8 storage".into()),
+        };
+        let pixels = self.capture_pixels(source, rect, format)?;
+        Ok((format, pixels))
+    }
+
+    #[cfg(test)]
+    pub(in crate::device::wgpu) fn has_cached_readback(&self) -> bool {
+        self.readback.completed.is_some()
+    }
+
     pub fn prepare_readback(&mut self, enabled: bool) {
         if enabled {
             if let Some(swapchain) = &mut self.swapchain {
@@ -50,7 +74,7 @@ impl RenderDevice {
         let id = u32::try_from(handle.0)
             .map_err(|_| "Invalid Vulkan external readback handle".to_owned())?;
         let source = self.textures.external_textures().get(id)?;
-        if source.supports_copy_src() {
+        if source.supports_view_copy_src() {
             return Ok(source);
         }
         self.flush_pass()?;

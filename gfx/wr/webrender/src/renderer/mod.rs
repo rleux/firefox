@@ -1593,6 +1593,21 @@ impl Renderer {
         self.device.wgpu_external_textures()
     }
 
+    /// Read registered image storage in its base RGBA/BGRA format, without sampled-view effects.
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
+    pub fn wgpu_snapshot_shared_image(
+        &mut self,
+        handle: api::ExternalTextureHandle,
+        rect: api::units::DeviceIntRect,
+    ) -> Result<(api::ImageFormat, Vec<u8>), RendererError> {
+        self.device
+            .wgpu_snapshot_shared_image(handle, rect)
+            .map_err(RendererError::Device)
+    }
+
     /// Pause presentation and drain GPU work before the embedder hides the window.
     /// Rendering while paused can update caches but does not acquire window images.
     /// Resuming redraws the cached scene; the native window must remain alive.

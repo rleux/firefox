@@ -344,6 +344,10 @@ impl NativeGate {
         }
     }
 
+    pub(super) fn release_signal(&self) -> std::sync::mpsc::Sender<()> {
+        self.release.as_ref().unwrap().clone()
+    }
+
     pub(super) fn release(&mut self) -> Result<bool, String> {
         if let Some(result) = &self.result {
             return result.clone();

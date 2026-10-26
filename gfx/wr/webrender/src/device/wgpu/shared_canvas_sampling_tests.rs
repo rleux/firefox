@@ -15,20 +15,20 @@ use api::{ExternalTextureHandle, ImageBufferKind, ImageRendering};
 use api::units::TexelRect;
 use euclid::default::Transform3D;
 
-const PATTERN: [[u8; 4]; 4] = [
+pub(super) const PATTERN: [[u8; 4]; 4] = [
     [17, 51, 102, 255],
     [204, 153, 68, 128],
     [7, 31, 199, 64],
     [137, 11, 83, 192],
 ];
-const BACKGROUND: [u8; 4] = [23, 47, 89, 255];
+pub(super) const BACKGROUND: [u8; 4] = [23, 47, 89, 255];
 
 fn counts(graphics: &hal::DynOpenDevice) -> (isize, isize) {
     let counters = graphics.device.get_internal_counters();
     (counters.textures.read(), counters.texture_memory.read())
 }
 
-fn external(handle: ExternalTextureHandle) -> ExternalTexture {
+pub(super) fn external(handle: ExternalTextureHandle) -> ExternalTexture {
     ExternalTexture::new(
         handle,
         ImageBufferKind::Texture2D,
@@ -373,7 +373,7 @@ impl CanvasSampling {
                 read_only &= source
                     .copy_from_texture(&mut commands, &consumer.target, source_rect, source_rect)
                     .is_err();
-                read_only &= source.readback(source_rect).is_err();
+                read_only &= source.copy_source().is_ok();
                 read_only &= source_state();
             }
             let mut instances = |left: f32| {
@@ -428,7 +428,7 @@ impl CanvasSampling {
     }
 }
 
-fn linear(value: u8, srgb: bool) -> f64 {
+pub(super) fn linear(value: u8, srgb: bool) -> f64 {
     let encoded = f64::from(value) / 255.0;
     if !srgb {
         encoded
@@ -439,7 +439,7 @@ fn linear(value: u8, srgb: bool) -> f64 {
     }
 }
 
-fn verify_pixels(bytes: &[u8], srgb: bool, opaque: bool) {
+pub(super) fn verify_pixels(bytes: &[u8], srgb: bool, opaque: bool) {
     assert_eq!(bytes.len(), 32);
     for row in 0..2 {
         for panel in 0..2 {

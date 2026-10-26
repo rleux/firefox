@@ -146,6 +146,18 @@ pub trait GpuBackend {
         None
     }
 
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
+    fn wgpu_snapshot_shared_image(
+        &mut self,
+        _handle: api::ExternalTextureHandle,
+        _rect: api::units::DeviceIntRect,
+    ) -> Result<(api::ImageFormat, Vec<u8>), String> {
+        Err("This backend does not snapshot registered Vulkan images".into())
+    }
+
     #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn set_wgpu_surface(
         &mut self,

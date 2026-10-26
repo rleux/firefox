@@ -289,3 +289,72 @@ fn window_readback_is_on_demand_and_survives_present_resize_and_retry() {
     }
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn registered_raw_snapshot_rejects_invalid_requests_and_releases_cached_source() {
+    validation_logging();
+    let owner = Rc::new(
+        Device::new(&Options {
+            validation: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let mut device = RenderDevice::new(&owner).unwrap();
+    let registry = device.textures.external_textures();
+    let full = DeviceIntRect::from_size(DeviceIntSize::new(3, 2));
+    for handle in [
+        api::ExternalTextureHandle(0),
+        api::ExternalTextureHandle(u64::MAX),
+    ] {
+        assert!(GpuBackend::wgpu_snapshot_shared_image(&mut device, handle, full).is_err());
+    }
+    let unsupported = Texture::new(
+        &owner,
+        3,
+        2,
+        wgt::TextureFormat::R8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let unsupported_handle = registry.register(&unsupported).unwrap();
+    assert!(GpuBackend::wgpu_snapshot_shared_image(&mut device, unsupported_handle, full).is_err());
+    assert!(!device.has_cached_readback());
+    let source = Texture::new(
+        &owner,
+        3,
+        2,
+        wgt::TextureFormat::Rgba8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let pixels = [
+        17, 31, 61, 0, 73, 101, 137, 64, 151, 173, 199, 128, 211, 223, 239, 255, 13, 29, 43, 127,
+        59, 83, 107, 191,
+    ];
+    source
+        .upload(&device.submissions, full, &pixels, None, 0, None)
+        .unwrap();
+    let handle = registry.register(&source).unwrap();
+    let invalid =
+        DeviceIntRect::from_origin_and_size(DeviceIntPoint::new(-1, 0), DeviceIntSize::new(2, 2));
+    assert!(GpuBackend::wgpu_snapshot_shared_image(&mut device, handle, invalid).is_err());
+    assert!(device.failure().is_none());
+    let (format, snapshot) =
+        GpuBackend::wgpu_snapshot_shared_image(&mut device, handle, full).unwrap();
+    assert_eq!(format, ImageFormat::RGBA8);
+    assert_eq!(snapshot, pixels);
+    assert!(device.has_cached_readback());
+    device.submissions.wait().unwrap();
+    let weak = Rc::downgrade(&source);
+    registry.unregister(handle).unwrap();
+    drop(source);
+    assert!(weak.upgrade().is_none());
+    assert!(device.has_cached_readback());
+    registry.unregister(unsupported_handle).unwrap();
+    drop((unsupported, registry, device, owner));
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}

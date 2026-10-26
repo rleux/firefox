@@ -52,6 +52,7 @@ fn sampled_view(source: &Rc<Texture>, opaque: bool) -> Rc<Texture> {
         base_mip: 0,
         mip_count: 1,
         usage: wgt::TextureUses::RESOURCE,
+        copy_src_matches_view: !opaque,
         states: source.states.clone(),
         #[cfg(target_os = "linux")]
         external: None,
