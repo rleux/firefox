@@ -65,6 +65,14 @@ pub(crate) unsafe fn clear_texture_zero(
     Ok(())
 }
 
+pub(crate) fn surface_lifetime(
+    surface: &super::Surface,
+) -> Result<crate::renderer::SurfaceLifetime, crate::SurfaceError> {
+    surface.inner.as_any().downcast_ref::<super::swapchain::NativeSurface>()
+        .map(|surface| surface.lifetime())
+        .ok_or(crate::SurfaceError::Other("Native surface lifetime is unavailable"))
+}
+
 pub(crate) unsafe fn configure_surface(
     surface: &super::Surface,
     device: &super::Device,

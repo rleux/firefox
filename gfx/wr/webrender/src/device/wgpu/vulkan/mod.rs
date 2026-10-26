@@ -96,6 +96,7 @@ impl Device {
                     window,
                     display.unwrap().as_raw(),
                     options.surface_options,
+                    None,
                 )
             })
             .transpose()?;

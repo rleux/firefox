@@ -12,12 +12,12 @@ mod target;
 pub(super) use self::target::{SurfacePassTarget, SurfaceView};
 
 pub(super) struct Swapchain {
-    surface: Option<WindowSurface>,
-    queue: Rc<SubmissionQueue>,
-    config: Option<hal::SurfaceConfiguration>,
     acquired: Option<Rc<hal::DynAcquiredSurfaceTexture>>,
     // Keep views owned here even if a target guard is forgotten.
     target: Option<Rc<target::AttachmentResources>>,
+    surface: Option<WindowSurface>,
+    queue: Rc<SubmissionQueue>,
+    config: Option<hal::SurfaceConfiguration>,
     reconfigure: bool,
     paused: bool,
     present_result: Option<PresentResult>,
@@ -87,15 +87,31 @@ impl Swapchain {
         };
         if self.config.is_some() {
             self.queue.wait()?;
-            unsafe { owner.open.queue.wait_for_idle() }.map_err(|error| {
-                owner.mark_lost();
-                format!("Waiting to reconfigure Vulkan swapchain: {error:?}")
-            })?;
-            unsafe { surface.raw.unconfigure(owner.open.device.as_ref()) };
+            if owner.shared.is_some() {
+                unsafe {
+                    hal::renderer::configure_surface(
+                        surface.raw.as_ref(), owner.open.device.as_ref(), None,
+                    )
+                }.map_err(|error| format!("Retiring shared Vulkan swapchain: {error}"))?;
+            } else {
+                unsafe { owner.open.queue.wait_for_idle() }.map_err(|error| {
+                    owner.mark_lost();
+                    format!("Waiting to reconfigure Vulkan swapchain: {error:?}")
+                })?;
+                unsafe { surface.raw.unconfigure(owner.open.device.as_ref()) };
+            }
             self.config = None;
         }
         if let Some(config) = config {
-            unsafe { surface.raw.configure(owner.open.device.as_ref(), &config) }.map_err(
+            unsafe {
+                if owner.shared.is_some() {
+                    hal::renderer::configure_surface(
+                        surface.raw.as_ref(), owner.open.device.as_ref(), Some(&config),
+                    )
+                } else {
+                    surface.raw.configure(owner.open.device.as_ref(), &config)
+                }
+            }.map_err(
                 |error| {
                     if matches!(error, hal::SurfaceError::Device(hal::DeviceError::Lost)) {
                         owner.mark_lost();
@@ -375,10 +391,21 @@ impl Drop for AcquiredImage<'_> {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
-        let _ = self.discard_acquired();
-        if self.config.is_some() {
+        let discarded = self.discard_acquired();
+        let owner = self.queue.owner();
+        if let Some(shared) = &owner.shared {
+            if discarded.is_err() || (self.config.is_some() && (
+                self.queue.wait().is_err() || unsafe {
+                    hal::renderer::configure_surface(
+                        self.surface.as_ref().unwrap().raw.as_ref(),
+                        owner.open.device.as_ref(), None,
+                    )
+                }.is_err()
+            )) {
+                unsafe { (shared.options.fatal_process)() };
+            }
+        } else if self.config.is_some() {
             let _ = self.queue.wait();
-            let owner = self.queue.owner();
             unsafe {
                 if owner.open.queue.wait_for_idle().is_err() {
                     owner.mark_lost();

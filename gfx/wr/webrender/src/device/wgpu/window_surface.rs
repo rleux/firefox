@@ -6,7 +6,10 @@ use super::{hal, Device, SurfaceOptions};
 use raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle as Display, RawWindowHandle as Window,
 };
-use std::rc::Rc;
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 pub trait SurfaceWindow: HasDisplayHandle + HasWindowHandle {}
 impl<T: HasDisplayHandle + HasWindowHandle> SurfaceWindow for T {}
@@ -14,8 +17,37 @@ impl<T: HasDisplayHandle + HasWindowHandle> SurfaceWindow for T {}
 pub(super) struct WindowSurface {
     pub raw: Box<dyn hal::DynSurface>,
     pub options: SurfaceOptions,
-    // The native surface must be destroyed before its window.
+    pub owner: Rc<SurfaceOwner>,
+}
+
+pub(super) struct SurfaceOwner {
+    lifetime: Option<(hal::renderer::SurfaceLifetime, unsafe extern "C" fn() -> !)>,
     _window: Rc<dyn SurfaceWindow>,
+    #[cfg(test)]
+    pub waiting: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub timeout: Duration,
+}
+
+impl Drop for SurfaceOwner {
+    fn drop(&mut self) {
+        if let Some((lifetime, fatal_process)) = &self.lifetime {
+            #[cfg(not(test))]
+            let timeout = Duration::from_secs(10);
+            #[cfg(test)]
+            let timeout = self.timeout;
+            let deadline = Instant::now() + timeout;
+            #[cfg(test)]
+            self.waiting
+                .store(true, std::sync::atomic::Ordering::Release);
+            while !lifetime.is_destroyed() {
+                if Instant::now() >= deadline {
+                    unsafe { fatal_process() };
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 impl WindowSurface {
@@ -24,6 +56,7 @@ impl WindowSurface {
         window: &Rc<dyn SurfaceWindow>,
         display: Display,
         options: SurfaceOptions,
+        fatal_process: Option<unsafe extern "C" fn() -> !>,
     ) -> Result<Self, String> {
         let handle = window
             .window_handle()
@@ -36,10 +69,24 @@ impl WindowSurface {
         validate_android(display, handle.as_raw())?;
         let raw = unsafe { instance.create_surface(display, handle.as_raw()) }
             .map_err(|error| format!("Creating Vulkan window surface: {error}"))?;
+        let lifetime = fatal_process
+            .map(|fatal_process| {
+                hal::renderer::surface_lifetime(raw.as_ref())
+                    .map(|lifetime| (lifetime, fatal_process))
+                    .map_err(|error| format!("Tracking Vulkan surface lifetime: {error}"))
+            })
+            .transpose()?;
         Ok(Self {
             raw,
             options,
-            _window: window.clone(),
+            owner: Rc::new(SurfaceOwner {
+                lifetime,
+                _window: window.clone(),
+                #[cfg(test)]
+                waiting: Default::default(),
+                #[cfg(test)]
+                timeout: Duration::from_secs(10),
+            }),
         })
     }
 }
@@ -53,14 +100,24 @@ impl Device {
         let display = window
             .display_handle()
             .map_err(|error| format!("Getting Vulkan display handle: {error}"))?;
-        let owned_display = self.display_owner.as_ref()
+        let owned_display = self
+            .display_owner
+            .as_ref()
             .ok_or("Vulkan window replacement requires an owned display")?
             .display_handle()
             .map_err(|error| format!("Getting owned Vulkan display: {error}"))?;
         if display.as_raw() != owned_display.as_raw() {
             return Err("Vulkan window replacement cannot change displays".into());
         }
-        let surface = WindowSurface::new(self.instance.as_ref(), window, display.as_raw(), options)?;
+        let surface = WindowSurface::new(
+            self.instance.as_ref(),
+            window,
+            display.as_raw(),
+            options,
+            self.shared
+                .as_ref()
+                .map(|shared| shared.options.fatal_process),
+        )?;
         if unsafe { self.adapter.surface_capabilities(surface.raw.as_ref()) }.is_none() {
             return Err("The Vulkan adapter cannot present to the replacement window".into());
         }

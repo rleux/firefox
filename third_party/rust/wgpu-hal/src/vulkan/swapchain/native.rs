@@ -23,6 +23,8 @@ pub(crate) struct NativeSurfaceOwner {
     raw: vk::SurfaceKHR,
     functor: khr::surface::Instance,
     instance: Arc<InstanceShared>,
+    // Signal only after the instance lease has been released.
+    lifetime: crate::renderer::SurfaceDropGuard,
 }
 
 pub(crate) struct NativeSurface {
@@ -60,6 +62,7 @@ impl NativeSurface {
                 raw,
                 functor,
                 instance: Arc::clone(&instance.shared),
+                lifetime: Default::default(),
             }),
             #[cfg(windows)]
             hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
@@ -80,6 +83,10 @@ impl NativeSurface {
     #[cfg(test)]
     pub(crate) fn owner_weak(&self) -> alloc::sync::Weak<NativeSurfaceOwner> {
         Arc::downgrade(&self.owner)
+    }
+
+    pub(crate) fn lifetime(&self) -> crate::renderer::SurfaceLifetime {
+        self.lifetime.lifetime()
     }
 
     pub fn as_raw(&self) -> vk::SurfaceKHR {

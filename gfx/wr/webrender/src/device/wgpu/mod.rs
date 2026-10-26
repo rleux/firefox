@@ -223,6 +223,33 @@ impl Device {
         })
     }
 
+    /// Import a shared graphics endpoint with an owned native window or display.
+    /// Only window, display_owner and surface_options apply; adapter selection
+    /// and native validation were fixed when the shared context was created.
+    ///
+    /// # Safety
+    /// The requirements of from_shared_endpoint apply, including isolated-process
+    /// fatal recovery. The supplied owners must retain their native resources.
+    pub unsafe fn from_shared_endpoint_with_surface(
+        open: std::sync::Arc<hal::DynOpenDevice>,
+        instance: Box<dyn hal::DynInstance>,
+        exposed: hal::DynExposedAdapter,
+        shared: SharedDeviceOptions,
+        options: &Options,
+    ) -> Result<Self, String> {
+        let mut device = unsafe { Self::from_shared_endpoint(open, instance, exposed, shared) }?;
+        device.display_owner = options.display_owner.clone().or_else(|| {
+            options.window.as_ref().map(|window| window.clone() as Rc<dyn HasDisplayHandle>)
+        });
+        let initial = options.window.as_ref().map(|window| {
+            device.create_surface(window, options.surface_options).map(InitialSurface::Attached)
+        }).transpose()?;
+        device.initial_surface.set(initial.or_else(|| {
+            device.display_owner.as_ref().map(|_| InitialSurface::Detached)
+        }));
+        Ok(device)
+    }
+
     pub(super) fn create_shader_module(
         &self,
         label: &str,

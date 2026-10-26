@@ -923,3 +923,41 @@ fn shared_surface_orphaned_generation_retains_native_payload() {
         alloc::string::String::from_utf8_lossy(&output.stderr),
     );
 }
+
+#[test]
+#[ignore = "Requires 24-bit Xvfb, shared Vulkan maintenance1 and Khronos validation"]
+fn surface_destruction_certificate_waits_for_hidden_generation_snapshot() {
+    let mut f = Fixture::new(1);
+    let lifetime = crate::renderer::surface_lifetime(&**f.surface(0)).unwrap();
+    f.configure(0, true).unwrap();
+    let snapshots = f.work.graphics.device.as_any()
+        .downcast_ref::<crate::vulkan::Device>().unwrap()
+        .shared.shared_queue_group.as_ref().unwrap().snapshot_generations().unwrap();
+    assert_eq!(snapshots.len(), 1);
+    f.configure(0, false).unwrap();
+    drop(f.surfaces[0].take());
+    assert!(!lifetime.is_destroyed());
+    let (release, blocked) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(snapshots);
+    });
+    assert!(!lifetime.is_destroyed());
+    release.send(()).unwrap();
+    worker.join().unwrap();
+    assert!(lifetime.is_destroyed());
+    drop(f);
+    assert_validation_clean();
+}
+
+#[test]
+#[ignore = "Requires 24-bit Xvfb, shared Vulkan maintenance1 and Khronos validation"]
+fn surface_destruction_certificate_covers_unconfigured_surface() {
+    let mut f = Fixture::new(1);
+    let lifetime = crate::renderer::surface_lifetime(&**f.surface(0)).unwrap();
+    assert!(!lifetime.is_destroyed());
+    drop(f.surfaces[0].take());
+    assert!(lifetime.is_destroyed());
+    drop(f);
+    assert_validation_clean();
+}

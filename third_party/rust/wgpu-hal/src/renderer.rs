@@ -1,6 +1,46 @@
 //! Portable operations required by the embedding graphics renderer.
 
 use crate::{DeviceError, DynAdapter, DynCommandEncoder, DynDevice, DynInstance, DynTexture};
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Clone, Debug)]
+pub struct SurfaceLifetime(Arc<AtomicBool>);
+
+impl SurfaceLifetime {
+    pub fn is_destroyed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SurfaceDropGuard(Arc<AtomicBool>);
+
+impl SurfaceDropGuard {
+    pub(crate) fn lifetime(&self) -> SurfaceLifetime {
+        SurfaceLifetime(self.0.clone())
+    }
+}
+
+impl Drop for SurfaceDropGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Observe actual native surface destruction, including backend-held generations.
+pub fn surface_lifetime(
+    surface: &dyn crate::DynSurface,
+) -> Result<SurfaceLifetime, crate::SurfaceError> {
+    #[cfg(vulkan)]
+    if let Some(surface) = surface.as_any().downcast_ref::<crate::vulkan::Surface>() {
+        return crate::vulkan::renderer::surface_lifetime(surface);
+    }
+    let _ = surface;
+    Err(crate::SurfaceError::Other(
+        "Native surface lifetime is unavailable",
+    ))
+}
 
 #[derive(Clone, Debug)]
 pub struct GraphicsCapabilities {

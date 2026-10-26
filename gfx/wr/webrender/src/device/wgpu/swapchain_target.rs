@@ -18,6 +18,7 @@ struct AttachmentState {
 
 pub(super) struct AttachmentResources {
     view: Owned<dyn hal::DynTextureView>,
+    _surface: Rc<super::super::window_surface::SurfaceOwner>,
     size: wgt::Extent3d,
     format: wgt::TextureFormat,
     copy_src: bool,
@@ -57,6 +58,7 @@ impl Swapchain {
         .map_err(|error| format!("Creating swapchain attachment view: {error:?}"))?;
         let resources = Rc::new(AttachmentResources {
             view: Owned::new(owner, view, <dyn hal::DynDevice>::destroy_texture_view),
+            _surface: self.surface.as_ref().unwrap().owner.clone(),
             size: config.extent,
             format: config.format,
             copy_src: config.usage.contains(wgt::TextureUses::COPY_SRC),
@@ -78,8 +80,8 @@ pub(in crate::device::wgpu) struct SurfaceView<'a> {
 }
 
 pub(in crate::device::wgpu) struct SurfacePassTarget {
-    resources: Rc<AttachmentResources>,
     image: Rc<hal::DynAcquiredSurfaceTexture>,
+    resources: Rc<AttachmentResources>,
     queue: Rc<SubmissionQueue>,
 }
 
@@ -312,3 +314,7 @@ impl ColorAttachment for SurfaceView<'_> {
         false
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "debugger"))]
+#[path = "shared_surface_tests.rs"]
+mod shared_surface_tests;
