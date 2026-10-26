@@ -21,6 +21,7 @@ pub(super) struct QueueGroup {
     pub(super) host: [Mutex<()>; 2],
     pub(super) closed: AtomicBool,
     pub(super) uncertain: AtomicBool,
+    pub(super) presentation_fences_enabled: bool,
     pub(super) texture_ids: Arc<ResourceIdentityFactory<vk::Image>>,
     pub(super) view_ids: Arc<ResourceIdentityFactory<vk::ImageView>>,
     identity: SharedDeviceIdentity,
@@ -35,11 +36,12 @@ pub(super) struct QueueGroup {
 }
 
 impl QueueGroup {
-    fn new() -> Self {
+    fn new(presentation_fences_enabled: bool) -> Self {
         Self {
             host: [Mutex::new(()), Mutex::new(())],
             closed: AtomicBool::new(false),
             uncertain: AtomicBool::new(false),
+            presentation_fences_enabled,
             texture_ids: Arc::new(ResourceIdentityFactory::new()),
             view_ids: Arc::new(ResourceIdentityFactory::new()),
             identity: SharedDeviceIdentity::new(),
@@ -225,6 +227,74 @@ fn supports_independent_queues(families: &[vk::QueueFamilyProperties]) -> bool {
     })
 }
 
+fn presentation_support(
+    api_version: u32,
+    extensions_present: bool,
+    feature_enabled: bool,
+) -> Result<(), SharedDeviceError> {
+    if api_version >= vk::API_VERSION_1_1 && extensions_present && feature_enabled {
+        Ok(())
+    } else {
+        Err(SharedDeviceError::PresentationUnavailable)
+    }
+}
+
+fn presentation_features(
+    adapter: &super::Adapter,
+    extensions: &mut Vec<&'static core::ffi::CStr>,
+) -> Result<Option<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>>, SharedDeviceError>
+{
+    if !adapter
+        .instance
+        .extensions
+        .contains(&ash::ext::surface_maintenance1::NAME)
+    {
+        return Ok(None);
+    }
+    let properties = adapter.physical_device_capabilities();
+    let required = [
+        ash::khr::swapchain::NAME,
+        ash::ext::swapchain_maintenance1::NAME,
+    ];
+    let extensions_present = adapter
+        .instance
+        .extensions
+        .contains(&ash::khr::surface::NAME)
+        && adapter
+            .instance
+            .extensions
+            .contains(&ash::khr::get_surface_capabilities2::NAME)
+        && required
+            .iter()
+            .all(|extension| properties.supports_extension(extension));
+    presentation_support(
+        adapter
+            .instance
+            .instance_api_version
+            .min(properties.properties().api_version),
+        extensions_present,
+        true,
+    )?;
+    let mut feature = vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default();
+    unsafe {
+        adapter.instance.raw.get_physical_device_features2(
+            adapter.raw,
+            &mut vk::PhysicalDeviceFeatures2::default().push_next(&mut feature),
+        );
+    }
+    presentation_support(
+        properties.properties().api_version,
+        true,
+        feature.swapchain_maintenance1 != 0,
+    )?;
+    for extension in required {
+        if !extensions.contains(&extension) {
+            extensions.push(extension);
+        }
+    }
+    Ok(Some(feature))
+}
+
 pub(crate) unsafe fn open_shared_device(
     adapter: &super::Adapter,
     features: wgt::Features,
@@ -258,6 +328,7 @@ pub(crate) unsafe fn open_shared_device(
     {
         extensions.push(ash::khr::external_semaphore_fd::NAME);
     }
+    let mut presentation = presentation_features(adapter, &mut extensions)?;
     let mut device_features = adapter.physical_device_features(&extensions, features);
     let priorities = [1.0, 1.0];
     let queues = [vk::DeviceQueueCreateInfo::default()
@@ -267,7 +338,10 @@ pub(crate) unsafe fn open_shared_device(
     let info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queues)
         .enabled_extension_names(&extension_names);
-    let info = device_features.add_to_device_create(info);
+    let mut info = device_features.add_to_device_create(info);
+    if let Some(feature) = presentation.as_mut() {
+        info = info.push_next(feature);
+    }
     let raw = unsafe { adapter.instance.raw.create_device(adapter.raw, &info, None) }
         .map_err(super::map_host_device_oom_and_lost_err)?;
     let owner = Arc::new(NativeDevice {
@@ -277,7 +351,7 @@ pub(crate) unsafe fn open_shared_device(
         extensions: extensions.clone(),
         features,
         limits: limits.clone(),
-        queues: Arc::new(QueueGroup::new()),
+        queues: Arc::new(QueueGroup::new(presentation.is_some())),
     });
     let open_endpoint = |index| {
         let lease = owner.clone();

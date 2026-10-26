@@ -813,3 +813,111 @@ fn shared_compute_endpoint_waiting_for_host_lock_observes_drain_closure() {
 
 #[path = "submit_tests.rs"]
 mod ordered;
+
+#[test]
+fn shared_presentation_requires_version_extensions_and_feature() {
+    assert!(presentation_support(vk::API_VERSION_1_1, true, true).is_ok());
+    for (version, extensions, feature) in [
+        (vk::API_VERSION_1_0, true, true),
+        (vk::API_VERSION_1_1, false, true),
+        (vk::API_VERSION_1_1, true, false),
+    ] {
+        assert!(matches!(
+            presentation_support(version, extensions, feature),
+            Err(SharedDeviceError::PresentationUnavailable)
+        ));
+    }
+}
+
+#[test]
+#[ignore = "Requires Vulkan swapchain maintenance1 and Khronos validation"]
+fn shared_presentation_capability_is_enabled_only_by_explicit_instance() {
+    let offscreen = native_factory().unwrap();
+    assert!(!native_group(&offscreen).presentation_fences_enabled);
+    let offscreen_device = offscreen
+        .graphics
+        .device
+        .as_any()
+        .downcast_ref::<crate::vulkan::Device>()
+        .unwrap();
+    assert!(!offscreen_device
+        .shared
+        .enabled_extensions
+        .contains(&ash::ext::swapchain_maintenance1::NAME));
+    drop(offscreen);
+
+    let (backend, instance) = unsafe {
+        crate::shared::create_presentation_instance(&crate::InstanceDescriptor {
+            name: "HAL shared-presentation capability test",
+            flags: wgt::InstanceFlags::VALIDATION | wgt::InstanceFlags::DEBUG,
+            memory_budget_thresholds: wgt::MemoryBudgetThresholds {
+                for_resource_creation: Some(95),
+                for_device_loss: Some(99),
+            },
+            backend_options: Default::default(),
+            telemetry: None,
+            display: None,
+        })
+    }
+    .unwrap();
+    assert_eq!(backend, wgt::Backend::Vulkan);
+    let native = instance
+        .as_any()
+        .downcast_ref::<crate::vulkan::Instance>()
+        .unwrap();
+    assert!(native
+        .shared
+        .debug_utils
+        .as_ref()
+        .is_some_and(|debug| { debug.callback_data.validation_layer_properties.is_some() }));
+    for required in [
+        ash::khr::surface::NAME,
+        ash::khr::get_surface_capabilities2::NAME,
+        ash::ext::surface_maintenance1::NAME,
+    ] {
+        assert!(native.shared.extensions.contains(&required));
+    }
+    let adapter = unsafe { instance.enumerate_adapters(None) }
+        .into_iter()
+        .next()
+        .unwrap();
+    let endpoints = unsafe {
+        crate::shared::open_shared_device(
+            &*adapter.adapter,
+            wgt::Features::empty(),
+            &adapter.capabilities.limits,
+            &wgt::MemoryHints::default(),
+        )
+    }
+    .unwrap();
+    let group = native_group(&endpoints);
+    assert!(group.presentation_fences_enabled);
+    for endpoint in [&endpoints.graphics, &endpoints.compute] {
+        let device = endpoint
+            .device
+            .as_any()
+            .downcast_ref::<crate::vulkan::Device>()
+            .unwrap();
+        assert!(device
+            .shared
+            .enabled_extensions
+            .contains(&ash::ext::swapchain_maintenance1::NAME));
+        assert!(device
+            .shared
+            .enabled_extensions
+            .contains(&ash::khr::swapchain::NAME));
+    }
+    let (_, clone) = endpoints.context.clone_instance();
+    drop((instance, adapter));
+    let native = clone
+        .as_any()
+        .downcast_ref::<crate::vulkan::Instance>()
+        .unwrap();
+    assert!(native
+        .shared
+        .extensions
+        .contains(&ash::ext::surface_maintenance1::NAME));
+    endpoints.context.drain().unwrap();
+    drop((clone, endpoints, group));
+    assert_validation_clean();
+}

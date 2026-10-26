@@ -149,6 +149,8 @@ pub enum SharedDeviceError {
     IndependentQueuesUnavailable,
     #[error("Shared devices require native timeline semaphores")]
     TimelineSemaphoresUnavailable,
+    #[error("Shared presentation requires Vulkan 1.1 and enabled surface/swapchain maintenance1 support")]
+    PresentationUnavailable,
     #[error("The adapter is not the shared context's original instance and physical device")]
     IncompatibleAdapter,
     #[error("Native features were not enabled when the shared context was created: {0:?}")]
@@ -186,4 +188,28 @@ pub unsafe fn open_shared_device(
     }
     let _ = (adapter, features, limits, memory_hints);
     Err(SharedDeviceError::UnsupportedBackend)
+}
+
+/// Create an instance with the prerequisites for shared presentation.
+/// Native budgets, validation and backend policy come from the descriptor.
+/// Shared-device surface operations remain unavailable until generation retirement
+/// and presentation-fence tracking are installed.
+///
+/// # Safety
+/// Instance::init requirements apply.
+pub unsafe fn create_presentation_instance(
+    descriptor: &crate::InstanceDescriptor<'_>,
+) -> Result<(wgt::Backend, alloc::boxed::Box<dyn crate::DynInstance>), crate::InstanceError> {
+    #[cfg(vulkan)]
+    {
+        let instance = unsafe { crate::vulkan::Instance::init_shared_presentation(descriptor) }?;
+        return Ok((wgt::Backend::Vulkan, alloc::boxed::Box::new(instance)));
+    }
+    #[cfg(not(vulkan))]
+    {
+        let _ = descriptor;
+        Err(crate::InstanceError::new(alloc::string::String::from(
+            "Shared presentation requires the Vulkan backend",
+        )))
+    }
 }

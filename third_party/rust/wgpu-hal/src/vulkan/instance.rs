@@ -767,6 +767,20 @@ impl super::Instance {
         desc: &crate::InstanceDescriptor<'_>,
         callback: Option<Box<super::CreateInstanceCallback>>,
     ) -> Result<Self, crate::InstanceError> {
+        unsafe { Self::init_internal(desc, callback, false) }
+    }
+
+    pub(crate) unsafe fn init_shared_presentation(
+        desc: &crate::InstanceDescriptor<'_>,
+    ) -> Result<Self, crate::InstanceError> {
+        unsafe { Self::init_internal(desc, None, true) }
+    }
+
+    unsafe fn init_internal(
+        desc: &crate::InstanceDescriptor<'_>,
+        callback: Option<Box<super::CreateInstanceCallback>>,
+        shared_presentation: bool,
+    ) -> Result<Self, crate::InstanceError> {
         profiling::scope!("Init Vulkan Backend");
 
         let entry = unsafe {
@@ -822,6 +836,30 @@ impl super::Instance {
             );
 
         let mut extensions = Self::desired_extensions(&entry, instance_api_version, desc.flags)?;
+        if shared_presentation {
+            let available = Self::enumerate_instance_extension_properties(&entry, None)?;
+            let required = [
+                khr::surface::NAME,
+                khr::get_surface_capabilities2::NAME,
+                ext::surface_maintenance1::NAME,
+            ];
+            if instance_api_version < vk::API_VERSION_1_1
+                || !required.iter().all(|name| {
+                    available
+                        .iter()
+                        .any(|extension| extension.extension_name_as_c_str() == Ok(*name))
+                })
+            {
+                return Err(crate::InstanceError::new(String::from(
+                    "Shared presentation requires Vulkan 1.1, KHR_surface, KHR_get_surface_capabilities2 and EXT_surface_maintenance1",
+                )));
+            }
+            for name in required {
+                if !extensions.contains(&name) {
+                    extensions.push(name);
+                }
+            }
+        }
         let mut create_info = vk::InstanceCreateInfo::default();
 
         if let Some(callback) = callback {
