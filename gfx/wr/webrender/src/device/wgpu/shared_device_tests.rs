@@ -5,6 +5,9 @@
 #[path = "shared_canvas_tests.rs"]
 mod shared_canvas_tests;
 
+#[path = "shared_canvas_sampling_tests.rs"]
+mod shared_canvas_sampling_tests;
+
 use super::*;
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use std::{
@@ -625,6 +628,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut canvas = shared_canvas_tests::CanvasCases::default();
     let mut finalizations = shared_canvas_tests::CanvasFinalizations::default();
+    let mut sampling = shared_canvas_sampling_tests::CanvasSampling::default();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         core_device.push_error_scope(wgt::error::ErrorFilter::Validation);
         core_queue.submit(&[work.commands.clone()]);
@@ -696,6 +700,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
 
         canvas.run(&core_device, &core_queue, &graphics, &provider);
         finalizations.run(&core_device, &core_queue, &graphics, &provider, &owner);
+        sampling.run(&core_device, &core_queue, &graphics, &provider, &owner);
 
         let receipt_count = provider.receipts.lock().unwrap().len();
         core_queue.submit(&[pending.clone()]);
@@ -723,10 +728,11 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         submission.submit().unwrap();
     }));
     let gate_release = finalizations.release_gate();
+    let sampling_release = sampling.release_gate();
     provider.release_receipts();
-    let retired = match &gate_release {
-        Ok(_) => context.drain(),
-        Err(_) => Err(hal::DeviceError::Unexpected),
+    let retired = match (&gate_release, &sampling_release) {
+        (Ok(_), Ok(_)) => context.drain(),
+        _ => Err(hal::DeviceError::Unexpected),
     };
     if retired.is_err() || outcome.is_err() {
         std::mem::forget((
@@ -740,6 +746,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
             pending,
             canvas,
             finalizations,
+            sampling,
             core_queue,
             core_device,
             adapter,
@@ -749,7 +756,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
-        panic!("Shared proof retirement unconfirmed: {retired:?}, controller: {gate_release:?}");
+        panic!("Shared proof retirement unconfirmed: {retired:?}, controllers: {gate_release:?}, {sampling_release:?}");
     }
     let pixels = unsafe {
         let mapping = owner.open.device.map_buffer(&**readback, 0..pitch).unwrap();
@@ -763,7 +770,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         owner.open.device.unmap_buffer(&**readback);
         pixels
     };
-    drop((work, pending, canvas, finalizations));
+    drop((work, pending, canvas, finalizations, sampling));
     drop((core_queue, core_device, adapter, core_instance, provider));
     drop((submission, readback, target, owner, graphics, context));
     assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 0, 255]);

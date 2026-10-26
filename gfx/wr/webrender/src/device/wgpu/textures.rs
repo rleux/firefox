@@ -7,7 +7,7 @@ use super::state::UsageState;
 use super::{hal, wgt, Device, Recording};
 use crate::device::TextureFilter;
 use api::ImageFormat;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 #[path = "texture_access.rs"]
 mod access;
@@ -75,7 +75,140 @@ pub(super) fn supports_float_color_format(
         && capabilities.contains(required)
 }
 
+fn shared_image_view_descriptor(
+    descriptor: &hal::TextureDescriptor<'_>,
+    view_format: wgt::TextureFormat,
+    filter: TextureFilter,
+    force_opaque: bool,
+) -> Result<hal::TextureViewDescriptor<'static>, String> {
+    if !matches!(
+        descriptor.format,
+        wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm
+    ) || descriptor.dimension != wgt::TextureDimension::D2
+        || descriptor.size.width == 0
+        || descriptor.size.height == 0
+        || descriptor.size.depth_or_array_layers != 1
+        || descriptor.mip_level_count != 1
+        || descriptor.sample_count != 1
+        || descriptor.usage.contains(wgt::TextureUses::TRANSIENT)
+        || filter == TextureFilter::Trilinear
+    {
+        return Err("Invalid shared canvas sampling descriptor".into());
+    }
+    if (view_format != descriptor.format && !descriptor.view_formats.contains(&view_format))
+        || view_format.remove_srgb_suffix() != descriptor.format.remove_srgb_suffix()
+        || descriptor
+            .view_formats
+            .iter()
+            .any(|format| format.remove_srgb_suffix() != descriptor.format.remove_srgb_suffix())
+    {
+        return Err("Shared canvas view format is not declared or compatible".into());
+    }
+    Ok(hal::TextureViewDescriptor {
+        label: Some("WR shared canvas sampled view"),
+        swizzle: wgt::TextureComponentSwizzle {
+            a: if force_opaque {
+                wgt::ComponentSwizzle::One
+            } else {
+                wgt::ComponentSwizzle::A
+            },
+            ..Default::default()
+        },
+        format: view_format,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::RESOURCE,
+        range: wgt::ImageSubresourceRange {
+            mip_level_count: Some(1),
+            array_layer_count: Some(1),
+            ..Default::default()
+        },
+    })
+}
+
+
 impl Texture {
+    pub(super) unsafe fn from_shared_image(
+        owner: &Rc<Device>,
+        lease: Arc<dyn hal::shared_image::ImageLease>,
+        descriptor: &hal::TextureDescriptor<'_>,
+        view_format: wgt::TextureFormat,
+        filter: TextureFilter,
+        force_opaque: bool,
+    ) -> Result<Rc<Self>, String> {
+        if owner.shared.is_none() || owner.is_lost() {
+            return Err("Shared canvas sampling requires a live shared graphics device".into());
+        }
+        let view_descriptor =
+            shared_image_view_descriptor(descriptor, view_format, filter, force_opaque)?;
+        if descriptor.size.width > owner.capabilities.limits.max_texture_dimension_2d
+            || descriptor.size.height > owner.capabilities.limits.max_texture_dimension_2d
+        {
+            return Err("Shared canvas dimensions exceed renderer limits".into());
+        }
+        let required = hal::TextureFormatCapabilities::SAMPLED
+            | if filter == TextureFilter::Linear {
+                hal::TextureFormatCapabilities::SAMPLED_LINEAR
+            } else {
+                hal::TextureFormatCapabilities::empty()
+            };
+        let capabilities = unsafe { owner.adapter.texture_format_capabilities(view_format) };
+        if !supports_float_color_format(view_format, owner.features, capabilities, required) {
+            return Err("Unsupported shared canvas sampling format or filter".into());
+        }
+        let mut alias_descriptor = descriptor.clone();
+        alias_descriptor.usage = wgt::TextureUses::RESOURCE;
+        let alias = unsafe {
+            hal::shared_image::create_alias(
+                lease.clone(),
+                owner.open.device.as_ref(),
+                &alias_descriptor,
+            )
+        }
+        .map_err(|error| format!("Creating shared canvas alias: {error}"))?;
+        let raw = Rc::new(Owned::new(
+            owner,
+            alias,
+            <dyn hal::DynDevice>::destroy_texture,
+        ));
+        hal::shared_image::validate_alias(
+            lease.as_ref(),
+            owner.open.device.as_ref(),
+            &**raw,
+            owner.open.queue.as_ref(),
+            descriptor,
+        )
+        .map_err(|error| format!("Validating shared canvas owner: {error}"))?;
+        let view = unsafe {
+            owner
+                .open
+                .device
+                .create_texture_view(&**raw, &view_descriptor)
+        }
+        .map_err(|error| format!("Creating shared canvas sampled view: {error:?}"))?;
+        Ok(Rc::new(Self {
+            view: Some(Owned::new(
+                owner,
+                view,
+                <dyn hal::DynDevice>::destroy_texture_view,
+            )),
+            target: None,
+            mips: Default::default(),
+            raw,
+            size: descriptor.size,
+            format: descriptor.format,
+            filter,
+            base_mip: 0,
+            mip_count: 1,
+            usage: wgt::TextureUses::RESOURCE,
+            states: Rc::new(vec![UsageState::new(TextureState {
+                usage: wgt::TextureUses::RESOURCE,
+                initialized: true,
+            })]),
+            #[cfg(target_os = "linux")]
+            external: None,
+        }))
+    }
+
     #[cfg(target_os = "linux")]
     pub fn from_foreign_rgb(
         image: &super::ForeignRgbImage,
@@ -535,3 +668,7 @@ fn depth_and_mip_views_reuse_native_storage_without_cycles() {
     assert!(weak.upgrade().is_none());
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[cfg(test)]
+#[path = "shared_image_tests.rs"]
+mod shared_image_tests;

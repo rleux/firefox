@@ -238,17 +238,17 @@ pub(super) unsafe fn submit_with_gate(
     }
 }
 
-struct NativeGate {
+pub(super) struct NativeGate {
     _control: Rc<Device>,
     _producer: Arc<dyn hal::external_sync::Semaphore>,
-    imported: Arc<dyn hal::external_sync::Semaphore>,
+    pub(super) imported: Arc<dyn hal::external_sync::Semaphore>,
     release: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<Result<bool, String>>>,
     result: Option<Result<bool, String>>,
 }
 
 impl NativeGate {
-    fn new(graphics: &hal::DynOpenDevice) -> Self {
+    pub(super) fn new(graphics: &hal::DynOpenDevice) -> Self {
         let control = Rc::new(
             Device::new(&Options {
                 validation: true,
@@ -344,7 +344,7 @@ impl NativeGate {
         }
     }
 
-    fn release(&mut self) -> Result<bool, String> {
+    pub(super) fn release(&mut self) -> Result<bool, String> {
         if let Some(result) = &self.result {
             return result.clone();
         }

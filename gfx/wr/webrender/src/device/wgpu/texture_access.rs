@@ -28,10 +28,19 @@ impl Texture {
         Ok(SampledTexture { texture: self, view })
     }
 
-    pub(in crate::device::wgpu) fn writable(self: &Rc<Self>) -> Result<WritableTexture<'_>, String> {
+    pub(in crate::device::wgpu) fn writable(
+        self: &Rc<Self>,
+    ) -> Result<WritableTexture<'_>, String> {
         #[cfg(target_os = "linux")]
         if self.external.is_some() {
             return Err("Imported textures are read-only".into());
+        }
+        if !self.usage.intersects(
+            wgt::TextureUses::COPY_DST
+                | wgt::TextureUses::COLOR_TARGET
+                | wgt::TextureUses::DEPTH_WRITE,
+        ) {
+            return Err("Texture is read-only".into());
         }
         Ok(WritableTexture { texture: self })
     }
