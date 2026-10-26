@@ -279,6 +279,7 @@ pub mod api {
 mod dynamic;
 mod graphics;
 pub mod shared;
+pub mod shared_image;
 pub mod renderer;
 pub mod external_sync;
 pub use graphics::{

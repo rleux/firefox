@@ -38,6 +38,7 @@ pub(crate) mod renderer;
 mod sampler;
 mod semaphore_list;
 pub(crate) mod shared;
+pub(crate) mod shared_image;
 mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;
