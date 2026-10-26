@@ -309,6 +309,7 @@ pub(super) fn clear_texture_cmd(
         state.device.zero_buffer.as_ref(),
         state.snatch_guard,
         state.device.instance_flags,
+        false,
     )?;
 
     Ok(())
@@ -336,6 +337,7 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
     zero_buffer: &dyn hal::DynBuffer,
     snatch_guard: &SnatchGuard<'_>,
     instance_flags: wgt::InstanceFlags,
+    defer_device_loss: bool,
 ) -> Result<(), ClearError> {
     let dst_raw = dst_texture.try_inner(snatch_guard)?.raw();
 
@@ -395,11 +397,25 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
         ),
         TextureClearMode::Surface { .. } => {
             drop(clear_mode);
-            clear_texture_via_render_passes(dst_texture, range, true, encoder, instance_flags)?
+            clear_texture_via_render_passes(
+                dst_texture,
+                range,
+                true,
+                encoder,
+                instance_flags,
+                defer_device_loss,
+            )?
         }
         TextureClearMode::RenderPass { is_color, .. } => {
             drop(clear_mode);
-            clear_texture_via_render_passes(dst_texture, range, is_color, encoder, instance_flags)?
+            clear_texture_via_render_passes(
+                dst_texture,
+                range,
+                is_color,
+                encoder,
+                instance_flags,
+                defer_device_loss,
+            )?
         }
         TextureClearMode::None => {
             return Err(ClearError::NoValidTextureClearMode(
@@ -409,6 +425,7 @@ pub(crate) fn clear_texture<T: TextureTrackerSetSingle>(
     }
     Ok(())
 }
+
 
 fn clear_texture_via_buffer_copies(
     texture_desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
@@ -537,6 +554,7 @@ fn clear_texture_via_render_passes(
     is_color: bool,
     encoder: &mut dyn hal::DynCommandEncoder,
     instance_flags: wgt::InstanceFlags,
+    defer_device_loss: bool,
 ) -> Result<(), ClearError> {
     assert_eq!(dst_texture.desc.dimension, wgt::TextureDimension::D2);
 
@@ -605,7 +623,13 @@ fn clear_texture_via_render_passes(
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     })
-                    .map_err(|e| dst_texture.device.handle_hal_error(e))?;
+                    .map_err(|error| {
+                        if defer_device_loss {
+                            crate::device::DeviceError::from_hal(error)
+                        } else {
+                            dst_texture.device.handle_hal_error(error)
+                        }
+                    })?;
                 encoder.end_render_pass();
             }
         }

@@ -650,3 +650,105 @@ fn shared_image_aliases_transfer_between_endpoints_and_preserve_srgb_views() {
     drop(work);
     validation_clean();
 }
+
+#[test]
+#[ignore = "Requires Vulkan, two queues, validation_canary and wgpu-types/counters"]
+fn alias_validation_requires_exact_sampling_allocation_and_graphics_endpoint() {
+    let (_, adapter, pair) = factory();
+    let graphics = Arc::new(pair.graphics);
+    let compute = Arc::new(pair.compute);
+    let desc = descriptor();
+    let lease = unsafe { crate::shared_image::allocate(graphics.clone(), &desc) }.unwrap();
+    let texture = alias(&compute, &lease, &desc);
+    crate::shared_image::validate_alias(
+        lease.as_ref(),
+        &*compute.device,
+        texture.raw(),
+        &*graphics.queue,
+        &desc,
+    )
+    .unwrap();
+    let other = unsafe { crate::shared_image::allocate(graphics.clone(), &desc) }.unwrap();
+    assert!(crate::shared_image::validate_alias(
+        other.as_ref(),
+        &*compute.device,
+        texture.raw(),
+        &*graphics.queue,
+        &desc
+    )
+    .is_err());
+    let mut wrong = desc.clone();
+    wrong.mip_level_count = 2;
+    assert!(crate::shared_image::validate_alias(
+        lease.as_ref(),
+        &*compute.device,
+        texture.raw(),
+        &*graphics.queue,
+        &wrong
+    )
+    .is_err());
+    assert!(crate::shared_image::validate_alias(
+        lease.as_ref(),
+        &*compute.device,
+        texture.raw(),
+        &*compute.queue,
+        &desc
+    )
+    .is_err());
+    let native = graphics
+        .device
+        .as_any()
+        .downcast_ref::<super::super::Device>()
+        .unwrap();
+    let context = pair.context.clone();
+    let duplicate = unsafe {
+        adapter.adapter.device_from_raw_shared(
+            native.shared.raw.clone(),
+            Some(Box::new(move || drop(context))),
+            &native.shared.enabled_extensions,
+            native.shared.features,
+            &adapter.capabilities.limits,
+            &wgt::MemoryHints::MemoryUsage,
+            0,
+            0,
+            native.shared.shared_queue_group.clone(),
+        )
+    }
+    .unwrap();
+    assert!(crate::shared_image::validate_alias(
+        lease.as_ref(),
+        &*compute.device,
+        texture.raw(),
+        &duplicate.queue,
+        &desc
+    )
+    .is_err());
+    let mut unsampled = desc.clone();
+    unsampled.usage.remove(wgt::TextureUses::RESOURCE);
+    let unsampled_lease =
+        unsafe { crate::shared_image::allocate(graphics.clone(), &unsampled) }.unwrap();
+    let unsampled_alias = alias(&compute, &unsampled_lease, &unsampled);
+    assert!(crate::shared_image::validate_alias(
+        unsampled_lease.as_ref(),
+        &*compute.device,
+        unsampled_alias.raw(),
+        &*graphics.queue,
+        &unsampled
+    )
+    .is_err());
+    pair.context.drain().unwrap();
+    assert!(matches!(
+        crate::shared_image::validate_alias(
+            lease.as_ref(),
+            &*compute.device,
+            texture.raw(),
+            &*graphics.queue,
+            &desc
+        ),
+        Err(ImageLeaseError::Closed)
+    ));
+    drop((texture, unsampled_alias, lease, other, unsampled_lease));
+    assert_eq!(counts(&*graphics.device), (0, 0));
+    assert_eq!(counts(&*compute.device), (0, 0));
+    validation_clean();
+}

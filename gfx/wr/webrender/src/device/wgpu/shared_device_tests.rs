@@ -27,6 +27,7 @@ struct GraphicsProvider {
     recoveries: AtomicUsize,
     receipts: Mutex<Vec<Arc<Receipt>>>,
     lanes: Mutex<Vec<hal::shared::SharedQueueLane>>,
+    native_wait: Mutex<Option<hal::external_sync::SemaphoreValue>>,
 }
 
 struct Receipt {
@@ -117,6 +118,10 @@ impl core::graphics::GraphicsSubmissionProvider for GraphicsProvider {
             })
     }
 
+    fn graphics_queue(&self) -> Option<&dyn hal::DynQueue> {
+        Some(self.graphics.queue.as_ref())
+    }
+
     unsafe fn submit(
         &self,
         logical_queue: &dyn hal::DynQueue,
@@ -128,8 +133,7 @@ impl core::graphics::GraphicsSubmissionProvider for GraphicsProvider {
             .unwrap()
             .extend(segments.iter().map(|segment| segment.lane));
         let native = unsafe {
-            self.context
-                .submit_ordered(logical_queue, segments, terminal)
+            shared_canvas_tests::submit_with_gate(self, logical_queue, segments, terminal)
         }?;
         let receipt = Arc::new(Receipt {
             native,
@@ -504,6 +508,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         recoveries: AtomicUsize::new(0),
         receipts: Mutex::new(Vec::new()),
         lanes: Mutex::new(Vec::new()),
+        native_wait: Mutex::new(None),
     });
     let (core_device, core_queue) = unsafe {
         adapter.create_device_and_queue_from_hal_with_graphics(
@@ -619,6 +624,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         .finish(&Default::default());
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut canvas = shared_canvas_tests::CanvasCases::default();
+    let mut finalizations = shared_canvas_tests::CanvasFinalizations::default();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         core_device.push_error_scope(wgt::error::ErrorFilter::Validation);
         core_queue.submit(&[work.commands.clone()]);
@@ -689,6 +695,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         assert!(lanes[graphics_index + 1..].contains(&hal::shared::SharedQueueLane::Compute));
 
         canvas.run(&core_device, &core_queue, &graphics, &provider);
+        finalizations.run(&core_device, &core_queue, &graphics, &provider, &owner);
 
         let receipt_count = provider.receipts.lock().unwrap().len();
         core_queue.submit(&[pending.clone()]);
@@ -715,8 +722,12 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         assert_eq!(provider.recoveries.load(Ordering::SeqCst), 0);
         submission.submit().unwrap();
     }));
+    let gate_release = finalizations.release_gate();
     provider.release_receipts();
-    let retired = context.drain();
+    let retired = match &gate_release {
+        Ok(_) => context.drain(),
+        Err(_) => Err(hal::DeviceError::Unexpected),
+    };
     if retired.is_err() || outcome.is_err() {
         std::mem::forget((
             context,
@@ -728,6 +739,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
             work,
             pending,
             canvas,
+            finalizations,
             core_queue,
             core_device,
             adapter,
@@ -737,7 +749,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         if let Err(payload) = outcome {
             std::panic::resume_unwind(payload);
         }
-        panic!("Shared proof retirement unconfirmed: {retired:?}");
+        panic!("Shared proof retirement unconfirmed: {retired:?}, controller: {gate_release:?}");
     }
     let pixels = unsafe {
         let mapping = owner.open.device.map_buffer(&**readback, 0..pitch).unwrap();
@@ -751,7 +763,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         owner.open.device.unmap_buffer(&**readback);
         pixels
     };
-    drop((work, pending, canvas));
+    drop((work, pending, canvas, finalizations));
     drop((core_queue, core_device, adapter, core_instance, provider));
     drop((submission, readback, target, owner, graphics, context));
     assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 0, 255]);

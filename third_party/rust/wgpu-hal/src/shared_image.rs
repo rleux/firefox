@@ -61,3 +61,28 @@ pub unsafe fn create_alias(
     let _ = (lease, target, descriptor);
     Err(ImageLeaseError::UnsupportedBackend)
 }
+
+/// Validate a live alias and sampling capability against its exact graphics owner.
+pub fn validate_alias(
+    lease: &dyn ImageLease,
+    target: &dyn DynDevice,
+    texture: &dyn DynTexture,
+    graphics_queue: &dyn crate::DynQueue,
+    descriptor: &crate::TextureDescriptor<'_>,
+) -> Result<(), ImageLeaseError> {
+    #[cfg(vulkan)]
+    if let (Some(target), Some(texture)) = (
+        target.as_any().downcast_ref::<crate::vulkan::Device>(),
+        texture.as_any().downcast_ref::<crate::vulkan::Texture>(),
+    ) {
+        return crate::vulkan::shared_image::validate_alias(
+            lease,
+            target,
+            texture,
+            graphics_queue,
+            descriptor,
+        );
+    }
+    let _ = (lease, target, texture, graphics_queue, descriptor);
+    Err(ImageLeaseError::UnsupportedBackend)
+}

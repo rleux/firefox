@@ -15,6 +15,7 @@ use core::{
 use std::sync::Mutex as StdMutex;
 
 use crate::device::Device;
+use crate::resource::RawResourceAccess;
 use crate::graphics::{GraphicsRecordingProvider, GraphicsSubmissionProvider, NativeRetirement};
 
 const SUCCESS: usize = 0;
@@ -24,6 +25,10 @@ const PARTIAL: usize = 2;
 #[derive(Default)]
 struct Driver {
     mode: AtomicUsize,
+    clear_error: AtomicBool,
+    end_error: AtomicBool,
+    hide_graphics_queue: AtomicBool,
+    segments: StdMutex<Vec<(hal::shared::SharedQueueLane, bool, bool)>>,
     ready: AtomicU64,
     poll_error: AtomicBool,
     wait_error: AtomicBool,
@@ -51,6 +56,10 @@ impl Driver {
             let probe = std::thread::spawn(move || {
                 let snatch = device.snatchable_lock.write();
                 let indices = device.command_indices.write();
+                if let Some(queue) = device.get_queue() {
+                    let pending = queue.pending_writes.lock();
+                    drop(pending);
+                }
                 drop(indices);
                 drop(snatch);
                 let _ = sender.send(());
@@ -143,13 +152,32 @@ impl GraphicsSubmissionProvider for Provider {
             })
     }
 
+    fn graphics_queue(&self) -> Option<&dyn hal::DynQueue> {
+        if self.driver.hide_graphics_queue.load(Ordering::SeqCst) {
+            None
+        } else {
+            Some(self.graphics.queue.as_ref())
+        }
+    }
+
     unsafe fn submit(
         &self,
         queue: &dyn hal::DynQueue,
-        _segments: &[hal::shared::SharedSubmitSegment<'_>],
+        segments: &[hal::shared::SharedSubmitSegment<'_>],
         terminal: (&dyn hal::DynFence, hal::FenceValue),
     ) -> Result<Box<dyn hal::shared::SharedSubmissionReceipt>, hal::shared::SharedSubmitError> {
         self.driver.submissions.fetch_add(1, Ordering::SeqCst);
+        self.driver
+            .segments
+            .lock()
+            .unwrap()
+            .extend(segments.iter().map(|segment| {
+                (
+                    segment.lane,
+                    segment.command_buffers.is_empty(),
+                    core::ptr::eq(segment.queue, self.graphics.queue.as_ref()),
+                )
+            }));
         if self.driver.mode.load(Ordering::SeqCst) == REJECT {
             return Err(hal::shared::SharedSubmitError {
                 error: hal::DeviceError::Unexpected,
@@ -225,6 +253,9 @@ impl hal::GraphicsRecorder for Recorder {
         _desc: &hal::RenderPassDescriptor<dyn hal::DynQuerySet, dyn hal::DynTextureView>,
     ) -> Result<(), hal::DeviceError> {
         assert!(self.open && !self.pass);
+        if self.driver.clear_error.swap(false, Ordering::SeqCst) {
+            return Err(hal::DeviceError::OutOfMemory);
+        }
         self.pass = true;
         Ok(())
     }
@@ -237,6 +268,9 @@ impl hal::GraphicsRecorder for Recorder {
     }
     unsafe fn end_encoding(&mut self) -> Result<usize, hal::DeviceError> {
         assert!(self.open && !self.pass);
+        if self.driver.end_error.swap(false, Ordering::SeqCst) {
+            return Err(hal::DeviceError::OutOfMemory);
+        }
         self.open = false;
         let index = self.buffers.len();
         self.buffers.push(Box::new(BufferToken));
@@ -724,4 +758,253 @@ fn shared_wait_for_an_index_gap_still_requires_the_native_fence() {
         life.submission_complete(2),
     );
     assert!(matches!(result, Err(crate::device::WaitIdleError::Timeout)));
+}
+
+fn canvas_texture(fixture: &Fixture, render: bool) -> Arc<Texture> {
+    fixture
+        .device
+        .create_texture(&crate::resource::TextureDescriptor {
+            label: None,
+            size: wgt::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: wgt::TextureFormat::Rgba8Unorm,
+            usage: wgt::TextureUsages::COPY_SRC
+                | wgt::TextureUsages::COPY_DST
+                | if render {
+                    wgt::TextureUsages::RENDER_ATTACHMENT
+                } else {
+                    wgt::TextureUsages::empty()
+                },
+            view_formats: Vec::new(),
+        })
+}
+
+#[test]
+fn shared_canvas_no_barrier_still_retains_a_real_finalization_submission() {
+    let fixture = Fixture::new();
+    let warmup = fixture.queue.submit(&[])
+        .expect("Canvas warmup must be submitted");
+    fixture.driver.ready.store(warmup, Ordering::SeqCst);
+    fixture.device.poll(wgt::PollType::Poll).unwrap();
+    assert!(!fixture.queue.pending_writes.lock().is_recording);
+    let texture = canvas_texture(&fixture, false);
+    texture.initialization_status.write().mips[0].drain(0..1);
+    {
+        let mut trackers = fixture.device.trackers.lock();
+        let transitions: Vec<_> = trackers
+            .textures
+            .set_single(
+                &texture,
+                texture.full_range.clone(),
+                wgt::TextureUses::RESOURCE,
+            )
+            .collect();
+        assert!(!transitions.is_empty());
+    }
+    let graphics = fixture
+        .device
+        .graphics_submission
+        .as_ref()
+        .unwrap()
+        .graphics_queue()
+        .unwrap();
+    let index = unsafe {
+        fixture.queue.finalize_shared_canvas_submission(
+            &texture,
+            fixture.device.snatchable_lock.read(),
+            graphics,
+        )
+    }
+    .unwrap();
+    assert!(index > warmup);
+    assert!(texture
+        .raw(&fixture.device.snatchable_lock.read())
+        .is_none());
+    assert_eq!(
+        fixture
+            .queue
+            .lock_life()
+            .get_texture_latest_submission_index(&texture),
+        Some(index)
+    );
+    assert_eq!(
+        fixture.driver.segments.lock().unwrap().last(),
+        Some(&(hal::shared::SharedQueueLane::Graphics, true, true))
+    );
+    fixture.device.poll(wgt::PollType::Poll).unwrap();
+    assert!(!fixture.queue.lock_life().queue_empty());
+    fixture.driver.ready.store(index, Ordering::SeqCst);
+    fixture.device.poll(wgt::PollType::Poll).unwrap();
+    assert!(fixture.queue.lock_life().queue_empty());
+}
+
+#[test]
+fn shared_canvas_local_and_preflight_errors_report_loss_after_guards_drop() {
+    for failure in 0..3 {
+        let fixture = Fixture::new();
+        let texture = canvas_texture(&fixture, true);
+        match failure {
+            0 => fixture.driver.clear_error.store(true, Ordering::SeqCst),
+            1 => fixture.driver.end_error.store(true, Ordering::SeqCst),
+            _ => fixture.driver.mode.store(REJECT, Ordering::SeqCst),
+        }
+        let graphics = fixture
+            .device
+            .graphics_submission
+            .as_ref()
+            .unwrap()
+            .graphics_queue()
+            .unwrap();
+        let result = unsafe {
+            fixture.queue.finalize_shared_canvas_submission(
+                &texture,
+                fixture.device.snatchable_lock.read(),
+                graphics,
+            )
+        };
+        assert!(result.is_err());
+        fixture.driver.join_probes();
+        assert!(!fixture.device.is_valid());
+        assert!(fixture.driver.unlocked.load(Ordering::SeqCst));
+        assert_eq!(
+            fixture
+                .device
+                .last_successful_submission_index
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert!(fixture.driver.recoveries.lock().unwrap().is_empty());
+        assert!(texture
+            .raw(&fixture.device.snatchable_lock.read())
+            .is_some());
+    }
+}
+
+#[derive(Debug)]
+struct UnrelatedLease;
+impl hal::shared_image::ImageLease for UnrelatedLease {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[test]
+fn shared_canvas_without_a_graphics_endpoint_is_rejected_before_mutation() {
+    let fixture = Fixture::new();
+    let texture = canvas_texture(&fixture, false);
+    fixture
+        .driver
+        .hide_graphics_queue
+        .store(true, Ordering::SeqCst);
+    assert!(unsafe {
+        fixture
+            .queue
+            .finalize_shared_canvas(&texture, &UnrelatedLease)
+    }
+    .is_err());
+    assert!(fixture.device.is_valid());
+    assert_eq!(fixture.driver.submissions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture
+            .device
+            .last_successful_submission_index
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert!(texture
+        .raw(&fixture.device.snatchable_lock.read())
+        .is_some());
+}
+
+#[test]
+fn shared_canvas_partial_acceptance_never_expires_or_publishes_the_texture() {
+    for unconfirmed in [false, true] {
+        let fixture = Fixture::new();
+        let texture = canvas_texture(&fixture, true);
+        fixture.driver.mode.store(PARTIAL, Ordering::SeqCst);
+        fixture
+            .driver
+            .drain_error
+            .store(unconfirmed, Ordering::SeqCst);
+        let graphics = fixture
+            .device
+            .graphics_submission
+            .as_ref()
+            .unwrap()
+            .graphics_queue()
+            .unwrap();
+        let result = unsafe {
+            fixture.queue.finalize_shared_canvas_submission(
+                &texture,
+                fixture.device.snatchable_lock.read(),
+                graphics,
+            )
+        };
+        assert!(result.is_err());
+        fixture.driver.join_probes();
+        assert!(!fixture.device.is_valid());
+        assert!(fixture.driver.unlocked.load(Ordering::SeqCst));
+        assert!(texture
+            .raw(&fixture.device.snatchable_lock.read())
+            .is_some());
+        assert_eq!(
+            fixture
+                .device
+                .last_successful_submission_index
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            *fixture.driver.recoveries.lock().unwrap(),
+            [if unconfirmed {
+                NativeRetirement::Unconfirmed
+            } else {
+                NativeRetirement::Confirmed
+            }]
+        );
+        if unconfirmed {
+            let index = fixture
+                .device
+                .command_indices
+                .read()
+                .active_submission_index;
+            let mut life = fixture.queue.lock_life();
+            assert!(life.triage_submissions(u64::MAX).is_empty());
+            assert!(!life.queue_empty());
+            assert_eq!(
+                life.get_texture_latest_submission_index(&texture),
+                Some(index)
+            );
+            let active = life.active.last().unwrap();
+            assert_eq!(active.completion, Completion::Unconfirmed);
+            assert!(fixture.device.get_queue().is_some());
+            assert_eq!(fixture.driver.executions_dropped.load(Ordering::SeqCst), 0);
+        } else {
+            assert!(fixture.queue.lock_life().queue_empty());
+        }
+    }
+}
+
+#[test]
+fn shared_canvas_wrong_logical_device_is_rejected_before_mutation() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let texture = canvas_texture(&first, false);
+    assert!(matches!(
+        unsafe {
+            second
+                .queue
+                .finalize_shared_canvas(&texture, &UnrelatedLease)
+        },
+        Err(crate::device::DeviceError::DeviceMismatch(_))
+    ));
+    assert!(first.device.is_valid() && second.device.is_valid());
+    assert_eq!(second.driver.submissions.load(Ordering::SeqCst), 0);
+    assert!(texture.raw(&first.device.snatchable_lock.read()).is_some());
 }

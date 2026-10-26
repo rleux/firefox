@@ -47,6 +47,12 @@ pub trait GraphicsSubmissionProvider: fmt::Debug + wgt::WasmNotSendSync {
         queue: &'a dyn hal::DynQueue,
     ) -> Result<Vec<GraphicsSubmitPart<'a>>, hal::DeviceError>;
 
+    /// Borrow the stable graphics endpoint from the same retained owner used
+    /// by the recording provider; another wrapper of its native queue is invalid.
+    fn graphics_queue(&self) -> Option<&dyn hal::DynQueue> {
+        None
+    }
+
     /// # Safety
     ///
     /// The requirements of SharedDeviceContext::submit_ordered apply.

@@ -703,6 +703,7 @@ fn handle_texture_init(
                 state.device.zero_buffer.as_ref(),
                 state.snatch_guard,
                 state.device.instance_flags,
+                false,
             )?;
         }
     }

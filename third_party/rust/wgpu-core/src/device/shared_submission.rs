@@ -36,6 +36,7 @@ impl Queue {
         mut executions: Vec<EncoderInFlight>,
         surface_textures: FastHashMap<*const Texture, Arc<Texture>>,
         submit_index: SubmissionIndex,
+        graphics_tail: Option<&'a dyn hal::DynQueue>,
     ) -> Result<SubmissionResult<'a>, DeviceError> {
         let provider = self.device.graphics_submission.as_ref().unwrap().clone();
         let queue_lease = self
@@ -52,7 +53,7 @@ impl Queue {
         {
             Ok(parts) => {
                 let buffers: Vec<_> = parts.iter().map(|part| [part.buffer]).collect();
-                let segments: Vec<_> = parts
+                let mut segments: Vec<_> = parts
                     .iter()
                     .zip(&buffers)
                     .map(|(part, buffers)| hal::shared::SharedSubmitSegment {
@@ -62,6 +63,14 @@ impl Queue {
                         synchronization: None,
                     })
                     .collect();
+                if let Some(queue) = graphics_tail {
+                    segments.push(hal::shared::SharedSubmitSegment {
+                        lane: hal::shared::SharedQueueLane::Graphics,
+                        queue,
+                        command_buffers: &[],
+                        synchronization: None,
+                    });
+                }
                 unsafe {
                     provider.submit(
                         self.raw(),
@@ -128,6 +137,8 @@ impl Queue {
             }
         }
     }
+
+
 }
 
 impl Queue {

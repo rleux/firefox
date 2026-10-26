@@ -69,6 +69,20 @@ use super::{
 
 use wgpu_sync::atomic::AtomicU64;
 
+pub(super) fn is_shared_canvas_descriptor<L, V>(desc: &wgt::TextureDescriptor<L, V>) -> bool {
+    matches!(
+        desc.format,
+        TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm
+    ) && desc.dimension == wgt::TextureDimension::D2
+        && desc.size.depth_or_array_layers == 1
+        && desc.mip_level_count == 1
+        && desc.sample_count == 1
+        && !desc
+            .usage
+            .contains(wgt::TextureUsages::TRANSIENT_ATTACHMENT)
+}
+
+
 pub(crate) struct CommandIndices {
     /// The index of the last command submission that was attempted.
     ///
@@ -2331,15 +2345,7 @@ impl Device {
     ) -> (Arc<Texture>, Option<Arc<dyn hal::shared_image::ImageLease>>) {
         profiling::scope!("Device::create_texture_with_shared_image");
         self.create_texture_with_allocator(desc, |hal_desc| {
-            if !matches!(
-                hal_desc.format,
-                TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm
-            ) || hal_desc.dimension != wgt::TextureDimension::D2
-                || hal_desc.size.depth_or_array_layers != 1
-                || hal_desc.mip_level_count != 1
-                || hal_desc.sample_count != 1
-                || hal_desc.usage.contains(wgt::TextureUses::TRANSIENT)
-            {
+            if !is_shared_canvas_descriptor(desc) {
                 log::error!("Shared canvas allocation received a non-canvas descriptor");
                 return Err(self.handle_hal_error(hal::DeviceError::Unexpected).into());
             }

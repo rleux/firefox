@@ -160,6 +160,7 @@ impl Queue {
                 device.zero_buffer.as_ref(),
                 &submission.snatch_guard,
                 device.instance_flags,
+                false,
             )
             .map_err(|e| match e {
                 ClearError::Device(e) => e,
@@ -226,6 +227,158 @@ impl Queue {
         submission.submit(pending_writes)?;
 
         Ok(())
+    }
+
+    /// Finalize a trusted canvas on the shared graphics queue and expire its logical texture.
+    /// The returned index is completion bookkeeping, not a readiness certificate.
+    /// Admission rejection does not establish native retirement.
+    ///
+    /// # Safety
+    /// Serialize all logical device/queue access through this entire operation.
+    /// Retain the independent lease for every subsequent native consumer.
+    pub unsafe fn finalize_shared_canvas(
+        self: &Arc<Self>,
+        texture: &Arc<Texture>,
+        lease: &dyn hal::shared_image::ImageLease,
+    ) -> Result<SubmissionIndex, DeviceError> {
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = (texture, lease);
+            Err(DeviceError::Lost)
+        }
+        #[cfg(feature = "std")]
+        {
+            self.device.check_is_valid()?;
+            texture.same_device_as(self.as_ref())?;
+            if !super::resource::is_shared_canvas_descriptor(texture.descriptor()) {
+                return Err(DeviceError::Lost);
+            }
+            let graphics = self
+                .device
+                .graphics_submission
+                .as_ref()
+                .and_then(|provider| provider.graphics_queue())
+                .ok_or(DeviceError::Lost)?;
+            let snatch_guard = self.device.snatchable_lock.read();
+            {
+                let TextureInner::Native { raw } = texture
+                    .try_inner(&snatch_guard)
+                    .map_err(|_| DeviceError::Lost)?
+                else {
+                    return Err(DeviceError::Lost);
+                };
+                let desc = texture.descriptor();
+                let descriptor = hal::TextureDescriptor {
+                    label: None,
+                    size: desc.size,
+                    mip_level_count: desc.mip_level_count,
+                    sample_count: desc.sample_count,
+                    dimension: desc.dimension,
+                    format: desc.format,
+                    usage: texture._hal_usage,
+                    memory_flags: hal::MemoryFlags::empty(),
+                    view_formats: desc
+                        .view_formats
+                        .iter()
+                        .copied()
+                        .filter(|format| *format != desc.format)
+                        .collect(),
+                };
+                hal::shared_image::validate_alias(
+                    lease,
+                    self.device.raw(),
+                    raw.as_ref(),
+                    graphics,
+                    &descriptor,
+                )
+                .map_err(|_| DeviceError::Lost)?;
+            }
+            unsafe { self.finalize_shared_canvas_submission(texture, snatch_guard, graphics) }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub(super) unsafe fn finalize_shared_canvas_submission<'a>(
+        self: &'a Arc<Self>,
+        texture: &Arc<Texture>,
+        snatch_guard: SnatchGuard<'a>,
+        graphics: &'a dyn hal::DynQueue,
+    ) -> Result<SubmissionIndex, DeviceError> {
+        let mut mutated = false;
+        let result: Result<SubmissionIndex, DeviceError> = (|| {
+            let mut submission = self.allocate_submission(snatch_guard)?;
+            let index = submission.index;
+            submission.graphics_tail = Some(graphics);
+            let needs_clear = texture.initialization_status.read().mips[0]
+                .check(0..1)
+                .is_some();
+            let mut pending_writes = self.pending_writes.lock();
+            mutated = true;
+            pending_writes
+                .try_activate()
+                .map_err(DeviceError::from_hal)?;
+            pending_writes.insert_texture(texture);
+            if needs_clear {
+                let encoder = pending_writes.activate();
+                let mut trackers = self.device.trackers.lock();
+                crate::command::clear_texture(
+                    texture,
+                    TextureInitRange {
+                        mip_range: 0..1,
+                        layer_range: 0..1,
+                    },
+                    None,
+                    encoder,
+                    &mut trackers.textures,
+                    &self.device.alignments,
+                    self.device.zero_buffer.as_ref(),
+                    &submission.snatch_guard,
+                    self.device.instance_flags,
+                    true,
+                )
+                .map_err(|error| match error {
+                    ClearError::Device(error) => error,
+                    _ => DeviceError::Lost,
+                })?;
+                texture.initialization_status.write().mips[0].drain(0..1);
+            }
+            let pending: Vec<_> = self
+                .device
+                .trackers
+                .lock()
+                .textures
+                .set_single(
+                    texture,
+                    texture.full_range.clone(),
+                    wgt::TextureUses::RESOURCE,
+                )
+                .collect();
+            if !pending.is_empty() {
+                let raw = texture
+                    .raw(&submission.snatch_guard)
+                    .ok_or(DeviceError::Lost)?;
+                let barriers: Vec<_> = pending
+                    .into_iter()
+                    .map(|transition| transition.into_hal(raw))
+                    .collect();
+                unsafe { pending_writes.activate().transition_textures(&barriers) };
+            }
+            let submitted = submission.submit(pending_writes)?;
+            drop(submitted);
+            Ok(index)
+        })();
+        match result {
+            Ok(index) => {
+                texture.destroy();
+                Ok(index)
+            }
+            Err(error) => {
+                if mutated {
+                    self.device.lose("Shared canvas finalization failed");
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Maintains the queue's list of finished command buffers.
@@ -605,19 +758,31 @@ impl PendingWrites {
         device: &Arc<Device>,
         queue: &Queue,
         snatch_guard: &SnatchGuard,
+        defer_device_loss: bool,
     ) -> Result<Option<EncoderInFlight>, DeviceError> {
         if self.is_recording {
             let pending_buffers = mem::take(&mut self.dst_buffers);
             let pending_textures = mem::take(&mut self.dst_textures);
             let pending_blas_s = mem::take(&mut self.copied_blas_s);
 
-            let cmd_buf = unsafe { self.command_encoder.end_encoding() }
-                .map_err(|e| device.handle_hal_error(e))?;
+            let cmd_buf = unsafe { self.command_encoder.end_encoding() }.map_err(|error| {
+                if defer_device_loss {
+                    DeviceError::from_hal(error)
+                } else {
+                    device.handle_hal_error(error)
+                }
+            })?;
             self.is_recording = false;
 
             let new_encoder = command_allocator
                 .acquire_encoder(device, queue.raw())
-                .map_err(|e| device.handle_hal_error(e))?;
+                .map_err(|error| {
+                    if defer_device_loss {
+                        DeviceError::from_hal(error)
+                    } else {
+                        device.handle_hal_error(error)
+                    }
+                })?;
 
             let mut encoder = EncoderInFlight {
                 inner: crate::command::InnerCommandEncoder {
@@ -653,19 +818,23 @@ impl PendingWrites {
     }
 
     pub fn activate(&mut self) -> &mut dyn hal::DynCommandEncoder {
+        self.try_activate().unwrap()
+    }
+
+    fn try_activate(&mut self) -> Result<&mut dyn hal::DynCommandEncoder, hal::DeviceError> {
         if !self.is_recording {
             unsafe {
-                self.command_encoder
-                    .begin_encoding(hal_label(
-                        Some("(wgpu internal) PendingWrites"),
-                        self.instance_flags,
-                    ))
-                    .unwrap();
+                self.command_encoder.begin_encoding(hal_label(
+                    Some("(wgpu internal) PendingWrites"),
+                    self.instance_flags,
+                ))?;
             }
             self.is_recording = true;
         }
-        self.command_encoder.as_mut()
+        Ok(self.command_encoder.as_mut())
     }
+
+
 }
 
 impl Drop for PendingWrites {
@@ -829,6 +998,8 @@ pub(crate) struct PendingSubmission<'a> {
 
     /// The index this submission has been assigned.
     pub index: SubmissionIndex,
+
+    graphics_tail: Option<&'a dyn hal::DynQueue>,
 }
 
 pub(crate) struct SubmissionResult<'a> {
@@ -1220,6 +1391,7 @@ impl Queue {
                     self.device.zero_buffer.as_ref(),
                     &snatch_guard,
                     self.device.instance_flags,
+                    false,
                 )
                 .map_err(QueueWriteError::from)?;
             }
@@ -1506,6 +1678,7 @@ impl Queue {
                     self.device.zero_buffer.as_ref(),
                     &snatch_guard,
                     self.device.instance_flags,
+                    false,
                 )
                 .map_err(QueueWriteError::from)?;
             }
@@ -1949,6 +2122,7 @@ impl Queue {
             executions: Vec::new(),
             surface_textures: FastHashMap::default(),
             index,
+            graphics_tail: None,
         };
 
         Ok(submission)
@@ -1981,6 +2155,7 @@ impl Queue {
             mut executions,
             mut surface_textures,
             index: submit_index,
+            graphics_tail,
         } = prepared;
 
         let mut used_surface_textures = track::TextureUsageScope::default();
@@ -2028,6 +2203,7 @@ impl Queue {
             &self.device,
             self,
             &snatch_guard,
+            graphics_tail.is_some(),
         ) {
             Ok(Some(pending_execution)) => {
                 executions.insert(0, pending_execution);
@@ -2044,6 +2220,7 @@ impl Queue {
                 executions,
                 surface_textures,
                 submit_index,
+                graphics_tail,
             );
         }
         if self.device.graphics_provider.is_some() {

@@ -131,15 +131,10 @@ pub(crate) unsafe fn allocate(
     }))
 }
 
-pub(crate) unsafe fn create_alias(
-    lease: Arc<dyn ImageLease>,
+fn alias_device(
+    allocation: &Allocation,
     target: &super::Device,
-    desc: &crate::TextureDescriptor<'_>,
-) -> Result<Box<dyn crate::DynTexture>, ImageLeaseError> {
-    let allocation = lease
-        .as_any()
-        .downcast_ref::<Allocation>()
-        .ok_or(ImageLeaseError::IncompatibleDevice)?;
+) -> Result<Arc<super::shared::QueueGroup>, ImageLeaseError> {
     let owner = allocation
         .owner
         .device
@@ -161,6 +156,19 @@ pub(crate) unsafe fn create_alias(
     {
         return Err(ImageLeaseError::IncompatibleDevice);
     }
+    Ok(group)
+}
+
+pub(crate) unsafe fn create_alias(
+    lease: Arc<dyn ImageLease>,
+    target: &super::Device,
+    desc: &crate::TextureDescriptor<'_>,
+) -> Result<Box<dyn crate::DynTexture>, ImageLeaseError> {
+    let allocation = lease
+        .as_any()
+        .downcast_ref::<Allocation>()
+        .ok_or(ImageLeaseError::IncompatibleDevice)?;
+    let group = alias_device(allocation, target)?;
     if !compatible(&allocation.descriptor, desc) {
         return Err(ImageLeaseError::InvalidDescriptor);
     }
@@ -182,6 +190,42 @@ pub(crate) unsafe fn create_alias(
     };
     unsafe { target.add_raw_texture(&alias) };
     Ok(Box::new(alias))
+}
+
+pub(crate) fn validate_alias(
+    lease: &dyn ImageLease,
+    target: &super::Device,
+    texture: &super::Texture,
+    graphics_queue: &dyn crate::DynQueue,
+    descriptor: &crate::TextureDescriptor<'_>,
+) -> Result<(), ImageLeaseError> {
+    let allocation = lease
+        .as_any()
+        .downcast_ref::<Allocation>()
+        .ok_or(ImageLeaseError::IncompatibleDevice)?;
+    let group = alias_device(allocation, target)?;
+    let original = allocation.texture.as_ref().unwrap();
+    if !compatible(&allocation.descriptor, descriptor)
+        || !core::ptr::eq(allocation.owner.queue.as_ref(), graphics_queue)
+        || !allocation
+            .descriptor
+            .usage
+            .contains(wgt::TextureUses::RESOURCE)
+        || texture.raw != original.raw
+        || texture.format != original.format
+        || texture.copy_size.width != original.copy_size.width
+        || texture.copy_size.height != original.copy_size.height
+        || texture.copy_size.depth != original.copy_size.depth
+        || !matches!(&texture.memory, super::TextureMemory::External)
+        || texture.drop_guard.is_none()
+    {
+        return Err(ImageLeaseError::InvalidDescriptor);
+    }
+    let _host = group.host[target.shared.queue_index as usize].lock();
+    if group.closed.load(Ordering::Acquire) {
+        return Err(ImageLeaseError::Closed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -216,6 +216,7 @@ pub(crate) fn fixup_discarded_surfaces<InitIter: Iterator<Item = TextureSurfaceD
             device.zero_buffer.as_ref(),
             snatch_guard,
             device.instance_flags,
+            false,
         )
         .unwrap();
     }
@@ -400,6 +401,7 @@ impl BakedCommands {
                     device.zero_buffer.as_ref(),
                     snatch_guard,
                     device.instance_flags,
+                    false,
                 );
 
                 // We panic on destroyed textures for symmetry with buffer
@@ -478,6 +480,7 @@ impl BakedCommands {
                 device.zero_buffer.as_ref(),
                 snatch_guard,
                 device.instance_flags,
+                false,
             );
             // We panic on destroyed textures for symmetry with the main buffer
             // and initialization pass. It should not happen, but supposing it
