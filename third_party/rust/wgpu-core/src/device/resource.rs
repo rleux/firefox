@@ -2136,10 +2136,14 @@ impl Device {
         Ok((format_features, hal_view_formats))
     }
 
-    fn create_texture_inner(
+    fn create_texture_inner<T>(
         self: &Arc<Self>,
         desc: &resource::TextureDescriptor,
-    ) -> Result<Arc<Texture>, resource::CreateTextureError> {
+        allocate: impl FnOnce(
+            &hal::TextureDescriptor<'_>,
+        )
+            -> Result<(Box<dyn hal::DynTexture>, T), resource::CreateTextureError>,
+    ) -> Result<(Arc<Texture>, T), resource::CreateTextureError> {
         let (format_features, hal_view_formats) = self.validate_texture_descriptor_inner(desc)?;
 
         let hal_usage = conv::map_texture_usage_for_texture(desc, &format_features);
@@ -2156,8 +2160,12 @@ impl Device {
             view_formats: hal_view_formats,
         };
 
-        let raw_texture = unsafe { self.raw().create_texture(&hal_desc) }
-            .map_err(|e| self.handle_hal_error_with_nonfatal_oom(e))?;
+        let (raw_texture, allocation) = allocate(&hal_desc)?;
+        let raw_texture = guard(raw_texture, |raw| {
+            #[cfg(test)]
+            shared_image_tests::record("texture");
+            unsafe { self.raw().destroy_texture(raw) };
+        });
 
         let clear_mode = if hal_usage
             .contains(wgt::TextureUses::DEPTH_WRITE | wgt::TextureUses::STENCIL_WRITE)
@@ -2178,7 +2186,19 @@ impl Device {
                 self.instance_flags,
             );
 
-            let mut clear_views = SmallVec::new();
+            let mut clear_views = guard(
+                SmallVec::<[ManuallyDrop<Box<dyn hal::DynTextureView>>; 1]>::new(),
+                |views| {
+                    for view in views {
+                        #[cfg(test)]
+                        shared_image_tests::record("view");
+                        unsafe {
+                            self.raw()
+                                .destroy_texture_view(ManuallyDrop::into_inner(view))
+                        };
+                    }
+                },
+            );
             for mip_level in 0..desc.mip_level_count {
                 for array_layer in 0..desc.size.depth_or_array_layers {
                     macro_rules! push_clear_view {
@@ -2197,11 +2217,18 @@ impl Device {
                                 },
                                 swizzle: wgt::TextureComponentSwizzle::default(),
                             };
+                            #[cfg(test)]
+                            let view = shared_image_tests::create_clear_view(
+                                self.raw(),
+                                raw_texture.as_ref(),
+                                &desc,
+                            );
+                            #[cfg(not(test))]
+                            let view = unsafe {
+                                self.raw().create_texture_view(raw_texture.as_ref(), &desc)
+                            };
                             clear_views.push(ManuallyDrop::new(
-                                unsafe {
-                                    self.raw().create_texture_view(raw_texture.as_ref(), &desc)
-                                }
-                                .map_err(|e| self.handle_hal_error(e))?,
+                                view.map_err(|e| self.handle_hal_error(e))?,
                             ));
                         };
                     }
@@ -2218,7 +2245,7 @@ impl Device {
                 }
             }
             resource::TextureClearMode::RenderPass {
-                clear_views,
+                clear_views: ScopeGuard::into_inner(clear_views),
                 is_color,
             }
         } else {
@@ -2227,7 +2254,9 @@ impl Device {
 
         let texture = Texture::new(
             self,
-            resource::TextureInner::Native { raw: raw_texture },
+            resource::TextureInner::Native {
+                raw: ScopeGuard::into_inner(raw_texture),
+            },
             hal_usage,
             desc,
             format_features,
@@ -2242,17 +2271,24 @@ impl Device {
             .textures
             .insert_single(&texture, wgt::TextureUses::UNINITIALIZED);
 
-        Ok(texture)
+        Ok((texture, allocation))
     }
 
-    /// <https://www.w3.org/TR/webgpu/#dom-gpudevice-createtexture>
-    pub fn create_texture(self: &Arc<Self>, desc: &resource::TextureDescriptor) -> Arc<Texture> {
-        profiling::scope!("Device::create_texture");
-
-        let texture = self.create_texture_inner(desc).unwrap_or_else(|err| {
-            self.handle_error(err, desc.label.as_deref(), "Device::create_texture");
-            Texture::invalid(self, desc)
-        });
+    fn create_texture_with_allocator<T>(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+        allocate: impl FnOnce(
+            &hal::TextureDescriptor<'_>,
+        )
+            -> Result<(Box<dyn hal::DynTexture>, T), resource::CreateTextureError>,
+    ) -> (Arc<Texture>, Option<T>) {
+        let (texture, allocation) = match self.create_texture_inner(desc, allocate) {
+            Ok((texture, allocation)) => (texture, Some(allocation)),
+            Err(error) => {
+                self.handle_error(error, desc.label.as_deref(), "Device::create_texture");
+                (Texture::invalid(self, desc), None)
+            }
+        };
         api_log!(
             "Device::create_texture({desc:?}) -> {:?}",
             Arc::as_ptr(&texture)
@@ -2267,7 +2303,66 @@ impl Device {
                 desc.clone(),
             ));
         }
-        texture
+        (texture, allocation)
+    }
+
+    /// <https://www.w3.org/TR/webgpu/#dom-gpudevice-createtexture>
+    pub fn create_texture(self: &Arc<Self>, desc: &resource::TextureDescriptor) -> Arc<Texture> {
+        profiling::scope!("Device::create_texture");
+        self.create_texture_with_allocator(desc, |hal_desc| {
+            unsafe { self.raw().create_texture(hal_desc) }
+                .map(|raw| (raw, ()))
+                .map_err(|error| self.handle_hal_error_with_nonfatal_oom(error).into())
+        })
+        .0
+    }
+
+    /// Allocate a validated canvas texture and return its independent storage lease.
+    ///
+    /// # Safety
+    /// The graphics endpoint must be the retained shared owner of this device.
+    /// Only RGBA8/BGRA8 D2, single-layer/mip/sample, non-transient canvases are
+    /// admitted. Retain the lease through derived aliases/views and native work.
+    /// Owner/admission failures close this logical device without a fallback.
+    pub unsafe fn create_texture_with_shared_image(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+        graphics: Arc<hal::DynOpenDevice>,
+    ) -> (Arc<Texture>, Option<Arc<dyn hal::shared_image::ImageLease>>) {
+        profiling::scope!("Device::create_texture_with_shared_image");
+        self.create_texture_with_allocator(desc, |hal_desc| {
+            if !matches!(
+                hal_desc.format,
+                TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm
+            ) || hal_desc.dimension != wgt::TextureDimension::D2
+                || hal_desc.size.depth_or_array_layers != 1
+                || hal_desc.mip_level_count != 1
+                || hal_desc.sample_count != 1
+                || hal_desc.usage.contains(wgt::TextureUses::TRANSIENT)
+            {
+                log::error!("Shared canvas allocation received a non-canvas descriptor");
+                return Err(self.handle_hal_error(hal::DeviceError::Unexpected).into());
+            }
+            let map_error = |error| match error {
+                hal::shared_image::ImageLeaseError::Device(error) => {
+                    self.handle_hal_error_with_nonfatal_oom(error)
+                }
+                error => {
+                    log::error!("Shared canvas allocation rejected: {error}");
+                    self.handle_hal_error(hal::DeviceError::Unexpected)
+                }
+            };
+            let mut physical = hal_desc.clone();
+            physical.usage |= wgt::TextureUses::RESOURCE;
+            #[cfg(test)]
+            shared_image_tests::record("allocate");
+            let lease =
+                unsafe { hal::shared_image::allocate(graphics, &physical) }.map_err(&map_error)?;
+            let raw =
+                unsafe { hal::shared_image::create_alias(lease.clone(), self.raw(), hal_desc) }
+                    .map_err(map_error)?;
+            Ok((raw, lease))
+        })
     }
 
     /// Creates a texture that is guaranteed to be invalid
@@ -5760,3 +5855,7 @@ impl Device {
 crate::impl_resource_type!(Device);
 crate::impl_labeled!(Device);
 crate::impl_storage_item!(Device);
+
+#[cfg(test)]
+#[path = "shared_image_tests.rs"]
+mod shared_image_tests;

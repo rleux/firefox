@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#[path = "shared_canvas_tests.rs"]
+mod shared_canvas_tests;
+
 use super::*;
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 use std::{
@@ -615,6 +618,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         .create_command_encoder(&Default::default())
         .finish(&Default::default());
     let events = Arc::new(Mutex::new(Vec::new()));
+    let mut canvas = shared_canvas_tests::CanvasCases::default();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         core_device.push_error_scope(wgt::error::ErrorFilter::Validation);
         core_queue.submit(&[work.commands.clone()]);
@@ -684,6 +688,8 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         assert!(lanes[..graphics_index].contains(&hal::shared::SharedQueueLane::Compute));
         assert!(lanes[graphics_index + 1..].contains(&hal::shared::SharedQueueLane::Compute));
 
+        canvas.run(&core_device, &core_queue, &graphics, &provider);
+
         let receipt_count = provider.receipts.lock().unwrap().len();
         core_queue.submit(&[pending.clone()]);
         assert!(provider.receipts.lock().unwrap().len() > receipt_count);
@@ -709,6 +715,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         assert_eq!(provider.recoveries.load(Ordering::SeqCst), 0);
         submission.submit().unwrap();
     }));
+    provider.release_receipts();
     let retired = context.drain();
     if retired.is_err() || outcome.is_err() {
         std::mem::forget((
@@ -720,6 +727,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
             readback,
             work,
             pending,
+            canvas,
             core_queue,
             core_device,
             adapter,
@@ -743,7 +751,7 @@ fn shared_endpoint_records_webgpu_and_renders_webrender() {
         owner.open.device.unmap_buffer(&**readback);
         pixels
     };
-    drop((work, pending));
+    drop((work, pending, canvas));
     drop((core_queue, core_device, adapter, core_instance, provider));
     drop((submission, readback, target, owner, graphics, context));
     assert_eq!(pixels, [255, 0, 0, 255, 0, 0, 0, 255]);
