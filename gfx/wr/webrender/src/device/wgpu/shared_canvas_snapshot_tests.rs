@@ -45,12 +45,13 @@ fn native_bytes(format: wgt::TextureFormat) -> Vec<u8> {
 struct Source {
     texture: Arc<core::resource::Texture>,
     lease: Option<Arc<dyn hal::shared_image::ImageLease>>,
+    epoch: Option<Arc<hal::shared_image::ImageEpoch>>,
     descriptor: hal::TextureDescriptor<'static>,
 }
 
 #[derive(Default)]
 pub(super) struct CanvasSnapshots {
-    renderer: Option<RenderDevice>,
+    pub(super) renderer: Option<RenderDevice>,
     program: Option<Program>,
     vao: Option<VertexArray>,
     vertices: Option<crate::device::Buffer>,
@@ -61,6 +62,27 @@ pub(super) struct CanvasSnapshots {
 }
 
 impl CanvasSnapshots {
+    pub(super) fn cleanup(&mut self) {
+        let renderer = self.renderer.as_mut().unwrap();
+        renderer
+            .vertex_arrays
+            .delete(self.vao.as_mut().unwrap())
+            .unwrap();
+        renderer
+            .vertex_arrays
+            .delete_buffer(self.vertices.as_mut().unwrap())
+            .unwrap();
+        renderer
+            .vertex_arrays
+            .delete_buffer(self.instances.as_mut().unwrap())
+            .unwrap();
+        renderer
+            .programs
+            .delete(self.program.as_mut().unwrap())
+            .unwrap();
+        drop(self.renderer.take());
+    }
+
     pub(super) fn release_gate(&mut self) -> Result<bool, String> {
         let released = self.gate.as_mut().map_or(Ok(true), NativeGate::release);
         if let Some(trigger) = self.trigger.take() {
@@ -71,7 +93,7 @@ impl CanvasSnapshots {
         released
     }
 
-    fn setup(&mut self, owner: &Rc<Device>) {
+    pub(super) fn setup(&mut self, owner: &Rc<Device>) {
         self.renderer = Some(RenderDevice::new(owner).unwrap());
         let renderer = self.renderer.as_mut().unwrap();
         let mut program = renderer
@@ -152,6 +174,7 @@ impl CanvasSnapshots {
         self.sources.push(Source {
             texture,
             lease: Some(lease.expect("Native snapshot allocation must succeed")),
+            epoch: None,
             descriptor: hal::TextureDescriptor {
                 label: None,
                 size: desc.size,
@@ -193,8 +216,7 @@ impl CanvasSnapshots {
                 .textures
                 .external_textures()
                 .register_shared_image(
-                    source.lease.as_ref().unwrap().clone(),
-                    &source.descriptor,
+                    source.epoch.as_ref().unwrap().clone(),
                     if srgb {
                         format.add_srgb_suffix()
                     } else {
@@ -207,7 +229,7 @@ impl CanvasSnapshots {
         .unwrap()
     }
 
-    fn begin_draw(&mut self, handle: ExternalTextureHandle) {
+    pub(super) fn begin_draw(&mut self, handle: ExternalTextureHandle) {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.begin_frame().unwrap();
         renderer
@@ -253,14 +275,14 @@ impl CanvasSnapshots {
         renderer.draw_instanced(1, 1).unwrap();
     }
 
-    fn verify_draw(&self, srgb: bool, opaque: bool) {
+    pub(super) fn verify_draw(&self, srgb: bool, opaque: bool) {
         let renderer = self.renderer.as_ref().unwrap();
         let output = renderer.textures.output().unwrap();
         let bytes = output.readback(output_rect()).unwrap().wait().unwrap();
         verify_pixels(&bytes, srgb, opaque);
     }
 
-    fn finish_draw(&mut self) {
+    pub(super) fn finish_draw(&mut self) {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.end_render_pass(StoreOp::Store).unwrap();
         renderer.end_frame().unwrap();
@@ -306,10 +328,12 @@ impl CanvasSnapshots {
         );
         let source = &self.sources[index];
         let finalized = unsafe {
-            queue.finalize_shared_canvas(&source.texture, &**source.lease.as_ref().unwrap())
+            queue.finalize_shared_canvas(&source.texture, source.lease.as_ref().unwrap().clone())
         }
         .unwrap();
-        let lease = Arc::downgrade(source.lease.as_ref().unwrap());
+        let submission = finalized.submission_index();
+        self.sources[index].epoch = Some(finalized.publish_epoch());
+        let lease = Arc::downgrade(self.sources[index].lease.as_ref().unwrap());
         let handle = self.register(index, true, true);
         let renderer = self.renderer.as_mut().unwrap();
         let registry = renderer.textures.external_textures();
@@ -318,6 +342,7 @@ impl CanvasSnapshots {
         assert!(!source.supports_copy_src());
         drop(source);
         drop(self.sources[index].lease.take());
+        drop(self.sources[index].epoch.take());
         assert!(renderer.snapshot_shared_image(handle, full()).is_err());
         assert!(renderer.failure().is_none());
         self.begin_draw(handle);
@@ -332,7 +357,7 @@ impl CanvasSnapshots {
         provider.release_receipts();
         device
             .poll(wgt::PollType::Wait {
-                submission_index: Some(finalized),
+                submission_index: Some(submission),
                 timeout: Some(std::time::Duration::from_secs(30)),
             })
             .unwrap();
@@ -379,11 +404,13 @@ impl CanvasSnapshots {
                     let finalized = unsafe {
                         queue.finalize_shared_canvas(
                             &source.texture,
-                            &**source.lease.as_ref().unwrap(),
+                            source.lease.as_ref().unwrap().clone(),
                         )
                     }
                     .unwrap();
-                    let lease = Arc::downgrade(source.lease.as_ref().unwrap());
+                    let submission = finalized.submission_index();
+                    self.sources[index].epoch = Some(finalized.publish_epoch());
+                    let lease = Arc::downgrade(self.sources[index].lease.as_ref().unwrap());
                     let handle = self.register(index, srgb, opaque);
                     let registry = self.renderer.as_ref().unwrap().textures.external_textures();
                     let sampled = registry.get(handle.0 as u32).unwrap();
@@ -391,6 +418,7 @@ impl CanvasSnapshots {
                     let copy_src = sampled.supports_copy_src();
                     drop(sampled);
                     drop(self.sources[index].lease.take());
+                    drop(self.sources[index].epoch.take());
                     self.begin_draw(handle);
                     let mut producer_ready = None;
                     let requested = if gated {
@@ -475,7 +503,7 @@ impl CanvasSnapshots {
                     provider.release_receipts();
                     device
                         .poll(wgt::PollType::Wait {
-                            submission_index: Some(finalized),
+                            submission_index: Some(submission),
                             timeout: Some(std::time::Duration::from_secs(30)),
                         })
                         .unwrap();
@@ -501,24 +529,7 @@ impl CanvasSnapshots {
         }
         self.no_copy_src(device, queue, graphics, provider);
         assert!(device.pop_error_scope().unwrap().is_none());
-        let renderer = self.renderer.as_mut().unwrap();
-        renderer
-            .vertex_arrays
-            .delete(self.vao.as_mut().unwrap())
-            .unwrap();
-        renderer
-            .vertex_arrays
-            .delete_buffer(self.vertices.as_mut().unwrap())
-            .unwrap();
-        renderer
-            .vertex_arrays
-            .delete_buffer(self.instances.as_mut().unwrap())
-            .unwrap();
-        renderer
-            .programs
-            .delete(self.program.as_mut().unwrap())
-            .unwrap();
-        drop(self.renderer.take());
+        self.cleanup();
         assert_eq!(counts(graphics), before);
     }
 }

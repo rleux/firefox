@@ -1608,6 +1608,20 @@ impl Renderer {
             .map_err(RendererError::Device)
     }
 
+    /// Close future image reads and submit the sole return marker, without waiting.
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
+    pub fn wgpu_close_shared_image(
+        &mut self,
+        epoch: &std::sync::Arc<crate::vulkan::ImageEpoch>,
+    ) -> Result<Option<u64>, RendererError> {
+        self.device
+            .wgpu_close_shared_image(epoch)
+            .map_err(RendererError::Device)
+    }
+
     /// Pause presentation and drain GPU work before the embedder hides the window.
     /// Rendering while paused can update caches but does not acquire window images.
     /// Resuming redraws the cached scene; the native window must remain alive.

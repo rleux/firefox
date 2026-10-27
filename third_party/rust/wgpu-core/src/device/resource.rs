@@ -2371,6 +2371,35 @@ impl Device {
         })
     }
 
+    pub fn create_texture_from_returned_shared_image(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+        returned: hal::shared_image::ReturnedImage,
+    ) -> (Arc<Texture>, Option<Arc<dyn hal::shared_image::ImageLease>>) {
+        let lease = returned.lease().clone();
+        self.create_texture_with_allocator(desc, |hal_desc| {
+            if !is_shared_canvas_descriptor(desc) {
+                return Err(self.handle_hal_error(hal::DeviceError::Unexpected).into());
+            }
+            let queue = self.get_queue().ok_or(DeviceError::Lost)?;
+            let raw = unsafe {
+                hal::shared_image::create_alias_from_returned(
+                    returned,
+                    self.raw(),
+                    queue.raw(),
+                    hal_desc,
+                )
+            }
+            .map_err(|error| match error {
+                hal::shared_image::ImageLeaseError::Device(error) => {
+                    self.handle_hal_error_with_nonfatal_oom(error)
+                }
+                _ => self.handle_hal_error(hal::DeviceError::Unexpected),
+            })?;
+            Ok((raw, lease))
+        })
+    }
+
     /// Creates a texture that is guaranteed to be invalid
     pub fn create_texture_error(
         self: &Arc<Self>,

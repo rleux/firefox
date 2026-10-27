@@ -24,6 +24,7 @@ pub(in crate::device::wgpu) struct CopyDestination<'a> {
 
 impl Texture {
     pub(in crate::device::wgpu) fn sampled(self: &Rc<Self>) -> Result<SampledTexture<'_>, String> {
+        self.check_shared_access()?;
         let view = self.view.as_deref().ok_or("Texture has no sampled view")?;
         Ok(SampledTexture { texture: self, view })
     }
@@ -46,6 +47,7 @@ impl Texture {
     }
 
     pub(in crate::device::wgpu) fn copy_source(self: &Rc<Self>) -> Result<CopySource<'_>, String> {
+        self.check_shared_access()?;
         if !self.usage.contains(wgt::TextureUses::COPY_SRC) {
             return Err("Texture does not support copy-source access".into());
         }

@@ -905,7 +905,7 @@ fn shared_canvas_without_a_graphics_endpoint_is_rejected_before_mutation() {
     assert!(unsafe {
         fixture
             .queue
-            .finalize_shared_canvas(&texture, &UnrelatedLease)
+            .finalize_shared_canvas(&texture, Arc::new(UnrelatedLease))
     }
     .is_err());
     assert!(fixture.device.is_valid());
@@ -1000,7 +1000,7 @@ fn shared_canvas_wrong_logical_device_is_rejected_before_mutation() {
         unsafe {
             second
                 .queue
-                .finalize_shared_canvas(&texture, &UnrelatedLease)
+                .finalize_shared_canvas(&texture, Arc::new(UnrelatedLease))
         },
         Err(crate::device::DeviceError::DeviceMismatch(_))
     ));

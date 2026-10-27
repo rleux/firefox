@@ -158,6 +158,17 @@ pub trait GpuBackend {
         Err("This backend does not snapshot registered Vulkan images".into())
     }
 
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
+    fn wgpu_close_shared_image(
+        &mut self,
+        _epoch: &std::sync::Arc<wgpu::ImageEpoch>,
+    ) -> Result<Option<u64>, String> {
+        Err("This backend does not close registered Vulkan images".into())
+    }
+
     #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     fn set_wgpu_surface(
         &mut self,

@@ -25,6 +25,8 @@ use std::rc::Rc;
 
 #[path = "readback.rs"]
 mod readback;
+#[path = "shared_image_access.rs"]
+mod shared_image_access;
 
 pub(in crate::device) struct RenderDevice {
     pub properties: RendererProperties,

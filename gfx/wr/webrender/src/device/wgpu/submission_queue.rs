@@ -113,6 +113,25 @@ impl SubmissionQueue {
         Ok(())
     }
 
+    pub(in crate::device::wgpu) fn ensure_available(&self) -> Result<(), String> {
+        self.state
+            .try_borrow_mut()
+            .map(drop)
+            .map_err(|_| "Renderer queue is busy".into())
+    }
+
+    #[cfg(test)]
+    pub(in crate::device::wgpu) fn fail_active_before_submit_for_test(&self) {
+        self.state.borrow_mut().active.as_mut().unwrap().failure =
+            Some(super::FailurePoint::EndEncoding);
+    }
+
+    #[cfg(test)]
+    pub(in crate::device::wgpu) fn fail_active_after_submit_for_test(&self) {
+        self.state.borrow_mut().active.as_mut().unwrap().failure =
+            Some(super::FailurePoint::AfterSubmit);
+    }
+
     pub fn recording(&self) -> Result<Recording<'_>, String> {
         if self.pool.owner.is_lost() {
             return Err("Vulkan device requires recreation".into());

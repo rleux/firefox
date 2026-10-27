@@ -75,6 +75,13 @@ impl wr::GpuBackend for RenderDevice {
         self.snapshot_shared_image(handle, rect)
     }
 
+    fn wgpu_close_shared_image(
+        &mut self,
+        epoch: &std::sync::Arc<super::super::ImageEpoch>,
+    ) -> Result<Option<u64>, String> {
+        self.close_shared_image(epoch)
+    }
+
     fn textures_created(&self) -> u32 {
         self.textures.created()
     }

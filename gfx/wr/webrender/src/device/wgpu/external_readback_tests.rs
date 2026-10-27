@@ -56,6 +56,7 @@ fn sampled_view(source: &Rc<Texture>, opaque: bool) -> Rc<Texture> {
         states: source.states.clone(),
         #[cfg(target_os = "linux")]
         external: None,
+        shared_payload: None,
     })
 }
 

@@ -18,8 +18,14 @@ pub enum ImageLeaseError {
     IncompatibleDevice,
     #[error("The descriptor is incompatible with the allocation or enabled features")]
     InvalidDescriptor,
-    #[error("The shared native context is closed")]
+    #[error("The shared native context or image epoch is closed")]
     Closed,
+    #[error("The image epoch or reservation is not current")]
+    InvalidEpoch,
+    #[error("The image allocation was abandoned for reuse")]
+    Abandoned,
+    #[error("The logical producer endpoint no longer exists")]
+    ProducerGone,
     #[error(transparent)]
     Device(#[from] crate::DeviceError),
 }
@@ -86,3 +92,7 @@ pub fn validate_alias(
     let _ = (lease, target, texture, graphics_queue, descriptor);
     Err(ImageLeaseError::UnsupportedBackend)
 }
+
+mod epoch;
+pub use epoch::{create_alias_from_returned, reserve_finalization};
+pub use epoch::{FinalizeReservation, ImageEpoch, ImagePayload, ReturnedImage};

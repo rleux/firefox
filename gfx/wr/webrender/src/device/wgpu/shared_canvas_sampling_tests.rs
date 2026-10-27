@@ -40,6 +40,7 @@ pub(super) fn external(handle: ExternalTextureHandle) -> ExternalTexture {
 struct Source {
     texture: Arc<core::resource::Texture>,
     lease: Option<Arc<dyn hal::shared_image::ImageLease>>,
+    epoch: Option<Arc<hal::shared_image::ImageEpoch>>,
     descriptor: hal::TextureDescriptor<'static>,
 }
 
@@ -93,6 +94,7 @@ impl Resources {
 
 struct ForeignRegistry {
     registry: Rc<ExternalTextureRegistry>,
+    nonshared: Rc<ExternalTextureRegistry>,
     context: Arc<dyn hal::shared::SharedDeviceContext>,
 }
 
@@ -128,8 +130,16 @@ impl ForeignRegistry {
             }
             .unwrap(),
         );
+        let nonshared = Rc::new(
+            Device::new(&Options {
+                validation: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
         Self {
             registry: ExternalTextureRegistry::new(&foreign),
+            nonshared: ExternalTextureRegistry::new(&nonshared),
             context,
         }
     }
@@ -179,6 +189,7 @@ impl CanvasSampling {
         self.sources.push(Source {
             texture,
             lease: Some(lease.expect("Native sampled allocation must succeed")),
+            epoch: None,
             descriptor: hal::TextureDescriptor {
                 label: None,
                 size,
@@ -232,8 +243,7 @@ impl CanvasSampling {
                 .store
                 .external_textures()
                 .register_shared_image(
-                    source.lease.as_ref().unwrap().clone(),
-                    &source.descriptor,
+                    source.epoch.as_ref().unwrap().clone(),
                     if srgb {
                         format.add_srgb_suffix()
                     } else {
@@ -248,31 +258,25 @@ impl CanvasSampling {
 
     fn rejected_registrations(&self, index: usize) {
         let source = &self.sources[index];
+        let epoch = source.epoch.as_ref().unwrap();
         let registry = self.resources.as_ref().unwrap().store.external_textures();
         let format = source.descriptor.format;
+        assert_eq!(epoch.descriptor().size, source.descriptor.size);
+        assert_eq!(epoch.descriptor().format, format);
+        assert_eq!(epoch.descriptor().usage, source.descriptor.usage);
+        assert_eq!(
+            epoch.descriptor().view_formats,
+            source.descriptor.view_formats
+        );
         let before = counts(&registry.device().open);
-        for field in 0..4 {
-            let mut invalid = source.descriptor.clone();
-            match field {
-                0 => invalid.size.width += 1,
-                1 => invalid.usage |= wgt::TextureUses::STORAGE_READ_WRITE,
-                2 => invalid
-                    .view_formats
-                    .push(wgt::TextureFormat::Bgra8UnormSrgb),
-                _ => invalid.memory_flags = hal::MemoryFlags::TRANSIENT,
-            }
+        for (view, filter) in [
+            (wgt::TextureFormat::Bgra8UnormSrgb, TextureFilter::Nearest),
+            (wgt::TextureFormat::Rgba32Float, TextureFilter::Nearest),
+            (format, TextureFilter::Trilinear),
+        ] {
             assert!(
-                unsafe {
-                    registry.register_shared_image(
-                        source.lease.as_ref().unwrap().clone(),
-                        &invalid,
-                        format,
-                        TextureFilter::Nearest,
-                        false,
-                    )
-                }
-                .is_err(),
-                "Shared registration accepted incompatible descriptor field {field}"
+                unsafe { registry.register_shared_image(epoch.clone(), view, filter, false) }
+                    .is_err()
             );
             assert_eq!(counts(&registry.device().open), before);
         }
@@ -280,8 +284,7 @@ impl CanvasSampling {
         let foreign_before = counts(&foreign.registry.device().open);
         assert!(unsafe {
             foreign.registry.register_shared_image(
-                source.lease.as_ref().unwrap().clone(),
-                &source.descriptor,
+                epoch.clone(),
                 format,
                 TextureFilter::Nearest,
                 false,
@@ -289,6 +292,25 @@ impl CanvasSampling {
         }
         .is_err());
         assert_eq!(counts(&foreign.registry.device().open), foreign_before);
+        let owner = foreign.nonshared.device();
+        let ordinary = Texture::new(owner, 2, 2, format, TextureFilter::Nearest, false).unwrap();
+        let first = foreign.nonshared.register(&ordinary).unwrap();
+        let nonshared_before = counts(&owner.open);
+        assert!(unsafe {
+            foreign.nonshared.register_shared_image(
+                epoch.clone(),
+                format,
+                TextureFilter::Nearest,
+                false,
+            )
+        }
+        .is_err());
+        assert_eq!(counts(&owner.open), nonshared_before);
+        let next = foreign.nonshared.register(&ordinary).unwrap();
+        assert_eq!(first.0, 1);
+        assert_eq!(next.0, first.0 + 1);
+        foreign.nonshared.unregister(first).unwrap();
+        foreign.nonshared.unregister(next).unwrap();
         assert_eq!(counts(&registry.device().open), before);
     }
 
@@ -499,10 +521,12 @@ impl CanvasSampling {
         self.arm_gate(graphics, provider);
         let source = &self.sources[index];
         let finalized = unsafe {
-            queue.finalize_shared_canvas(&source.texture, &**source.lease.as_ref().unwrap())
+            queue.finalize_shared_canvas(&source.texture, source.lease.as_ref().unwrap().clone())
         }
         .unwrap();
-        let weak = Arc::downgrade(source.lease.as_ref().unwrap());
+        let submission = finalized.submission_index();
+        self.sources[index].epoch = Some(finalized.publish_epoch());
+        let weak = Arc::downgrade(self.sources[index].lease.as_ref().unwrap());
         let handle = self.register(index, false, false);
         self.resources
             .as_ref()
@@ -512,6 +536,7 @@ impl CanvasSampling {
             .unregister(handle)
             .unwrap();
         drop(self.sources[index].lease.take());
+        drop(self.sources[index].epoch.take());
         let held = counts(graphics);
         let lease_alive = weak.upgrade().is_some();
         let logical_held = device.get_hal_counters().textures.read();
@@ -533,7 +558,7 @@ impl CanvasSampling {
         provider.release_receipts();
         device
             .poll(wgt::PollType::Wait {
-                submission_index: Some(finalized),
+                submission_index: Some(submission),
                 timeout: Some(std::time::Duration::from_secs(30)),
             })
             .unwrap();
@@ -584,10 +609,12 @@ impl CanvasSampling {
                     let finalized = unsafe {
                         queue.finalize_shared_canvas(
                             &source.texture,
-                            &**source.lease.as_ref().unwrap(),
+                            source.lease.as_ref().unwrap().clone(),
                         )
                     }
                     .unwrap();
+                    let submission = finalized.submission_index();
+                    self.sources[index].epoch = Some(finalized.publish_epoch());
                     if index == 0 {
                         self.rejected_registrations(index);
                     }
@@ -595,6 +622,7 @@ impl CanvasSampling {
                     let lease = Arc::downgrade(self.sources[index].lease.as_ref().unwrap());
                     let (read_only, removed) = self.record(index, handle, index == 0);
                     drop(self.sources[index].lease.take());
+                    drop(self.sources[index].epoch.take());
                     self.consumers[index].submission.submit().unwrap();
                     let kept = self.consumers[index].source.upgrade().is_some();
                     if gated {
@@ -631,7 +659,7 @@ impl CanvasSampling {
                     provider.release_receipts();
                     device
                         .poll(wgt::PollType::Wait {
-                            submission_index: Some(finalized),
+                            submission_index: Some(submission),
                             timeout: Some(std::time::Duration::from_secs(30)),
                         })
                         .unwrap();

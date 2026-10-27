@@ -54,6 +54,23 @@ pub struct Queue {
     pub(crate) device: Arc<Device>,
 }
 
+#[derive(Debug)]
+pub struct FinalizedCanvas {
+    index: SubmissionIndex,
+    reservation: hal::shared_image::FinalizeReservation,
+}
+
+impl FinalizedCanvas {
+    pub fn submission_index(&self) -> SubmissionIndex {
+        self.index
+    }
+
+    /// Publishes immutable admission, not CPU completion or reusable ownership.
+    pub fn publish_epoch(self) -> Arc<hal::shared_image::ImageEpoch> {
+        unsafe { self.reservation.publish() }
+    }
+}
+
 impl Queue {
     pub(crate) fn new(
         device: Arc<Device>,
@@ -239,8 +256,8 @@ impl Queue {
     pub unsafe fn finalize_shared_canvas(
         self: &Arc<Self>,
         texture: &Arc<Texture>,
-        lease: &dyn hal::shared_image::ImageLease,
-    ) -> Result<SubmissionIndex, DeviceError> {
+        lease: Arc<dyn hal::shared_image::ImageLease>,
+    ) -> Result<FinalizedCanvas, DeviceError> {
         #[cfg(not(feature = "std"))]
         {
             let _ = (texture, lease);
@@ -260,7 +277,7 @@ impl Queue {
                 .and_then(|provider| provider.graphics_queue())
                 .ok_or(DeviceError::Lost)?;
             let snatch_guard = self.device.snatchable_lock.read();
-            {
+            let reservation = {
                 let TextureInner::Native { raw } = texture
                     .try_inner(&snatch_guard)
                     .map_err(|_| DeviceError::Lost)?
@@ -284,16 +301,21 @@ impl Queue {
                         .filter(|format| *format != desc.format)
                         .collect(),
                 };
-                hal::shared_image::validate_alias(
-                    lease,
-                    self.device.raw(),
-                    raw.as_ref(),
-                    graphics,
-                    &descriptor,
-                )
-                .map_err(|_| DeviceError::Lost)?;
-            }
-            unsafe { self.finalize_shared_canvas_submission(texture, snatch_guard, graphics) }
+                unsafe {
+                    hal::shared_image::reserve_finalization(
+                        lease,
+                        self.device.raw(),
+                        self.raw(),
+                        raw.as_ref(),
+                        graphics,
+                        &descriptor,
+                    )
+                }
+                .map_err(|_| DeviceError::Lost)?
+            };
+            let index =
+                unsafe { self.finalize_shared_canvas_submission(texture, snatch_guard, graphics) }?;
+            Ok(FinalizedCanvas { index, reservation })
         }
     }
 
@@ -378,6 +400,30 @@ impl Queue {
                 }
                 Err(error)
             }
+        }
+    }
+
+    pub fn try_take_returned_shared_image(
+        self: &Arc<Self>,
+        epoch: &Arc<hal::shared_image::ImageEpoch>,
+    ) -> Result<Option<hal::shared_image::ReturnedImage>, DeviceError> {
+        self.device.check_is_valid()?;
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = epoch;
+            Err(DeviceError::Lost)
+        }
+        #[cfg(feature = "std")]
+        {
+            let graphics = self
+                .device
+                .graphics_submission
+                .as_ref()
+                .and_then(|provider| provider.graphics_queue())
+                .ok_or(DeviceError::Lost)?;
+            epoch
+                .try_take_returned(self.device.raw(), self.raw(), graphics)
+                .map_err(|_| DeviceError::Lost)
         }
     }
 

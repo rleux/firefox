@@ -363,12 +363,18 @@ impl NativeGate {
     }
 }
 
+struct FinalizedAlias {
+    raw: resources::Owned<dyn hal::DynTexture>,
+    _payload: hal::shared_image::ImagePayload,
+}
+
 struct FinalizedCanvas {
     texture: Arc<core::resource::Texture>,
     lease: Arc<dyn hal::shared_image::ImageLease>,
+    epoch: Option<Arc<hal::shared_image::ImageEpoch>>,
     stale: Arc<core::command::CommandBuffer>,
     stale_readback: Arc<core::resource::Buffer>,
-    alias: Option<Rc<resources::Owned<dyn hal::DynTexture>>>,
+    alias: Option<Rc<FinalizedAlias>>,
     readback: Option<Rc<resources::Owned<dyn hal::DynBuffer>>>,
     consumer: Option<Submission>,
     pixel: [u8; 4],
@@ -449,6 +455,7 @@ impl CanvasFinalizations {
         self.cases.push(FinalizedCanvas {
             texture,
             lease,
+            epoch: None,
             stale,
             stale_readback,
             alias: None,
@@ -500,15 +507,16 @@ impl CanvasFinalizations {
             memory_flags: hal::MemoryFlags::empty(),
             view_formats: Vec::new(),
         };
+        let epoch = case.epoch.as_ref().unwrap();
+        let payload = epoch.acquire_payload().unwrap();
         let alias = unsafe {
-            hal::shared_image::create_alias(case.lease.clone(), &*owner.open.device, &desc)
+            hal::shared_image::create_alias(epoch.lease().clone(), &*owner.open.device, &desc)
         }
         .unwrap();
-        case.alias = Some(Rc::new(resources::Owned::new(
-            owner,
-            alias,
-            <dyn hal::DynDevice>::destroy_texture,
-        )));
+        case.alias = Some(Rc::new(FinalizedAlias {
+            raw: resources::Owned::new(owner, alias, <dyn hal::DynDevice>::destroy_texture),
+            _payload: payload,
+        }));
         let (readback, _) = unsafe {
             owner.open.device.create_buffer(&hal::BufferDescriptor {
                 label: Some("WR finalized canvas readback"),
@@ -532,7 +540,7 @@ impl CanvasFinalizations {
         unsafe {
             let encoder = commands.encoder();
             encoder.transition_textures(&[hal::TextureBarrier {
-                texture: &***alias,
+                texture: &*alias.raw,
                 range: wgt::ImageSubresourceRange::default(),
                 usage: hal::StateTransition {
                     from: wgt::TextureUses::RESOURCE,
@@ -548,7 +556,7 @@ impl CanvasFinalizations {
                 },
             }]);
             encoder.copy_texture_to_buffer(
-                &***alias,
+                &*alias.raw,
                 wgt::TextureUses::COPY_SRC,
                 &***readback,
                 &[hal::BufferTextureCopy {
@@ -743,8 +751,10 @@ impl CanvasFinalizations {
                     }
                     let case = &self.cases[index];
                     let finalized =
-                        unsafe { queue.finalize_shared_canvas(&case.texture, &*case.lease) }
+                        unsafe { queue.finalize_shared_canvas(&case.texture, case.lease.clone()) }
                             .unwrap();
+                    let submission = finalized.submission_index();
+                    self.cases[index].epoch = Some(finalized.publish_epoch());
                     self.record_consumer(index, owner, pitch);
                     self.cases[index]
                         .consumer
@@ -783,7 +793,7 @@ impl CanvasFinalizations {
                     provider.release_receipts();
                     device
                         .poll(wgt::PollType::Wait {
-                            submission_index: Some(finalized),
+                            submission_index: Some(submission),
                             timeout: Some(std::time::Duration::from_secs(30)),
                         })
                         .unwrap();
@@ -824,7 +834,9 @@ impl CanvasFinalizations {
         queue.write_buffer(marker.clone(), 0, &MARKER);
         let case = &self.cases[index];
         let finalized =
-            unsafe { queue.finalize_shared_canvas(&case.texture, &*case.lease) }.unwrap();
+            unsafe { queue.finalize_shared_canvas(&case.texture, case.lease.clone()) }.unwrap();
+        let submission = finalized.submission_index();
+        self.cases[index].epoch = Some(finalized.publish_epoch());
         let mapped = Arc::new(Mutex::new(None));
         let callback = mapped.clone();
         let before_map = provider.receipts.lock().unwrap().len();
@@ -840,7 +852,7 @@ impl CanvasFinalizations {
         provider.release_receipts();
         device
             .poll(wgt::PollType::Wait {
-                submission_index: Some(finalized),
+                submission_index: Some(submission),
                 timeout: Some(std::time::Duration::from_secs(30)),
             })
             .unwrap();

@@ -3,9 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::{hal, wgt, Device, SubmissionQueue, Texture, TextureFilter};
+use crate::internal_types::FastHashMap;
 use api::ExternalTextureHandle;
 use std::cell::{Cell, RefCell};
-use crate::internal_types::FastHashMap;
 use std::convert::TryFrom;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -48,6 +48,7 @@ impl ExternalTextureRegistry {
     }
 
     pub fn register(&self, texture: &Rc<Texture>) -> Result<ExternalTextureHandle, String> {
+        texture.check_shared_access()?;
         if !Rc::ptr_eq(&texture.raw.owner, &self.owner) {
             return Err("External texture belongs to another Vulkan device".into());
         }
@@ -71,21 +72,13 @@ impl ExternalTextureRegistry {
     /// Unregister removes only the name; a lease or handle is no readiness or reuse proof.
     pub unsafe fn register_shared_image(
         &self,
-        lease: Arc<dyn hal::shared_image::ImageLease>,
-        descriptor: &hal::TextureDescriptor<'_>,
+        epoch: Arc<hal::shared_image::ImageEpoch>,
         view_format: wgt::TextureFormat,
         filter: TextureFilter,
         force_opaque: bool,
     ) -> Result<ExternalTextureHandle, String> {
         let texture = unsafe {
-            Texture::from_shared_image(
-                &self.owner,
-                lease,
-                descriptor,
-                view_format,
-                filter,
-                force_opaque,
-            )
+            Texture::from_shared_image(&self.owner, epoch, view_format, filter, force_opaque)
         }?;
         self.register(&texture)
     }

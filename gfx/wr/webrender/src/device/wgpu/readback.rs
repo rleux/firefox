@@ -29,6 +29,7 @@ impl RenderDevice {
     ) -> Result<(ImageFormat, Vec<u8>), String> {
         let id = u32::try_from(handle.0).map_err(|_| "Invalid shared image snapshot handle")?;
         let source = self.textures.external_textures().get(id)?;
+        source.check_shared_access()?;
         if !source.supports_copy_src() {
             return Err("Registered image does not permit copy-source snapshots".into());
         }
@@ -74,6 +75,7 @@ impl RenderDevice {
         let id = u32::try_from(handle.0)
             .map_err(|_| "Invalid Vulkan external readback handle".to_owned())?;
         let source = self.textures.external_textures().get(id)?;
+        source.check_shared_access()?;
         if source.supports_view_copy_src() {
             return Ok(source);
         }

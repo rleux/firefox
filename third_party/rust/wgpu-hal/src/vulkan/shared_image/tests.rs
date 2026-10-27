@@ -752,3 +752,324 @@ fn alias_validation_requires_exact_sampling_allocation_and_graphics_endpoint() {
     assert_eq!(counts(&*compute.device), (0, 0));
     validation_clean();
 }
+
+fn initialized_epoch() -> (
+    Work,
+    Arc<dyn ImageLease>,
+    Arc<crate::shared_image::ImageEpoch>,
+    crate::TextureDescriptor<'static>,
+) {
+    let (_, _, pair) = factory();
+    let graphics = Arc::new(pair.graphics);
+    let compute = Arc::new(pair.compute);
+    let fence = unsafe { compute.device.create_fence() }.unwrap();
+    let mut work = Work(core::mem::ManuallyDrop::new(Resources {
+        context: pair.context,
+        graphics,
+        compute,
+        aliases: Vec::new(),
+        views: Vec::new(),
+        buffers: Vec::new(),
+        commands: Vec::new(),
+        fence: Some(fence),
+        receipt: None,
+    }));
+    let desc = descriptor();
+    let lease = unsafe { crate::shared_image::allocate(work.graphics.clone(), &desc) }.unwrap();
+    let producer = alias(&work.compute, &lease, &desc);
+    work.aliases.push(producer);
+    let reserved = unsafe {
+        crate::shared_image::reserve_finalization(
+            lease.clone(),
+            &*work.compute.device,
+            &*work.compute.queue,
+            work.aliases[0].raw(),
+            &*work.graphics.queue,
+            &desc,
+        )
+    }
+    .unwrap();
+    let encoder = unsafe {
+        work.compute
+            .device
+            .create_command_encoder(&crate::CommandEncoderDescriptor {
+                label: None,
+                queue: &*work.compute.queue,
+            })
+    }
+    .unwrap();
+    let endpoint = work.compute.clone();
+    work.commands.push(Commands {
+        owner: endpoint,
+        encoder,
+        buffers: Vec::new(),
+        open: false,
+    });
+    let data = &mut *work.0;
+    let commands = &mut data.commands[0];
+    unsafe { commands.encoder.begin_encoding(None) }.unwrap();
+    commands.open = true;
+    let range = wgt::ImageSubresourceRange {
+        mip_level_count: Some(1),
+        array_layer_count: Some(1),
+        ..Default::default()
+    };
+    unsafe {
+        commands
+            .encoder
+            .transition_textures(&[crate::TextureBarrier {
+                texture: data.aliases[0].raw(),
+                range,
+                usage: crate::StateTransition {
+                    from: wgt::TextureUses::UNINITIALIZED,
+                    to: wgt::TextureUses::COPY_DST,
+                },
+                queue_family_ownership_transfer: None,
+            }]);
+        crate::renderer::clear_texture_zero(&mut *commands.encoder, data.aliases[0].raw(), range)
+            .unwrap();
+        commands
+            .encoder
+            .transition_textures(&[crate::TextureBarrier {
+                texture: data.aliases[0].raw(),
+                range,
+                usage: crate::StateTransition {
+                    from: wgt::TextureUses::COPY_DST,
+                    to: wgt::TextureUses::RESOURCE,
+                },
+                queue_family_ownership_transfer: None,
+            }]);
+    }
+    commands
+        .buffers
+        .push(unsafe { commands.encoder.end_encoding() }.unwrap());
+    commands.open = false;
+    let result = unsafe {
+        work.context.submit_ordered(
+            &*work.compute.queue,
+            &[
+                crate::shared::SharedSubmitSegment {
+                    lane: crate::shared::SharedQueueLane::Compute,
+                    queue: &*work.compute.queue,
+                    command_buffers: &[&*work.commands[0].buffers[0]],
+                    synchronization: None,
+                },
+                crate::shared::SharedSubmitSegment {
+                    lane: crate::shared::SharedQueueLane::Graphics,
+                    queue: &*work.graphics.queue,
+                    command_buffers: &[],
+                    synchronization: None,
+                },
+            ],
+            (work.fence.as_deref().unwrap(), 1),
+        )
+    };
+    match result {
+        Ok(receipt) => work.receipt = Some(receipt),
+        Err(error) => {
+            work.receipt = error.receipt;
+            panic!("Epoch initialization submit failed: {:?}", error.error);
+        }
+    }
+    assert!(work
+        .receipt
+        .as_ref()
+        .unwrap()
+        .wait(Some(core::time::Duration::from_secs(10)))
+        .unwrap());
+    work.aliases.clear();
+    let epoch = unsafe { reserved.publish() };
+    (work, lease, epoch, desc)
+}
+
+fn retire_epoch_marker(work: &mut Work, epoch: &Arc<crate::shared_image::ImageEpoch>) {
+    assert!(epoch
+        .begin_close(&*work.graphics.device, &*work.graphics.queue)
+        .unwrap());
+    assert!(!epoch
+        .begin_close(&*work.graphics.device, &*work.graphics.queue)
+        .unwrap());
+    let result = unsafe {
+        work.context.submit_graphics(
+            &*work.graphics.queue,
+            &[],
+            &[],
+            (work.fence.as_deref().unwrap(), 2),
+            &crate::external_sync::SubmissionSync::default(),
+        )
+    };
+    match result {
+        Ok(receipt) => work.receipt = Some(receipt),
+        Err(error) => {
+            work.receipt = error.receipt;
+            epoch.abandon();
+            panic!("Epoch marker failed: {:?}", error.error);
+        }
+    }
+    unsafe { epoch.marker_accepted() };
+    assert!(work
+        .receipt
+        .as_ref()
+        .unwrap()
+        .wait(Some(core::time::Duration::from_secs(10)))
+        .unwrap());
+    unsafe { epoch.marker_retired() };
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two queues, validation_canary and wgpu-types/counters"]
+fn epoch_reservation_drop_abandons_without_closing_the_shared_context() {
+    let (_, _, pair) = factory();
+    let graphics = Arc::new(pair.graphics);
+    let compute = Arc::new(pair.compute);
+    let desc = descriptor();
+    let lease = unsafe { crate::shared_image::allocate(graphics.clone(), &desc) }.unwrap();
+    let producer = alias(&compute, &lease, &desc);
+    let reserved = unsafe {
+        crate::shared_image::reserve_finalization(
+            lease.clone(),
+            &*compute.device,
+            &*compute.queue,
+            producer.raw(),
+            &*graphics.queue,
+            &desc,
+        )
+    }
+    .unwrap();
+    assert!(unsafe {
+        crate::shared_image::reserve_finalization(
+            lease.clone(),
+            &*compute.device,
+            &*compute.queue,
+            producer.raw(),
+            &*graphics.queue,
+            &desc,
+        )
+    }
+    .is_err());
+    drop(reserved);
+    assert!(matches!(
+        unsafe {
+            crate::shared_image::reserve_finalization(
+                lease.clone(),
+                &*compute.device,
+                &*compute.queue,
+                producer.raw(),
+                &*graphics.queue,
+                &desc,
+            )
+        },
+        Err(ImageLeaseError::Abandoned)
+    ));
+    let other = unsafe { crate::shared_image::allocate(graphics.clone(), &desc) }.unwrap();
+    drop((producer, lease, other));
+    assert_eq!(counts(&*graphics.device), (0, 0));
+    validation_clean();
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two queues, validation_canary and wgpu-types/counters"]
+fn epoch_return_is_unique_after_marker_and_every_payload_release() {
+    let (mut work, lease, epoch, _) = initialized_epoch();
+    let first = epoch.acquire_payload().unwrap();
+    let second = epoch.acquire_payload().unwrap();
+    retire_epoch_marker(&mut work, &epoch);
+    assert!(epoch.ensure_open().is_err());
+    assert!(epoch.acquire_payload().is_err());
+    let take = || {
+        epoch.try_take_returned(
+            &*work.compute.device,
+            &*work.compute.queue,
+            &*work.graphics.queue,
+        )
+    };
+    assert!(take().unwrap().is_none());
+    drop(first);
+    assert!(take().unwrap().is_none());
+    drop(second);
+    let returned = take().unwrap().unwrap();
+    assert!(take().is_err());
+    assert!(Arc::ptr_eq(returned.lease(), &lease));
+    drop(returned);
+    assert!(epoch.acquire_payload().is_err());
+    drop((epoch, lease));
+    assert_eq!(counts(&*work.graphics.device), (0, 0));
+    drop(work);
+    validation_clean();
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two queues, validation_canary and wgpu-types/counters"]
+fn orphaned_epoch_cannot_be_republished_from_the_raw_physical_lease() {
+    let (work, lease, epoch, desc) = initialized_epoch();
+    let weak = Arc::downgrade(&epoch);
+    drop(epoch);
+    assert!(weak.upgrade().is_none());
+    let producer = alias(&work.compute, &lease, &desc);
+    assert!(matches!(
+        unsafe {
+            crate::shared_image::reserve_finalization(
+                lease.clone(),
+                &*work.compute.device,
+                &*work.compute.queue,
+                producer.raw(),
+                &*work.graphics.queue,
+                &desc,
+            )
+        },
+        Err(ImageLeaseError::Abandoned)
+    ));
+    drop((producer, lease));
+    assert_eq!(counts(&*work.graphics.device), (0, 0));
+    drop(work);
+    validation_clean();
+}
+
+#[test]
+#[ignore = "Requires Vulkan, two queues, validation_canary and wgpu-types/counters"]
+fn returned_alias_drop_abandons_the_next_writing_reservation() {
+    let (mut work, lease, epoch, mut desc) = initialized_epoch();
+    retire_epoch_marker(&mut work, &epoch);
+    let returned = epoch
+        .try_take_returned(
+            &*work.compute.device,
+            &*work.compute.queue,
+            &*work.graphics.queue,
+        )
+        .unwrap()
+        .unwrap();
+    desc.view_formats.clear();
+    desc.usage.remove(wgt::TextureUses::COLOR_TARGET);
+    let raw = unsafe {
+        crate::shared_image::create_alias_from_returned(
+            returned,
+            &*work.compute.device,
+            &*work.compute.queue,
+            &desc,
+        )
+    }
+    .unwrap();
+    let producer = Alias {
+        owner: work.compute.clone(),
+        texture: Some(raw),
+    };
+    drop(producer);
+    let another = alias(&work.compute, &lease, &desc);
+    assert!(matches!(
+        unsafe {
+            crate::shared_image::reserve_finalization(
+                lease.clone(),
+                &*work.compute.device,
+                &*work.compute.queue,
+                another.raw(),
+                &*work.graphics.queue,
+                &desc,
+            )
+        },
+        Err(ImageLeaseError::Abandoned)
+    ));
+    drop((another, epoch, lease));
+    assert_eq!(counts(&*work.graphics.device), (0, 0));
+    drop(work);
+    validation_clean();
+}

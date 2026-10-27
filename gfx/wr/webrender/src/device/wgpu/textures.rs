@@ -47,6 +47,7 @@ pub struct Texture {
     states: Rc<Vec<UsageState<TextureState>>>,
     #[cfg(target_os = "linux")]
     external: Option<Rc<super::DmaBufImage>>,
+    shared_payload: Option<hal::shared_image::ImagePayload>,
 }
 
 pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
@@ -130,8 +131,7 @@ fn shared_image_view_descriptor(
 impl Texture {
     pub(super) unsafe fn from_shared_image(
         owner: &Rc<Device>,
-        lease: Arc<dyn hal::shared_image::ImageLease>,
-        descriptor: &hal::TextureDescriptor<'_>,
+        epoch: Arc<hal::shared_image::ImageEpoch>,
         view_format: wgt::TextureFormat,
         filter: TextureFilter,
         force_opaque: bool,
@@ -139,6 +139,14 @@ impl Texture {
         if owner.shared.is_none() || owner.is_lost() {
             return Err("Shared canvas sampling requires a live shared graphics device".into());
         }
+        epoch
+            .validate_owner(owner.open.device.as_ref(), owner.open.queue.as_ref())
+            .map_err(|error| format!("Validating shared canvas epoch: {error}"))?;
+        let payload = epoch
+            .acquire_payload()
+            .map_err(|error| format!("Admitting shared canvas image: {error}"))?;
+        let descriptor = epoch.descriptor();
+        let lease = epoch.lease().clone();
         let view_descriptor =
             shared_image_view_descriptor(descriptor, view_format, filter, force_opaque)?;
         if descriptor.size.width > owner.capabilities.limits.max_texture_dimension_2d
@@ -209,6 +217,7 @@ impl Texture {
             })]),
             #[cfg(target_os = "linux")]
             external: None,
+            shared_payload: Some(payload),
         }))
     }
 
@@ -277,6 +286,7 @@ impl Texture {
             copy_src_matches_view: !force_opaque,
             states: image.states.clone(),
             external: Some(image.clone()),
+            shared_payload: None,
         }))
     }
 
@@ -431,6 +441,7 @@ impl Texture {
             ),
             #[cfg(target_os = "linux")]
             external: None,
+            shared_payload: None,
         }))
     }
 
@@ -498,6 +509,7 @@ impl Texture {
             copy_src_matches_view: self.copy_src_matches_view,
             #[cfg(target_os = "linux")]
             external: self.external.clone(),
+            shared_payload: None,
             states: self.states.clone(),
         });
         let mut mips = self.mips.borrow_mut();
@@ -508,6 +520,16 @@ impl Texture {
 
     fn states(&self) -> &[UsageState<TextureState>] {
         &self.states[self.base_mip as usize..(self.base_mip + self.mip_count) as usize]
+    }
+
+    pub(super) fn check_shared_access(&self) -> Result<(), String> {
+        if let Some(payload) = &self.shared_payload {
+            payload
+                .epoch()
+                .ensure_open()
+                .map_err(|error| format!("Shared canvas access rejected: {error}"))?;
+        }
+        Ok(())
     }
 
     pub fn current_usage(&self) -> wgt::TextureUses {
@@ -557,6 +579,7 @@ impl Texture {
         commands: &mut Recording<'_>,
         to: wgt::TextureUses,
     ) -> Result<(), String> {
+        self.check_shared_access()?;
         #[cfg(target_os = "linux")]
         if self.external.is_some() && !self.sample_initialized() {
             return Err("DMA-BUF image has not been acquired for sampling".into());

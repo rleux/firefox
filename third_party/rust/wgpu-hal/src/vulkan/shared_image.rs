@@ -9,6 +9,7 @@ struct Allocation {
     owner: Arc<crate::DynOpenDevice>,
     texture: Option<super::Texture>,
     descriptor: crate::TextureDescriptor<'static>,
+    publication: wgpu_sync::Mutex<epoch::Slot>,
 }
 
 impl fmt::Debug for Allocation {
@@ -128,6 +129,7 @@ pub(crate) unsafe fn allocate(
         owner: graphics,
         texture: Some(texture),
         descriptor,
+        publication: wgpu_sync::Mutex::new(epoch::Slot::default()),
     }))
 }
 
@@ -227,6 +229,8 @@ pub(crate) fn validate_alias(
     }
     Ok(())
 }
+
+pub(crate) mod epoch;
 
 #[cfg(test)]
 mod tests;
