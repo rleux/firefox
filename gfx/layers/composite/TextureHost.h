@@ -58,6 +58,9 @@ class AndroidHardwareBuffer;
 class AndroidHardwareBufferTextureHost;
 class BufferDescriptor;
 class BufferTextureHost;
+#if defined(XP_LINUX) && !defined(ANDROID)
+class VulkanNativeTextureHost;
+#endif
 class Compositor;
 class CompositableParentManager;
 class ReadLockDescriptor;
@@ -370,6 +373,7 @@ enum class TextureHostType : int8_t {
   EGLImage,
   GLTexture,
   Vulkan,
+  VulkanNative,
   Last
 };
 
@@ -614,6 +618,11 @@ class TextureHost : public AtomicRefCountedWithFinalize<TextureHost> {
   TextureReadLock* GetReadLock() { return mReadLock; }
 
   virtual BufferTextureHost* AsBufferTextureHost() { return nullptr; }
+#if defined(XP_LINUX) && !defined(ANDROID)
+  virtual VulkanNativeTextureHost* AsVulkanNativeTextureHost() {
+    return nullptr;
+  }
+#endif
   virtual ShmemTextureHost* AsShmemTextureHost() { return nullptr; }
   virtual MacIOSurfaceTextureHostOGL* AsMacIOSurfaceTextureHost() {
     return nullptr;

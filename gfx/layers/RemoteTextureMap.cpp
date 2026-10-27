@@ -25,6 +25,10 @@
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webrender/RenderThread.h"
 
+#if defined(XP_LINUX) && !defined(ANDROID)
+#  include "mozilla/layers/VulkanNativeTextureHost.h"
+#endif
+
 namespace mozilla::layers {
 
 void SharedResourceWrapper::ClearTextureHost() {
@@ -249,6 +253,26 @@ bool RemoteTextureOwnerClient::PushVulkanTexture(
                                        host, nullptr);
   return true;
 }
+
+#if defined(XP_LINUX) && !defined(ANDROID)
+bool RemoteTextureOwnerClient::PushNativeTexture(
+    const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+    wr::WrVulkanNativePublication* aPublication) {
+  if (!IsRegistered(aOwnerId)) {
+    wr::wr_vulkan_native_publication_delete(aPublication);
+    return false;
+  }
+  RefPtr<TextureHost> host = VulkanNativeTextureHost::Create(
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT,
+      aPublication);
+  if (!host) {
+    return false;
+  }
+  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
+                                       host, nullptr);
+  return true;
+}
+#endif
 
 void RemoteTextureOwnerClient::PushDummyTexture(
     const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId) {
@@ -546,6 +570,9 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
   CompositableTextureHostRef textureHostRef;
   RefPtr<TextureHost> releasingTexture;  // Release outside the monitor
   std::shared_ptr<webgpu::SharedTexture> sharedTexture;
+#if defined(XP_LINUX) && !defined(ANDROID)
+  RefPtr<VulkanNativeTextureHost> nativeTexture;
+#endif
   {
     MonitorAutoLock lock(mMonitor);
 
@@ -575,6 +602,11 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
       // during memcpy.
       textureHostRef = textureHost;
       sharedTexture = holder->mResourceWrapper->mSharedTexture;
+#if defined(XP_LINUX) && !defined(ANDROID)
+    } else if (auto* native = textureHost->AsVulkanNativeTextureHost()) {
+      textureHostRef = textureHost;
+      nativeTexture = native;
+#endif
     } else if (textureHost->AsBufferTextureHost()) {
       // Increment compositable ref to prevent that TextureDataHolder is removed
       // during memcpy.
@@ -593,6 +625,10 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
 
   if (sharedTexture) {
     snapshot = sharedTexture->GetSnapshot();
+#if defined(XP_LINUX) && !defined(ANDROID)
+  } else if (nativeTexture) {
+    snapshot = nativeTexture->GetSnapshot();
+#endif
   } else if (auto* bufferTextureHost = textureHostRef->AsBufferTextureHost()) {
     const auto src_size = bufferTextureHost->GetSize();
 

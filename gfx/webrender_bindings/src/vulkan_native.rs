@@ -63,6 +63,24 @@ pub extern "C" fn wr_vulkan_native_publication_info(
     }
 }
 
+/// Clone immutable publication data; renderer registrations remain independent.
+#[no_mangle]
+pub extern "C" fn wr_vulkan_native_publication_clone(
+    publication: &WrVulkanNativePublication,
+) -> *mut WrVulkanNativePublication {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    return Box::into_raw(Box::new(WrVulkanNativePublication {
+        owner: publication.owner.clone(),
+        epoch: publication.epoch.clone(),
+        view_format: publication.view_format,
+    }));
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = publication;
+        ptr::null_mut()
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn wr_vulkan_native_publication_delete(
     publication: *mut WrVulkanNativePublication,

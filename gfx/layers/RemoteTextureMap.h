@@ -241,6 +241,12 @@ class RemoteTextureOwnerClient final {
                    const std::shared_ptr<webgpu::SharedTexture>& aSharedTexture,
                    const gfx::IntSize& aSize, gfx::SurfaceFormat aFormat,
                    const SurfaceDescriptor& aDesc);
+#if defined(XP_LINUX) && !defined(ANDROID)
+  // Takes unique publication ownership, including rejected pushes.
+  bool PushNativeTexture(const RemoteTextureId aTextureId,
+                         const RemoteTextureOwnerId aOwnerId,
+                         wr::WrVulkanNativePublication* aPublication);
+#endif
   void PushDummyTexture(const RemoteTextureId aTextureId,
                         const RemoteTextureOwnerId aOwnerId);
   // The producer retains its allocation until the render-thread return

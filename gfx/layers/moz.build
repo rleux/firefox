@@ -475,6 +475,10 @@ SOURCES += [
     "wr/WebRenderTextureHost.cpp",
 ]
 
+if CONFIG["OS_TARGET"] == "Linux":
+    EXPORTS.mozilla.layers += ["composite/VulkanNativeTextureHost.h"]
+    SOURCES += ["composite/VulkanNativeTextureHost.cpp"]
+
 DEFINES["GOOGLE_PROTOBUF_NO_RTTI"] = True
 DEFINES["GOOGLE_PROTOBUF_NO_STATIC_INITIALIZER"] = True
 DEFINES["MOZ_APP_VERSION"] = CONFIG["MOZ_APP_VERSION"]

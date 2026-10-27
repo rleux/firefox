@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -14,10 +16,15 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/layers/RemoteTextureMap.h"
+#include "mozilla/layers/RemoteTextureHostWrapper.h"
+#include "mozilla/layers/CompositorThread.h"
+#include "mozilla/ipc/Shmem.h"
 #include "mozilla/layers/SourceSurfaceSharedData.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/layers/VulkanImages.h"
 #include "mozilla/layers/VulkanTextureHost.h"
+#include "mozilla/layers/WebRenderTextureHost.h"
+#include "mozilla/webgpu/FrontBufferSnapshot.h"
 #include "mozilla/webrender/RenderBufferTextureHost.h"
 #include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderSharedSurfaceTextureHost.h"
@@ -73,6 +80,20 @@ class RenderExternalBuffer : public ::testing::Test {
                                      test();
                                    }),
                                NS_DISPATCH_NORMAL));
+    task.Wait();
+  }
+
+  template <typename F>
+  void OnCompositorThread(F&& aTest) {
+    layers::SynchronousTask task("Native map compositor test");
+    ASSERT_EQ(NS_OK, layers::CompositorThread()->Dispatch(
+                         NS_NewRunnableFunction(
+                             "Native map compositor test",
+                             [test = std::move(aTest), &task] {
+                               layers::AutoCompleteTask complete(&task);
+                               test();
+                             }),
+                         NS_DISPATCH_NORMAL));
     task.Wait();
   }
 };
@@ -983,6 +1004,16 @@ void wr_test_native_canvas_record(void*, uint64_t, uint64_t);
 void wr_test_native_canvas_verify(void*);
 void wr_test_native_canvas_finish(void*);
 void wr_test_native_canvas_delete(void*);
+void* wr_test_native_canvas_map_new(WrVulkanNativePublication**,
+                                    WrVulkanNativePublication**);
+Renderer* wr_test_native_canvas_map_renderer(void*);
+void wr_test_native_canvas_map_sample(void*, uint64_t, uint64_t);
+void wr_test_native_canvas_map_gate_begin(void*);
+bool wr_test_native_canvas_map_gate_release(void*);
+intptr_t wr_test_native_canvas_map_texture_count(void*);
+bool wr_test_native_canvas_map_live(void*, bool);
+void wr_test_native_canvas_map_finish(void*);
+void wr_test_native_canvas_map_delete(void*);
 void* wr_test_foreign_rgb_new(int32_t*);
 void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
 void wr_test_foreign_rgb_delete(void*);
@@ -1037,15 +1068,15 @@ static void CheckNativeCanvasSnapshot(RenderVulkanNativeTextureHost* aHost,
   EXPECT_TRUE(std::all_of(output.begin(), output.end(),
                           [](uint8_t v) { return v == 0xa7; }));
   EXPECT_EQ(format, ImageFormat::R8);
-  bool snapshot = false;
+  bool copied = false;
   bool offRenderThread = false;
   std::thread canvas([&] {
     offRenderThread = !RenderThread::IsInRenderThread();
-    snapshot = aHost->Snapshot(full, 16, output.data(), output.size(), &format);
+    copied = aHost->Snapshot(full, 16, output.data(), output.size(), &format);
   });
   canvas.join();
   ASSERT_TRUE(offRenderThread);
-  ASSERT_EQ(snapshot, aCopySrc);
+  ASSERT_EQ(copied, aCopySrc);
   if (!aCopySrc) {
     EXPECT_TRUE(std::all_of(output.begin(), output.end(),
                             [](uint8_t v) { return v == 0xa7; }));
@@ -1146,6 +1177,204 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasHost) {
       images = alias = foreign = nullptr;
       wr_test_native_canvas_finish(fixture);
     }
+  });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasMap) {
+  auto* map = layers::RemoteTextureMap::Get();
+  ASSERT_TRUE(map);
+  const auto owner = layers::RemoteTextureOwnerId::GetNext();
+  const auto firstId = layers::RemoteTextureId::GetNext();
+  const auto latestId = layers::RemoteTextureId::GetNext();
+  const auto pid = base::GetCurrentProcId();
+  RefPtr<layers::RemoteTextureOwnerClient> client =
+      new layers::RemoteTextureOwnerClient(pid);
+  RefPtr<layers::TextureHost> wrapper;
+  layers::CompositableTextureHostRef compositable;
+  Maybe<ExternalImageId> external;
+  WrVulkanNativePublication* first = nullptr;
+  WrVulkanNativePublication* latest = nullptr;
+  WrVulkanExternalImages* images = nullptr;
+  void* fixture = nullptr;
+  bool registered = false;
+  bool gated = false;
+  std::thread snapshotWorker;
+  auto cleanup = MakeScopeExit([&] {
+    if (gated) {
+      OnRenderThread([&] {
+        EXPECT_TRUE(wr_test_native_canvas_map_gate_release(fixture));
+      });
+      gated = false;
+    }
+    if (snapshotWorker.joinable()) snapshotWorker.join();
+    if (registered) client->UnregisterTextureOwner(owner);
+    if (wrapper) {
+      OnCompositorThread([&] {
+        compositable = nullptr;
+        wrapper = nullptr;
+      });
+    }
+    OnRenderThread([&] {
+      if (images) wr_vulkan_external_images_delete(images);
+      if (first) wr_vulkan_native_publication_delete(first);
+      if (latest) wr_vulkan_native_publication_delete(latest);
+      if (fixture) wr_test_native_canvas_map_delete(fixture);
+    });
+  });
+  OnRenderThread(
+      [&] { fixture = wr_test_native_canvas_map_new(&first, &latest); });
+  ASSERT_TRUE(fixture && first && latest);
+  EXPECT_FALSE(client->PushNativeTexture(
+      firstId, owner, wr_vulkan_native_publication_clone(first)));
+  client->RegisterTextureOwner(owner);
+  registered = true;
+  const bool pushedFirst = client->PushNativeTexture(firstId, owner, first);
+  first = nullptr;
+  ASSERT_TRUE(pushedFirst);
+  OnCompositorThread([&] {
+    wrapper = map->GetOrCreateRemoteTextureHostWrapper(
+        firstId, owner, pid, IntSize(3, 2), layers::TextureFlags::DEFAULT);
+    ASSERT_TRUE(wrapper);
+    map->GetRemoteTexture(wrapper->AsRemoteTextureHostWrapper());
+    ASSERT_TRUE(wrapper->IsValid());
+    compositable = wrapper.get();
+    EXPECT_EQ(wrapper->GetFormat(), SurfaceFormat::R8G8B8A8);
+    auto* webRender = wrapper->AsWebRenderTextureHost();
+    ASSERT_TRUE(webRender);
+    external = Some(webRender->GetExternalImageKey());
+  });
+  ASSERT_TRUE(wrapper);
+  ASSERT_TRUE(external);
+  std::unique_ptr<WrVulkanNativePublication,
+                  decltype(&wr_vulkan_native_publication_delete)>
+      snapshotBounds(wr_vulkan_native_publication_clone(latest),
+                     &wr_vulkan_native_publication_delete);
+  ASSERT_TRUE(snapshotBounds);
+  const bool pushedLatest = client->PushNativeTexture(latestId, owner, latest);
+  latest = nullptr;
+  ASSERT_TRUE(pushedLatest);
+  uint64_t normal = 0;
+  uint64_t opaque = 0;
+  OnRenderThread([&] {
+    images = wr_vulkan_external_images_new(
+        wr_test_native_canvas_map_renderer(fixture));
+    ASSERT_TRUE(images);
+    auto* renderHost = RenderThread::Get()->GetRenderTexture(external.ref());
+    ASSERT_TRUE(renderHost);
+    const auto a = renderHost->LockVulkan(0, images);
+    const auto b = renderHost->LockVulkan(1, images);
+    ASSERT_EQ(a.image_type, WrExternalImageType::NativeTexture);
+    ASSERT_EQ(b.image_type, WrExternalImageType::NativeTexture);
+    normal = a.handle;
+    opaque = b.handle;
+    wr_test_native_canvas_map_sample(fixture, normal, opaque);
+    EXPECT_FALSE(renderHost->UnlockVulkan(images));
+  });
+  ASSERT_NE(normal, 0U);
+  ASSERT_NE(opaque, 0U);
+  std::array<uint8_t, 40> destination;
+  std::array<uint8_t, 31> shortDestination;
+  destination.fill(0xa7);
+  shortDestination.fill(0xa7);
+  const auto invalidSnapshot = [&](uint8_t* bytes, size_t length,
+                                   size_t stride) {
+    DeviceIntRect rect;
+    rect.min.x = 0;
+    rect.min.y = 0;
+    rect.max.x = 3;
+    rect.max.y = 2;
+    auto format = ImageFormat::R8;
+    return wr_vulkan_native_publication_snapshot(snapshotBounds.get(), rect,
+                                                 stride, bytes, length, &format);
+  };
+  EXPECT_FALSE(invalidSnapshot(nullptr, 0, 16));
+  EXPECT_FALSE(invalidSnapshot(destination.data(), destination.size(), 11));
+  EXPECT_FALSE(invalidSnapshot(shortDestination.data(), shortDestination.size(),
+                               16));
+  EXPECT_FALSE(invalidSnapshot(destination.data(), destination.size(), SIZE_MAX));
+  EXPECT_TRUE(std::all_of(destination.begin(), destination.end(),
+                          [](uint8_t value) { return value == 0xa7; }));
+  EXPECT_TRUE(std::all_of(shortDestination.begin(), shortDestination.end(),
+                          [](uint8_t value) { return value == 0xa7; }));
+  snapshotBounds.reset();
+  intptr_t before = 0;
+  OnRenderThread([&] {
+    wr_test_native_canvas_map_gate_begin(fixture);
+    before = wr_test_native_canvas_map_texture_count(fixture);
+  });
+  gated = true;
+  webgpu::FrontBufferSnapshot snapshot;
+  bool offRenderThread = false;
+  snapshotWorker = std::thread([&] {
+    offRenderThread = !RenderThread::IsInRenderThread();
+    snapshot = map->GetLatestBufferSnapshot(owner, pid);
+  });
+  bool admitted = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    OnRenderThread([&] {
+      admitted = wr_test_native_canvas_map_texture_count(fixture) > before;
+    });
+    if (admitted) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  bool retained = false;
+  if (admitted) {
+    client->UnregisterTextureOwner(owner);
+    registered = false;
+    OnRenderThread([&] {
+      retained = wr_test_native_canvas_map_live(fixture, true) &&
+                 wr_test_native_canvas_map_texture_count(fixture) > before;
+    });
+  }
+  bool explicitRelease = false;
+  OnRenderThread([&] {
+    explicitRelease = wr_test_native_canvas_map_gate_release(fixture);
+  });
+  gated = false;
+  snapshotWorker.join();
+  if (registered) {
+    client->UnregisterTextureOwner(owner);
+    registered = false;
+  }
+  ASSERT_TRUE(explicitRelease);
+  ASSERT_TRUE(admitted);
+  ASSERT_TRUE(retained);
+  ASSERT_TRUE(offRenderThread);
+  ASSERT_TRUE(snapshot.handle);
+  ASSERT_EQ(snapshot.width, 3U);
+  ASSERT_EQ(snapshot.height, 2U);
+  ASSERT_EQ(snapshot.byteStride, 12U);
+  auto snapshotMapping = snapshot.handle.Map();
+  ASSERT_TRUE(snapshotMapping);
+  ASSERT_GE(snapshotMapping.Size(), snapshot.byteStride * snapshot.height);
+  const std::array<uint8_t, 24> expected{11, 37, 201, 255, 13, 99,  5,  128,
+                                         31, 7,  53,  64,  11, 137, 83, 192,
+                                         67, 23, 101, 255, 19, 11,  31, 64};
+  for (size_t row = 0; row < 2; ++row) {
+    EXPECT_TRUE(std::equal(expected.begin() + row * 12,
+                           expected.begin() + (row + 1) * 12,
+                           snapshotMapping.DataAs<uint8_t>() + row * snapshot.byteStride));
+  }
+  OnCompositorThread([] {});
+  OnRenderThread([&] {
+    EXPECT_FALSE(wr_test_native_canvas_map_live(fixture, true));
+    EXPECT_TRUE(wr_test_native_canvas_map_live(fixture, false));
+    auto* renderHost = RenderThread::Get()->GetRenderTexture(external.ref());
+    ASSERT_TRUE(renderHost);
+    EXPECT_EQ(renderHost->LockVulkan(0, images).handle, normal);
+    wr_test_native_canvas_map_sample(fixture, normal, opaque);
+    EXPECT_FALSE(renderHost->UnlockVulkan(images));
+  });
+  OnCompositorThread([&] {
+    compositable = nullptr;
+    wrapper = nullptr;
+  });
+  OnRenderThread([&] {
+    wr_vulkan_external_images_delete(images);
+    images = nullptr;
+    wr_test_native_canvas_map_finish(fixture);
   });
 }
 

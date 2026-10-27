@@ -14,3 +14,6 @@ mod unified;
 
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod native_canvas;
+
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod native_canvas_map;

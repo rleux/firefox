@@ -17,7 +17,7 @@ use wgpu_core_remote::{global::Global, id::*};
 use wgpu_hal::shared_image::ImageLease;
 use wgpu_types as wgt;
 
-const PIXELS: [[u8; 4]; 6] = [
+pub(super) const PIXELS: [[u8; 4]; 6] = [
     [17, 51, 102, 255],
     [100, 60, 20, 128],
     [7, 31, 53, 64],
@@ -25,7 +25,7 @@ const PIXELS: [[u8; 4]; 6] = [
     [23, 67, 101, 255],
     [11, 19, 31, 64],
 ];
-const BACKGROUND: [u8; 4] = [23, 47, 89, 255];
+pub(super) const BACKGROUND: [u8; 4] = [23, 47, 89, 255];
 const SENTINEL: [u8; 4] = [3, 29, 71, 255];
 
 fn counts(owner: &Arc<ProcessOwner>) -> (isize, isize) {
@@ -55,15 +55,15 @@ impl ExternalImageHandler for Handles {
     fn unlock(&mut self, _: ExternalImageId, _: u8) {}
 }
 
-struct DrawContext {
-    renderer: Option<webrender::Renderer>,
+pub(super) struct DrawContext {
+    pub(super) renderer: Option<webrender::Renderer>,
     api: RenderApi,
     document: DocumentId,
     ready: mpsc::Receiver<()>,
     frame: u64,
 }
 impl DrawContext {
-    fn new(owner: &Arc<ProcessOwner>) -> Self {
+    pub(super) fn new(owner: &Arc<ProcessOwner>) -> Self {
         let device = unified::graphics(owner);
         let (tx, ready) = mpsc::channel();
         let (renderer, sender) = webrender::create_webrender_instance(
@@ -91,7 +91,7 @@ impl DrawContext {
             frame: 0,
         }
     }
-    fn render(&mut self, handles: [ExternalTextureHandle; 2], format: ImageFormat) {
+    pub(super) fn render(&mut self, handles: [ExternalTextureHandle; 2], format: ImageFormat) {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.set_external_image_handler(Box::new(Handles(handles)));
         let pipeline = PipelineId(0, 0);
@@ -142,24 +142,25 @@ impl DrawContext {
         let result = renderer.render(DeviceIntSize::new(6, 2), 0).unwrap();
         assert!(!result.external_images_pending);
     }
-    fn pixels(&mut self) -> Vec<u8> {
+    pub(super) fn pixels(&mut self) -> Vec<u8> {
         self.renderer
             .as_mut()
             .unwrap()
             .read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(6, 2)))
     }
-    fn finish(mut self) {
+    pub(super) fn finish(mut self) {
         self.api.delete_document(self.document);
         self.renderer.take().unwrap().deinit();
     }
 }
 
-fn source(
+pub(super) fn source(
     owner: &Arc<ProcessOwner>,
     global: &Global,
     format: wgt::TextureFormat,
     srgb: bool,
     copy_src: bool,
+    pixels: &[[u8; 4]; 6],
 ) -> (FinalizedCanvas, wgpu_core::SubmissionIndex, Weak<dyn ImageLease>) {
     let device = global.resolve_device_id(DeviceId::zip(1, 1));
     let queue = global.resolve_queue_id(QueueId::zip(1, 1));
@@ -196,7 +197,7 @@ fn source(
     assert_eq!(device.get_hal_counters().textures.read(), logical_before + 1);
     assert_eq!(counts(owner).0, before.0 + 1);
     assert!(counts(owner).1 > before.1);
-    let bytes = PIXELS
+    let bytes = pixels
         .iter()
         .flat_map(|pixel| {
             let mut pixel = *pixel;
@@ -230,7 +231,7 @@ fn source(
     let index = finalized.submission_index();
     (finalized, index, weak)
 }
-fn retire(global: &Global, index: wgpu_core::SubmissionIndex) {
+pub(super) fn retire(global: &Global, index: wgpu_core::SubmissionIndex) {
     if global
         .resolve_device_id(DeviceId::zip(1, 1))
         .poll(wgt::PollType::Wait {
@@ -292,7 +293,7 @@ pub extern "C" fn wr_test_native_canvas_new() -> *mut Fixture {
     drop((queue, pool, registry));
     let global = unified::actor(&owner, false);
     for wrong_owner in [false, true] {
-        let (finalized, index, weak) = source(&owner, &global, wgt::TextureFormat::Rgba8Unorm, false, true);
+        let (finalized, index, weak) = source(&owner, &global, wgt::TextureFormat::Rgba8Unorm, false, true, &PIXELS);
         let result = unsafe {
             WrVulkanNativePublication::new(
                 if wrong_owner {
@@ -344,7 +345,7 @@ pub extern "C" fn wr_test_native_canvas_prepare(
     } else {
         wgt::TextureFormat::Rgba8Unorm
     };
-    let (finalized, index, weak) = source(&fixture.owner, &global, format, srgb, copy_src);
+    let (finalized, index, weak) = source(&fixture.owner, &global, format, srgb, copy_src, &PIXELS);
     let publication = unsafe {
         WrVulkanNativePublication::new(
             fixture.owner.clone(),
@@ -428,7 +429,7 @@ pub extern "C" fn wr_test_native_canvas_record(fixture: &mut Fixture, normal: u6
         },
     );
 }
-fn linear(value: u8) -> f64 {
+pub(super) fn linear(value: u8) -> f64 {
     let value = value as f64 / 255.;
     if value <= 0.04045 {
         value / 12.92
