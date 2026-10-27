@@ -30,11 +30,15 @@ pub mod conv;
 mod descriptor;
 mod device;
 mod drm;
+#[cfg(target_os = "linux")]
+pub(crate) mod dma_buf;
 pub(crate) mod external_sync;
 mod instance;
 mod memory;
 mod pnext_chain;
 pub(crate) mod renderer;
+#[cfg(target_os = "linux")]
+pub(crate) mod renderer_imports;
 mod sampler;
 mod semaphore_list;
 pub(crate) mod shared;

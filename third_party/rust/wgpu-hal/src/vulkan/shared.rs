@@ -388,7 +388,19 @@ pub(crate) unsafe fn open_shared_device(
     if !adapter.private_caps.timeline_semaphores {
         return Err(SharedDeviceError::TimelineSemaphoresUnavailable);
     }
+    #[cfg(target_os = "linux")]
+    let (features, extra_extensions) = {
+        let mut extra = Vec::new();
+        let features = super::renderer_imports::configure(adapter, features, &mut extra);
+        (features, extra)
+    };
     let mut extensions = adapter.required_device_extensions(features);
+    #[cfg(target_os = "linux")]
+    for extension in extra_extensions {
+        if !extensions.contains(&extension) {
+            extensions.push(extension);
+        }
+    }
     #[cfg(unix)]
     if adapter.instance.instance_api_version >= vk::API_VERSION_1_1
         && adapter

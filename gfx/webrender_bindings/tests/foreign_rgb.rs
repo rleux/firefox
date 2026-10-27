@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use ash::vk;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd};
 use std::rc::Rc;
@@ -13,7 +12,7 @@ use webrender::vulkan::{
 };
 
 unsafe fn ready_fence(owner: &Rc<Device>) -> OwnedFd {
-    super::sync_file::ready_fence(owner).unwrap()
+    wgpu_hal::dma_buf::testing::signal_sync_file(owner.hal_owner()).unwrap()
 }
 
 pub struct Fixture {
@@ -30,18 +29,8 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_new(drm_fd: &mut i32) -> *mut Fixtu
         })
         .unwrap(),
     );
-    let hal = device.raw_device();
-    let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
-    hal.shared_instance().raw_instance().get_physical_device_properties2(
-        hal.raw_physical_device(),
-        &mut vk::PhysicalDeviceProperties2::default().push_next(&mut drm),
-    );
-    assert_eq!(drm.has_render, vk::TRUE);
-    let info = std::fs::read_to_string(format!(
-        "/sys/dev/char/{}:{}/uevent",
-        drm.render_major, drm.render_minor
-    ))
-    .unwrap();
+    let [major, minor] = device.dma_buf_capabilities().unwrap().foreign_drm_node().unwrap();
+    let info = std::fs::read_to_string(format!("/sys/dev/char/{}:{}/uevent", major, minor)).unwrap();
     let node = info.lines().find_map(|line| line.strip_prefix("DEVNAME=")).unwrap();
     let file = OpenOptions::new()
         .read(true)
@@ -124,14 +113,18 @@ pub unsafe extern "C" fn wr_test_foreign_rgb_import(fixture: &Fixture, fd: i32, 
             receipt
         };
         assert_eq!(receipt.status(), ForeignReleaseStatus::Pending);
-        submission.submit().unwrap();
-        assert!(!submission.wait(Some(Duration::from_millis(50))).unwrap());
-        assert_eq!(receipt.status(), ForeignReleaseStatus::Pending);
         let mut open = Submission::new(&gate_owner).unwrap();
         open.recording().unwrap().signal_timeline(&gate, value).unwrap();
-        open.submit().unwrap();
+        submission.submit().unwrap();
+        let premature = submission.wait(Some(Duration::from_millis(50)));
+        let pending = receipt.status();
+        if open.submit().is_err() {
+            std::process::exit(88);
+        }
         assert!(submission.wait(Some(Duration::from_secs(5))).unwrap());
         assert!(open.wait(Some(Duration::from_secs(5))).unwrap());
+        assert!(!premature.unwrap());
+        assert_eq!(pending, ForeignReleaseStatus::Pending);
         assert_eq!(receipt.status(), ForeignReleaseStatus::Complete);
         assert_eq!(receipt.status(), ForeignReleaseStatus::Complete);
     }

@@ -282,6 +282,7 @@ pub mod shared;
 pub mod shared_image;
 pub mod renderer;
 pub mod external_sync;
+pub mod dma_buf;
 pub use graphics::{
     GraphicsCommand, GraphicsExecution, GraphicsRecorder, GraphicsRecorderFactory,
 };

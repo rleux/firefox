@@ -3,13 +3,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use crate::device::wgpu::{hal, Options, Recording, SharedTimeline, Submission};
+use crate::device::wgpu::{hal, Options, SharedTimeline, Submission};
 use crate::device::wgpu::resources::Owned;
 use crate::device::wgpu::tests::{map_upload, validation_logging, ERRORS};
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use wgpu_hal::{CommandEncoder as _, Device as _};
 
 #[path = "dmabuf_access_tests.rs"]
 mod access;
@@ -60,17 +59,6 @@ fn dma_buf_plane_checks_preserve_opaque_modifier_layouts() {
     assert!(desc.validate_plane(8).is_err());
 }
 
-#[test]
-fn dma_buf_memory_types_intersect_and_exclude_protected_memory() {
-    let mut properties = vk::PhysicalDeviceMemoryProperties::default();
-    properties.memory_type_count = 3;
-    properties.memory_types[0].property_flags = vk::MemoryPropertyFlags::PROTECTED;
-    properties.memory_types[1].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-    assert_eq!(memory_type(0b111 & 0b011, &properties).unwrap(), 1);
-    assert!(memory_type(1, &properties).is_err());
-    assert!(memory_type(0b100 & 0b011, &properties).is_err());
-}
-
 fn device() -> Rc<Device> {
     validation_logging();
     Rc::new(
@@ -82,145 +70,73 @@ fn device() -> Rc<Device> {
     )
 }
 
+pub(in crate::device::wgpu) fn consumer_device(
+    shared: bool,
+) -> (
+    Rc<Device>,
+    Option<std::sync::Arc<dyn hal::shared::SharedDeviceContext>>,
+) {
+    if !shared {
+        return (device(), None);
+    }
+    let original = device();
+    let pair = unsafe {
+        hal::shared::open_shared_device(
+            &*original.adapter,
+            original.features,
+            &original.capabilities().limits,
+            &wgt::MemoryHints::MemoryUsage,
+        )
+    }
+    .unwrap();
+    let context = pair.context;
+    let graphics = std::sync::Arc::new(pair.graphics);
+    drop(pair.compute);
+    let (_, instance) = context.clone_instance();
+    let adapter = unsafe { instance.enumerate_adapters(None) }.pop().unwrap();
+    unsafe extern "C" fn fatal() -> ! {
+        std::process::exit(88)
+    }
+    let owner = Rc::new(
+        unsafe {
+            Device::from_shared_endpoint(
+                graphics.clone(),
+                instance,
+                adapter,
+                crate::device::wgpu::SharedDeviceOptions {
+                    context: context.clone(),
+                    recover: Rc::new(|_| std::process::exit(88)),
+                    fatal_process: fatal,
+                },
+            )
+        }
+        .unwrap(),
+    );
+    assert!(std::sync::Arc::ptr_eq(&owner.open, &graphics));
+    let first = owner.dma_buf_capabilities().unwrap();
+    let second = owner.dma_buf_capabilities().unwrap();
+    assert!(std::sync::Arc::ptr_eq(first.native.formats(), second.native.formats()));
+    assert!(!first.native.formats().is_empty());
+    (owner, Some(context))
+}
+
 fn export_image(
     owner: &Rc<Device>,
     format: wgt::TextureFormat,
     modifier: u64,
     size: [u32; 2],
 ) -> (Rc<DmaBufImage>, OwnedFd) {
-    let usage =
-        wgt::TextureUses::RESOURCE | wgt::TextureUses::COPY_SRC | wgt::TextureUses::COPY_DST;
-    let (format_raw, usage_raw, _) = image_parameters(format, usage).unwrap();
-    let modifiers = [modifier];
-    let mut drm =
-        vk::ImageDrmFormatModifierListCreateInfoEXT::default().drm_format_modifiers(&modifiers);
-    let mut external = vk::ExternalMemoryImageCreateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-    let info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format_raw)
-        .extent(vk::Extent3D {
-            width: size[0],
-            height: size[1],
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-        .usage(usage_raw)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .push_next(&mut external)
-        .push_next(&mut drm);
-    let raw = owner.raw_device().raw_device();
-    let image = unsafe { raw.create_image(&info, None) }.unwrap();
-    let (device_uuid, driver_uuid) = identity(owner);
-    let mut output = DmaBufImage {
-        owner: owner.clone(),
-        image,
-        memory: vk::DeviceMemory::null(),
-        states: Rc::new(vec![UsageState::new(TextureState {
-            usage: wgt::TextureUses::UNINITIALIZED,
-            initialized: false,
-        })]),
-        descriptor: DmaBufImageDescriptor {
-            size,
-            format,
-            usage,
-            modifier,
-            row_pitch: 0,
-            offset: 0,
-            device_uuid,
-            driver_uuid,
-        },
-    };
-    unsafe {
-        let requirements = raw.get_image_memory_requirements(image);
-        let properties = owner
-            .raw_device()
-            .shared_instance()
-            .raw_instance()
-            .get_physical_device_memory_properties(owner.raw_device().raw_physical_device());
-        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
-        let mut export = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-        output.memory = raw
-            .allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(
-                        memory_type(requirements.memory_type_bits, &properties).unwrap(),
-                    )
-                    .push_next(&mut dedicated)
-                    .push_next(&mut export),
-                None,
-            )
-            .unwrap();
-        raw.bind_image_memory(image, output.memory, 0).unwrap();
-        let layout = raw.get_image_subresource_layout(
-            image,
-            vk::ImageSubresource::default().aspect_mask(vk::ImageAspectFlags::MEMORY_PLANE_0_EXT),
-        );
-        output.descriptor.offset = layout.offset;
-        output.descriptor.row_pitch = layout.row_pitch;
-        let extension = ash::khr::external_memory_fd::Device::new(
-            owner.raw_device().shared_instance().raw_instance(),
-            raw,
-        );
-        let fd = extension
-            .get_memory_fd(
-                &vk::MemoryGetFdInfoKHR::default()
-                    .memory(output.memory)
-                    .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT),
-            )
-            .unwrap();
-        (Rc::new(output), OwnedFd::from_raw_fd(fd))
-    }
-}
-
-fn barrier(
-    recording: &mut Recording<'_>,
-    image: &Rc<DmaBufImage>,
-    old: vk::ImageLayout,
-    src_family: u32,
-    dst_family: u32,
-    src: vk::AccessFlags,
-    dst: vk::AccessFlags,
-) {
-    recording.keep(&image);
-    unsafe {
-        image.owner.raw_device().raw_device().cmd_pipeline_barrier(
-            recording.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[vk::ImageMemoryBarrier::default()
-                .image(image.image)
-                .old_layout(old)
-                .new_layout(vk::ImageLayout::GENERAL)
-                .src_queue_family_index(src_family)
-                .dst_queue_family_index(dst_family)
-                .src_access_mask(src)
-                .dst_access_mask(dst)
-                .subresource_range(
-                    vk::ImageSubresourceRange::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .level_count(1)
-                        .layer_count(1),
-                )],
-        );
-    }
+    let (image, fd) =
+        hal::dma_buf::testing::export_image(owner.open.clone(), format, modifier, size).unwrap();
+    (DmaBufImage::from_hal_image(owner, image), fd)
 }
 
 #[test]
 #[ignore = "Requires Vulkan DMA-BUF images, shared timelines and validation"]
 fn dma_buf_import_reuses_shared_pixels_and_retains_pending_images() {
-    {
+    for shared in [false, true] {
         let producer = device();
-        let consumer = device();
+        let (consumer, _context) = consumer_device(shared);
         let ready = SharedTimeline::new(&producer).unwrap();
         let ready_import = SharedTimeline::import(&consumer, &ready.export().unwrap()).unwrap();
         let released = SharedTimeline::new(&consumer).unwrap();
@@ -246,57 +162,19 @@ fn dma_buf_import_reuses_shared_pixels_and_retains_pending_images() {
                 let size = 17 * 9 * 4;
                 for channel in 0..3 {
                     value += 1;
-                    let mut send = Submission::new(&producer).unwrap();
-                    {
-                        let mut recording = send.recording().unwrap();
+                    let mut color = [0.0, 0.0, 0.0, 1.0];
+                    color[channel] = 1.0;
+                    let mut send = access::publish(
+                        &source,
+                        &ready,
+                        value,
                         if channel == 0 {
-                            barrier(
-                                &mut recording,
-                                &source,
-                                vk::ImageLayout::UNDEFINED,
-                                vk::QUEUE_FAMILY_IGNORED,
-                                vk::QUEUE_FAMILY_IGNORED,
-                                vk::AccessFlags::empty(),
-                                vk::AccessFlags::TRANSFER_WRITE,
-                            );
+                            None
                         } else {
-                            recording.wait_timeline(&release_import, value - 1).unwrap();
-                            barrier(
-                                &mut recording,
-                                &source,
-                                vk::ImageLayout::GENERAL,
-                                vk::QUEUE_FAMILY_EXTERNAL,
-                                producer.raw_device().queue_family_index(),
-                                vk::AccessFlags::empty(),
-                                vk::AccessFlags::TRANSFER_WRITE,
-                            );
-                        }
-                        let mut color = [0.0, 0.0, 0.0, 1.0];
-                        color[channel] = 1.0;
-                        unsafe {
-                            producer.raw_device().raw_device().cmd_clear_color_image(
-                                recording.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-                                source.image,
-                                vk::ImageLayout::GENERAL,
-                                &vk::ClearColorValue { float32: color },
-                                &[vk::ImageSubresourceRange::default()
-                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                    .level_count(1)
-                                    .layer_count(1)],
-                            );
-                        }
-                        barrier(
-                            &mut recording,
-                            &source,
-                            vk::ImageLayout::GENERAL,
-                            producer.raw_device().queue_family_index(),
-                            vk::QUEUE_FAMILY_EXTERNAL,
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::AccessFlags::empty(),
-                        );
-                        recording.signal_timeline(&ready, value).unwrap();
-                    }
-                    send.submit().unwrap();
+                            Some((&release_import, value - 1))
+                        },
+                        color,
+                    );
                     let output = Rc::new(Owned::new(
                         &consumer,
                         unsafe {
@@ -307,62 +185,89 @@ fn dma_buf_import_reuses_shared_pixels_and_retains_pending_images() {
                                 memory_flags: hal::MemoryFlags::PREFER_COHERENT,
                             })
                         }
-                        .unwrap().0,
+                        .unwrap()
+                        .0,
                         <dyn hal::DynDevice>::destroy_buffer,
                     ));
                     let mut receive = Submission::new(&consumer).unwrap();
                     {
                         let image = imported.as_ref().unwrap();
                         let mut recording = receive.recording().unwrap();
-                        recording.wait_timeline(&ready_import, value).unwrap();
-                        barrier(
-                            &mut recording,
-                            image,
-                            vk::ImageLayout::GENERAL,
-                            vk::QUEUE_FAMILY_EXTERNAL,
-                            consumer.raw_device().queue_family_index(),
-                            vk::AccessFlags::empty(),
-                            vk::AccessFlags::TRANSFER_READ,
-                        );
+                        let alias = Rc::new(Owned::new(
+                            &consumer,
+                            image.hal_texture().unwrap(),
+                            <dyn hal::DynDevice>::destroy_texture,
+                        ));
+                        unsafe { image.acquire(&mut recording, &ready_import, value) }.unwrap();
                         unsafe {
-                            consumer.raw_device().raw_device().cmd_copy_image_to_buffer(
-                                recording.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-                                image.image,
-                                vk::ImageLayout::GENERAL,
-                                output.as_any().downcast_ref::<hal::vulkan::Buffer>().unwrap().raw_handle(),
-                                &[vk::BufferImageCopy::default()
-                                    .image_extent(vk::Extent3D {
+                            recording
+                                .encoder()
+                                .transition_textures(&[hal::TextureBarrier {
+                                    texture: &**alias,
+                                    range: wgt::ImageSubresourceRange::default(),
+                                    queue_family_ownership_transfer: None,
+                                    usage: hal::StateTransition {
+                                        from: wgt::TextureUses::RESOURCE,
+                                        to: wgt::TextureUses::COPY_SRC,
+                                    },
+                                }]);
+                            recording
+                                .encoder()
+                                .transition_buffers(&[hal::BufferBarrier {
+                                    buffer: &**output,
+                                    usage: hal::StateTransition {
+                                        from: wgt::BufferUses::empty(),
+                                        to: wgt::BufferUses::COPY_DST,
+                                    },
+                                }]);
+                            recording.encoder().copy_texture_to_buffer(
+                                &**alias,
+                                wgt::TextureUses::COPY_SRC,
+                                &**output,
+                                &[hal::BufferTextureCopy {
+                                    buffer_layout: wgt::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(17 * 4),
+                                        rows_per_image: None,
+                                    },
+                                    texture_base: hal::TextureCopyBase {
+                                        mip_level: 0,
+                                        array_layer: 0,
+                                        origin: wgt::Origin3d::ZERO,
+                                        aspect: hal::FormatAspects::COLOR,
+                                    },
+                                    size: wgt::Extent3d {
                                         width: 17,
                                         height: 9,
-                                        depth: 1,
-                                    })
-                                    .image_subresource(
-                                        vk::ImageSubresourceLayers::default()
-                                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                                            .layer_count(1),
-                                    )],
+                                        depth_or_array_layers: 1,
+                                    }
+                                    .into(),
+                                }],
                             );
-                            recording.encoder().transition_buffers(&[
-                                hal::BufferBarrier {
+                            recording
+                                .encoder()
+                                .transition_buffers(&[hal::BufferBarrier {
                                     buffer: &**output,
                                     usage: hal::StateTransition {
                                         from: wgt::BufferUses::COPY_DST,
                                         to: wgt::BufferUses::MAP_READ,
                                     },
-                                },
-                            ]);
+                                }]);
+                            recording
+                                .encoder()
+                                .transition_textures(&[hal::TextureBarrier {
+                                    texture: &**alias,
+                                    range: wgt::ImageSubresourceRange::default(),
+                                    queue_family_ownership_transfer: None,
+                                    usage: hal::StateTransition {
+                                        from: wgt::TextureUses::COPY_SRC,
+                                        to: wgt::TextureUses::RESOURCE,
+                                    },
+                                }]);
                         }
+                        recording.keep(&alias);
                         recording.keep(&output);
-                        barrier(
-                            &mut recording,
-                            image,
-                            vk::ImageLayout::GENERAL,
-                            consumer.raw_device().queue_family_index(),
-                            vk::QUEUE_FAMILY_EXTERNAL,
-                            vk::AccessFlags::TRANSFER_READ,
-                            vk::AccessFlags::empty(),
-                        );
-                        recording.signal_timeline(&released, value).unwrap();
+                        image.release(&mut recording, &released, value).unwrap();
                     }
                     receive.submit().unwrap();
                     if channel == 2 {
@@ -389,7 +294,7 @@ fn dma_buf_import_reuses_shared_pixels_and_retains_pending_images() {
 #[test]
 #[ignore = "Requires Vulkan DMA-BUF images and validation"]
 fn dma_buf_import_rejects_bad_metadata_and_preserves_descriptors() {
-    {
+    for shared in [false, true] {
         let producer = device();
         let mut exercised = 0;
         for format in [wgt::TextureFormat::Rgba8Unorm, wgt::TextureFormat::Bgra8Unorm] {
@@ -397,7 +302,7 @@ fn dma_buf_import_rejects_bad_metadata_and_preserves_descriptors() {
                 | wgt::TextureUses::COPY_SRC | wgt::TextureUses::COPY_DST;
             let formats = producer.dma_buf_formats(format, usages).unwrap();
             for caps in formats.iter().filter(|entry| entry.exportable()) {
-                let consumer = device();
+                let (consumer, _context) = consumer_device(shared);
                 let (source, fd) = export_image(&producer, format, caps.modifier(), [17, 9]);
                 for which in 0..5 {
                     let mut descriptor = *source.descriptor();
@@ -409,7 +314,7 @@ fn dma_buf_import_rejects_bad_metadata_and_preserves_descriptors() {
                         _ => descriptor.row_pitch = 0,
                     }
                     assert!(unsafe { consumer.import_dma_buf(fd.as_fd(), descriptor) }.is_err(),
-                        "shared=false, format={format:?}, modifier={:#x}, variant={which}, original_pitch={}, invalid_pitch={}", caps.modifier(), source.descriptor().row_pitch, descriptor.row_pitch);
+                        "shared={shared}, format={format:?}, modifier={:#x}, variant={which}, original_pitch={}, invalid_pitch={}", caps.modifier(), source.descriptor().row_pitch, descriptor.row_pitch);
                     assert!(fd.try_clone().is_ok());
                 }
                 if caps.modifier() == 0 {
@@ -443,5 +348,76 @@ fn dma_buf_import_rejects_bad_metadata_and_preserves_descriptors() {
         }
         assert!(exercised > 0, "No supported exportable DMA-BUF modifier was exercised");
     }
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires shared Vulkan DMA-BUF images and validation"]
+fn shared_dma_buf_import_preserves_owner_counters_and_admission() {
+    use crate::device::wgpu::{ExternalTextureRegistry, ForeignRgbLayout, Texture, TextureFilter};
+    use crate::device::wgpu::render_device::RenderDevice;
+
+    let producer = device();
+    let (consumer, context) = consumer_device(true);
+    let context = context.unwrap();
+    let renderer = RenderDevice::new(&consumer).unwrap();
+    let registry = renderer.textures.external_textures();
+    let capabilities = registry.device().dma_buf_capabilities().unwrap();
+    let (source, fd) = export_image(&producer, wgt::TextureFormat::Rgba8Unorm, 0, [2, 2]);
+    assert!(capabilities.supports(source.descriptor()));
+    let counts = || {
+        let counters = consumer.open.device.get_internal_counters();
+        (counters.textures.read(), counters.texture_memory.read())
+    };
+    let before = counts();
+    let image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
+    assert!(Rc::ptr_eq(&image.owner, &consumer));
+    assert_eq!(counts(), before);
+    let weak = std::sync::Arc::downgrade(&image.inner);
+    let texture = Texture::from_dma_buf(&image, TextureFilter::Nearest, false).unwrap();
+    let aliased = counts();
+    assert_eq!(aliased, (before.0 + 1, before.1));
+    let handle = registry.register(&texture).unwrap();
+    let foreign_registry = ExternalTextureRegistry::new(&producer);
+    assert!(foreign_registry.register(&texture).is_err());
+    assert_eq!(counts(), aliased);
+    registry.unregister(handle).unwrap();
+    drop(texture);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(counts(), before);
+    let alias_image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
+    let alias_weak = std::sync::Arc::downgrade(&alias_image.inner);
+    let alias = alias_image.hal_texture().unwrap();
+    assert_eq!(counts(), (before.0 + 1, before.1));
+    drop(alias_image);
+    assert!(alias_weak.upgrade().is_some());
+    unsafe { consumer.open.device.destroy_texture(alias) };
+    assert!(alias_weak.upgrade().is_none());
+    assert_eq!(counts(), before);
+    let descriptor = source.descriptor();
+    let layout = ForeignRgbLayout::new(
+        descriptor.size,
+        0x34324241,
+        descriptor.modifier,
+        descriptor.row_pitch,
+        descriptor.offset,
+    )
+    .unwrap();
+    if let Some(node) = capabilities.foreign_drm_node() {
+        if capabilities.supports_foreign_rgb(node, layout) {
+            let foreign = unsafe { consumer.import_foreign_rgb(fd.as_fd(), layout) }.unwrap();
+            assert_eq!(foreign.layout().size(), [2, 2]);
+            drop(foreign);
+            assert_eq!(counts(), before);
+        }
+    }
+    context.drain().unwrap();
+    assert!(unsafe { consumer.import_dma_buf(fd.as_fd(), *descriptor) }.is_err());
+    assert!(Texture::from_dma_buf(&image, TextureFilter::Nearest, false).is_err());
+    assert_eq!(counts(), before);
+    drop(image);
+    assert!(weak.upgrade().is_none());
+    assert!(fd.try_clone().is_ok());
+    drop((registry, renderer, consumer));
     assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
 }

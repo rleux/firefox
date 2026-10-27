@@ -31,7 +31,7 @@ impl SharedTimeline {
     fn available(owner: &Device) -> bool {
         !owner.is_lost()
             && (owner.shared.is_some()
-                || owner.supports_dma_buf())
+                || hal::dma_buf::supports_imports(&*owner.open.device))
     }
 
     pub fn new(owner: &Rc<Device>) -> Result<Rc<Self>, String> {

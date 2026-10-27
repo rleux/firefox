@@ -246,7 +246,7 @@ impl Texture {
             height: descriptor.size[1],
             depth_or_array_layers: 1,
         };
-        let raw = Rc::new(Owned::<dyn hal::DynTexture>::new(owner, image.hal_texture(), |_, texture| drop(texture)));
+        let raw = Rc::new(Owned::<dyn hal::DynTexture>::new(owner, image.hal_texture()?, <dyn hal::DynDevice>::destroy_texture));
         let view = unsafe {
             owner.open.device.create_texture_view(
                 &**raw,

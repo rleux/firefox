@@ -2,9 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{wgt, Device, DmaBufImage, DmaBufImageDescriptor, Recording, SharedTimeline, SyncFileWait};
-use std::os::fd::BorrowedFd;
+use super::{
+    wgt, Device, DmaBufImage, DmaBufImageDescriptor, Recording, SharedTimeline, SyncFileWait,
+};
 use std::cell::Cell;
+use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug)]
@@ -148,7 +150,7 @@ impl ForeignRgbImage {
             commands,
             &recording,
             true,
-            ash::vk::QUEUE_FAMILY_FOREIGN_EXT,
+            super::hal::dma_buf::ExternalDomain::Foreign,
         )
     }
 
@@ -169,7 +171,7 @@ impl ForeignRgbImage {
             commands,
             &recording,
             false,
-            ash::vk::QUEUE_FAMILY_FOREIGN_EXT,
+            super::hal::dma_buf::ExternalDomain::Foreign,
         )?;
         let state = Rc::new(ReleaseState {
             timeline: released.clone(),
@@ -191,14 +193,15 @@ impl Device {
         fd: BorrowedFd<'_>,
         layout: ForeignRgbLayout,
     ) -> Result<ForeignRgbImage, String> {
-        if !self
-            .raw_device()
-            .enabled_device_extensions()
-            .contains(&ash::ext::queue_family_foreign::NAME)
-        {
-            return Err("Foreign queue ownership is unavailable".into());
+        if self.is_lost() {
+            return Err("Vulkan device requires recreation".into());
         }
-        let image = self.import_dma_buf_impl(fd, layout.descriptor, false)?;
+        let inner = unsafe {
+            self.dma_buf_capabilities()?
+                .native
+                .import_foreign_rgb(fd, layout.descriptor)
+        }?;
+        let image = DmaBufImage::from_hal_image(self, inner);
         Ok(ForeignRgbImage { image, layout })
     }
 }

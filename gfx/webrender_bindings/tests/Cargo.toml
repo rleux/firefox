@@ -5,14 +5,11 @@ edition = "2021"
 license = "MPL-2.0"
 
 [features]
-vulkan = ["dep:libc", "dep:webrender", "dep:ash", "webrender/vulkan"]
+vulkan = ["dep:webrender", "dep:wgpu-hal", "webrender/vulkan"]
 
 [dependencies]
 webrender = { path = "../../wr/webrender", default-features = false, optional = true }
-ash = { version = "0.38", optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = { version = "0.2", optional = true, default-features = false }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["vulkan", "validation_canary"] }
 
 [lib]
 path = "lib.rs"

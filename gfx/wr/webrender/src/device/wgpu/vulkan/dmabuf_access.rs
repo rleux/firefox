@@ -3,8 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::{DmaBufImage, TextureState};
+use crate::device::wgpu::hal::dma_buf::ExternalDomain;
 use crate::device::wgpu::{wgt, Recording, SharedTimeline};
-use ash::vk;
 use std::rc::Rc;
 
 impl DmaBufImage {
@@ -25,7 +25,7 @@ impl DmaBufImage {
             return Err("DMA-BUF image is already acquired".into());
         }
         commands.wait_timeline(ready, value)?;
-        self.record_access(commands, &recording, true, vk::QUEUE_FAMILY_EXTERNAL)
+        self.record_access(commands, &recording, true, ExternalDomain::External)
     }
 
     /// Publish the release value to the producer only after successful submission.
@@ -41,7 +41,7 @@ impl DmaBufImage {
             return Err("DMA-BUF image is not acquired".into());
         }
         commands.signal_timeline(released, value)?;
-        self.record_access(commands, &recording, false, vk::QUEUE_FAMILY_EXTERNAL)
+        self.record_access(commands, &recording, false, ExternalDomain::External)
     }
 
     pub(in crate::device::wgpu) fn record_access(
@@ -49,8 +49,10 @@ impl DmaBufImage {
         commands: &mut Recording<'_>,
         recording: &Rc<()>,
         acquire: bool,
-        external_family: u32,
+        external_family: ExternalDomain,
     ) -> Result<(), String> {
+        self.inner
+            .validate_access(commands.encoder(), external_family)?;
         let (_, first) = self.states[0].prepare(
             recording,
             TextureState {
@@ -67,82 +69,10 @@ impl DmaBufImage {
             commands.commit(move || image.states[0].commit());
         }
         commands.keep(self);
-        let family = self.owner.raw_device().queue_family_index();
-        if acquire {
-            self.image_barrier(
-                commands,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::GENERAL,
-                external_family,
-                family,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::SHADER_READ,
-            );
-            self.image_barrier(
-                commands,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::SHADER_READ,
-            );
-        } else {
-            self.image_barrier(
-                commands,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageLayout::GENERAL,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::AccessFlags::SHADER_READ,
-                vk::AccessFlags::empty(),
-            );
-            self.image_barrier(
-                commands,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::GENERAL,
-                family,
-                external_family,
-                vk::AccessFlags::SHADER_READ,
-                vk::AccessFlags::empty(),
-            );
-        }
-        Ok(())
-    }
-
-    fn image_barrier(
-        &self,
-        commands: &mut Recording<'_>,
-        old: vk::ImageLayout,
-        new: vk::ImageLayout,
-        src: u32,
-        dst: u32,
-        src_access: vk::AccessFlags,
-        dst_access: vk::AccessFlags,
-    ) {
         unsafe {
-            self.owner.raw_device().raw_device().cmd_pipeline_barrier(
-                commands.encoder().as_any().downcast_ref::<wgpu_hal::vulkan::CommandEncoder>().expect("Vulkan encoder").raw_handle(),
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[vk::ImageMemoryBarrier::default()
-                    .image(self.image)
-                    .old_layout(old)
-                    .new_layout(new)
-                    .src_queue_family_index(src)
-                    .dst_queue_family_index(dst)
-                    .src_access_mask(src_access)
-                    .dst_access_mask(dst_access)
-                    .subresource_range(
-                        vk::ImageSubresourceRange::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .level_count(1)
-                            .layer_count(1),
-                    )],
-            );
-        }
+            self.inner
+                .record_access(commands.encoder(), acquire, external_family)
+        };
+        Ok(())
     }
 }

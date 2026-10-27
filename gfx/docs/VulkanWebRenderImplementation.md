@@ -28,8 +28,9 @@ Source entry points are `gfxPlatform`, `RenderCompositorVulkan`,
 `device::wgpu::RenderDevice`. Shared HAL code lives under
 `gfx/wr/webrender/src/device/wgpu/`; its native Vulkan integration is under
 `gfx/wr/webrender/src/device/wgpu/vulkan/`. Resources and command recording use
-wgpu-hal's `Dyn*` interfaces. Native imports and synchronization retain checked
-Vulkan access at the integration boundary.
+wgpu-hal's `Dyn*` interfaces. Native Vulkan imports and synchronization are
+implemented inside `wgpu-hal`; WebRender retains logical admission through
+checked HAL interfaces.
 
 ## Host runtime requirements
 

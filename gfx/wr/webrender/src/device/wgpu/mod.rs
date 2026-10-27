@@ -21,9 +21,6 @@ pub use self::external_textures::ExternalTextureRegistry;
 #[cfg(target_os = "linux")]
 pub use self::external_textures::{ExternalReleaseStatus, PendingExternalRelease};
 #[cfg(target_os = "linux")]
-#[path = "vulkan/external.rs"]
-mod external;
-#[cfg(target_os = "linux")]
 #[path = "vulkan/dmabuf.rs"]
 mod dmabuf;
 #[cfg(target_os = "linux")]
@@ -146,6 +143,11 @@ pub struct Device {
 }
 
 impl Device {
+    /// Retain the portable device/queue endpoint that owns this renderer's resources.
+    pub fn hal_owner(&self) -> std::sync::Arc<hal::DynOpenDevice> {
+        self.open.clone()
+    }
+
     pub fn shared_features(adapter_features: wgt::Features) -> wgt::Features {
         adapter_features
             & (wgt::Features::DUAL_SOURCE_BLENDING

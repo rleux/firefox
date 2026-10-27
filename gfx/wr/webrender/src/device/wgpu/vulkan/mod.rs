@@ -5,35 +5,7 @@
 use super::*;
 use std::ffi::CStr;
 use wgpu_hal::{Adapter as _, Instance as _};
-use std::{ops::Deref, rc::Rc};
-
-pub(super) struct Owned<T> {
-    pub(super) owner: Rc<Device>,
-    raw: Option<T>,
-    destroy: unsafe fn(&hal::vulkan::Device, T),
-}
-
-impl<T> Owned<T> {
-    pub fn new(owner: &Rc<Device>, raw: T, destroy: unsafe fn(&hal::vulkan::Device, T)) -> Self {
-        Self { owner: owner.clone(), raw: Some(raw), destroy }
-    }
-}
-
-impl<T> Deref for Owned<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.raw.as_ref().unwrap()
-    }
-}
-
-impl<T> Drop for Owned<T> {
-    fn drop(&mut self) {
-        if let Some(raw) = self.raw.take() {
-            unsafe { (self.destroy)(self.owner.raw_device(), raw) }
-        }
-    }
-}
+use std::rc::Rc;
 
 impl Device {
     pub fn new(options: &Options) -> Result<Self, String> {
@@ -144,8 +116,15 @@ impl Device {
 
         let features = Self::shared_features(exposed.features);
         #[cfg(target_os = "linux")]
-        let (open, features) = external::open_adapter(&exposed, features)
-            .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
+        let (open, features) = unsafe {
+            hal::renderer::open_device(
+                &exposed.adapter,
+                features,
+                &exposed.capabilities.limits,
+                &wgt::MemoryHints::default(),
+            )
+        }
+        .map_err(|error| format!("Opening {}: {error:?}", exposed.info.name))?;
         #[cfg(not(target_os = "linux"))]
         let open = unsafe {
             exposed.adapter.open(
@@ -188,21 +167,17 @@ impl Device {
             display_owner,
         })
     }
+    #[cfg(test)]
     pub fn raw_device(&self) -> &hal::vulkan::Device {
         self.open.device.as_ref().as_any().downcast_ref().expect("Vulkan device")
     }
+    #[cfg(test)]
     pub fn queue(&self) -> &hal::vulkan::Queue {
         self.open.queue.as_ref().as_any().downcast_ref().expect("Vulkan queue")
     }
+    #[cfg(test)]
     pub(super) fn raw_adapter(&self) -> &hal::vulkan::Adapter {
         self.adapter.as_any().downcast_ref().expect("Vulkan adapter")
-    }
-}
-
-impl Recording<'_> {
-    pub fn vulkan_encoder(&mut self) -> Result<&mut hal::vulkan::CommandEncoder, String> {
-        self.encoder().as_any_mut().downcast_mut()
-            .ok_or_else(|| "Native Vulkan commands require a Vulkan encoder".into())
     }
 }
 
@@ -219,8 +194,5 @@ mod tests;
 pub(super) struct Cache {
     pub(super) properties: std::cell::OnceCell<([u8; 16], [u8; 16], u64)>,
     pub(super) sync_file: std::cell::OnceCell<bool>,
-    pub(super) drm_node: std::cell::OnceCell<Option<[u64; 2]>>,
     pub(super) capabilities: std::cell::OnceCell<DmaBufCapabilities>,
-    pub(super) formats: std::cell::RefCell<crate::internal_types::FastHashMap<(wgt::TextureFormat, wgt::TextureUses), Rc<[DmaBufFormat]>>>,
-    pub(super) modifiers: std::cell::RefCell<crate::internal_types::FastHashMap<wgt::TextureFormat, Rc<[ash::vk::DrmFormatModifierPropertiesEXT]>>>,
 }

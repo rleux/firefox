@@ -14,7 +14,7 @@ use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 #[path = "../external_access_tests.rs"]
 mod registry;
 
-fn publish(
+pub(super) fn publish(
     source: &Rc<DmaBufImage>,
     ready: &Rc<SharedTimeline>,
     value: u64,
@@ -27,47 +27,17 @@ fn publish(
         let mut recording = send.recording().unwrap();
         if let Some((timeline, point)) = released {
             recording.wait_timeline(timeline, point).unwrap();
-            barrier(
-                &mut recording,
-                source,
-                vk::ImageLayout::GENERAL,
-                vk::QUEUE_FAMILY_EXTERNAL,
-                owner.raw_device().queue_family_index(),
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::TRANSFER_WRITE,
-            );
-        } else {
-            barrier(
-                &mut recording,
-                source,
-                vk::ImageLayout::UNDEFINED,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::QUEUE_FAMILY_IGNORED,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::TRANSFER_WRITE,
-            );
         }
+        recording.keep(source);
         unsafe {
-            owner.raw_device().raw_device().cmd_clear_color_image(
-                recording.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-                source.image,
-                vk::ImageLayout::GENERAL,
-                &vk::ClearColorValue { float32: color },
-                &[vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .level_count(1)
-                    .layer_count(1)],
-            );
+            hal::dma_buf::testing::publish(
+                &source.inner,
+                recording.encoder(),
+                color,
+                released.is_some(),
+            )
         }
-        barrier(
-            &mut recording,
-            source,
-            vk::ImageLayout::GENERAL,
-            owner.raw_device().queue_family_index(),
-            vk::QUEUE_FAMILY_EXTERNAL,
-            vk::AccessFlags::TRANSFER_WRITE,
-            vk::AccessFlags::empty(),
-        );
+        .unwrap();
         recording.signal_timeline(ready, value).unwrap();
     }
     send.submit().unwrap();
@@ -134,9 +104,9 @@ fn sampled_draw(owner: &Rc<Device>, texture: Rc<Texture>) -> (Rc<Buffer>, Draw) 
 #[test]
 #[ignore = "Requires Vulkan DMA-BUF sampling, shared timelines and validation"]
 fn dma_buf_access_samples_updates_and_releases_through_the_draw_path() {
-    {
+    for shared in [false, true] {
         let producer = device();
-        let consumer = device();
+        let (consumer, _context) = consumer_device(shared);
         let ready = SharedTimeline::new(&producer).unwrap();
         let ready_import = SharedTimeline::import(&consumer, &ready.export().unwrap()).unwrap();
         let released = SharedTimeline::new(&consumer).unwrap();
@@ -227,9 +197,9 @@ fn dma_buf_access_samples_updates_and_releases_through_the_draw_path() {
 #[test]
 #[ignore = "Requires Vulkan DMA-BUF images, shared timelines and validation"]
 fn dma_buf_access_rolls_back_and_shares_state_between_views() {
-    {
+    for shared in [false, true] {
         let producer = device();
-        let consumer = device();
+        let (consumer, _context) = consumer_device(shared);
         let ready = SharedTimeline::new(&producer).unwrap();
         let ready_import = SharedTimeline::import(&consumer, &ready.export().unwrap()).unwrap();
         let released = SharedTimeline::new(&consumer).unwrap();
@@ -277,7 +247,9 @@ fn dma_buf_access_rolls_back_and_shares_state_between_views() {
             .release(&mut cancelled_release.recording().unwrap(), &released, 1)
             .unwrap();
         assert!(!second.initialized());
-        assert!(sampled.prepare(&mut cancelled_release.recording().unwrap()).is_err());
+        assert!(sampled
+            .prepare(&mut cancelled_release.recording().unwrap())
+            .is_err());
         drop(cancelled_release);
         assert!(first.initialized() && second.initialized());
         let mut release = Submission::new(&consumer).unwrap();
@@ -301,9 +273,9 @@ fn dma_buf_access_rolls_back_and_shares_state_between_views() {
 #[test]
 #[ignore = "Requires Vulkan DMA-BUF images and validation"]
 fn dma_buf_access_view_retains_the_native_allocation() {
-    {
+    for shared in [false, true] {
         let producer = device();
-        let consumer = device();
+        let (consumer, _context) = consumer_device(shared);
         let (source, fd) = export_image(&producer, wgt::TextureFormat::Rgba8Unorm, 0, [2, 2]);
         let image = unsafe { consumer.import_dma_buf(fd.as_fd(), *source.descriptor()) }.unwrap();
         let weak = Rc::downgrade(&image);

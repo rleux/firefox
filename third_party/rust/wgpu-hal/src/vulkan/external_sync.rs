@@ -67,7 +67,7 @@ fn properties_shared(device: &super::DeviceShared) -> Result<DeviceProperties, S
     })
 }
 
-fn fd_capability(
+pub(super) fn fd_capability(
     device: &super::DeviceShared,
     kind: vk::ExternalSemaphoreHandleTypeFlags,
     timeline: bool,

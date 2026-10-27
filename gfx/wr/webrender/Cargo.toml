@@ -82,6 +82,7 @@ rand = "0.4"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dev-dependencies]
 wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std", "vulkan", "wgsl", "counters"] }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["vulkan", "validation_canary"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dev-dependencies.wgpu_graphics]
 path = "../../wgpu_graphics"

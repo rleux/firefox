@@ -131,3 +131,23 @@ pub unsafe fn configure_surface(
         "Checked surface configuration is unavailable",
     ))
 }
+
+/// Open a renderer endpoint with optional ordinary external-image support.
+/// The returned effective features apply the complete optional DMA-BUF policy,
+/// including when the incoming feature set already contains that internal bit.
+/// # Safety
+/// DynAdapter::open requirements apply.
+pub unsafe fn open_device(
+    adapter: &dyn crate::DynAdapter,
+    features: wgt::Features,
+    limits: &wgt::Limits,
+    hints: &wgt::MemoryHints,
+) -> Result<(crate::DynOpenDevice, wgt::Features), crate::DeviceError> {
+    #[cfg(all(vulkan, target_os = "linux"))]
+    if let Some(adapter) = adapter.as_any().downcast_ref::<crate::vulkan::Adapter>() {
+        return unsafe {
+            crate::vulkan::renderer_imports::open_adapter(adapter, features, limits, hints)
+        };
+    }
+    unsafe { adapter.open(features, limits, hints) }.map(|open| (open, features))
+}
