@@ -459,6 +459,7 @@ impl super::Instance {
 
         Ok(Self {
             selected_physical_device: None,
+            selected_features: None,
             shared: Arc::new(super::InstanceShared {
                 raw: raw_instance,
                 extensions,
@@ -1251,6 +1252,11 @@ impl crate::Instance for super::Instance {
 
         if let Some(selected) = self.selected_physical_device {
             exposed_adapters.retain(|adapter| adapter.adapter.raw == selected);
+        }
+        if let Some(features) = self.selected_features {
+            for adapter in &mut exposed_adapters {
+                adapter.features &= features;
+            }
         }
         exposed_adapters
     }

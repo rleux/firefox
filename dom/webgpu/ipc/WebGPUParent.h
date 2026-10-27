@@ -46,6 +46,8 @@ class WebGPUParent final : public PWebGPUParent, public SupportsWeakPtr {
  public:
   explicit WebGPUParent(const dom::ContentParentId& aContentId);
 
+  bool IsReady() const { return mContext != nullptr; }
+
   void PostAdapterRequestDevice(RawId aDeviceId);
   void BufferUnmap(RawId aDeviceId, RawId aBufferId, bool aFlush);
   ipc::IPCResult RecvMessages(uint32_t nrOfMessages,

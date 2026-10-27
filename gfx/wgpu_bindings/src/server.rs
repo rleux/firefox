@@ -302,6 +302,7 @@ impl Drop for WebGPUParentWeakPtr {
 pub struct Global {
     owner: WebGPUParentPtr,
     global: wgpu_core_remote::global::Global,
+    unified: Option<Arc<crate::unified::ProcessOwner>>,
 
     /// Swap chain texture descriptors.
     ///
@@ -311,6 +312,24 @@ pub struct Global {
     swap_chain_configs: Mutex<HashMap<SwapChainId, TextureDescriptor<'static>>>,
 }
 
+impl Global {
+    fn reject_unified_canvas(&self, device_id: id::DeviceId, operation: &'static str) -> bool {
+        if self.unified.is_none() {
+            return false;
+        }
+        self.device_handle_error(
+            device_id,
+            GPUError {
+                message: Cow::Borrowed("Unified native canvas transport is unavailable"),
+                r#type: ErrorType::Validation,
+            },
+            None,
+            operation,
+        );
+        true
+    }
+}
+
 impl std::ops::Deref for Global {
     type Target = wgpu_core_remote::global::Global;
     fn deref(&self) -> &Self::Target {
@@ -318,9 +337,7 @@ impl std::ops::Deref for Global {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
-    log::info!("Initializing WGPU server");
+pub(crate) fn instance_descriptor() -> wgt::InstanceDescriptor {
     let backends_pref = static_prefs::pref!("dom.webgpu.wgpu-backend").to_string();
     let backends = if backends_pref.is_empty() {
         #[cfg(windows)]
@@ -351,37 +368,70 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
         dxc_path: "dxcompiler.dll".into(),
     };
 
-    let global = wgpu_core_remote::global::Global::new(
-        "wgpu",
-        wgt::InstanceDescriptor {
-            backends,
-            flags: instance_flags,
-            backend_options: wgt::BackendOptions {
-                gl: wgt::GlBackendOptions {
-                    gles_minor_version: wgt::Gles3MinorVersion::Automatic,
-                    fence_behavior: wgt::GlFenceBehavior::Normal,
-                    debug_fns: wgt::GlDebugFns::Auto,
-                },
-                dx12: wgt::Dx12BackendOptions {
-                    shader_compiler: dx12_shader_compiler,
-                    ..Default::default()
-                },
-                noop: wgt::NoopBackendOptions::default(),
+    wgt::InstanceDescriptor {
+        backends,
+        flags: instance_flags,
+        backend_options: wgt::BackendOptions {
+            gl: wgt::GlBackendOptions {
+                gles_minor_version: wgt::Gles3MinorVersion::Automatic,
+                fence_behavior: wgt::GlFenceBehavior::Normal,
+                debug_fns: wgt::GlDebugFns::Auto,
             },
-            memory_budget_thresholds: wgt::MemoryBudgetThresholds {
-                for_resource_creation: Some(95),
-                for_device_loss: Some(99),
+            dx12: wgt::Dx12BackendOptions {
+                shader_compiler: dx12_shader_compiler,
+                ..Default::default()
             },
-            display: None,
+            noop: wgt::NoopBackendOptions::default(),
         },
-        Some(build_telemetry_struct()),
-    );
-    let global = Global {
+        memory_budget_thresholds: wgt::MemoryBudgetThresholds {
+            for_resource_creation: Some(95),
+            for_device_loss: Some(99),
+        },
+        display: None,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_unified_available(is_gpu_process: bool) -> bool {
+    crate::unified::available_owner(is_gpu_process).is_some()
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_new(
+    owner: WebGPUParentPtr,
+    unified_requested: bool,
+    is_gpu_process: bool,
+) -> *mut Global {
+    log::info!("Initializing WGPU server");
+    let (global, unified) = if unified_requested {
+        let Some(shared) = crate::unified::available_owner(is_gpu_process) else {
+            log::warn!("Unified WebGPU native owner is unavailable");
+            return std::ptr::null_mut();
+        };
+        let global = match shared.new_actor_global() {
+            Ok(global) => global,
+            Err(error) => {
+                log::warn!("Initializing unified WebGPU actor: {error}");
+                return std::ptr::null_mut();
+            }
+        };
+        (global, Some(shared))
+    } else {
+        (
+            wgpu_core_remote::global::Global::new(
+                "wgpu",
+                instance_descriptor(),
+                Some(build_telemetry_struct()),
+            ),
+            None,
+        )
+    };
+    Box::into_raw(Box::new(Global {
         owner,
         global,
+        unified,
         swap_chain_configs: Mutex::new(HashMap::new()),
-    };
-    Box::into_raw(Box::new(global))
+    }))
 }
 
 /// # Safety
@@ -444,6 +494,10 @@ fn support_use_shared_texture_in_swap_chain(
     backend: wgt::Backend,
     is_hardware: bool,
 ) -> bool {
+    if global.unified.is_some() {
+        return false;
+    }
+
     #[cfg(target_os = "windows")]
     {
         if backend != wgt::Backend::Dx12 {
@@ -604,6 +658,31 @@ fn adapter_request_device(
                 additional_features.insert(feature);
             }
         }
+    }
+
+    if let Some(owner) = &global.unified {
+        let mut sanitized_desc = wgt::DeviceDescriptor {
+            label: desc.label,
+            required_features: wgt::Features::from_internal_flags(
+                wgt::FeaturesWGPU::empty(),
+                desc.required_features,
+            )
+            .union(additional_features),
+            required_limits: desc.required_limits,
+            default_queue: desc.default_queue,
+            experimental_features: wgt::ExperimentalFeatures::disabled(),
+            memory_hints: wgt::MemoryHints::MemoryUsage,
+            trace,
+        };
+        return owner
+            .create_device(
+                &global.global,
+                self_id,
+                &mut sanitized_desc,
+                new_device_id,
+                new_queue_id,
+            )
+            .map_err(request_device_error_to_ffi);
     }
 
     #[cfg(target_os = "linux")]
@@ -2383,6 +2462,11 @@ impl Global {
             }
             #[allow(unused_variables)]
             DeviceAction::CreateTexture(id, desc, swap_chain_id) => {
+                if swap_chain_id.is_some() && self.unified.is_some() {
+                    self.create_texture_error(device_id, id, &desc);
+                    self.reject_unified_canvas(device_id, "GPUCanvasContext.getCurrentTexture");
+                    return;
+                }
                 let desc = if let Some(swap_chain_id) = swap_chain_id {
                     // This should have been checked on the content timeline.
                     assert!(!desc
@@ -3034,6 +3118,9 @@ unsafe fn process_message(
             remote_texture_owner_id,
             use_shared_texture_in_swap_chain,
         } => {
+            if global.reject_unified_canvas(device_id, "GPUCanvasContext.configure") {
+                return;
+            }
             let (sanitized_desc, size) = {
                 let TextureDescriptor {
                     size: wgt::Extent3d { width, height, .. },
@@ -3109,6 +3196,10 @@ unsafe fn process_message(
             remote_texture_id,
             remote_texture_owner_id,
         } => {
+            if global.unified.is_some() {
+                log::warn!("Unified native canvas presentation is unavailable");
+                return;
+            }
             wgpu_parent_swap_chain_present(
                 global.owner,
                 texture_id,
@@ -3234,6 +3325,10 @@ pub extern "C" fn wgpu_server_submit_copy_texture_to_buffer(
     dst_buffer_id: id::BufferId,
     dst_buffer_bytes_per_row: u32,
 ) -> bool {
+    if global.reject_unified_canvas(device_id, "GPUCanvasContext legacy readback") {
+        return false;
+    }
+
     global.device_push_error_scope(device_id, ErrorFilter::Validation);
     global.device_create_command_encoder(
         device_id,
@@ -3393,6 +3488,20 @@ pub unsafe extern "C" fn wgpu_server_queue_submit(
     let queue = global.resolve_queue_id(queue_id);
     let device = queue.device();
 
+    if global.unified.is_some() && signal_semaphores.length != 0 {
+        device.handle_error(
+            GPUError {
+                message: Cow::Borrowed(
+                    "Legacy Vulkan semaphore payloads are unavailable for unified queues",
+                ),
+                r#type: ErrorType::Validation,
+            },
+            None,
+            "Queue::submit",
+        );
+        return 0;
+    }
+
     device.push_error_scope(ErrorFilter::Validation);
     let submission_index_opt =
         global.queue_submit(queue_id, unsafe { command_buffer_ids.as_slice() });
@@ -3437,6 +3546,23 @@ pub extern "C" fn wgpu_vksemaphore_create_signal_semaphore(
     queue_id: id::QueueId,
     out_fd: *mut i32,
 ) -> VkSemaphoreHandle {
+    if global.unified.is_some() {
+        unsafe {
+            *out_fd = -1;
+        }
+        global.resolve_queue_id(queue_id).device().handle_error(
+            GPUError {
+                message: Cow::Borrowed(
+                    "Legacy Vulkan semaphore creation is unavailable for unified queues",
+                ),
+                r#type: ErrorType::Validation,
+            },
+            None,
+            "Queue legacy semaphore",
+        );
+        return VkSemaphoreHandle(0);
+    }
+
     use ash::vk::Handle as _;
     use wgc::resource::ParentDevice as _;
 
@@ -3506,6 +3632,11 @@ pub unsafe extern "C" fn wgpu_server_device_import_texture_from_d3d11_resource(
     handle: *mut core::ffi::c_void,
 ) {
     let desc = desc.to_wgpu();
+    if global.unified.is_some() {
+        global.create_texture_error(device_id, id_in, &desc);
+        global.reject_unified_canvas(device_id, "Legacy shared texture import");
+        return;
+    }
 
     global.create_texture_with_imported_d3d11_resource(
         device_id,
@@ -3533,6 +3664,19 @@ pub unsafe extern "C" fn wgpu_server_device_wait_fence_from_shared_handle(
 
     let queue = global.resolve_queue_id(queue_id);
     let device = queue.device().clone();
+    if global.unified.is_some() {
+        device.handle_error(
+            GPUError {
+                message: Cow::Borrowed(
+                    "Legacy shared fence waits are unavailable for unified queues",
+                ),
+                r#type: ErrorType::Validation,
+            },
+            None,
+            "Legacy shared fence wait",
+        );
+        return false;
+    }
 
     let hal_device =
         unsafe { device.as_hal::<wgc::api::Dx12>() }.expect("D3D12 backend device on windows");

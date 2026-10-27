@@ -151,3 +151,42 @@ pub unsafe fn open_device(
     }
     unsafe { adapter.open(features, limits, hints) }.map(|open| (open, features))
 }
+
+/// Optional renderer features shared by legacy and unified native creation.
+pub fn shared_features(available: wgt::Features) -> wgt::Features {
+    available
+        & (wgt::Features::DUAL_SOURCE_BLENDING
+            | wgt::Features::FLOAT32_FILTERABLE
+            | wgt::Features::TEXTURE_FORMAT_16BIT_NORM)
+}
+pub(crate) fn shared_native_features(available: wgt::Features) -> wgt::Features {
+    wgt::Features::from_internal_flags(wgt::FeaturesWGPU::empty(), available.features_webgpu)
+        | shared_features(available)
+        | (available
+            & (wgt::Features::EXTERNAL_TEXTURE
+                | wgt::Features::TEXTURE_FORMAT_NV12
+                | wgt::Features::TEXTURE_FORMAT_P010
+                | wgt::Features::TEXTURE_FORMAT_16BIT_NORM))
+}
+
+/// Create a window-independent native owner for the renderer and WebGPU.
+/// # Safety
+/// Instance::init requirements and shared::open_shared_device retirement apply.
+pub unsafe fn bootstrap_shared_device(
+    descriptor: &crate::InstanceDescriptor<'_>,
+    require_hardware: bool,
+) -> Result<crate::shared::SharedDeviceEndpoints, alloc::string::String> {
+    #[cfg(vulkan)]
+    {
+        return unsafe {
+            crate::vulkan::renderer::bootstrap_shared_device(descriptor, require_hardware)
+        };
+    }
+    #[cfg(not(vulkan))]
+    {
+        let _ = (descriptor, require_hardware);
+        Err(alloc::string::String::from(
+            "Shared renderer bootstrap requires Vulkan",
+        ))
+    }
+}

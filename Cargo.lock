@@ -9334,6 +9334,7 @@ dependencies = [
  "tracy-rs",
  "uuid",
  "webrender",
+ "wgpu_bindings",
  "winapi",
  "wr_malloc_size_of",
 ]
@@ -9569,7 +9570,16 @@ dependencies = [
  "wgpu-core-remote-types",
  "wgpu-hal",
  "wgpu-types",
+ "wgpu_graphics",
  "windows",
+]
+
+[[package]]
+name = "wgpu_graphics"
+version = "0.1.0"
+dependencies = [
+ "wgpu-hal",
+ "wgpu-types",
 ]
 
 [[package]]

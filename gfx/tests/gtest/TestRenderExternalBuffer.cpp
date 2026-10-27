@@ -967,10 +967,15 @@ void wr_test_vulkan_image_delete(void*);
 Renderer* wr_test_vulkan_renderer_new();
 void wr_test_vulkan_renderer_delete(Renderer*);
 void wr_test_vulkan_sync_file_wait();
+void wr_test_unified_owner_bootstrap();
 void* wr_test_foreign_rgb_new(int32_t*);
 void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
 void wr_test_foreign_rgb_delete(void*);
 int32_t wr_test_foreign_rgb_ready(void*);
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanUnifiedOwnerBootstrap) {
+  OnRenderThread([] { wr_test_unified_owner_bootstrap(); });
 }
 
 static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(

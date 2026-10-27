@@ -38,8 +38,11 @@ extern crate foreign_types;
 
 #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
 extern crate raw_window_handle;
+#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+extern crate wgpu_bindings;
 
 mod program_cache;
+mod unified;
 mod vulkan;
 mod vulkan_external;
 

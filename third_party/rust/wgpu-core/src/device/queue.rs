@@ -81,7 +81,7 @@ impl Queue {
         let pending_encoder = device
             .command_allocator
             .acquire_encoder(&device, raw.as_ref())
-            .map_err(DeviceError::from_hal);
+            .map_err(|error| device.map_hal_error_without_loss(error));
 
         let pending_encoder = match pending_encoder {
             Ok(pending_encoder) => pending_encoder,
@@ -338,7 +338,7 @@ impl Queue {
             mutated = true;
             pending_writes
                 .try_activate()
-                .map_err(DeviceError::from_hal)?;
+                .map_err(|error| self.device.map_hal_error_without_loss(error))?;
             pending_writes.insert_texture(texture);
             if needs_clear {
                 let encoder = pending_writes.activate();
@@ -813,7 +813,7 @@ impl PendingWrites {
 
             let cmd_buf = unsafe { self.command_encoder.end_encoding() }.map_err(|error| {
                 if defer_device_loss {
-                    DeviceError::from_hal(error)
+                    device.map_hal_error_without_loss(error)
                 } else {
                     device.handle_hal_error(error)
                 }
@@ -824,7 +824,7 @@ impl PendingWrites {
                 .acquire_encoder(device, queue.raw())
                 .map_err(|error| {
                     if defer_device_loss {
-                        DeviceError::from_hal(error)
+                        device.map_hal_error_without_loss(error)
                     } else {
                         device.handle_hal_error(error)
                     }
@@ -2426,7 +2426,7 @@ impl Queue {
                     allow_compaction: false,
                 })
         }
-        .map_err(DeviceError::from_hal)?;
+        .map_err(|error| device.map_hal_error_without_loss(error))?;
 
         let src_raw = blas.try_raw(&snatch_guard)?;
 

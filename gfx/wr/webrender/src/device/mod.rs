@@ -45,6 +45,8 @@ pub enum GpuBackendConfig {
     Gl(GlBackendConfig),
     #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
     Vulkan(wgpu::Options),
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    VulkanShared(Rc<wgpu::Device>),
 }
 
 /// What the GL backend needs from the embedder.
@@ -609,12 +611,31 @@ impl Device {
     pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Result<Device, String> {
         let backend: Box<dyn GpuBackend> = match config {
             GpuBackendConfig::Gl(config) => Box::new(GlDevice::new(config, options)),
-            #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+            #[cfg(all(
+                feature = "vulkan",
+                any(target_os = "linux", target_os = "windows", target_os = "android")
+            ))]
             GpuBackendConfig::Vulkan(config) => {
-                if options.resource_override_path.is_some() || options.dump_shader_source.is_some() {
-                    return Err("Vulkan runtime shader source overrides and dumps are unsupported".into());
+                if options.resource_override_path.is_some() || options.dump_shader_source.is_some()
+                {
+                    return Err(
+                        "Vulkan runtime shader source overrides and dumps are unsupported".into(),
+                    );
                 }
                 let owner = Rc::new(wgpu::Device::new(&config)?);
+                Box::new(wgpu::RenderDevice::new(&owner)?)
+            }
+            #[cfg(all(
+                feature = "vulkan",
+                any(target_os = "linux", target_os = "windows", target_os = "android")
+            ))]
+            GpuBackendConfig::VulkanShared(owner) => {
+                if options.resource_override_path.is_some() || options.dump_shader_source.is_some()
+                {
+                    return Err(
+                        "Vulkan runtime shader source overrides and dumps are unsupported".into(),
+                    );
+                }
                 Box::new(wgpu::RenderDevice::new(&owner)?)
             }
         };

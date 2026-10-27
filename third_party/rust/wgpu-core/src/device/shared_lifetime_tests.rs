@@ -26,6 +26,7 @@ const PARTIAL: usize = 2;
 struct Driver {
     mode: AtomicUsize,
     clear_error: AtomicBool,
+    clear_native_lost: AtomicBool,
     end_error: AtomicBool,
     hide_graphics_queue: AtomicBool,
     segments: StdMutex<Vec<(hal::shared::SharedQueueLane, bool, bool)>>,
@@ -253,6 +254,9 @@ impl hal::GraphicsRecorder for Recorder {
         _desc: &hal::RenderPassDescriptor<dyn hal::DynQuerySet, dyn hal::DynTextureView>,
     ) -> Result<(), hal::DeviceError> {
         assert!(self.open && !self.pass);
+        if self.driver.clear_native_lost.swap(false, Ordering::SeqCst) {
+            return Err(hal::DeviceError::Lost);
+        }
         if self.driver.clear_error.swap(false, Ordering::SeqCst) {
             return Err(hal::DeviceError::OutOfMemory);
         }
@@ -1007,4 +1011,88 @@ fn shared_canvas_wrong_logical_device_is_rejected_before_mutation() {
     assert!(first.device.is_valid() && second.device.is_valid());
     assert_eq!(second.driver.submissions.load(Ordering::SeqCst), 0);
     assert!(texture.raw(&first.device.snatchable_lock.read()).is_some());
+}
+
+
+#[test]
+fn shared_native_lost_is_fatal_while_logical_loss_and_oom_stay_local() {
+    const CHILD: &str = "WGPU_CORE_SHARED_NATIVE_FAILURE_CASE";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let fixture = Fixture::new();
+        let sibling = Fixture::new();
+        assert!(fixture.device.graphics_termination.is_some());
+        match mode.as_str() {
+            "native" => {
+                let _snatch = fixture.device.snatchable_lock.read();
+                let _pending = fixture.queue.pending_writes.lock();
+                fixture.device.handle_hal_error(hal::DeviceError::Lost);
+                std::process::exit(87);
+            }
+            "finalizer-native" => {
+                let texture = canvas_texture(&fixture, true);
+                fixture
+                    .driver
+                    .clear_native_lost
+                    .store(true, Ordering::SeqCst);
+                let graphics = fixture
+                    .device
+                    .graphics_submission
+                    .as_ref()
+                    .unwrap()
+                    .graphics_queue()
+                    .unwrap();
+                let _ = unsafe {
+                    fixture.queue.finalize_shared_canvas_submission(
+                        &texture,
+                        fixture.device.snatchable_lock.read(),
+                        graphics,
+                    )
+                };
+                std::process::exit(87);
+            }
+            "oom" => {
+                assert!(matches!(
+                    fixture
+                        .device
+                        .handle_hal_error(hal::DeviceError::OutOfMemory),
+                    DeviceError::OutOfMemory
+                ));
+            }
+            "unexpected" => {
+                assert!(matches!(
+                    fixture
+                        .device
+                        .handle_hal_error(hal::DeviceError::Unexpected),
+                    DeviceError::Lost
+                ));
+            }
+            "destroy" => fixture.device.destroy(),
+            _ => panic!("Unexpected child case"),
+        }
+        fixture.driver.join_probes();
+        assert!(!fixture.device.is_valid());
+        assert!(sibling.device.is_valid());
+        assert!(fixture.driver.recoveries.lock().unwrap().is_empty());
+        assert!(fixture.driver.unlocked.load(Ordering::SeqCst));
+        std::process::exit(0);
+    }
+    for (mode, expected) in [
+        ("native", 86),
+        ("finalizer-native", 86),
+        ("oom", 0),
+        ("unexpected", 0),
+        ("destroy", 0),
+    ] {
+        let output=std::process::Command::new(std::env::current_exe().unwrap()).args([
+            "--exact",
+            "device::life::shared_tests::shared_native_lost_is_fatal_while_logical_loss_and_oom_stay_local",
+            "--nocapture",
+        ]).env(CHILD,mode).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

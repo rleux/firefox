@@ -3262,7 +3262,7 @@ void gfxPlatform::InitWebGPUConfig() {
     } else {
       featureWebGPU.ForceDisable(
           FeatureStatus::Unavailable,
-          "Unified WebGPU rendering is not implemented",
+          "Unified WebGPU native canvas transport is unavailable",
           "FEATURE_FAILURE_WEBGPU_UNIFIED_NOT_IMPLEMENTED"_ns);
     }
   }

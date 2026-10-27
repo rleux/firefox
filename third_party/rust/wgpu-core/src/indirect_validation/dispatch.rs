@@ -44,6 +44,7 @@ impl Dispatch {
         device: &dyn hal::DynDevice,
         instance_flags: wgt::InstanceFlags,
         limits: &wgt::Limits,
+        map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
     ) -> Result<Self, CreateIndirectValidationPipelineError> {
         let max_compute_workgroups_per_dimension = limits.max_compute_workgroups_per_dimension;
 
@@ -122,7 +123,7 @@ impl Dispatch {
             unsafe { device.create_shader_module(&hal_desc, hal_shader) }.map_err(|error| {
                 match error {
                     hal::ShaderError::Device(error) => {
-                        CreateShaderModuleError::Device(DeviceError::from_hal(error))
+                        CreateShaderModuleError::Device(map_hal_error(error))
                     }
                     hal::ShaderError::Compilation(ref msg) => {
                         log::error!("Shader error: {msg}");
@@ -154,7 +155,7 @@ impl Dispatch {
         let dst_bind_group_layout = unsafe {
             device
                 .create_bind_group_layout(&dst_bind_group_layout_desc)
-                .map_err(DeviceError::from_hal)?
+                .map_err(map_hal_error)?
         };
         let dst_bind_group_layout = guard(dst_bind_group_layout, |bgl| unsafe {
             device.destroy_bind_group_layout(bgl)
@@ -180,7 +181,7 @@ impl Dispatch {
         let src_bind_group_layout = unsafe {
             device
                 .create_bind_group_layout(&src_bind_group_layout_desc)
-                .map_err(DeviceError::from_hal)?
+                .map_err(map_hal_error)?
         };
         let src_bind_group_layout = guard(src_bind_group_layout, |bgl| unsafe {
             device.destroy_bind_group_layout(bgl)
@@ -201,7 +202,7 @@ impl Dispatch {
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&pipeline_layout_desc)
-                .map_err(DeviceError::from_hal)?
+                .map_err(map_hal_error)?
         };
         let pipeline_layout = guard(pipeline_layout, |pipeline_layout| unsafe {
             device.destroy_pipeline_layout(pipeline_layout)
@@ -222,7 +223,12 @@ impl Dispatch {
             cache: None,
         };
         let pipeline = unsafe { device.create_compute_pipeline(&pipeline_desc) }
-            .map_err(CreatePipelineError::from_hal_without_device_loss)?;
+            .map_err(|error| match error {
+                hal::PipelineError::Device(error) => {
+                    CreatePipelineError::Device(map_hal_error(error))
+                }
+                other => CreatePipelineError::from_hal_without_device_loss(other),
+            })?;
         let pipeline = guard(pipeline, |pipeline| unsafe {
             device.destroy_compute_pipeline(pipeline)
         });
@@ -237,7 +243,7 @@ impl Dispatch {
             memory_flags: hal::MemoryFlags::empty(),
         };
         let (dst_buffer, _) =
-            unsafe { device.create_buffer(&dst_buffer_desc) }.map_err(DeviceError::from_hal)?;
+            unsafe { device.create_buffer(&dst_buffer_desc) }.map_err(map_hal_error)?;
         let dst_buffer = guard(dst_buffer, |buffer| unsafe {
             device.destroy_buffer(buffer)
         });
@@ -267,7 +273,7 @@ impl Dispatch {
         let dst_bind_group = unsafe {
             device
                 .create_bind_group(&dst_bind_group_desc)
-                .map_err(DeviceError::from_hal)
+                .map_err(map_hal_error)
         }?;
 
         // Error returns after we start consuming guards could bypass resource cleanup.
@@ -291,6 +297,7 @@ impl Dispatch {
         buffer_size: u64,
         buffer: &dyn hal::DynBuffer,
         instance_flags: wgt::InstanceFlags,
+        map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
     ) -> Result<Option<Box<dyn hal::DynBindGroup>>, DeviceError> {
         let binding_size = calculate_src_buffer_binding_size(buffer_size, limits);
         let Some(binding_size) = NonZeroU64::new(binding_size) else {
@@ -318,7 +325,7 @@ impl Dispatch {
             device
                 .create_bind_group(&hal_desc)
                 .map(Some)
-                .map_err(DeviceError::from_hal)
+                .map_err(map_hal_error)
         }
     }
 

@@ -1949,7 +1949,12 @@ fn window_backend_config(
         if !unified_webgpu_requested && !static_prefs::pref!("gfx.webrender.vulkan") {
             return Err("Vulkan requires gfx.webrender.vulkan to be enabled".into());
         }
-        return unsafe { ::vulkan::create_backend(config) }.map(|backend| (backend, None));
+        return if unified_webgpu_requested {
+            unsafe { ::vulkan::create_shared_backend(config) }
+        } else {
+            unsafe { ::vulkan::create_backend(config) }
+        }
+        .map(|backend| (backend, None));
     }
 
     let (gl, sw_gl) = if !swgl_context.is_null() {
@@ -1969,7 +1974,10 @@ fn window_backend_config(
         };
         (gl, None)
     };
-    info!("WebRender - OpenGL version new {}", gl.get_string(gl::VERSION));
+    info!(
+        "WebRender - OpenGL version new {}",
+        gl.get_string(gl::VERSION)
+    );
     Ok((
         GpuBackendConfig::Gl(GlBackendConfig {
             panic_on_error: panic_on_gl_error,

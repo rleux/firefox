@@ -149,10 +149,7 @@ impl Device {
     }
 
     pub fn shared_features(adapter_features: wgt::Features) -> wgt::Features {
-        adapter_features
-            & (wgt::Features::DUAL_SOURCE_BLENDING
-                | wgt::Features::FLOAT32_FILTERABLE
-                | wgt::Features::TEXTURE_FORMAT_16BIT_NORM)
+        hal::renderer::shared_features(adapter_features)
     }
 
     /// Construct an offscreen renderer from the shared owner's graphics endpoint.

@@ -73,6 +73,7 @@ pub(crate) fn check_limits(requested: &Limits, allowed: &Limits) -> Vec<FailedLi
 }
 
 /// Fields in [`wgt::AdapterInfo`] relevant to limit bucketing.
+#[derive(Clone)]
 pub(crate) struct BucketedAdapterInfo {
     // Equivalent to `adapter.info.device_type == wgt::DeviceType::Cpu`
     is_fallback_adapter: bool,
@@ -97,6 +98,7 @@ impl Default for BucketedAdapterInfo {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Bucket {
     name: &'static str,
     limits: Limits,
@@ -212,8 +214,19 @@ impl Bucket {
 /// downlevel devices is not recommended.
 ///
 /// [lt]: self#Limit-bucketing
-pub fn apply_limit_buckets(mut raw: hal::DynExposedAdapter) -> Option<hal::DynExposedAdapter> {
+pub fn apply_limit_buckets(raw: hal::DynExposedAdapter) -> Option<hal::DynExposedAdapter> {
+    apply_limit_buckets_with_flags(raw, wgt::InstanceFlags::empty())
+}
+
+pub(crate) fn apply_limit_buckets_with_flags(
+    mut raw: hal::DynExposedAdapter,
+    flags: wgt::InstanceFlags,
+) -> Option<hal::DynExposedAdapter> {
     for bucket in buckets() {
+        let mut bucket = Cow::Borrowed(bucket);
+        if flags.contains(wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE) {
+            bucket.to_mut().limits.zero_native_only();
+        }
         if bucket.try_apply_to(&mut raw) {
             let name = bucket.name();
             api_log!("Applied limit bucket `{name}`");

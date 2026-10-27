@@ -5,11 +5,21 @@ edition = "2021"
 license = "MPL-2.0"
 
 [features]
-vulkan = ["dep:webrender", "dep:wgpu-hal", "webrender/vulkan"]
+vulkan = [
+    "dep:webrender", "dep:wgpu-hal", "dep:wgpu_bindings", "dep:wgpu-core",
+    "dep:wgpu-core-remote", "dep:wgpu-core-remote-types", "dep:wgpu-types",
+    "webrender/vulkan",
+]
 
 [dependencies]
 webrender = { path = "../../wr/webrender", default-features = false, optional = true }
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["vulkan", "validation_canary"] }
+
+wgpu_bindings = { path = "../../wgpu_bindings", optional = true }
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true }
+wgpu-core-remote = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true }
+wgpu-core-remote-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true }
 
 [lib]
 path = "lib.rs"

@@ -190,12 +190,17 @@ impl SharedDeviceContext for NativeDevice {
         self.queues.identity.clone()
     }
 
+    fn is_closed(&self) -> bool {
+        self.queues.closed.load(Ordering::Acquire)
+    }
+
     fn clone_instance(&self) -> (wgt::Backend, Box<dyn crate::DynInstance>) {
         (
             wgt::Backend::Vulkan,
             Box::new(super::Instance {
                 shared: self._instance.clone(),
                 selected_physical_device: Some(self.physical_device),
+                selected_features: Some(self.features),
             }),
         )
     }

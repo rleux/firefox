@@ -65,6 +65,7 @@ impl Draw {
         instance_flags: wgt::InstanceFlags,
         backend: wgt::Backend,
         limits: &Limits,
+        map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
     ) -> Result<Self, CreateIndirectValidationPipelineError> {
         // Indirect draw validation doesn't support buffer sizes higher than u32
         // since its offsets in the shader and dynamic offsets are u32.
@@ -72,13 +73,14 @@ impl Draw {
         // See also: `u64_offset_to_u32_offset`.
         assert!(limits.max_buffer_size <= u32::MAX as u64);
 
-        let module = create_validation_module(device, instance_flags)?;
+        let module = create_validation_module(device, instance_flags, map_hal_error)?;
         let module = guard(module, |module| unsafe {
             device.destroy_shader_module(module)
         });
 
         let metadata_bind_group_layout = create_bind_group_layout(
             device,
+            map_hal_error,
             true,
             false,
             BUFFER_SIZE,
@@ -93,6 +95,7 @@ impl Draw {
 
         let src_bind_group_layout = create_bind_group_layout(
             device,
+            map_hal_error,
             true,
             true,
             wgt::BufferSize::new(4 * 4).unwrap(),
@@ -107,6 +110,7 @@ impl Draw {
 
         let dst_bind_group_layout = create_bind_group_layout(
             device,
+            map_hal_error,
             false,
             false,
             BUFFER_SIZE,
@@ -135,7 +139,7 @@ impl Draw {
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(&pipeline_layout_desc)
-                .map_err(DeviceError::from_hal)?
+                .map_err(map_hal_error)?
         };
         let pipeline_layout = guard(pipeline_layout, |pipeline_layout| unsafe {
             device.destroy_pipeline_layout(pipeline_layout)
@@ -151,6 +155,7 @@ impl Draw {
             supports_indirect_first_instance,
             write_d3d12_special_constants,
             instance_flags,
+            map_hal_error,
         )?;
         let pipeline = guard(pipeline, |pipeline| unsafe {
             device.destroy_compute_pipeline(pipeline)
@@ -179,6 +184,7 @@ impl Draw {
         buffer_size: u64,
         buffer: &dyn hal::DynBuffer,
         instance_flags: wgt::InstanceFlags,
+        map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
     ) -> Result<Option<Box<dyn hal::DynBindGroup>>, DeviceError> {
         let binding_size = calculate_src_buffer_binding_size(buffer_size, limits);
         let Some(binding_size) = NonZeroU64::new(binding_size) else {
@@ -206,7 +212,7 @@ impl Draw {
             device
                 .create_bind_group(&hal_desc)
                 .map(Some)
-                .map_err(DeviceError::from_hal)
+                .map_err(map_hal_error)
         }
     }
 
@@ -545,6 +551,7 @@ impl Draw {
 fn create_validation_module(
     device: &dyn hal::DynDevice,
     instance_flags: wgt::InstanceFlags,
+    map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
 ) -> Result<Box<dyn hal::DynShaderModule>, CreateIndirectValidationPipelineError> {
     let src = include_str!("./validate_draw.wgsl");
 
@@ -588,7 +595,7 @@ fn create_validation_module(
     let module = unsafe { device.create_shader_module(&hal_desc, hal_shader) }.map_err(
         |error| match error {
             hal::ShaderError::Device(error) => {
-                CreateShaderModuleError::Device(DeviceError::from_hal(error))
+                CreateShaderModuleError::Device(map_hal_error(error))
             }
             hal::ShaderError::Compilation(ref msg) => {
                 log::error!("Shader error: {msg}");
@@ -607,6 +614,7 @@ fn create_validation_pipeline(
     supports_indirect_first_instance: bool,
     write_d3d12_special_constants: bool,
     instance_flags: wgt::InstanceFlags,
+    map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
 ) -> Result<Box<dyn hal::DynComputePipeline>, CreateIndirectValidationPipelineError> {
     let pipeline_desc = hal::ComputePipelineDescriptor {
         label: hal_label(
@@ -632,13 +640,19 @@ fn create_validation_pipeline(
         cache: None,
     };
     let pipeline = unsafe { device.create_compute_pipeline(&pipeline_desc) }
-        .map_err(CreatePipelineError::from_hal_without_device_loss)?;
+        .map_err(|error| match error {
+            hal::PipelineError::Device(error) => {
+                CreatePipelineError::Device(map_hal_error(error))
+            }
+            other => CreatePipelineError::from_hal_without_device_loss(other),
+        })?;
 
     Ok(pipeline)
 }
 
 fn create_bind_group_layout(
     device: &dyn hal::DynDevice,
+    map_hal_error: &dyn Fn(hal::DeviceError) -> DeviceError,
     read_only: bool,
     has_dynamic_offset: bool,
     min_binding_size: wgt::BufferSize,
@@ -661,7 +675,7 @@ fn create_bind_group_layout(
     let bind_group_layout = unsafe {
         device
             .create_bind_group_layout(&bind_group_layout_desc)
-            .map_err(DeviceError::from_hal)?
+            .map_err(map_hal_error)?
     };
 
     Ok(bind_group_layout)
@@ -849,7 +863,8 @@ impl DrawResources {
             }
             Ok(())
         };
-        let entry_data = Self::get_subrange_impl(ensure_entry, current_entry, size)?;
+        let entry_data = Self::get_subrange_impl(ensure_entry, current_entry, size)
+            .map_err(|error| self.device.map_hal_error_without_loss(error))?;
         Ok((entry_data.index, entry_data.offset))
     }
 
@@ -867,7 +882,8 @@ impl DrawResources {
             }
             Ok(())
         };
-        let entry_data = Self::get_subrange_impl(ensure_entry, current_entry, size)?;
+        let entry_data = Self::get_subrange_impl(ensure_entry, current_entry, size)
+            .map_err(|error| self.device.map_hal_error_without_loss(error))?;
         Ok((entry_data.index, entry_data.offset))
     }
 
@@ -875,7 +891,7 @@ impl DrawResources {
         ensure_entry: impl FnOnce(usize) -> Result<(), hal::DeviceError>,
         current_entry: &mut Option<CurrentEntry>,
         size: u64,
-    ) -> Result<CurrentEntry, DeviceError> {
+    ) -> Result<CurrentEntry, hal::DeviceError> {
         let index = if let Some(current_entry) = current_entry.as_mut() {
             if current_entry.offset + size <= BUFFER_SIZE.get() {
                 let entry_data = current_entry.clone();
@@ -888,7 +904,7 @@ impl DrawResources {
             0
         };
 
-        ensure_entry(index).map_err(DeviceError::from_hal)?;
+        ensure_entry(index)?;
 
         let entry_data = CurrentEntry { index, offset: 0 };
 

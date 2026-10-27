@@ -8,3 +8,6 @@ mod foreign_rgb;
 mod sync_file;
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod vulkan;
+
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+mod unified;

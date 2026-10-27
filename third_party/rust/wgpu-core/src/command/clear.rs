@@ -625,7 +625,7 @@ fn clear_texture_via_render_passes(
                     })
                     .map_err(|error| {
                         if defer_device_loss {
-                            crate::device::DeviceError::from_hal(error)
+                            dst_texture.device.map_hal_error_without_loss(error)
                         } else {
                             dst_texture.device.handle_hal_error(error)
                         }

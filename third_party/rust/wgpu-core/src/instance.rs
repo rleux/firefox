@@ -480,7 +480,7 @@ impl Instance {
                     .filter(|raw| self.adapter_allowed(raw))
                     .filter_map(|raw| {
                         if apply_limit_buckets {
-                            limits::apply_limit_buckets(raw)
+                            limits::apply_limit_buckets_with_flags(raw, self.flags)
                         } else {
                             Some(raw)
                         }
@@ -580,7 +580,10 @@ impl Instance {
                 .filter(|raw| self.adapter_allowed(raw));
 
             if desc.apply_limit_buckets {
-                adapters.extend(backend_adapters.filter_map(limits::apply_limit_buckets));
+                adapters.extend(
+                    backend_adapters
+                        .filter_map(|raw| limits::apply_limit_buckets_with_flags(raw, self.flags)),
+                );
             } else {
                 adapters.extend(backend_adapters);
             }
@@ -1698,6 +1701,89 @@ mod tests {
             &wgt::Limits::defaults(),
             &compliant_downlevel()
         ));
+    }
+
+    #[cfg(feature = "noop")]
+    fn bucket_instance(flags: InstanceFlags, limits: wgt::Limits) -> Arc<Instance> {
+        Instance::new(
+            "limit bucket regression",
+            wgt::InstanceDescriptor {
+                backends: Backends::NOOP,
+                flags,
+                memory_budget_thresholds: Default::default(),
+                backend_options: wgt::BackendOptions {
+                    noop: wgt::NoopBackendOptions {
+                        limits: Some(limits),
+                        features: Some(wgt::Features::empty()),
+                        ..wgt::NoopBackendOptions::enabled()
+                    },
+                    ..Default::default()
+                },
+                display: None,
+            },
+            None,
+        )
+    }
+
+    #[cfg(feature = "noop")]
+    #[test]
+    fn strict_bucketed_adapters_keep_native_only_limits_zero() {
+        let flags = InstanceFlags::STRICT_WEBGPU_COMPLIANCE;
+        let instance = bucket_instance(flags, wgt::Limits::defaults());
+        let mut expected = wgt::Limits::defaults();
+        expected.zero_native_only();
+        let options = wgt::RequestAdapterOptions {
+            apply_limit_buckets: true,
+            ..Default::default()
+        };
+        let adapter = instance.request_adapter(&options, Backends::NOOP).unwrap();
+        assert_eq!(adapter.limits(), expected);
+        assert_eq!(adapter.features(), wgt::Features::empty());
+        assert_eq!(adapter.get_info().limit_bucket.unwrap().name, "fallback");
+        let adapters = instance.enumerate_adapters(Backends::NOOP, true);
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters[0].limits(), expected);
+        assert_eq!(adapters[0].features(), wgt::Features::empty());
+    }
+
+    #[cfg(feature = "noop")]
+    #[test]
+    fn strict_bucketed_adapters_reject_webgpu_limit_deficits() {
+        for limits in [
+            wgt::Limits {
+                max_texture_dimension_2d: 4096,
+                ..wgt::Limits::defaults()
+            },
+            wgt::Limits {
+                max_bind_groups: 3,
+                ..wgt::Limits::defaults()
+            },
+        ] {
+            let instance = bucket_instance(InstanceFlags::STRICT_WEBGPU_COMPLIANCE, limits);
+            let options = wgt::RequestAdapterOptions {
+                apply_limit_buckets: true,
+                ..Default::default()
+            };
+            assert!(instance.request_adapter(&options, Backends::NOOP).is_err());
+            assert!(instance.enumerate_adapters(Backends::NOOP, true).is_empty());
+        }
+    }
+
+    #[cfg(feature = "noop")]
+    #[test]
+    fn nonstrict_bucketed_adapters_preserve_native_limit_requirements() {
+        let options = wgt::RequestAdapterOptions {
+            apply_limit_buckets: true,
+            ..Default::default()
+        };
+        let instance = bucket_instance(InstanceFlags::empty(), wgt::Limits::defaults());
+        let adapter = instance.request_adapter(&options, Backends::NOOP).unwrap();
+        assert_eq!(adapter.limits(), wgt::Limits::defaults());
+        let mut limits = wgt::Limits::defaults();
+        limits.zero_native_only();
+        let instance = bucket_instance(InstanceFlags::empty(), limits);
+        assert!(instance.request_adapter(&options, Backends::NOOP).is_err());
+        assert!(instance.enumerate_adapters(Backends::NOOP, true).is_empty());
     }
 
     mod storage_resource_limits {

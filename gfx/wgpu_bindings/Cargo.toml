@@ -102,3 +102,6 @@ moz_task = { path = "../../xpcom/rust/moz_task" }
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false }
 scopeguard = "1.2"
+
+[dependencies.wgpu_graphics]
+path = "../wgpu_graphics"

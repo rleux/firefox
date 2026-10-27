@@ -68,9 +68,14 @@ pub(crate) unsafe fn clear_texture_zero(
 pub(crate) fn surface_lifetime(
     surface: &super::Surface,
 ) -> Result<crate::renderer::SurfaceLifetime, crate::SurfaceError> {
-    surface.inner.as_any().downcast_ref::<super::swapchain::NativeSurface>()
+    surface
+        .inner
+        .as_any()
+        .downcast_ref::<super::swapchain::NativeSurface>()
         .map(|surface| surface.lifetime())
-        .ok_or(crate::SurfaceError::Other("Native surface lifetime is unavailable"))
+        .ok_or(crate::SurfaceError::Other(
+            "Native surface lifetime is unavailable",
+        ))
 }
 
 pub(crate) unsafe fn configure_surface(
@@ -86,5 +91,98 @@ pub(crate) unsafe fn configure_surface(
     match configuration {
         Some(configuration) => unsafe { surface.configure_checked(device, configuration) },
         None => unsafe { surface.unconfigure_checked(device) },
+    }
+}
+
+pub(crate) unsafe fn bootstrap_shared_device(
+    descriptor: &crate::InstanceDescriptor<'_>,
+    require_hardware: bool,
+) -> Result<crate::shared::SharedDeviceEndpoints, alloc::string::String> {
+    use crate::{Adapter as _, Instance as _};
+    let instance = unsafe { super::Instance::init_shared_presentation(descriptor) }
+        .map_err(|error| alloc::format!("Initializing shared Vulkan instance: {error:?}"))?;
+    let mut adapters = unsafe { instance.enumerate_adapters(None) };
+    adapters.retain(|adapter| {
+        adapter
+            .adapter
+            .physical_device_capabilities()
+            .properties()
+            .api_version
+            >= vk::API_VERSION_1_1
+    });
+    let selected = adapters
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, adapter)| {
+            let rank = match adapter.info.device_type {
+                wgt::DeviceType::DiscreteGpu => 0,
+                wgt::DeviceType::IntegratedGpu => 1,
+                wgt::DeviceType::VirtualGpu => 2,
+                wgt::DeviceType::Cpu => 3,
+                _ => 4,
+            };
+            (rank, *index)
+        })
+        .map(|(index, _)| index)
+        .ok_or("No Vulkan1.1 adapter for the shared renderer")?;
+    let adapter = adapters.swap_remove(selected);
+    if require_hardware
+        && !matches!(
+            adapter.info.device_type,
+            wgt::DeviceType::DiscreteGpu | wgt::DeviceType::IntegratedGpu
+        )
+    {
+        return Err(alloc::string::String::from(
+            "Shared renderer requires a hardware adapter",
+        ));
+    }
+    for (format, required) in [
+        (
+            wgt::TextureFormat::Rgba8Unorm,
+            crate::TextureFormatCapabilities::COLOR_ATTACHMENT
+                | crate::TextureFormatCapabilities::COPY_SRC,
+        ),
+        (
+            wgt::TextureFormat::Depth32Float,
+            crate::TextureFormatCapabilities::DEPTH_STENCIL_ATTACHMENT
+                | crate::TextureFormatCapabilities::COPY_SRC,
+        ),
+    ] {
+        if !unsafe { adapter.adapter.texture_format_capabilities(format) }.contains(required) {
+            return Err(alloc::format!(
+                "Shared renderer adapter lacks {format:?} with {required:?}"
+            ));
+        }
+    }
+    let features = crate::renderer::shared_native_features(adapter.features);
+    unsafe {
+        super::shared::open_shared_device(
+            &adapter.adapter,
+            features,
+            &adapter.capabilities.limits,
+            &wgt::MemoryHints::MemoryUsage,
+        )
+    }
+    .map_err(|error| alloc::format!("Opening shared renderer: {error}"))
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    #[test]
+    fn native_ceiling_keeps_public_features_and_only_known_internal_requirements() {
+        let available = wgt::Features::TIMESTAMP_QUERY
+            | wgt::Features::SHADER_F16
+            | wgt::Features::DUAL_SOURCE_BLENDING
+            | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+            | wgt::Features::EXTERNAL_TEXTURE;
+        let native = crate::renderer::shared_native_features(available);
+        assert!(native.contains(
+            wgt::Features::TIMESTAMP_QUERY
+                | wgt::Features::SHADER_F16
+                | wgt::Features::DUAL_SOURCE_BLENDING
+                | wgt::Features::EXTERNAL_TEXTURE
+        ));
+        assert!(!native.contains(wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES));
+        assert!(available.contains(native));
     }
 }

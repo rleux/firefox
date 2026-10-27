@@ -60,6 +60,9 @@
 #include "mozilla/layers/VideoBridgeParent.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/webrender/WebRenderAPI.h"
+#ifdef MOZ_WEBRENDER_VULKAN
+#  include "mozilla/webrender/webrender_ffi.h"
+#endif
 #include "nsDebugImpl.h"
 #include "nsIGfxInfo.h"
 #include "nsIXULRuntime.h"
@@ -112,6 +115,13 @@ static GPUParent* sGPUParent;
 GPUParent::GPUParent() : mLaunchTime(TimeStamp::Now()) { sGPUParent = this; }
 
 GPUParent::~GPUParent() { sGPUParent = nullptr; }
+
+#ifdef MOZ_WEBRENDER_VULKAN
+void GPUParent::UnifiedOwnerDeleter::operator()(
+    wr::WrUnifiedOwner* aOwner) const {
+  wr::wr_unified_owner_delete(aOwner);
+}
+#endif
 
 /* static */
 GPUParent* GPUParent::GetSingleton() {
@@ -241,7 +251,9 @@ void GPUParent::NotifyDeviceReset(DeviceResetReason aReason,
   // Notify the main process that there's been a device reset
   // and that they should reset their compositors and repaint
   GPUDeviceData data;
-  RecvGetDeviceStatus(&data);
+  if (!RecvGetDeviceStatus(&data)) {
+    return;
+  }
   (void)SendNotifyDeviceReset(data, aReason, aPlace);
 }
 
@@ -405,6 +417,19 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
 
 #endif
 
+  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+      gfxVars::UseWebRenderVulkan()) {
+#ifdef MOZ_WEBRENDER_VULKAN
+    mUnifiedOwner.reset(wr::wr_unified_owner_new(
+        XRE_IsGPUProcess(), gfxVars::UseWebRenderVulkan()));
+    if (!mUnifiedOwner || !wr::wr_unified_owner_is_ready(mUnifiedOwner.get())) {
+      return IPC_FAIL(this, "Unified WebGPU native owner unavailable");
+    }
+#else
+    return IPC_FAIL(this, "Unified WebGPU requires Vulkan support");
+#endif
+  }
+
   // Make sure to do this *after* we update gfxVars above.
   wr::RenderThread::Start(aWrNamespace);
   gfx::CanvasRenderThread::Start();
@@ -417,7 +442,9 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
   VRManager::ManagerInit();
   // Send a message to the UI process that we're done.
   GPUDeviceData data;
-  RecvGetDeviceStatus(&data);
+  if (auto result = RecvGetDeviceStatus(&data); !result) {
+    return result;
+  }
   aInitResolver(data);
 
   // Dispatch a task to background thread to determine the media codec supported
@@ -581,6 +608,17 @@ static void CopyFeatureChange(Feature aFeature, Maybe<FeatureFailure>* aOut) {
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvGetDeviceStatus(GPUDeviceData* aOut) {
+  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+      gfxVars::UseWebRenderVulkan()) {
+#ifdef MOZ_WEBRENDER_VULKAN
+    if (!mUnifiedOwner || !wr::wr_unified_owner_is_ready(mUnifiedOwner.get())) {
+      return IPC_FAIL(this, "Unified WebGPU native owner is not ready");
+    }
+#else
+    return IPC_FAIL(this, "Unified WebGPU requires Vulkan support");
+#endif
+  }
+
   CopyFeatureChange(Feature::D3D11_COMPOSITING, &aOut->d3d11Compositing());
   CopyFeatureChange(Feature::OPENGL_COMPOSITING, &aOut->oglCompositing());
 
@@ -753,9 +791,20 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
   ProcessChild::QuickExit();
 #endif
 
+#ifdef MOZ_WEBRENDER_VULKAN
+  if (mUnifiedOwner) {
+    wr::wr_unified_owner_begin_shutdown(mUnifiedOwner.get());
+  }
+#endif
+
   // Wait until all RemoteMediaManagerParent have closed.
   mShutdownBlockers.WaitUntilClear(10 * 1000 /* 10s timeout*/)
-      ->Then(GetCurrentSerialEventTarget(), __func__, [self = RefPtr{this}]() {
+      ->Then(GetCurrentSerialEventTarget(), __func__,
+             [self = RefPtr{this}
+#ifdef MOZ_WEBRENDER_VULKAN
+              , unifiedOwner = std::move(mUnifiedOwner)
+#endif
+             ]() mutable {
         if (self->mProfilerController) {
           self->mProfilerController->Shutdown();
           self->mProfilerController = nullptr;
@@ -781,6 +830,9 @@ void GPUParent::ActorDestroy(ActorDestroyReason aWhy) {
         if (wr::RenderThread::Get()) {
           wr::RenderThread::ShutDown();
         }
+#ifdef MOZ_WEBRENDER_VULKAN
+        unifiedOwner = nullptr;
+#endif
 #ifdef XP_WIN
         if (widget::WinCompositorWindowThread::Get()) {
           widget::WinCompositorWindowThread::ShutDown();

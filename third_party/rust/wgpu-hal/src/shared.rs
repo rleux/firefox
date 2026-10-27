@@ -67,8 +67,13 @@ pub struct SharedSubmitError {
 pub trait SharedDeviceContext: fmt::Debug + wgt::WasmNotSendSync {
     fn identity(&self) -> SharedDeviceIdentity;
 
+    /// Unknown implementations are closed for process-owner admission.
+    fn is_closed(&self) -> bool {
+        true
+    }
+
     /// Clone a lease on the original native instance, restricted to the selected
-    /// physical adapter, without reconfiguring the instance.
+    /// physical adapter and enabled native features, without reconfiguring it.
     fn clone_instance(&self) -> (wgt::Backend, alloc::boxed::Box<dyn crate::DynInstance>);
 
     /// Open a private logical device on the reserved compute queue.

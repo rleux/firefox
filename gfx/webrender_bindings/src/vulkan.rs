@@ -53,6 +53,11 @@ pub struct WrVulkanConfig {
     pub transparent: bool,
 }
 
+#[cfg(not(all(feature="vulkan",any(target_os="linux",target_os="windows",target_os="android"))))]
+pub unsafe fn create_shared_backend(_: &WrVulkanConfig) -> Result<GpuBackendConfig, String> {
+    Err("Shared Vulkan support was not built for this platform".into())
+}
+
 #[cfg(not(all(
     feature = "vulkan",
     any(target_os = "linux", target_os = "windows", target_os = "android")
@@ -73,7 +78,7 @@ pub unsafe fn set_surface(_: &mut webrender::Renderer, _: Option<&WrVulkanConfig
     feature = "vulkan",
     any(target_os = "linux", target_os = "windows", target_os = "android")
 ))]
-pub use self::enabled::{create_backend, set_surface};
+pub use self::enabled::{create_backend, create_shared_backend, set_surface};
 
 #[cfg(all(
     feature = "vulkan",
@@ -241,6 +246,41 @@ mod enabled {
             surface_options: surface_options(config),
             ..Default::default()
         }))
+    }
+
+    pub unsafe fn create_shared_backend(
+        config: &WrVulkanConfig,
+    ) -> Result<GpuBackendConfig, String> {
+        let owner = wgpu_bindings::unified::available_owner(true)
+            .ok_or("Unified native owner is unavailable")?;
+        if config.validation && !owner.validation_enabled() {
+            return Err("Native validation was not enabled at unified startup".into());
+        }
+        let (window, display) = owned_window(config)?;
+        let options = Options {
+            window: window.map(|window| window as Rc<dyn webrender::vulkan::SurfaceWindow>),
+            display_owner: Some(display),
+            validation: config.validation,
+            surface_options: surface_options(config),
+            ..Default::default()
+        };
+        let (instance, adapter) = owner.clone_graphics_instance()?;
+        let recover = owner.clone();
+        let shared = webrender::vulkan::SharedDeviceOptions {
+            context: owner.context(),
+            recover: Rc::new(move |retirement| recover.recover_native_failure(retirement)),
+            fatal_process: owner.fatal_process(),
+        };
+        let device = unsafe {
+            webrender::vulkan::Device::from_shared_endpoint_with_surface(
+                owner.graphics(),
+                instance,
+                adapter,
+                shared,
+                &options,
+            )
+        }?;
+        Ok(GpuBackendConfig::VulkanShared(Rc::new(device)))
     }
 
     pub unsafe fn set_surface(

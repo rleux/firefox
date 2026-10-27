@@ -152,7 +152,15 @@ CanvasManagerParent::AllocPWebGPUParent() {
     return nullptr;
   }
 
-  return MakeAndAddRef<webgpu::WebGPUParent>(mContentId);
+  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+      !webgpu::ffi::wgpu_server_unified_available(XRE_IsGPUProcess())) {
+    return nullptr;
+  }
+  auto actor = MakeRefPtr<webgpu::WebGPUParent>(mContentId);
+  if (!actor->IsReady()) {
+    return nullptr;
+  }
+  return actor.forget();
 }
 
 mozilla::ipc::IPCResult CanvasManagerParent::RecvInitialize(

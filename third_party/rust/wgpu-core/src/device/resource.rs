@@ -477,6 +477,17 @@ impl Drop for Device {
     }
 }
 
+fn terminate_on_shared_native_loss(
+    error: &hal::DeviceError,
+    termination: Option<unsafe extern "C" fn() -> !>,
+) {
+    if matches!(error, hal::DeviceError::Lost) {
+        if let Some(terminate) = termination {
+            unsafe { terminate() }
+        }
+    }
+}
+
 impl Device {
     pub fn features(&self) -> &wgt::Features {
         &self.features
@@ -566,6 +577,11 @@ impl Device {
             return Err(DeviceError::Lost);
         }
 
+        let map_hal_error = |error: hal::DeviceError| {
+            terminate_on_shared_native_loss(&error, graphics_termination);
+            DeviceError::from_hal(error)
+        };
+
         #[cfg(not(feature = "trace"))]
         match &desc.trace {
             wgt::Trace::Off => {}
@@ -625,7 +641,7 @@ impl Device {
         // resources.
         let raw = raw_device.as_ref();
 
-        let fence = unsafe { raw_device.create_fence() }.map_err(DeviceError::from_hal)?;
+        let fence = unsafe { raw_device.create_fence() }.map_err(&map_hal_error)?;
         let fence = guard(fence, |fence| unsafe { raw.destroy_fence(fence) });
 
         let command_allocator = command::CommandAllocator::new();
@@ -648,7 +664,7 @@ impl Device {
                 memory_flags: hal::MemoryFlags::empty(),
             })
         }
-        .map_err(DeviceError::from_hal)?
+        .map_err(&map_hal_error)?
         .0;
         let zero_buffer = guard(zero_buffer, |buffer| unsafe { raw.destroy_buffer(buffer) });
 
@@ -659,7 +675,7 @@ impl Device {
                 entries: &[],
             })
         }
-        .map_err(DeviceError::from_hal)?;
+        .map_err(&map_hal_error)?;
         let empty_bgl = guard(empty_bgl, |bgl| unsafe {
             raw.destroy_bind_group_layout(bgl)
         });
@@ -675,7 +691,7 @@ impl Device {
                 memory_flags: hal::MemoryFlags::empty(),
             })
         }
-        .map_err(DeviceError::from_hal)?
+        .map_err(&map_hal_error)?
         .0;
         let default_external_texture_params_buffer =
             guard(default_external_texture_params_buffer, |buffer| unsafe {
@@ -701,6 +717,7 @@ impl Device {
                 &desc.required_features,
                 instance_flags,
                 adapter.backend(),
+                &map_hal_error,
             )?;
             Some(guard(indirect_validation, |indirect_validation| {
                 indirect_validation.dispose(raw)
@@ -923,7 +940,13 @@ impl Device {
             .map_err(|e| self.handle_hal_error(e));
     }
 
+    pub(crate) fn map_hal_error_without_loss(&self, error: hal::DeviceError) -> DeviceError {
+        terminate_on_shared_native_loss(&error, self.graphics_termination);
+        DeviceError::from_hal(error)
+    }
+
     pub fn handle_hal_error(&self, error: hal::DeviceError) -> DeviceError {
+        terminate_on_shared_native_loss(&error, self.graphics_termination);
         match error {
             hal::DeviceError::OutOfMemory
             | hal::DeviceError::Lost

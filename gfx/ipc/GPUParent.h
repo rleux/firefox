@@ -5,6 +5,7 @@
 #define _include_gfx_ipc_GPUParent_h_
 
 #include "mozilla/RefPtr.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/PGPUParent.h"
 #include "mozilla/ipc/AsyncBlockers.h"
 #if defined(MOZ_SANDBOX) && defined(MOZ_DEBUG) && defined(ENABLE_TESTS)
@@ -15,6 +16,12 @@ namespace mozilla {
 
 class TimeStamp;
 class ChildProfilerController;
+
+#ifdef MOZ_WEBRENDER_VULKAN
+namespace wr {
+struct WrUnifiedOwner;
+}
+#endif
 
 namespace gfx {
 
@@ -126,6 +133,13 @@ class GPUParent final : public PGPUParent {
 
  private:
   ~GPUParent();
+
+#ifdef MOZ_WEBRENDER_VULKAN
+  struct UnifiedOwnerDeleter {
+    void operator()(wr::WrUnifiedOwner* aOwner) const;
+  };
+  mozilla::UniquePtr<wr::WrUnifiedOwner, UnifiedOwnerDeleter> mUnifiedOwner;
+#endif
 
   const TimeStamp mLaunchTime;
   RefPtr<VsyncBridgeParent> mVsyncBridge;

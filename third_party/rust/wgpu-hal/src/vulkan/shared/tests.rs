@@ -469,6 +469,7 @@ fn shared_compute_endpoint_rejects_foreign_instance_features_limits_and_closed_c
     let missing = crate::vulkan::Instance {
         shared: selected_native.instance.clone(),
         selected_physical_device: Some(vk::PhysicalDevice::null()),
+        selected_features: None,
     };
     assert!(unsafe { missing.enumerate_adapters(None) }.is_empty());
 
