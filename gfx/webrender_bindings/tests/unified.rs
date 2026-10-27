@@ -28,7 +28,7 @@ unsafe extern "C" fn fatal() -> ! {
     unsafe { _exit(88) }
 }
 
-fn owner() -> Arc<ProcessOwner> {
+pub(super) fn owner() -> Arc<ProcessOwner> {
     let flags = (wgt::InstanceFlags::DEBUG
         | wgt::InstanceFlags::VALIDATION
         | wgt::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION
@@ -58,7 +58,7 @@ fn owner() -> Arc<ProcessOwner> {
     owner
 }
 
-fn actor(owner: &Arc<ProcessOwner>, buckets: bool) -> Global {
+pub(super) fn actor(owner: &Arc<ProcessOwner>, buckets: bool) -> Global {
     let global = owner.new_actor_global().unwrap();
     let options = RequestAdapterOptions {
         power_preference: wgt::PowerPreference::None,
@@ -161,7 +161,7 @@ fn core_work(global: &Global) {
     assert!(device.pop_error_scope().unwrap().is_none());
 }
 
-fn graphics(owner: &Arc<ProcessOwner>) -> Rc<Device> {
+pub(super) fn graphics(owner: &Arc<ProcessOwner>) -> Rc<Device> {
     let (instance, adapter) = owner.clone_graphics_instance().unwrap();
     let graphics = owner.graphics();
     let device = Rc::new(

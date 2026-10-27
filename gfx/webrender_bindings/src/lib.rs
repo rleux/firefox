@@ -45,6 +45,7 @@ mod program_cache;
 mod unified;
 mod vulkan;
 mod vulkan_external;
+pub mod vulkan_native;
 
 #[allow(non_snake_case)]
 pub mod bindings;

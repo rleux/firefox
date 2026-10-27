@@ -177,7 +177,10 @@ impl Submission {
             return Err("Vulkan device requires recreation".into());
         }
         let fence = unsafe { owner.open.device.create_fence() }
-            .map_err(|error| format!("Creating submission fence: {error:?}"))?;
+            .map_err(|error| {
+                owner.check_native_error(&error);
+                format!("Creating submission fence: {error:?}")
+            })?;
         Self::with_fence(
             owner,
             Rc::new(Owned::new(owner, fence, <dyn hal::DynDevice>::destroy_fence)),
@@ -197,9 +200,13 @@ impl Submission {
                 label: Some("WR Vulkan submission"),
                 queue: owner.open.queue.as_ref(),
             })
-        }.map_err(|error| format!("Creating submission encoder: {error:?}"))?;
+        }.map_err(|error| {
+            owner.check_native_error(&error);
+            format!("Creating submission encoder: {error:?}")
+        })?;
         unsafe {
             if let Err(error) = encoder.begin_encoding(Some("WR Vulkan submission")) {
+                owner.check_native_error(&error);
                 encoder.reset_all(Vec::new());
                 return Err(format!("Beginning submission: {error:?}"));
             }
@@ -240,6 +247,7 @@ impl Submission {
         unsafe {
             self.data.encoder.begin_encoding(Some("WR Vulkan submission"))
         }.map_err(|error| {
+            self.data.owner.check_native_error(&error);
             self.data.owner.mark_lost();
             format!("Reusing submission encoder: {error:?}")
         })?;
@@ -293,6 +301,7 @@ impl Submission {
         };
         self.state = SubmissionState::EncodingFailed { id };
         let buffer = data.encoder.end_encoding().map_err(|error| {
+            data.owner.check_native_error(&error);
             data.owner.mark_lost();
             format!("Finishing submission: {error:?}")
         })?;
@@ -359,11 +368,12 @@ impl Submission {
         };
         #[cfg(test)]
         let result = if self.failure == Some(FailurePoint::AfterSubmit) {
-            result.and(Err(hal::DeviceError::Lost))
+            result.and(Err(hal::DeviceError::Unexpected))
         } else {
             result
         };
         if let Err(error) = result {
+            self.data.owner.check_native_error(&error);
             if self.data.owner.shared.is_some() {
                 self.resolve_shared_failure();
             } else {
@@ -393,11 +403,12 @@ impl Submission {
         let owner = self.data.owner.clone();
         let shared = owner.shared.as_ref().unwrap();
         match shared.options.context.drain() {
-            Ok(()) | Err(hal::DeviceError::Lost) => {
+            Ok(()) => {
                 self.native_retired = true;
                 owner.mark_lost_retired();
             }
-            Err(_) => {
+            Err(error) => {
+                owner.check_native_error(&error);
                 let state = std::mem::replace(&mut self.state, SubmissionState::Retired);
                 std::mem::forget(state);
                 unsafe { (shared.options.fatal_process)() };
@@ -452,6 +463,7 @@ impl Submission {
             }
             Ok(false) => Ok(false),
             Err(error) => {
+                self.data.owner.check_native_error(&error);
                 if self.data.owner.shared.is_some() {
                     self.resolve_shared_failure();
                 }
@@ -488,6 +500,7 @@ impl Submission {
             }
             Ok(false) => Ok(false),
             Err(error) => {
+                self.data.owner.check_native_error(&error);
                 if self.data.owner.shared.is_some() {
                     self.resolve_shared_failure();
                 }
@@ -512,6 +525,9 @@ impl Drop for Submission {
             } else {
                 None
             };
+            if let Some(Err(error)) = &completed {
+                self.data.owner.check_native_error(error);
+            }
             if !matches!(completed, Some(Ok(true))) {
                 self.resolve_shared_failure();
             }

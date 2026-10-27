@@ -21,6 +21,8 @@ static RECOVERED: AtomicUsize = AtomicUsize::new(0);
 #[derive(Default)]
 struct Faults {
     submit: AtomicBool,
+    native_submit_lost: AtomicBool,
+    native_receipt_lost: AtomicBool,
     receipt: AtomicBool,
     drain: AtomicBool,
     hold_poll: AtomicBool,
@@ -47,12 +49,18 @@ impl fmt::Debug for Receipt {
 }
 impl hal::shared::SharedSubmissionReceipt for Receipt {
     fn poll(&self) -> Result<bool, hal::DeviceError> {
+        if self.faults.native_receipt_lost.load(Ordering::SeqCst) {
+            return Err(hal::DeviceError::Lost);
+        }
         if self.faults.receipt.load(Ordering::SeqCst) {
             return Err(hal::DeviceError::OutOfMemory);
         }
         Ok(self.inner.poll()? && !self.faults.hold_poll.load(Ordering::SeqCst))
     }
     fn wait(&self, timeout: Option<Duration>) -> Result<bool, hal::DeviceError> {
+        if self.faults.native_receipt_lost.load(Ordering::SeqCst) {
+            return Err(hal::DeviceError::Lost);
+        }
         if self.faults.receipt.load(Ordering::SeqCst) {
             return Err(hal::DeviceError::OutOfMemory);
         }
@@ -110,7 +118,12 @@ impl hal::shared::SharedDeviceContext for Context {
             inner: receipt,
             faults: self.faults.clone(),
         });
-        if self.faults.submit.load(Ordering::SeqCst) {
+        if self.faults.native_submit_lost.load(Ordering::SeqCst) {
+            Err(hal::shared::SharedSubmitError {
+                error: hal::DeviceError::Lost,
+                receipt: Some(wrapped),
+            })
+        } else if self.faults.submit.load(Ordering::SeqCst) {
             Err(hal::shared::SharedSubmitError {
                 error: hal::DeviceError::OutOfMemory,
                 receipt: Some(wrapped),
@@ -313,6 +326,21 @@ fn child(mode: &str) -> ! {
     DROPPED.store(0, Ordering::SeqCst);
     RECOVERED.store(0, Ordering::SeqCst);
     let (owner, faults, _context) = owner();
+    if mode.starts_with("native-") {
+        let mut submission = Submission::new(&owner).unwrap();
+        record(&owner, &mut submission.recording().unwrap());
+        faults.native_submit_lost.store(mode == "native-submit", Ordering::SeqCst);
+        submission.submit().unwrap();
+        faults.native_receipt_lost.store(true, Ordering::SeqCst);
+        if mode == "native-drop" {
+            drop(submission);
+        } else if mode == "native-poll" {
+            let _ = submission.poll();
+        } else {
+            let _ = submission.wait(None);
+        }
+        std::process::exit(87);
+    }
     let target = if mode == "readback" {
         let texture = Texture::new(
             &owner,
@@ -392,7 +420,7 @@ fn shared_unconfirmed_cleanup_terminates_before_releasing_owners() {
     if let Some(mode) = std::env::var_os(CHILD) {
         child(&mode.to_string_lossy());
     }
-    for mode in ["submit", "wait", "drop", "queue", "readback"] {
+    for mode in ["submit", "wait", "drop", "queue", "readback", "native-submit", "native-poll", "native-wait", "native-drop"] {
         let mut process = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "device::wgpu::submission::shared_tests::shared_unconfirmed_cleanup_terminates_before_releasing_owners", "--nocapture"])
             .env(CHILD, mode).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();

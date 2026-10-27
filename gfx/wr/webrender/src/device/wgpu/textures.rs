@@ -129,7 +129,12 @@ fn shared_image_view_descriptor(
 
 
 impl Texture {
-    pub(super) unsafe fn from_shared_image(
+    /// Import finalized immutable storage on its exact graphics endpoint.
+    ///
+    /// # Safety
+    /// Finalization must be accepted and the logical texture expired. Keep the
+    /// epoch open and immutable while aliases can record or retain accepted work.
+    pub unsafe fn from_shared_image(
         owner: &Rc<Device>,
         epoch: Arc<hal::shared_image::ImageEpoch>,
         view_format: wgt::TextureFormat,
@@ -174,7 +179,12 @@ impl Texture {
                 &alias_descriptor,
             )
         }
-        .map_err(|error| format!("Creating shared canvas alias: {error}"))?;
+        .map_err(|error| {
+            if let hal::shared_image::ImageLeaseError::Device(error) = &error {
+                owner.check_native_error(error);
+            }
+            format!("Creating shared canvas alias: {error}")
+        })?;
         let raw = Rc::new(Owned::new(
             owner,
             alias,
@@ -194,7 +204,10 @@ impl Texture {
                 .device
                 .create_texture_view(&**raw, &view_descriptor)
         }
-        .map_err(|error| format!("Creating shared canvas sampled view: {error:?}"))?;
+        .map_err(|error| {
+            owner.check_native_error(&error);
+            format!("Creating shared canvas sampled view: {error:?}")
+        })?;
         Ok(Rc::new(Self {
             view: Some(Owned::new(
                 owner,

@@ -159,8 +159,9 @@ impl Device {
     /// The open device/queue must be the graphics endpoint associated with the
     /// supplied instance and selected adapter. SharedDeviceOptions.context must
     /// own that same device and queue; submitted resources must outlive
-    /// their confirmed native retirement. Use only on the renderer thread in an
-    /// isolated graphics process. Recovery must dispatch asynchronously without
+    /// their confirmed native retirement. Each wrapper and all its Rc resources
+    /// stay on one thread in an isolated graphics process; a detached local
+    /// wrapper may record explicit readback on the same graphics endpoint. Recovery must dispatch asynchronously without
     /// reentering WR or strongly capturing Device/Submission/core owners. The
     /// fatal C hook must terminate that process without returning or unwinding.
     pub unsafe fn from_shared_endpoint(
@@ -270,6 +271,14 @@ impl Device {
         &self.info
     }
 
+    fn check_native_error(&self, error: &hal::DeviceError) {
+        if matches!(error, hal::DeviceError::Lost) {
+            if let Some(shared) = &self.shared {
+                unsafe { (shared.options.fatal_process)() };
+            }
+        }
+    }
+
     pub fn is_lost(&self) -> bool {
         self.lost.get()
     }
@@ -278,8 +287,11 @@ impl Device {
         if self.lost.get() { return; }
         if let Some(shared) = &self.shared {
             match shared.options.context.drain() {
-                Ok(()) | Err(hal::DeviceError::Lost) => {}
-                Err(_) => unsafe { (shared.options.fatal_process)() },
+                Ok(()) => {}
+                Err(error) => {
+                    self.check_native_error(&error);
+                    unsafe { (shared.options.fatal_process)() };
+                }
             }
         }
         self.mark_lost_retired();

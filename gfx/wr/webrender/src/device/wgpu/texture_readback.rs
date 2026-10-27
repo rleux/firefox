@@ -99,7 +99,10 @@ impl Texture {
                 memory_flags: hal::MemoryFlags::PREFER_COHERENT,
             })
         }
-        .map_err(|error| format!("Creating readback buffer: {error:?}"))?;
+        .map_err(|error| {
+            owner.check_native_error(&error);
+            format!("Creating readback buffer: {error:?}")
+        })?;
         let buffer = Rc::new(Owned::new(owner, raw, <dyn hal::DynDevice>::destroy_buffer));
             (Submission::new(owner)?, buffer, capacity, false)
         };
@@ -219,6 +222,7 @@ impl PendingReadback {
             let mapping = device
                 .map_buffer(&**self.buffer, 0..layout.size)
                 .map_err(|error| {
+                    owner.check_native_error(&error);
                     owner.mark_lost();
                     format!("Mapping readback: {error:?}")
                 })?;

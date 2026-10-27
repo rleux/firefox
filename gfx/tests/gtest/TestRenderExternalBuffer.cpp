@@ -38,6 +38,9 @@
 #  include "base/linux_memfd_defs.h"
 #  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
+#  ifdef MOZ_WEBRENDER_VULKAN
+#    include "mozilla/webrender/RenderVulkanNativeTextureHost.h"
+#  endif
 #  include "mozilla/widget/DMABufAccess.h"
 #  include "mozilla/widget/DMABufDevice.h"
 #endif
@@ -968,6 +971,18 @@ Renderer* wr_test_vulkan_renderer_new();
 void wr_test_vulkan_renderer_delete(Renderer*);
 void wr_test_vulkan_sync_file_wait();
 void wr_test_unified_owner_bootstrap();
+void* wr_test_native_canvas_new();
+WrVulkanNativePublication* wr_test_native_canvas_prepare(void*, bool, bool,
+                                                         bool);
+Renderer* wr_test_native_canvas_renderer(void*, bool);
+intptr_t wr_test_native_canvas_texture_count(void*, bool);
+uint64_t wr_test_native_canvas_sentinel_handle(void*);
+void wr_test_native_canvas_check_foreign(void*);
+void wr_test_native_canvas_drop_actor(void*, bool);
+void wr_test_native_canvas_record(void*, uint64_t, uint64_t);
+void wr_test_native_canvas_verify(void*);
+void wr_test_native_canvas_finish(void*);
+void wr_test_native_canvas_delete(void*);
 void* wr_test_foreign_rgb_new(int32_t*);
 void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
 void wr_test_foreign_rgb_delete(void*);
@@ -976,6 +991,162 @@ int32_t wr_test_foreign_rgb_ready(void*);
 
 TEST_F(RenderExternalBuffer, DISABLED_VulkanUnifiedOwnerBootstrap) {
   OnRenderThread([] { wr_test_unified_owner_bootstrap(); });
+}
+
+static DeviceIntRect NativeCanvasRect(int32_t aX, int32_t aY, int32_t aWidth,
+                                      int32_t aHeight) {
+  DeviceIntRect rect;
+  rect.min.x = aX;
+  rect.min.y = aY;
+  rect.max.x = aX + aWidth;
+  rect.max.y = aY + aHeight;
+  return rect;
+}
+
+static void CheckNativeCanvasSnapshot(RenderVulkanNativeTextureHost* aHost,
+                                      bool aBgra, bool aCopySrc) {
+  std::array<uint8_t, 24> expected{17, 51, 102, 255, 100, 60, 20, 128,
+                                   7,  31, 53,  64,  137, 11, 83, 192,
+                                   23, 67, 101, 255, 11,  19, 31, 64};
+  if (aBgra) {
+    for (size_t pixel = 0; pixel < 6; ++pixel) {
+      std::swap(expected[pixel * 4], expected[pixel * 4 + 2]);
+    }
+  }
+  std::array<uint8_t, 40> output;
+  output.fill(0xa7);
+  auto format = ImageFormat::R8;
+  for (const auto& invalid :
+       {NativeCanvasRect(-1, 0, 3, 2), NativeCanvasRect(0, 0, 0, 2),
+        NativeCanvasRect(2, 0, 2, 2)}) {
+    EXPECT_FALSE(
+        aHost->Snapshot(invalid, 16, output.data(), output.size(), &format));
+    EXPECT_TRUE(std::all_of(output.begin(), output.end(),
+                            [](uint8_t v) { return v == 0xa7; }));
+    EXPECT_EQ(format, ImageFormat::R8);
+  }
+  const auto full = NativeCanvasRect(0, 0, 3, 2);
+  EXPECT_FALSE(
+      aHost->Snapshot(full, 11, output.data(), output.size(), &format));
+  EXPECT_FALSE(aHost->Snapshot(full, 16, output.data(), 31, &format));
+  EXPECT_FALSE(
+      aHost->Snapshot(full, SIZE_MAX, output.data(), output.size(), &format));
+  EXPECT_FALSE(aHost->Snapshot(full, 16, nullptr, output.size(), &format));
+  EXPECT_FALSE(
+      aHost->Snapshot(full, 16, output.data(), output.size(), nullptr));
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(),
+                          [](uint8_t v) { return v == 0xa7; }));
+  EXPECT_EQ(format, ImageFormat::R8);
+  bool snapshot = false;
+  bool offRenderThread = false;
+  std::thread canvas([&] {
+    offRenderThread = !RenderThread::IsInRenderThread();
+    snapshot = aHost->Snapshot(full, 16, output.data(), output.size(), &format);
+  });
+  canvas.join();
+  ASSERT_TRUE(offRenderThread);
+  ASSERT_EQ(snapshot, aCopySrc);
+  if (!aCopySrc) {
+    EXPECT_TRUE(std::all_of(output.begin(), output.end(),
+                            [](uint8_t v) { return v == 0xa7; }));
+    EXPECT_EQ(format, ImageFormat::R8);
+    return;
+  }
+  EXPECT_EQ(format, aBgra ? ImageFormat::BGRA8 : ImageFormat::RGBA8);
+  for (size_t row = 0; row < 2; ++row) {
+    EXPECT_TRUE(std::equal(expected.begin() + row * 12,
+                           expected.begin() + (row + 1) * 12,
+                           output.begin() + row * 16));
+    for (size_t pad = 12; pad < 16; ++pad) {
+      EXPECT_EQ(output[row * 16 + pad], 0);
+    }
+  }
+  for (size_t byte = 32; byte < output.size(); ++byte) {
+    EXPECT_EQ(output[byte], 0xa7);
+  }
+  output.fill(0xa7);
+  ASSERT_TRUE(aHost->Snapshot(NativeCanvasRect(1, 1, 2, 1), 12, output.data(),
+                              output.size(), &format));
+  EXPECT_TRUE(
+      std::equal(expected.begin() + 16, expected.end(), output.begin()));
+  for (size_t byte = 8; byte < 12; ++byte) {
+    EXPECT_EQ(output[byte], 0);
+  }
+  for (size_t byte = 12; byte < output.size(); ++byte) {
+    EXPECT_EQ(output[byte], 0xa7);
+  }
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasHost) {
+  OnRenderThread([] {
+    auto* fixture = wr_test_native_canvas_new();
+    ASSERT_TRUE(fixture);
+    auto deleteFixture =
+        MakeScopeExit([&] { wr_test_native_canvas_delete(fixture); });
+    for (int caseIndex = 0; caseIndex < 5; ++caseIndex) {
+      const bool bgra = caseIndex == 2 || caseIndex == 4;
+      const bool srgb = caseIndex == 1 || caseIndex == 4;
+      const bool copySrc = caseIndex != 3;
+      auto* publication =
+          wr_test_native_canvas_prepare(fixture, bgra, srgb, copySrc);
+      ASSERT_TRUE(publication);
+      RefPtr<RenderVulkanNativeTextureHost> host =
+          RenderVulkanNativeTextureHost::Create(publication);
+      ASSERT_TRUE(host);
+      auto* images = wr_vulkan_external_images_new(
+          wr_test_native_canvas_renderer(fixture, false));
+      auto* alias = wr_vulkan_external_images_new(
+          wr_test_native_canvas_renderer(fixture, false));
+      auto* foreign = wr_vulkan_external_images_new(
+          wr_test_native_canvas_renderer(fixture, true));
+      auto cleanup = MakeScopeExit([&] {
+        host = nullptr;
+        if (images) wr_vulkan_external_images_delete(images);
+        if (alias) wr_vulkan_external_images_delete(alias);
+        if (foreign) wr_vulkan_external_images_delete(foreign);
+      });
+      ASSERT_TRUE(images && alias && foreign);
+      EXPECT_EQ(host->GetSize(), IntSize(3, 2));
+      EXPECT_EQ(host->Bytes(), 24U);
+      EXPECT_EQ(host->GetFormat(),
+                bgra ? SurfaceFormat::B8G8R8A8 : SurfaceFormat::R8G8B8A8);
+      const auto normal = host->LockVulkan(0, images);
+      const auto opaque = host->LockVulkan(1, images);
+      ASSERT_EQ(normal.image_type, WrExternalImageType::NativeTexture);
+      ASSERT_EQ(opaque.image_type, WrExternalImageType::NativeTexture);
+      EXPECT_NE(normal.handle, opaque.handle);
+      EXPECT_EQ(host->LockVulkan(0, alias).handle, normal.handle);
+      EXPECT_EQ(host->LockVulkan(2, images).image_type,
+                WrExternalImageType::Invalid);
+      EXPECT_EQ(host->LockVulkan(0, nullptr).image_type,
+                WrExternalImageType::Invalid);
+      if (caseIndex == 0) {
+        EXPECT_EQ(wr_test_native_canvas_sentinel_handle(fixture),
+                  normal.handle);
+        const auto before = wr_test_native_canvas_texture_count(fixture, true);
+        EXPECT_EQ(host->LockVulkan(0, foreign).image_type,
+                  WrExternalImageType::Invalid);
+        EXPECT_EQ(wr_test_native_canvas_texture_count(fixture, true), before);
+        EXPECT_EQ(host->LockVulkan(0, images).handle, normal.handle);
+        wr_test_native_canvas_check_foreign(fixture);
+      }
+      wr_test_native_canvas_drop_actor(fixture, caseIndex == 4);
+      const auto beforeSnapshot =
+          wr_test_native_canvas_texture_count(fixture, false);
+      CheckNativeCanvasSnapshot(host, bgra, copySrc);
+      EXPECT_EQ(wr_test_native_canvas_texture_count(fixture, false),
+                beforeSnapshot);
+      wr_test_native_canvas_record(fixture, normal.handle, opaque.handle);
+      EXPECT_FALSE(host->UnlockVulkan(images));
+      host = nullptr;
+      wr_test_native_canvas_verify(fixture);
+      wr_vulkan_external_images_delete(images);
+      wr_vulkan_external_images_delete(alias);
+      wr_vulkan_external_images_delete(foreign);
+      images = alias = foreign = nullptr;
+      wr_test_native_canvas_finish(fixture);
+    }
+  });
 }
 
 static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(

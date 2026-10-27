@@ -64,7 +64,7 @@ pub enum WrVulkanReleaseStatus {
 /// Render-thread-only registry; retain this before entering Renderer image callbacks.
 pub struct WrVulkanExternalImages {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    registry: Rc<ExternalTextureRegistry>,
+    pub(crate) registry: Rc<ExternalTextureRegistry>,
 }
 
 pub struct WrVulkanTimeline {

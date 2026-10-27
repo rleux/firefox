@@ -10,6 +10,7 @@ use wgh::{
     shared::{NativeRetirement, SharedDeviceContext, SharedDeviceIdentity},
     DynOpenDevice,
 };
+pub use wgc::device::queue::FinalizedCanvas;
 use wgpu_core_remote::{global::Global, id};
 use wgpu_core_remote_types::{Label, RequestDeviceError};
 
