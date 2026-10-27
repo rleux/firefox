@@ -96,6 +96,18 @@ block ordinary rendering. Resource allocation and surface configuration still
 validate their actual usages and extents at runtime. Windows and Android do not
 use this GTK probe.
 
+When unified WR/WebGPU sharing is requested at startup, the same HAL-backed probe
+implementation runs in a second, independent child invocation
+(`vulkan --webrender-shared`). Its `VULKAN_WEBRENDER_SHARED` status and optional
+`VULKAN_WEBRENDER_SHARED_REASON` are separate from ordinary WR support. It opens the actual HAL
+shared device with the runtime flags, memory budgets and hardware-assertion policy,
+and checks surfaces and alpha visuals on that device's selected adapter. A failed,
+crashed or malformed shared probe preserves the ordinary WR result. Native WebGPU
+requests are denied when sharing is required but unavailable; ordinary Vulkan WR
+continues. Baseline WebGPU blocklist and security decisions remain unchanged.
+Alpha-visual admission uses the effective renderer mode's result. Probe selections
+are advisory; runtime owner and surface checks remain authoritative.
+
 The separate `gfxtest vulkan -p` mode, when built with Vulkan video support,
 probes video-decoder capabilities. Its Vulkan 1.3 and video-extension checks do
 not establish whether Vulkan WebRender can run. Wrench's Vulkan `test_init`

@@ -454,7 +454,7 @@ class PresentationData {
 WebGPUParent::WebGPUParent(const dom::ContentParentId& aContentId)
     : mContentId(aContentId),
       mContext(ffi::wgpu_server_new(
-          this, gfx::gfxVars::WebRenderUnifiedWebGPURequested(),
+          this, gfx::gfxVars::WebRenderUnifiedWebGPURequired(),
           XRE_IsGPUProcess())) {
   if (mContext) {
     mTimer.Start(base::TimeDelta::FromMilliseconds(POLL_TIME_MS), this,

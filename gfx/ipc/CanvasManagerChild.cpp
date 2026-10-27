@@ -9,6 +9,7 @@
 #include "mozilla/dom/WorkerPrivate.h"
 #include "mozilla/dom/WorkerRef.h"
 #include "mozilla/gfx/2D.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/gfx/CanvasShutdownManager.h"
 #include "mozilla/gfx/Swizzle.h"
 #include "mozilla/ipc/Endpoint.h"
@@ -207,6 +208,10 @@ RefPtr<layers::CanvasChild> CanvasManagerChild::GetCanvasChild() {
 }
 
 RefPtr<webgpu::WebGPUChild> CanvasManagerChild::GetWebGPUChild() {
+  if (gfxVars::WebRenderUnifiedWebGPURequired() &&
+      !gfxVars::WebRenderUnifiedWebGPUSupported()) {
+    return nullptr;
+  }
   if (PWebGPUChild* actor = LoneManagedOrNullAsserts(ManagedPWebGPUChild())) {
     return static_cast<webgpu::WebGPUChild*>(actor);
   }

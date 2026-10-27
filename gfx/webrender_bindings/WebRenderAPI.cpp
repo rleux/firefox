@@ -306,7 +306,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
                 aWindowKind == WindowKind::MAIN, supportLowPriorityTransactions,
                 supportLowPriorityThreadpool, gfx::gfxVars::UseGLSwizzle(),
                 gfx::gfxVars::UseWebRenderScissoredCacheClears(), swgl, gl,
-                vulkan, gfx::gfxVars::WebRenderUnifiedWebGPURequested(),
+                vulkan, gfx::gfxVars::UseWebRenderUnifiedWebGPU(),
                 compositor->SurfaceOriginIsTopLeft(), progCache,
                 shaders, renderThread->ThreadPool().Raw(),
                 renderThread->ThreadPoolLP().Raw(),

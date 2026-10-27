@@ -30,7 +30,8 @@ int vulkantest(const char* aDrmDevice);
 #endif
 
 #ifdef MOZ_WEBRENDER_VULKAN
-int vulkanwrtest();
+int vulkanwrtest(bool aShared, bool aHalLabels, bool aRequireHardware,
+                 const char* aBackends);
 #endif
 
 static void PrintUsage() {
@@ -53,6 +54,9 @@ static void PrintUsage() {
 #endif
 #ifdef MOZ_WEBRENDER_VULKAN
       "  vulkan --webrender       probe Vulkan WebRender on X11\n"
+      "  vulkan --webrender-shared [--hal-labels] [--require-hardware]\n"
+      "                           [--webgpu-backend list] probe shared "
+      "capabilities\n"
 #endif
       "\n");
 }
@@ -148,23 +152,45 @@ static int RunV4l2(int argc, char** argv) {
 
 #if defined(MOZ_ENABLE_VULKAN_VIDEO) || defined(MOZ_WEBRENDER_VULKAN)
 static int RunVulkan(int argc, char** argv) {
-  struct option longOptions[] = {{"help", no_argument, nullptr, 'h'},
-                                 {"probe", no_argument, nullptr, 'p'},
-                                 {"webrender", no_argument, nullptr, 'w'},
-                                 {"drm", required_argument, nullptr, 'd'},
-                                 {nullptr, 0, nullptr, 0}};
+  struct option longOptions[] = {
+      {"help", no_argument, nullptr, 'h'},
+      {"probe", no_argument, nullptr, 'p'},
+      {"webrender", no_argument, nullptr, 'w'},
+      {"webrender-shared", no_argument, nullptr, 's'},
+      {"hal-labels", no_argument, nullptr, 'l'},
+      {"require-hardware", no_argument, nullptr, 'r'},
+      {"webgpu-backend", required_argument, nullptr, 'b'},
+      {"drm", required_argument, nullptr, 'd'},
+      {nullptr, 0, nullptr, 0}};
   int c;
   optind = 1;
   bool doProbe = false;
   bool webRender = false;
+  bool shared = false;
+  bool halLabels = false;
+  bool requireHardware = false;
+  const char* backends = nullptr;
   [[maybe_unused]] const char* drmDevice = nullptr;
-  while ((c = getopt_long(argc, argv, "hpwd:", longOptions, nullptr)) != -1) {
+  while ((c = getopt_long(argc, argv, "hpwslrb:d:", longOptions, nullptr)) !=
+         -1) {
     switch (c) {
       case 'p':
         doProbe = true;
         break;
       case 'w':
         webRender = true;
+        break;
+      case 's':
+        shared = true;
+        break;
+      case 'l':
+        halLabels = true;
+        break;
+      case 'r':
+        requireHardware = true;
+        break;
+      case 'b':
+        backends = optarg;
         break;
       case 'd':
         doProbe = true;
@@ -177,9 +203,13 @@ static int RunVulkan(int argc, char** argv) {
         break;
     }
   }
-  if (webRender) {
+  if (webRender || shared) {
+    if (webRender && shared) {
+      PrintUsage();
+      return 1;
+    }
 #  ifdef MOZ_WEBRENDER_VULKAN
-    return vulkanwrtest();
+    return vulkanwrtest(shared, halLabels, requireHardware, backends);
 #  else
     fprintf(stderr, "gfxtest: Vulkan WebRender probe is not built\n");
     return 1;

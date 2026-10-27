@@ -126,6 +126,11 @@ already_AddRefed<dom::Promise> Instance::RequestAdapter(
   };
 
   rejectIf(!gfx::gfxVars::AllowWebGPU(), "WebGPU is disabled by blocklist.");
+  // requestAdapter selection/resolution: no compatible adapter resolves to
+  // null.
+  rejectIf(gfx::gfxVars::WebRenderUnifiedWebGPURequired() &&
+               !gfx::gfxVars::WebRenderUnifiedWebGPUSupported(),
+           "WebGPU is unavailable with this graphics configuration.");
   rejectIf(!StaticPrefs::dom_webgpu_enabled(),
            "WebGPU is disabled because the `dom.webgpu.enabled` pref. is set "
            "to `false`.");

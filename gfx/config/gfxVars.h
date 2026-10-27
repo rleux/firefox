@@ -60,6 +60,7 @@ class MOZ_STACK_CLASS gfxVarsCollectUpdates;
   _(UseWebRenderANGLE, bool, false)                                \
   _(UseWebRenderVulkan, bool, false)                               \
   _(WebRenderUnifiedWebGPURequested, bool, false)                  \
+  _(WebRenderUnifiedWebGPUSupported, bool, false)                  \
   _(UseWebRenderFlipSequentialWin, bool, false)                    \
   _(UseWebRenderDCompWin, bool, false)                             \
   _(UseWebRenderDCompVideoHwOverlayWin, bool, false)               \
@@ -301,6 +302,15 @@ class gfxVars final {
 
   GFX_VARS_LIST(GFX_VAR_DECL)
 #undef GFX_VAR_DECL
+
+  static bool WebRenderUnifiedWebGPURequired() {
+    return WebRenderUnifiedWebGPURequested();
+  }
+
+  static bool UseWebRenderUnifiedWebGPU() {
+    return WebRenderUnifiedWebGPURequired() && UseWebRenderVulkan() &&
+           WebRenderUnifiedWebGPUSupported();
+  }
 
  private:
   gfxVars();

@@ -14,20 +14,29 @@
 #include "mozilla/ScopeExit.h"
 
 #ifdef MOZ_X11
-static bool ProbeWebRender() {
+static bool ProbeWebRender(bool aShared, bool aHalLabels, bool aRequireHardware,
+                           const char* aBackends) {
   using namespace mozilla::gfx;
   WrStartupProbeReport report{};
-  auto* probe = wr_startup_probe_new(&report);
-  if (!probe) {
-    record_error("%s", report.error);
+  const auto fail = [aShared](const char* reason) {
+    if (aShared) {
+      record_value("VULKAN_WEBRENDER_SHARED_REASON\n%s\n", reason);
+    } else {
+      record_error("%s", reason);
+    }
     return false;
+  };
+  auto* probe = aShared ? wr_startup_probe_new_shared(
+                              aHalLabels, aRequireHardware, aBackends, &report)
+                        : wr_startup_probe_new(&report);
+  if (!probe) {
+    return fail(report.error);
   }
   auto deleteProbe =
       mozilla::MakeScopeExit([&] { wr_startup_probe_delete(probe); });
   Display* display = XOpenDisplay(nullptr);
   if (!display) {
-    record_error("Cannot open X11 display for Vulkan WebRender");
-    return false;
+    return fail("Cannot open X11 display for Vulkan WebRender");
   }
   auto closeDisplay = mozilla::MakeScopeExit([&] { XCloseDisplay(display); });
   Window window = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0,
@@ -37,11 +46,13 @@ static bool ProbeWebRender() {
   const bool selected = wr_startup_probe_select_xlib(
       probe, display, uint64_t(window), DefaultScreen(display), &report);
   if (report.has_device) {
-    record_value("VULKAN_WEBRENDER_DEVICE\n%s\n", report.device_name);
+    record_value(
+        "%s\n%s\n",
+        aShared ? "VULKAN_WEBRENDER_SHARED_DEVICE" : "VULKAN_WEBRENDER_DEVICE",
+        report.device_name);
   }
   if (!selected) {
-    record_error("%s", report.error);
-    return false;
+    return fail(report.error);
   }
   for (int screen = 0; screen < ScreenCount(display); ++screen) {
     XVisualInfo query = {};
@@ -71,32 +82,44 @@ static bool ProbeWebRender() {
       if (wr_startup_probe_alpha_xlib(probe, display, uint64_t(alphaWindow),
                                       screen)) {
         uint64_t key = (uint64_t(screen) << 32) | visual.visualid;
-        record_value("VULKAN_WEBRENDER_ALPHA_VISUAL\n%" PRIu64 "\n", key);
+        record_value("%s\n%" PRIu64 "\n",
+                     aShared ? "VULKAN_WEBRENDER_SHARED_ALPHA_VISUAL"
+                             : "VULKAN_WEBRENDER_ALPHA_VISUAL",
+                     key);
       }
     }
   }
   if (!wr_startup_probe_finish(probe, &report)) {
-    record_error("%s", report.error);
-    return false;
+    return fail(report.error);
   }
   return true;
 }
 #endif
 
-int vulkanwrtest() {
+int vulkanwrtest(bool aShared, bool aHalLabels, bool aRequireHardware,
+                 const char* aBackends) {
   const char* debug = getenv("MOZ_GFX_DEBUG");
   enable_logging = debug && *debug == '1';
   if (!enable_logging) {
     close_logging();
   }
-  log("Vulkan WebRender capability probe start\n");
+  log("Vulkan %s capability probe start\n",
+      aShared ? "shared WebRender/WebGPU" : "WebRender");
 #ifdef MOZ_X11
-  bool supported = ProbeWebRender();
+  bool supported =
+      ProbeWebRender(aShared, aHalLabels, aRequireHardware, aBackends);
 #else
   bool supported = false;
-  record_error("Vulkan WebRender probe requires X11");
+  if (aShared) {
+    record_value(
+        "VULKAN_WEBRENDER_SHARED_REASON\nVulkan shared probe requires X11\n");
+  } else {
+    record_error("Vulkan WebRender probe requires X11");
+  }
 #endif
-  record_value("VULKAN_WEBRENDER\n%s\n", supported ? "TRUE" : "FALSE");
+  record_value("%s\n%s\n",
+               aShared ? "VULKAN_WEBRENDER_SHARED" : "VULKAN_WEBRENDER",
+               supported ? "TRUE" : "FALSE");
   record_flush();
   return EXIT_SUCCESS;
 }

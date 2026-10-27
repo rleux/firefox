@@ -152,8 +152,9 @@ CanvasManagerParent::AllocPWebGPUParent() {
     return nullptr;
   }
 
-  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
-      !webgpu::ffi::wgpu_server_unified_available(XRE_IsGPUProcess())) {
+  if (gfxVars::WebRenderUnifiedWebGPURequired() &&
+      (!gfxVars::WebRenderUnifiedWebGPUSupported() ||
+       !webgpu::ffi::wgpu_server_unified_available(XRE_IsGPUProcess()))) {
     return nullptr;
   }
   auto actor = MakeRefPtr<webgpu::WebGPUParent>(mContentId);

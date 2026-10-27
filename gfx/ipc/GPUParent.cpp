@@ -417,7 +417,7 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
 
 #endif
 
-  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+  if (gfxVars::UseWebRenderUnifiedWebGPU() &&
       gfxVars::UseWebRenderVulkan()) {
 #ifdef MOZ_WEBRENDER_VULKAN
     mUnifiedOwner.reset(wr::wr_unified_owner_new(
@@ -608,7 +608,7 @@ static void CopyFeatureChange(Feature aFeature, Maybe<FeatureFailure>* aOut) {
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvGetDeviceStatus(GPUDeviceData* aOut) {
-  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+  if (gfxVars::UseWebRenderUnifiedWebGPU() &&
       gfxVars::UseWebRenderVulkan()) {
 #ifdef MOZ_WEBRENDER_VULKAN
     if (!mUnifiedOwner || !wr::wr_unified_owner_is_ready(mUnifiedOwner.get())) {

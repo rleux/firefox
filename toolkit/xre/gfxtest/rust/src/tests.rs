@@ -217,3 +217,47 @@ fn report_strings_are_bounded_and_terminated() {
     copy_bytes(&mut output, b"");
     assert!(output.iter().all(|&byte| byte == 0));
 }
+
+#[test]
+fn shared_surface_checks_leave_adapter_policy_to_bootstrap() {
+    for transparent in [false, true] {
+        let mut requirements = supported_device();
+        requirements.device_type = wgt::DeviceType::Cpu;
+        if transparent {
+            requirements.surface.composite_alpha_modes =
+                vec![wgt::CompositeAlphaMode::PreMultiplied];
+        }
+        assert!(requirements.failure(transparent).is_some());
+        assert_eq!(requirements.surface_failure(transparent), None);
+        requirements.surface.usage = wgt::TextureUses::COPY_SRC;
+        assert!(requirements.surface_failure(transparent).is_some());
+    }
+}
+
+#[test]
+fn shared_descriptor_rejects_non_vulkan_backend() {
+    assert!(shared_descriptor(true, "gl").is_err());
+}
+
+#[test]
+fn shared_descriptor_preserves_runtime_configuration() {
+    for (hal_labels, backends) in [(true, ""), (true, "vulkan"), (false, "vulkan")] {
+        let descriptor = shared_descriptor(hal_labels, backends).unwrap();
+        assert_eq!(
+            descriptor.memory_budget_thresholds.for_resource_creation,
+            Some(95)
+        );
+        assert_eq!(
+            descriptor.memory_budget_thresholds.for_device_loss,
+            Some(99)
+        );
+        let mut expected_flags = (wgt::InstanceFlags::from_build_config()
+            | wgt::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION
+            | wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE)
+            .with_env();
+        if !hal_labels {
+            expected_flags.insert(wgt::InstanceFlags::DISCARD_HAL_LABELS);
+        }
+        assert_eq!(descriptor.flags, expected_flags);
+    }
+}

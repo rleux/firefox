@@ -4,10 +4,10 @@
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, XlibDisplayHandle, XlibWindowHandle};
 use std::{
-    ffi::{c_char, c_void},
+    ffi::{c_char, c_void, CStr},
     ptr::{self, NonNull},
 };
-use wgpu_hal::{self as hal, Adapter as _, Instance as _};
+use wgpu_hal::{self as hal, Instance as _};
 use wgpu_types as wgt;
 
 struct Requirements {
@@ -20,17 +20,19 @@ struct Requirements {
 }
 
 impl Requirements {
-    fn for_surface(
-        adapter: &hal::ExposedAdapter<hal::api::Vulkan>,
-        surface: hal::SurfaceCapabilities,
-    ) -> Self {
+    fn for_surface(adapter: &hal::DynExposedAdapter, surface: hal::SurfaceCapabilities) -> Self {
         Self {
             device_type: adapter.info.device_type,
             max_texture_dimension_2d: adapter.capabilities.limits.max_texture_dimension_2d,
             swapchain: adapter
                 .adapter
-                .physical_device_capabilities()
-                .supports_extension(c"VK_KHR_swapchain"),
+                .as_any()
+                .downcast_ref::<hal::vulkan::Adapter>()
+                .is_some_and(|adapter| {
+                    adapter
+                        .physical_device_capabilities()
+                        .supports_extension(c"VK_KHR_swapchain")
+                }),
             color: unsafe {
                 adapter
                     .adapter
@@ -49,6 +51,10 @@ impl Requirements {
         if self.device_type == wgt::DeviceType::Cpu {
             return Some("Vulkan WebRender requires a hardware adapter");
         }
+        self.surface_failure(transparent)
+    }
+
+    fn surface_failure(&self, transparent: bool) -> Option<&'static str> {
         if !self.swapchain {
             return Some("Vulkan adapter lacks VK_KHR_swapchain");
         }
@@ -116,9 +122,39 @@ fn prefer_adapter(candidate: &wgt::AdapterInfo, selected: &wgt::AdapterInfo) -> 
     device_rank(candidate.device_type) < device_rank(selected.device_type)
 }
 
+fn shared_descriptor(
+    hal_labels: bool,
+    backends: &str,
+) -> Result<hal::InstanceDescriptor<'static>, String> {
+    if !backends.is_empty()
+        && !wgt::Backends::from_comma_list(backends).contains(wgt::Backends::VULKAN)
+    {
+        return Err("Unified WebGPU requires the Vulkan backend".into());
+    }
+    let mut flags = (wgt::InstanceFlags::from_build_config()
+        | wgt::InstanceFlags::AUTOMATIC_TIMESTAMP_NORMALIZATION
+        | wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE)
+        .with_env();
+    if !hal_labels {
+        flags.insert(wgt::InstanceFlags::DISCARD_HAL_LABELS);
+    }
+    Ok(hal::InstanceDescriptor {
+        name: "Unified WebRender/WebGPU",
+        flags,
+        memory_budget_thresholds: wgt::MemoryBudgetThresholds {
+            for_resource_creation: Some(95),
+            for_device_loss: Some(99),
+        },
+        backend_options: Default::default(),
+        telemetry: None,
+        display: None,
+    })
+}
+
 pub struct WrStartupProbe {
-    selected: Option<hal::ExposedAdapter<hal::api::Vulkan>>,
-    instance: hal::vulkan::Instance,
+    selected: Option<hal::DynExposedAdapter>,
+    instance: Box<dyn hal::DynInstance>,
+    shared: Option<hal::shared::SharedDeviceEndpoints>,
 }
 
 impl WrStartupProbe {
@@ -136,7 +172,28 @@ impl WrStartupProbe {
         .map_err(|error| format!("Cannot initialize Vulkan HAL: {error}"))?;
         Ok(Self {
             selected: None,
+            instance: Box::new(instance),
+            shared: None,
+        })
+    }
+
+    fn new_shared(
+        hal_labels: bool,
+        require_hardware: bool,
+        backends: &str,
+    ) -> Result<Self, String> {
+        let descriptor = shared_descriptor(hal_labels, backends)?;
+        let shared =
+            unsafe { hal::renderer::bootstrap_shared_device(&descriptor, require_hardware) }?;
+        let (_, instance) = shared.context.clone_instance();
+        let mut adapters = unsafe { instance.enumerate_adapters(None) };
+        if adapters.len() != 1 {
+            return Err("Shared owner did not expose its selected adapter".into());
+        }
+        Ok(Self {
+            selected: adapters.pop(),
             instance,
+            shared: Some(shared),
         })
     }
 
@@ -145,7 +202,7 @@ impl WrStartupProbe {
         display: *mut c_void,
         window: u64,
         screen: i32,
-    ) -> Result<hal::vulkan::Surface, String> {
+    ) -> Result<Box<dyn hal::DynSurface>, String> {
         let display = NonNull::new(display).ok_or("Missing X11 display")?;
         let window = window.try_into().map_err(|_| "Invalid X11 window")?;
         if window == 0 || screen < 0 {
@@ -167,15 +224,21 @@ impl WrStartupProbe {
         screen: i32,
     ) -> Result<(), String> {
         let surface = unsafe { self.surface(display, window, screen) }?;
+        if self.shared.is_some() {
+            let selected = self.selected.as_ref().ok_or("No shared adapter")?;
+            let caps = unsafe { selected.adapter.surface_capabilities(surface.as_ref()) }
+                .ok_or("Shared adapter cannot present to this X11 surface")?;
+            return Requirements::for_surface(selected, caps)
+                .surface_failure(false)
+                .map_or(Ok(()), |error| Err(error.into()));
+        }
         self.selected = None;
         // shortcut: instance/device version probing is postponed; assume the minimum
         // until a portable HAL query exists. Renderer runtime guards remain enabled.
-        let mut best: Option<(
-            hal::ExposedAdapter<hal::api::Vulkan>,
-            hal::SurfaceCapabilities,
-        )> = None;
-        for exposed in unsafe { self.instance.enumerate_adapters(Some(&surface)) } {
-            let Some(caps) = (unsafe { exposed.adapter.surface_capabilities(&surface) }) else {
+        let mut best: Option<(hal::DynExposedAdapter, hal::SurfaceCapabilities)> = None;
+        for exposed in unsafe { self.instance.enumerate_adapters(Some(surface.as_ref())) } {
+            let Some(caps) = (unsafe { exposed.adapter.surface_capabilities(surface.as_ref()) })
+            else {
                 continue;
             };
             if best
@@ -201,22 +264,30 @@ impl WrStartupProbe {
         let Ok(surface) = (unsafe { self.surface(display, window, screen) }) else {
             return false;
         };
-        let Some(caps) = (unsafe { selected.adapter.surface_capabilities(&surface) }) else {
+        let Some(caps) = (unsafe { selected.adapter.surface_capabilities(surface.as_ref()) })
+        else {
             return false;
         };
-        Requirements::for_surface(selected, caps)
-            .failure(true)
-            .is_none()
+        let requirements = Requirements::for_surface(selected, caps);
+        if self.shared.is_some() {
+            requirements.surface_failure(true).is_none()
+        } else {
+            requirements.failure(true).is_none()
+        }
     }
 
     fn finish(&self) -> Result<(), String> {
+        if self.shared.is_some() {
+            return Ok(());
+        }
         let selected = self.selected.as_ref().ok_or("No selected Vulkan adapter")?;
         let features = selected.features
             & (wgt::Features::DUAL_SOURCE_BLENDING
                 | wgt::Features::FLOAT32_FILTERABLE
                 | wgt::Features::TEXTURE_FORMAT_16BIT_NORM);
-        let hal::OpenDevice { device, queue } = unsafe {
-            selected.adapter.open(
+        let (hal::DynOpenDevice { device, queue }, _) = unsafe {
+            hal::renderer::open_device(
+                selected.adapter.as_ref(),
                 features,
                 &selected.capabilities.limits,
                 &wgt::MemoryHints::default(),
@@ -276,6 +347,32 @@ fn report(
 pub extern "C" fn wr_startup_probe_new(output: &mut WrStartupProbeReport) -> *mut WrStartupProbe {
     *output = WrStartupProbeReport::default();
     match WrStartupProbe::new() {
+        Ok(probe) => Box::into_raw(Box::new(probe)),
+        Err(error) => {
+            copy_bytes(&mut output.error, error.as_bytes());
+            ptr::null_mut()
+        }
+    }
+}
+
+/// # Safety
+/// Backends is null or a borrowed NUL-terminated string valid for this call.
+#[no_mangle]
+pub unsafe extern "C" fn wr_startup_probe_new_shared(
+    hal_labels: bool,
+    require_hardware: bool,
+    backends: *const c_char,
+    output: &mut WrStartupProbeReport,
+) -> *mut WrStartupProbe {
+    *output = WrStartupProbeReport::default();
+    let backends = if backends.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(backends) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    match WrStartupProbe::new_shared(hal_labels, require_hardware, &backends) {
         Ok(probe) => Box::into_raw(Box::new(probe)),
         Err(error) => {
             copy_bytes(&mut output.error, error.as_bytes());

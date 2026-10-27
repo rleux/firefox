@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "GfxInfo.h"
+#include "mozilla/gfx/gfxVars.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,6 +22,7 @@
 #include "mozilla/GUniquePtr.h"
 #include "mozilla/SSE.h"
 #include "mozilla/ScopeExit.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_media.h"
 #include "mozilla/XREAppData.h"
@@ -815,57 +817,124 @@ void GfxInfo::GetDataV4L2() {
 }
 
 bool GfxInfo::IsVulkanWebRenderSupported() {
-  return GetVulkanWebRenderSupport().supported;
+  return GetVulkanWebRenderSupport().ordinary.supported;
+}
+
+bool GfxInfo::IsVulkanWebRenderSharedSupported(nsACString& aReason) {
+  const auto& result = GetVulkanWebRenderSupport().shared;
+  aReason.Assign(result.reason);
+  return result.checked && result.supported;
 }
 
 bool GfxInfo::IsVulkanWebRenderAlphaSupported(uint32_t aScreen,
                                               uint32_t aVisual) {
-  return GetVulkanWebRenderSupport().alphaVisuals.Contains(
-      (uint64_t(aScreen) << 32) | aVisual);
+  const auto& support = GetVulkanWebRenderSupport();
+  const auto& result = gfx::gfxVars::UseWebRenderUnifiedWebGPU()
+                           ? support.shared
+                           : support.ordinary;
+  return result.supported &&
+         result.alphaVisuals.Contains((uint64_t(aScreen) << 32) | aVisual);
+}
+
+GfxInfo::VulkanProbeResult GfxInfo::RunVulkanWebRenderProbe(bool aShared) {
+  const auto fail = [aShared](const char* reason) {
+    VulkanProbeResult result;
+    result.checked = true;
+    result.reason.Assign(reason);
+    if (!aShared) {
+      gfxCriticalNote << "Vulkan WebRender probe: " << reason;
+    }
+    return result;
+  };
+#if defined(MOZ_WEBRENDER_VULKAN) && defined(MOZ_X11)
+  AutoTArray<const char*, 8> args;
+  args.AppendElement("vulkan");
+  args.AppendElement(aShared ? "--webrender-shared" : "--webrender");
+  nsCString backends;
+  if (aShared) {
+    if (StaticPrefs::dom_webgpu_hal_labels_AtStartup()) {
+      args.AppendElement("--hal-labels");
+    }
+    if (StaticPrefs::dom_webgpu_testing_assert_hardware_adapter()) {
+      args.AppendElement("--require-hardware");
+    }
+    {
+      const auto locked = StaticPrefs::dom_webgpu_wgpu_backend();
+      backends = *locked;
+    }
+    if (!backends.IsEmpty()) {
+      args.AppendElement("--webgpu-backend");
+      args.AppendElement(backends.get());
+    }
+  }
+  args.AppendElement(nullptr);
+  int pipe = -1;
+  int pid = FireTestProcess(GFX_PROBE_BINARY, &pipe, args.Elements());
+  char* data = nullptr;
+  auto freeData = MakeScopeExit([&] { g_free(data); });
+  if (!pid ||
+      !ManageChildProcess(aShared ? "vulkansharedtest" : "vulkanwrtest", &pid,
+                          &pipe, VULKAN_TEST_TIMEOUT, &data) ||
+      !data) {
+    return fail("Capability probe process failed");
+  }
+  VulkanProbeResult result;
+  result.checked = true;
+  bool sawStatus = false;
+  const char* statusKey =
+      aShared ? "VULKAN_WEBRENDER_SHARED" : "VULKAN_WEBRENDER";
+  const char* alphaKey = aShared ? "VULKAN_WEBRENDER_SHARED_ALPHA_VISUAL"
+                                 : "VULKAN_WEBRENDER_ALPHA_VISUAL";
+  char* cursor = data;
+  while (char* key = NS_strtok("\n", &cursor)) {
+    char* value = NS_strtok("\n", &cursor);
+    if (!value || !strcmp(key, "ERROR") || !strcmp(key, "WARNING")) {
+      return fail(value ? value : "Incomplete capability probe result");
+    }
+    if (!strcmp(key, statusKey)) {
+      if (sawStatus || (strcmp(value, "TRUE") && strcmp(value, "FALSE"))) {
+        return fail("Malformed capability status");
+      }
+      sawStatus = true;
+      result.supported = !strcmp(value, "TRUE");
+    } else if (!strcmp(key, alphaKey)) {
+      nsresult rv;
+      int64_t visual = nsCString(value).ToInteger64(&rv);
+      if (NS_FAILED(rv) || visual < 0) {
+        return fail("Malformed alpha visual");
+      }
+      result.alphaVisuals.Insert(uint64_t(visual));
+    } else if (aShared && !strcmp(key, "VULKAN_WEBRENDER_SHARED_REASON")) {
+      result.reason.Assign(value);
+    }
+  }
+  if (!sawStatus || (result.supported && !result.reason.IsEmpty())) {
+    return fail("Incomplete or contradictory capability result");
+  }
+  if (!result.supported && result.reason.IsEmpty()) {
+    result.reason.AssignLiteral("Capability unavailable");
+  }
+  return result;
+#else
+  return fail("Vulkan WebRender probe requires X11");
+#endif
 }
 
 const GfxInfo::VulkanWebRenderSupport& GfxInfo::GetVulkanWebRenderSupport() {
   MOZ_ASSERT(XRE_IsParentProcess());
   MOZ_ASSERT(NS_IsMainThread());
-  static const VulkanWebRenderSupport supported =
-      []() -> VulkanWebRenderSupport {
-#if defined(MOZ_WEBRENDER_VULKAN) && defined(MOZ_X11)
-    int pipe = -1;
-    const char* args[] = {"vulkan", "--webrender", nullptr};
-    int pid = FireTestProcess(GFX_PROBE_BINARY, &pipe, args);
-    char* data = nullptr;
-    auto freeData = MakeScopeExit([&] { g_free(data); });
-    if (!pid ||
-        !ManageChildProcess("vulkanwrtest", &pid, &pipe, VULKAN_TEST_TIMEOUT,
-                            &data) ||
-        !data) {
-      gfxCriticalNote << "Vulkan WebRender capability probe failed";
-      return {};
-    }
+  static const VulkanWebRenderSupport supported = []() {
     VulkanWebRenderSupport result;
-    char* cursor = data;
-    while (char* key = NS_strtok("\n", &cursor)) {
-      char* value = NS_strtok("\n", &cursor);
-      if (!value || !strcmp(key, "ERROR") || !strcmp(key, "WARNING")) {
-        gfxCriticalNote << "Vulkan WebRender probe: "
-                        << (value ? value : "incomplete result");
-        return {};
-      }
-      if (!strcmp(key, "VULKAN_WEBRENDER")) {
-        result.supported = !strcmp(value, "TRUE");
-      } else if (!strcmp(key, "VULKAN_WEBRENDER_ALPHA_VISUAL")) {
-        nsresult rv;
-        int64_t visual = nsCString(value).ToInteger64(&rv);
-        if (NS_FAILED(rv) || visual < 0) {
-          return {};
-        }
-        result.alphaVisuals.Insert(uint64_t(visual));
-      }
+    result.ordinary = RunVulkanWebRenderProbe(false);
+    if (result.ordinary.supported &&
+        StaticPrefs::gfx_webrender_vulkan_unified_webgpu_AtStartup()) {
+      result.shared = RunVulkanWebRenderProbe(true);
+    } else {
+      result.shared.reason.AssignLiteral(
+          "Shared probing was not requested or ordinary Vulkan WR is "
+          "unavailable");
     }
     return result;
-#else
-    return {};
-#endif
   }();
   return supported;
 }

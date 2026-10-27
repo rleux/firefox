@@ -57,6 +57,7 @@ class GfxInfo final : public GfxInfoBase {
 
   static bool FireGLXTestProcess();
   static bool IsVulkanWebRenderSupported();
+  static bool IsVulkanWebRenderSharedSupported(nsACString& aReason);
   static bool IsVulkanWebRenderAlphaSupported(uint32_t aScreen,
                                               uint32_t aVisual);
 
@@ -95,10 +96,17 @@ class GfxInfo final : public GfxInfoBase {
                              const char** aStringArgs);
 
  private:
-  struct VulkanWebRenderSupport {
+  struct VulkanProbeResult {
+    bool checked = false;
     bool supported = false;
+    nsCString reason;
     nsTHashSet<uint64_t> alphaVisuals;
   };
+  struct VulkanWebRenderSupport {
+    VulkanProbeResult ordinary;
+    VulkanProbeResult shared;
+  };
+  static VulkanProbeResult RunVulkanWebRenderProbe(bool aShared);
   static const VulkanWebRenderSupport& GetVulkanWebRenderSupport();
 
   bool mInitialized = false;

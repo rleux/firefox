@@ -2543,6 +2543,17 @@ void gfxPlatform::InitWebRenderConfig() {
       hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
       widget::GdkIsX11Display() &&
       widget::GfxInfo::IsVulkanWebRenderSupported());
+  if (gfxVars::WebRenderUnifiedWebGPURequested() &&
+      gfxVars::UseWebRenderVulkan()) {
+    nsAutoCString reason;
+    gfxVars::SetWebRenderUnifiedWebGPUSupported(
+        widget::GfxInfo::IsVulkanWebRenderSharedSupported(reason));
+    if (gfxVars::WebRenderUnifiedWebGPURequired() &&
+        !gfxVars::WebRenderUnifiedWebGPUSupported()) {
+      gfxCriticalNote << "Shared WebGPU capability probe unavailable: "
+                      << reason.get();
+    }
+  }
 #  endif
 #endif
 
