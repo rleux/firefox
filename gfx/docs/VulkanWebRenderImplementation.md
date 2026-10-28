@@ -16,10 +16,14 @@ window and lifecycle support remains compiled but is not selected at startup.
 `RenderCompositorVulkan` supplies an owned native-window configuration to
 `wr_window_new`. In ordinary mode the Rust binding selects
 `GpuBackendConfig::Vulkan`, and `Device::new` constructs the Vulkan backend.
-The shared HAL integration can instead use distinct graphics and compute
-endpoints on one native device while retaining independent logical Core devices.
-It is not yet selected for Firefox canvas presentation. The same `Renderer`
-continues to consume scene-builder results, update caches and issue draws. Vulkan window
+The startup preference `gfx.webrender.vulkan.unified-webgpu` additionally requests
+native WebGPU canvas sharing. On compatible Linux GPU-process Vulkan consumers,
+`gfx/wgpu_bindings/src/unified.rs` supplies a `ProcessOwner` retaining one native
+`VkDevice` and WebRender's graphics endpoint. WebGPU actors retain independent
+logical Core devices and their public feature, limit, error and lifetime policy.
+Compute work uses a distinct native queue; validated graphics work is dispatched
+through WebRender's graphics endpoint. The same `Renderer` continues to consume
+scene-builder results, update caches and issue draws. Vulkan window
 creation rejects GL/SWGL state and Native, Layer or partial-present compositor
 callbacks, because this integration uses the Draw compositor.
 
@@ -60,8 +64,9 @@ the maintenance and storage-buffer functionality for which the HAL would need
 | Capability | Requirements and behavior when unavailable |
 | --- | --- |
 | Timeline-based queue completion | Vulkan 1.2 or `VK_KHR_timeline_semaphore`, with the `timelineSemaphore` feature enabled. The HAL uses a fence pool when timeline semaphores are unavailable; ordinary rendering does not require external semaphores. |
-| Linux native image sharing | `VK_KHR_external_memory_fd`, `VK_EXT_external_memory_dma_buf`, `VK_EXT_image_drm_format_modifier`, and `VK_KHR_external_semaphore_fd`, plus timeline semaphore support. The renderer additionally requires importable and exportable `OPAQUE_FD` timeline semaphores. Missing capabilities disable native publications, leaving buffer paths where the producer supports them. |
+| Linux DMA-BUF publications | `VK_KHR_external_memory_fd`, `VK_EXT_external_memory_dma_buf`, `VK_EXT_image_drm_format_modifier`, and `VK_KHR_external_semaphore_fd`, plus timeline semaphore support. The renderer additionally requires importable and exportable `OPAQUE_FD` timeline semaphores. Missing capabilities disable native publications, leaving buffer paths where the producer supports them. |
 | GL RGB publications | The native-sharing capabilities plus `VK_EXT_queue_family_foreign` and importable `SYNC_FD` binary semaphores. The current admission path requires linear, single-plane ABGR8888 or ARGB8888 storage and compatible EGL producer support. Ownership transfers use `QUEUE_FAMILY_FOREIGN_EXT`. |
+| Native WebGPU canvases | The shared HAL owner requires two graphics/compute-capable queues in the first queue family and timeline semaphores. Window presentation additionally requires `VK_EXT_surface_maintenance1`, `VK_KHR_get_surface_capabilities2`, `VK_EXT_swapchain_maintenance1` and its enabled `swapchainMaintenance1` feature, plus the ordinary surface requirements. Runtime owner and consumer checks remain authoritative. |
 | Synchronous screenshots | Transfer-source usage on the swapchain surface. Unsupported capture fails without disabling ordinary rendering. |
 | Rendering features | Dual-source blending, 16-bit normalized texture formats, 32-bit float filtering and timestamp-query features are requested only when exposed by the adapter. Their presence is not a baseline device-selection requirement. |
 | Diagnostics | `VK_LAYER_KHRONOS_validation` is required only when validation is explicitly requested. The validation-layer version discussed below is not the minimum Vulkan API version. |
@@ -250,14 +255,25 @@ to make a texture usable. Producers and adapters select buffer paths where avail
 | Producer | Acquisition | Return |
 | --- | --- | --- |
 | CPU buffer images | Validated descriptor and mapped bytes through `LockExternalBuffer` | CPU source can be reused after upload consumption; GPU staging remains retained |
-| WebGPU canvas | Read pixels through WebGPU's staging-buffer presentation path and upload the resulting CPU image | Reuse the staging buffer after readback completes |
+| Ordinary WebGPU canvas | Read pixels through WebGPU's staging-buffer presentation path and upload the resulting CPU image | Reuse the staging buffer after readback completes |
+| Native WebGPU canvas | Acquire a process-local sealed publication on the shared native device through HAL interfaces | Recycle only after the publication epoch closes, all renderer payloads release and the exact graphics marker retires |
 | GL RGB DMA-BUF | Acquire shared access, import the publication's EGL `SYNC_FD`, and transfer FOREIGN ownership | Return access only after the GPU read has completed; poison abandoned access |
 
-Logical Core devices remain independent on shared native HAL endpoints. Firefox
-canvas presentation still uses ordinary readback and upload; the native canvas
-integration is staged separately from these low-level interfaces. GL retains
-its resolve/presentation work. Layout admission is deliberately narrower than
-all formats a producer might create.
+Logical Core devices remain independent even in native mode; `ProcessOwner`
+retains their shared native Vulkan owner. Local `wgpu-core` and `wgpu-hal`
+interfaces provide validated graphics recording, native image initialization,
+publication, snapshots and retirement. Native image operations stay behind HAL
+interfaces rather than exposing Vulkan objects to DOM code.
+
+Native canvases publish sealed storage directly to WebRender. They do not use
+DMA-BUF or CPU final-texture import. Each actor's allocator bounds live physical
+canvas storage at 128 allocations. Exhaustion returns an error texture and
+reports out of memory rather than blocking or changing transport. The return
+coordinator requires the canonical epoch to close, every renderer payload to
+release and the exact graphics marker to retire before reuse. Unsupported
+consumers deny native canvas drawing. Explicit snapshots use a separate readback
+path. GL retains its resolve/presentation work, and layout admission remains
+deliberately narrower than all formats a producer might create.
 
 GL publications carry generation, access and fence metadata. Fence descriptors
 remain serializable after a producer-side wait. The imported sync-file semaphore
@@ -353,6 +369,16 @@ Genuine sync-file import fixtures require access to the selected DRM render node
 and DRM SYNCOBJ support. Vulkan may export `-1` for an already-completed payload;
 these fixtures create a real signaled sync_file through DRM to preserve native
 FD-import coverage. They also exercise that completed-payload path directly.
+
+Positive native browser jobs additionally require a hardware adapter with two
+graphics/compute queues, timeline semaphores and the shared presentation
+maintenance capabilities. They run the same-binary shared HAL probe independently
+of public adapter/render assertions, with matching backend/labels/hardware flags
+and driver environment. This still depends on product HAL admission code.
+Known-qualifying jobs must require zero skips; only explicit prerequisite absence
+can classify an unsupported host. Crashes, timeouts, incomplete output and other
+bootstrap errors fail. The deliberate GL-backend job separately checks probe and
+public-adapter denial.
 
 Coverage includes native resource/upload regressions, presentation and window
 lifetime tests, external buffer/native-image checks, ImageBridge recovery,

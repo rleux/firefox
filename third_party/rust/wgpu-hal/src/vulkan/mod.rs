@@ -612,6 +612,18 @@ struct RenderPassKey {
     stencil_read_only: bool,
 }
 
+fn native_device_created(shared: bool) -> usize {
+    static NEXT_ID: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+    let id = NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    log::info!(
+        "native-device-created pid={} device={} shared={}",
+        std::process::id(),
+        id,
+        shared
+    );
+    id
+}
+
 struct DeviceShared {
     raw: ash::Device,
     family_index: u32,

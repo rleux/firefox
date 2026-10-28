@@ -244,7 +244,10 @@ Maybe<TextureHost::ResourceUpdateOp> AsyncImagePipelineManager::UpdateImageKeys(
       !aTexture && !aPipeline->mImageHost->GetCurrentTextureHost() &&
       aPipeline->mCurrentTexture &&
       aPipeline->mCurrentTexture->AsVulkanNativeTextureHost();
-  if (clearNative || (native && native->IsError())) {
+  const bool denyNative =
+      native &&
+      !aSceneBuilderTxn.GetCapabilities().mSupportsVulkanNativeTextures;
+  if (clearNative || (native && native->IsError()) || denyNative) {
     for (auto key : aPipeline->mKeys) {
       aSceneBuilderTxn.DeleteImage(key);
     }
@@ -524,7 +527,9 @@ void AsyncImagePipelineManager::ApplyAsyncImageForPipeline(
 
 #if defined(XP_LINUX) && !defined(ANDROID)
   auto* native = aPipeline->mCurrentTexture->AsVulkanNativeTextureHost();
-  if (native && native->IsError()) {
+  if (native &&
+      (native->IsError() ||
+       !aSceneBuilderTxn.GetCapabilities().mSupportsVulkanNativeTextures)) {
     const auto rect = wr::ToLayoutRect(LayoutDeviceRect(
         0, 0, native->GetSize().width, native->GetSize().height));
     native->PushDisplayItems(aPipeline->mDLBuilder, rect, rect,

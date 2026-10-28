@@ -87,6 +87,7 @@ struct WebRenderCapabilities {
   bool mUseLayerCompositor = false;
   bool mUseTripleBuffering = false;
   bool mSupportsExternalBufferTextures = false;
+  bool mSupportsVulkanNativeTextures = false;
 #ifdef XP_DARWIN
   wr::ImageBufferKind mIOSurfaceImageKind = wr::ImageBufferKind::Texture2D;
 #endif

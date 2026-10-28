@@ -65,6 +65,8 @@ namespace {
 
 class RenderExternalBuffer : public ::testing::Test {
  protected:
+  void CheckNativeCanvasRouting(bool aSoftware);
+
   void SetUp() override {
     gfxPlatform::GetPlatform();
     gfxPlatform::InitLayersIPC();
@@ -1032,6 +1034,8 @@ void wr_test_native_canvas_reuse();
 void wr_test_native_canvas_unretired_return();
 void wr_test_native_canvas_routing_state();
 void* wr_test_native_canvas_routing_new();
+void* wr_test_native_canvas_routing_new_swgl();
+intptr_t wr_test_native_canvas_routing_texture_count(void*);
 DocumentHandle* wr_test_native_canvas_routing_take_document(void*);
 Renderer* wr_test_native_canvas_routing_renderer(void*);
 WrVulkanExternalImages* wr_test_native_canvas_routing_images(void*);
@@ -1487,7 +1491,7 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasMap) {
   });
 }
 
-TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
+void RenderExternalBuffer::CheckNativeCanvasRouting(bool aSoftware) {
   void* fixture = nullptr;
   RefPtr<WebRenderAPI> api;
   RefPtr<layers::AsyncImagePipelineManager> manager;
@@ -1525,13 +1529,17 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
     });
   });
   OnRenderThread([&] {
-    wr_test_native_canvas_routing_state();
-    fixture = wr_test_native_canvas_routing_new();
+    if (!aSoftware) wr_test_native_canvas_routing_state();
+    fixture = aSoftware ? wr_test_native_canvas_routing_new_swgl()
+                        : wr_test_native_canvas_routing_new();
     ASSERT_TRUE(fixture);
     WebRenderCapabilities capabilities;
+    capabilities.mSupportsVulkanNativeTextures = !aSoftware;
+    if (aSoftware)
+      capabilities.mBackendType = layers::WebRenderBackend::SOFTWARE;
     capabilities.mMaxTextureSize =
         wr_test_native_canvas_routing_max_texture_size(fixture);
-    ASSERT_GE(capabilities.mMaxTextureSize, 3);
+    ASSERT_GE(capabilities.mMaxTextureSize, aSoftware ? 6 : 3);
     auto* document = wr_test_native_canvas_routing_take_document(fixture);
     ASSERT_TRUE(document);
     api = WebRenderAPI::CreateForTesting(document, capabilities);
@@ -1584,20 +1592,29 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
       EXPECT_FALSE(native->GetMaybeExternalImageId());
       DisplayListBuilder builder(root, api->GetCapabilities().mBackendType);
       builder.Begin(AppUnitsPerCSSPixel());
-      const auto bounds = wr::ToLayoutRect(LayoutDeviceRect(0, 0, 3, 2));
+      const auto bounds =
+          wr::ToLayoutRect(LayoutDeviceRect(0, 0, aSoftware ? 6 : 3, 2));
       builder.PushRect(
           bounds, bounds, true, false, false,
           ColorF{23.0f / 255.0f, 47.0f / 255.0f, 89.0f / 255.0f, 1.0f});
+      if (aSoftware) {
+        const auto sibling = wr::ToLayoutRect(LayoutDeviceRect(3, 0, 3, 2));
+        builder.PushRect(
+            sibling, sibling, true, false, false,
+            ColorF{149.0f / 255.0f, 37.0f / 255.0f, 113.0f / 255.0f, 1.0f});
+      }
       builder.PushIFrame(LayoutDeviceRect(0, 0, 3, 2), true, pipeline, false);
       BuiltDisplayList display;
       builder.End(display);
       transaction.SetRootPipeline(root);
-      transaction.SetDocumentView(LayoutDeviceIntRect(0, 0, 3, 2));
+      transaction.SetEmbedPolicy(root, Some(nsTArray<uint32_t>{0}));
+      transaction.SetDocumentView(
+          LayoutDeviceIntRect(0, 0, aSoftware ? 6 : 3, 2));
       transaction.SetDisplayList(
           Epoch{alpha + 1}, api->GetNamespace(), root, display.dl_desc,
           display.dl_items, display.dl_spatial_tree, display.dl_interner_delta);
 
-      transaction.GenerateFrame(VsyncId(), false, false,
+      transaction.GenerateFrame(VsyncId(), true, false,
                                 RenderReasons::TESTING);
       api->SendTransaction(transaction);
       blankApplied = true;
@@ -1615,6 +1632,23 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
               fixture, alpha * 2 + (step == 2 ? 1 : 0));
         });
         ASSERT_TRUE(frame);
+        if (aSoftware)
+          OnRenderThread([&] {
+            const auto before =
+                wr_test_native_canvas_routing_texture_count(fixture);
+            RefPtr<RenderVulkanNativeTextureHost> host =
+                RenderVulkanNativeTextureHost::Create(
+                    wr_vulkan_native_publication_from_webgpu_frame(frame));
+            ASSERT_TRUE(host);
+            EXPECT_EQ(host->Lock(0, nullptr).image_type,
+                      WrExternalImageType::Invalid);
+            EXPECT_EQ(host->LockSWGL(0, nullptr, nullptr).image_type,
+                      WrExternalImageType::Invalid);
+            EXPECT_EQ(host->LockExternalBuffer(0).image_type,
+                      WrExternalImageType::Invalid);
+            EXPECT_EQ(wr_test_native_canvas_routing_texture_count(fixture),
+                      before);
+          });
       }
       auto releaseFrame = MakeScopeExit([&] {
         if (frame) webgpu::ffi::wgpu_native_canvas_frame_delete(frame);
@@ -1680,9 +1714,9 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
         TransactionBuilder transaction(api);
         manager->ApplyAsyncImageForPipeline(pipeline, transaction, transaction,
                                             nullptr, nullptr);
-        EXPECT_FALSE(transaction.IsResourceUpdatesEmpty());
+        EXPECT_EQ(transaction.IsResourceUpdatesEmpty(), aSoftware);
 
-        transaction.GenerateFrame(VsyncId(), false, false,
+        transaction.GenerateFrame(VsyncId(), true, false,
                                   RenderReasons::TESTING);
         api->SendTransaction(transaction);
         applied = true;
@@ -1697,7 +1731,13 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
           EXPECT_FALSE(
               RenderThread::Get()->GetRenderTexture(errorWrapper.ref()));
         }
-        wr_test_native_canvas_routing_render(fixture, alpha * 3 + step);
+        const auto before =
+            wr_test_native_canvas_routing_texture_count(fixture);
+        wr_test_native_canvas_routing_render(
+            fixture, aSoftware ? alpha * 3 + 1 : alpha * 3 + step);
+        if (aSoftware)
+          EXPECT_EQ(wr_test_native_canvas_routing_texture_count(fixture),
+                    before);
       });
       if (step == 0) {
         OnCompositorThread([&] {
@@ -1706,12 +1746,14 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
               pipeline, static_cast<layers::TextureHost*>(nullptr),
               transaction);
           EXPECT_TRUE(transaction.IsResourceUpdatesEmpty());
-          transaction.GenerateFrame(VsyncId(), false, false,
+          transaction.GenerateFrame(VsyncId(), true, false,
                                     RenderReasons::TESTING);
           api->SendTransaction(transaction);
         });
-        OnRenderThread(
-            [&] { wr_test_native_canvas_routing_render(fixture, alpha * 3); });
+        OnRenderThread([&] {
+          wr_test_native_canvas_routing_render(
+              fixture, aSoftware ? alpha * 3 + 1 : alpha * 3);
+        });
       }
     }
     OnCompositorThread([&] {
@@ -1720,8 +1762,8 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
       TransactionBuilder transaction(api);
       manager->ApplyAsyncImageForPipeline(pipeline, transaction, transaction,
                                           nullptr, nullptr);
-      EXPECT_FALSE(transaction.IsResourceUpdatesEmpty());
-      transaction.GenerateFrame(VsyncId(), false, false,
+      EXPECT_EQ(transaction.IsResourceUpdatesEmpty(), aSoftware);
+      transaction.GenerateFrame(VsyncId(), true, false,
                                 RenderReasons::TESTING);
       api->SendTransaction(transaction);
     });
@@ -1735,6 +1777,14 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
       client->UnregisterTextureOwner(owner);
     });
   }
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
+  CheckNativeCanvasRouting(false);
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasSoftwareDenial) {
+  CheckNativeCanvasRouting(true);
 }
 
 static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(

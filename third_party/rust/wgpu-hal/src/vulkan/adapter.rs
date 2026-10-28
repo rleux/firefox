@@ -3179,6 +3179,7 @@ impl super::Adapter {
                     .map_err(map_err)?
             }
         };
+        super::native_device_created(false);
         fn map_err(err: vk::Result) -> crate::DeviceError {
             match err {
                 vk::Result::ERROR_TOO_MANY_OBJECTS => crate::DeviceError::OutOfMemory,

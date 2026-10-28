@@ -121,7 +121,7 @@ void VulkanNativeTextureHost::PushDisplayItems(
     wr::DisplayListBuilder& aBuilder, const wr::LayoutRect& aBounds,
     const wr::LayoutRect& aClip, wr::ImageRendering aFilter,
     const Range<wr::ImageKey>& aImageKeys, PushDisplayItemFlagSet) {
-  if (mIsError) {
+  if (mIsError || aImageKeys.length() == 0) {
     if (mOpaque) {
       aBuilder.PushRect(aBounds, aClip, true, false, false,
                         wr::ColorF{0.0f, 0.0f, 0.0f, 1.0f});

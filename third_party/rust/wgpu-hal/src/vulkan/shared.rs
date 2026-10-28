@@ -31,6 +31,7 @@ pub(super) struct QueueGroup {
     pub(super) texture_ids: Arc<ResourceIdentityFactory<vk::Image>>,
     pub(super) view_ids: Arc<ResourceIdentityFactory<vk::ImageView>>,
     identity: SharedDeviceIdentity,
+    log_device_id: usize,
     #[cfg(test)]
     pub(super) generation_execution_error: AtomicBool,
     #[cfg(test)]
@@ -63,6 +64,7 @@ impl QueueGroup {
             texture_ids: Arc::new(ResourceIdentityFactory::new()),
             view_ids: Arc::new(ResourceIdentityFactory::new()),
             identity: SharedDeviceIdentity::new(),
+            log_device_id: 0,
             #[cfg(test)]
             generation_execution_error: AtomicBool::new(false),
             #[cfg(test)]
@@ -436,6 +438,8 @@ pub(crate) unsafe fn open_shared_device(
     }
     let raw = unsafe { adapter.instance.raw.create_device(adapter.raw, &info, None) }
         .map_err(super::map_host_device_oom_and_lost_err)?;
+    let mut queue_group = QueueGroup::new(presentation.is_some());
+    queue_group.log_device_id = super::native_device_created(true);
     let owner = Arc::new(NativeDevice {
         raw,
         _instance: adapter.instance.clone(),
@@ -443,7 +447,7 @@ pub(crate) unsafe fn open_shared_device(
         extensions: extensions.clone(),
         features,
         limits: limits.clone(),
-        queues: Arc::new(QueueGroup::new(presentation.is_some())),
+        queues: Arc::new(queue_group),
     });
     let open_endpoint = |index| {
         let lease = owner.clone();

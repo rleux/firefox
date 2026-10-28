@@ -137,6 +137,10 @@ class nsDisplayCanvas final : public nsPaintedDisplayItem {
         WebRenderCanvasRendererAsync* data = canvasData->GetCanvasRenderer();
         MOZ_ASSERT(data);
         data->UpdateCompositableClient();
+        const auto pipelineId = data->GetPipelineId();
+        if (pipelineId.isNothing()) {
+          return Ok();
+        }
 
         // Push IFrame for async image pipeline.
         // XXX Remove this once partial display list update is supported.
@@ -151,15 +155,14 @@ class nsDisplayCanvas final : public nsPaintedDisplayItem {
         // stacking context need to be done manually and pushed over to the
         // parent side, where it will be done when we build the display list for
         // the iframe. That happens in WebRenderCompositableHolder.s2);
-        aBuilder.PushIFrame(bounds, !BackfaceIsHidden(),
-                            data->GetPipelineId().ref(),
+        aBuilder.PushIFrame(bounds, !BackfaceIsHidden(), pipelineId.ref(),
                             /*ignoreMissingPipelines*/ true);
 
         LayoutDeviceRect scBounds(LayoutDevicePoint(0, 0), bounds.Size());
         auto filter = wr::ToImageRendering(mFrame->UsedImageRendering());
         auto mixBlendMode = wr::MixBlendMode::Normal;
         aManager->WrBridge()->AddWebRenderParentCommand(
-            OpUpdateAsyncImagePipeline(data->GetPipelineId().value(), scBounds,
+            OpUpdateAsyncImagePipeline(pipelineId.ref(), scBounds,
                                        wr::WrRotation::Degree0, filter,
                                        mixBlendMode));
 

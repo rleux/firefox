@@ -382,6 +382,8 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         const bool useTripleBuffering = compositor->UseTripleBuffering();
         const bool supportsExternalBufferTextures =
             compositor->SupportsExternalBufferTextures();
+        const bool supportsVulkanNativeTextures =
+            vulkan && gfx::gfxVars::UseWebRenderUnifiedWebGPU();
 
         RefPtr<RenderThread> thread = RenderThread::Get();
         auto renderer = std::make_unique<RendererOGL>(
@@ -423,6 +425,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
             .mUseLayerCompositor = useLayerCompositor,
             .mUseTripleBuffering = useTripleBuffering,
             .mSupportsExternalBufferTextures = supportsExternalBufferTextures,
+            .mSupportsVulkanNativeTextures = supportsVulkanNativeTextures,
 #ifdef XP_DARWIN
             .mIOSurfaceImageKind = ioSurfaceImageKind,
 #endif

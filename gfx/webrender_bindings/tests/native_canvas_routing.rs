@@ -23,7 +23,6 @@ use wgpu_core_remote::{global::Global, id::*};
 use wgpu_core_remote_types::TextureDescriptor;
 use wgpu_types as wgt;
 
-const SIZE: DeviceIntSize = DeviceIntSize::new(3, 2);
 const A: [[u8; 4]; 6] = super::native_canvas::PIXELS;
 const B: [[u8; 4]; 6] = [
     [41, 13, 71, 255],
@@ -34,6 +33,7 @@ const B: [[u8; 4]; 6] = [
     [31, 11, 19, 64],
 ];
 const BG: [u8; 4] = [23, 47, 89, 255];
+const SIBLING: [u8; 4] = [149, 37, 113, 255];
 
 fn descriptor(format: wgt::TextureFormat) -> TextureDescriptor<'static> {
     TextureDescriptor {
@@ -421,6 +421,20 @@ impl ExternalImageHandler for Images {
     }
 }
 
+struct Software {
+    context: Rc<swgl::Context>,
+    _pixels: Vec<u8>,
+}
+struct DeniedImages;
+impl ExternalImageHandler for DeniedImages {
+    fn lock(&mut self, _: ExternalImageId, _: u8, _: bool) -> ExternalImage {
+        panic!("Software renderer attempted to lock a native canvas image");
+    }
+    fn unlock(&mut self, _: ExternalImageId, _: u8) {
+        panic!("Software renderer attempted to unlock a native canvas image");
+    }
+}
+
 pub struct RoutingFixture {
     renderer: Option<webrender::Renderer>,
     document: Option<Box<DocumentHandle>>,
@@ -428,10 +442,12 @@ pub struct RoutingFixture {
     ready: mpsc::Receiver<()>,
     frames: [Option<Arc<SealedCanvasFrame>>; 4],
     max_texture_size: i32,
+    owner: Arc<wgpu_bindings::unified::ProcessOwner>,
+    software: Option<Software>,
+    size: DeviceIntSize,
 }
 
-#[no_mangle]
-pub extern "C" fn wr_test_native_canvas_routing_new() -> *mut RoutingFixture {
+fn routing_new(software: bool) -> *mut RoutingFixture {
     let owner = unified::owner();
     let global = unified::actor(&owner, false);
     let device = global.resolve_device_id(DeviceId::zip(1, 1));
@@ -452,24 +468,53 @@ pub extern "C" fn wr_test_native_canvas_routing_new() -> *mut RoutingFixture {
     });
     device.destroy();
     drop((allocator, queue, device, global));
-    let graphics = unified::graphics(&owner);
+    let size = DeviceIntSize::new(if software { 6 } else { 3 }, 2);
+    let software = software.then(|| {
+        let context = Rc::new(swgl::Context::create());
+        context.make_current();
+        let mut pixels = vec![0; (size.width * size.height * 4) as usize];
+        context.init_default_framebuffer(
+            0,
+            0,
+            size.width,
+            size.height,
+            size.width * 4,
+            pixels.as_mut_ptr().cast(),
+        );
+        Software {
+            context,
+            _pixels: pixels,
+        }
+    });
+    let backend = match software.as_ref() {
+        Some(software) => webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(software.context.clone())),
+        None => webrender::GpuBackendConfig::VulkanShared(unified::graphics(&owner)),
+    };
     let (tx, ready) = mpsc::channel();
     let (mut renderer, sender) = webrender::create_webrender_instance(
-        webrender::GpuBackendConfig::VulkanShared(graphics),
+        backend,
         Box::new(Notice(tx)),
         webrender::WebRenderOptions {
             enable_debugger: false,
             enable_subpixel_aa: false,
+            clear_caches_with_quads: software.is_none(),
             ..Default::default()
         },
         None,
     )
     .unwrap();
     let max_texture_size = renderer.get_max_texture_size();
-    let images = unsafe { wr_vulkan_external_images_new(&renderer) };
-    assert!(!images.is_null());
-    renderer.set_external_image_handler(Box::new(Images(images)));
-    let document = Box::new(DocumentHandle::new(sender.create_api(), None, SIZE, 0));
+    let images = if software.is_some() {
+        assert!(renderer.wgpu_external_textures().is_none());
+        renderer.set_external_image_handler(Box::new(DeniedImages));
+        std::ptr::null_mut()
+    } else {
+        let images = unsafe { wr_vulkan_external_images_new(&renderer) };
+        assert!(!images.is_null());
+        renderer.set_external_image_handler(Box::new(Images(images)));
+        images
+    };
+    let document = Box::new(DocumentHandle::new(sender.create_api(), None, size, 0));
     Box::into_raw(Box::new(RoutingFixture {
         renderer: Some(renderer),
         document: Some(document),
@@ -477,7 +522,23 @@ pub extern "C" fn wr_test_native_canvas_routing_new() -> *mut RoutingFixture {
         ready,
         frames,
         max_texture_size,
+        owner,
+        software,
+        size,
     }))
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_native_canvas_routing_new() -> *mut RoutingFixture {
+    routing_new(false)
+}
+#[no_mangle]
+pub extern "C" fn wr_test_native_canvas_routing_new_swgl() -> *mut RoutingFixture {
+    routing_new(true)
+}
+#[no_mangle]
+pub extern "C" fn wr_test_native_canvas_routing_texture_count(fixture: &RoutingFixture) -> isize {
+    fixture.owner.graphics().device.get_internal_counters().textures.read()
 }
 
 #[no_mangle]
@@ -513,22 +574,34 @@ pub extern "C" fn wr_test_native_canvas_routing_frame(
 #[no_mangle]
 pub extern "C" fn wr_test_native_canvas_routing_render(fixture: &mut RoutingFixture, case: u32) {
     fixture.ready.recv_timeout(Duration::from_secs(30)).unwrap();
+    if let Some(software) = fixture.software.as_ref() {
+        software.context.make_current();
+    }
     let renderer = fixture.renderer.as_mut().unwrap();
     renderer.update();
-    let result = renderer.render(SIZE, 0).unwrap();
+    let result = renderer.render(fixture.size, 0).unwrap();
     assert!(!result.external_images_pending);
-    let pixels = renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(3, 2)));
+    let pixels = renderer.read_pixels_rgba8(FramebufferIntRect::from_size(FramebufferIntSize::new(
+        fixture.size.width,
+        fixture.size.height,
+    )));
+    assert_eq!(pixels.len(), (fixture.size.width * fixture.size.height * 4) as usize);
+    let tolerance = if fixture.software.is_some() { 0 } else { 1 };
     let opaque = case < 3;
     let step = case % 3;
     for (pixel, actual) in pixels.chunks_exact(4).enumerate() {
-        let expected = if step == 1 {
+        let column = pixel % fixture.size.width as usize;
+        let source_pixel = pixel / fixture.size.width as usize * 3 + column;
+        let expected = if fixture.software.is_some() && column >= 3 {
+            SIBLING
+        } else if step == 1 {
             if opaque {
                 [0, 0, 0, 255]
             } else {
                 BG
             }
         } else {
-            let source = if step == 0 { A[pixel] } else { B[pixel] };
+            let source = if step == 0 { A[source_pixel] } else { B[source_pixel] };
             if opaque {
                 [source[0], source[1], source[2], 255]
             } else {
@@ -543,7 +616,7 @@ pub extern "C" fn wr_test_native_canvas_routing_render(fixture: &mut RoutingFixt
         };
         for channel in 0..4 {
             assert!(
-                (actual[channel] as i32 - expected[channel] as i32).abs() <= 1,
+                (actual[channel] as i32 - expected[channel] as i32).abs() <= tolerance,
                 "case{case}/pixel{pixel}/channel{channel}: {} != {}",
                 actual[channel],
                 expected[channel]
@@ -554,6 +627,9 @@ pub extern "C" fn wr_test_native_canvas_routing_render(fixture: &mut RoutingFixt
 
 #[no_mangle]
 pub extern "C" fn wr_test_native_canvas_routing_deinit_renderer(fixture: &mut RoutingFixture) {
+    if let Some(software) = fixture.software.as_ref() {
+        software.context.make_current();
+    }
     let mut document = fixture.document.take();
     if let Some(document) = document.as_mut() {
         unsafe { webrender_bindings::bindings::wr_api_stop_render_backend(document) };
@@ -567,6 +643,9 @@ pub extern "C" fn wr_test_native_canvas_routing_deinit_renderer(fixture: &mut Ro
             webrender_bindings::bindings::wr_api_shut_down(&mut document);
         }
     }
+    if let Some(software) = fixture.software.take() {
+        software.context.destroy();
+    }
 }
 
 #[no_mangle]
@@ -576,7 +655,9 @@ pub unsafe extern "C" fn wr_test_native_canvas_routing_delete(fixture: *mut Rout
         assert!(fixture.renderer.is_none());
         assert!(fixture.document.is_none());
         unsafe {
-            wr_vulkan_external_images_delete(fixture.images);
+            if !fixture.images.is_null() {
+                wr_vulkan_external_images_delete(fixture.images);
+            }
         }
     }
 }

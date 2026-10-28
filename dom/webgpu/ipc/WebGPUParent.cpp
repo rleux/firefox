@@ -893,6 +893,10 @@ bool WebGPUParent::PresentNativeCanvas(
   }
   if (accepted) {
     data->mSubmissionIndex = aSubmissionIndex;
+    MOZ_LOG(sLogger, LogLevel::Debug,
+            ("PresentNativeCanvas owner=%" PRIu64 " texture=%" PRIu64
+             " image=%d submission=%" PRIu64,
+             aOwnerId.mId, aRemoteTextureId.mId, !!frame, aSubmissionIndex));
   }
   return accepted;
 #else

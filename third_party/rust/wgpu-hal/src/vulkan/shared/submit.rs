@@ -350,6 +350,12 @@ pub(super) unsafe fn submit_ordered(
                 }
                 segment.synchronization.accepted();
                 progress.commit(next);
+                log::info!(
+                    "shared-segment-accepted pid={} device={} lane={} queue_index={} command_buffers={}",
+                    std::process::id(), context.queues.log_device_id,
+                    if segment.queue.device.queue_index == 0 { "graphics" } else { "compute" },
+                    segment.queue.device.queue_index, segment.buffers.len()
+                );
                 if let Some(value) = logical_terminal {
                     logical_progress.commit(value);
                 }

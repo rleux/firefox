@@ -22,11 +22,13 @@ and suitable device and surface capabilities.
 | `wgpu-hal` dynamic interfaces | Device, queue, resource and presentation operations |
 
 `Device::new` constructs the backend from `GpuBackendConfig`. Ordinary WebRender
-owns its Vulkan device independently of WebGPU. The shared HAL path can bind
-WebRender graphics and independent logical Core devices to one native Vulkan
-device, using distinct graphics and compute queues. Firefox canvas presentation
-still uses the ordinary readback path. Native image producers use explicit
-image-publication and synchronization protocols.
+owns its Vulkan device independently of WebGPU. With
+`gfx.webrender.vulkan.unified-webgpu=true` at startup and compatible GPU-process
+Vulkan consumers, `ProcessOwner` retains one native `VkDevice` for WebRender
+graphics and private WebGPU actors. Actors keep independent logical Core devices;
+compute uses a separate native queue, while validated graphics work runs through
+WebRender's graphics endpoint. Native image producers use explicit publication
+and synchronization protocols.
 
 GPU commands are batched with explicit synchronization and resource retention
 until completion. Upload buffers and temporary textures are pooled; pipelines
@@ -44,11 +46,12 @@ texture.
 ## Scope
 
 The implementation covers ordinary rendering resources, text, images, clips,
-gradients, filters, YUV sampling and native-window presentation. CPU images use
-the upload path, including WebGPU canvas frames presented through readback. Linux
-GL producers can publish compatible linear RGB DMA-BUF images for direct sampling. This
-path still has producer-side work and does not make the whole browser pipeline
-copy-free. Native WebGPU canvas publication is not yet selected for Firefox.
+gradients, filters, YUV sampling and native-window presentation. CPU images and
+ordinary WebGPU canvases use the upload/readback path. Linux GL producers can
+publish compatible linear RGB DMA-BUF images for direct sampling; their producer-side
+work remains. Opt-in native WebGPU canvases use process-local native image
+publications and bounded storage reuse, without DMA-BUF or CPU final-texture
+import. Explicit snapshots still use readback.
 
 Vulkan startup supports Linux/GTK/X11 and Windows. Android window/lifecycle paths
 are present in the code, but Android keeps accelerated OpenGL until Vulkan can
