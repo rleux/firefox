@@ -2,7 +2,86 @@
 
 use crate::{DynDevice, DynOpenDevice, DynTexture, TextureDescriptor};
 use alloc::{boxed::Box, sync::Arc};
-use core::{any::Any, fmt};
+use core::{
+    any::Any,
+    fmt,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
+/// Charges every live physical shared image until confirmed allocator cleanup.
+#[derive(Debug)]
+pub struct AllocationBudget {
+    capacity: usize,
+    live: AtomicUsize,
+    poisoned: AtomicBool,
+}
+
+impl AllocationBudget {
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity != 0);
+        Self {
+            capacity,
+            live: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub fn live_allocations(&self) -> usize {
+        self.live.load(Ordering::Acquire)
+    }
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    pub(super) fn reserve(self: &Arc<Self>) -> Result<AllocationCredit, ImageLeaseError> {
+        if self.is_poisoned() {
+            return Err(crate::DeviceError::OutOfMemory.into());
+        }
+        self.live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                (live < self.capacity).then(|| live + 1)
+            })
+            .map_err(|_| ImageLeaseError::Device(crate::DeviceError::OutOfMemory))?;
+        let credit = AllocationCredit {
+            budget: self.clone(),
+            allocated: false,
+            cleaned: false,
+        };
+        if self.is_poisoned() {
+            return Err(crate::DeviceError::OutOfMemory.into());
+        }
+        Ok(credit)
+    }
+}
+
+pub(super) struct AllocationCredit {
+    budget: Arc<AllocationBudget>,
+    allocated: bool,
+    cleaned: bool,
+}
+
+impl AllocationCredit {
+    pub(super) fn allocated(&mut self) {
+        self.allocated = true;
+    }
+    pub(super) fn cleaned(&mut self) {
+        self.cleaned = true;
+    }
+}
+
+impl Drop for AllocationCredit {
+    fn drop(&mut self) {
+        if !self.allocated || self.cleaned {
+            let previous = self.budget.live.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous != 0);
+        } else {
+            self.budget.poisoned.store(true, Ordering::Release);
+        }
+    }
+}
 
 pub trait ImageLease: fmt::Debug + wgt::WasmNotSendSync {
     fn as_any(&self) -> &dyn Any;
@@ -45,6 +124,25 @@ pub unsafe fn allocate(
         return unsafe { crate::vulkan::shared_image::allocate(graphics, descriptor) };
     }
     let _ = (graphics, descriptor);
+    Err(ImageLeaseError::UnsupportedBackend)
+}
+
+/// Allocate one charged physical canvas image; aliases retain its original credit.
+///
+/// # Safety
+/// The descriptor and graphics ownership requirements of allocate apply.
+pub unsafe fn allocate_budgeted(
+    graphics: Arc<DynOpenDevice>,
+    descriptor: &TextureDescriptor<'_>,
+    budget: Arc<AllocationBudget>,
+) -> Result<Arc<dyn ImageLease>, ImageLeaseError> {
+    #[cfg(vulkan)]
+    if graphics.device.as_any().is::<crate::vulkan::Device>() {
+        return unsafe {
+            crate::vulkan::shared_image::allocate_budgeted(graphics, descriptor, budget)
+        };
+    }
+    let _ = (graphics, descriptor, budget);
     Err(ImageLeaseError::UnsupportedBackend)
 }
 
@@ -96,3 +194,7 @@ pub fn validate_alias(
 mod epoch;
 pub use epoch::{create_alias_from_returned, reserve_finalization};
 pub use epoch::{FinalizeReservation, ImageEpoch, ImagePayload, ReturnedImage};
+
+#[cfg(test)]
+#[path = "shared_image/budget_tests.rs"]
+mod budget_tests;

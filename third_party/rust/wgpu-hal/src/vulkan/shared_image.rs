@@ -10,6 +10,7 @@ struct Allocation {
     texture: Option<super::Texture>,
     descriptor: crate::TextureDescriptor<'static>,
     publication: wgpu_sync::Mutex<epoch::Slot>,
+    credit: Option<crate::shared_image::AllocationCredit>,
 }
 
 impl fmt::Debug for Allocation {
@@ -35,7 +36,11 @@ impl Drop for Allocation {
                 .as_any()
                 .downcast_ref::<super::Device>()
                 .unwrap();
-            unsafe { owner.destroy_texture(texture) };
+            if unsafe { owner.destroy_texture_checked(texture) } {
+                if let Some(credit) = &mut self.credit {
+                    credit.cleaned();
+                }
+            }
         }
     }
 }
@@ -85,6 +90,22 @@ pub(crate) unsafe fn allocate(
     graphics: Arc<crate::DynOpenDevice>,
     desc: &crate::TextureDescriptor<'_>,
 ) -> Result<Arc<dyn ImageLease>, ImageLeaseError> {
+    unsafe { allocate_inner(graphics, desc, None) }
+}
+
+pub(crate) unsafe fn allocate_budgeted(
+    graphics: Arc<crate::DynOpenDevice>,
+    desc: &crate::TextureDescriptor<'_>,
+    budget: Arc<crate::shared_image::AllocationBudget>,
+) -> Result<Arc<dyn ImageLease>, ImageLeaseError> {
+    unsafe { allocate_inner(graphics, desc, Some(budget)) }
+}
+
+unsafe fn allocate_inner(
+    graphics: Arc<crate::DynOpenDevice>,
+    desc: &crate::TextureDescriptor<'_>,
+    budget: Option<Arc<crate::shared_image::AllocationBudget>>,
+) -> Result<Arc<dyn ImageLease>, ImageLeaseError> {
     let device = graphics
         .device
         .as_any()
@@ -107,13 +128,27 @@ pub(crate) unsafe fn allocate(
         return Err(ImageLeaseError::InvalidEndpoint);
     }
     validate_features(device, desc)?;
+    let mut credit = budget.as_ref().map(|budget| budget.reserve()).transpose()?;
     let texture = {
         let _host = group.host[0].lock();
         if group.closed.load(Ordering::Acquire) {
             return Err(ImageLeaseError::Closed);
         }
-        unsafe { device.create_texture(desc) }?
+        match unsafe { device.create_texture_checked(desc) } {
+            Ok(texture) => texture,
+            Err(failure) => {
+                if !failure.cleanup_confirmed {
+                    if let Some(credit) = &mut credit {
+                        credit.allocated();
+                    }
+                }
+                return Err(failure.error.into());
+            }
+        }
     };
+    if let Some(credit) = &mut credit {
+        credit.allocated();
+    }
     let descriptor = crate::TextureDescriptor {
         label: None,
         size: desc.size,
@@ -130,6 +165,7 @@ pub(crate) unsafe fn allocate(
         texture: Some(texture),
         descriptor,
         publication: wgpu_sync::Mutex::new(epoch::Slot::default()),
+        credit,
     }))
 }
 

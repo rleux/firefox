@@ -28,6 +28,8 @@ struct Driver {
     clear_error: AtomicBool,
     clear_native_lost: AtomicBool,
     end_error: AtomicBool,
+    hoisted_probe: bool,
+    hoisted_faults: [Arc<AtomicUsize>; 2],
     hide_graphics_queue: AtomicBool,
     segments: StdMutex<Vec<(hal::shared::SharedQueueLane, bool, bool)>>,
     ready: AtomicU64,
@@ -101,6 +103,14 @@ impl GraphicsRecordingProvider for Provider {
         _device: &dyn hal::DynDevice,
         native: Box<dyn hal::DynCommandEncoder>,
     ) -> Result<Box<dyn hal::DynCommandEncoder>, hal::DeviceError> {
+        let native = if self.driver.hoisted_probe {
+            crate::command::graphics_tests::queue_barrier_fault_encoder(
+                native,
+                self.driver.hoisted_faults.clone(),
+            )
+        } else {
+            native
+        };
         Ok(Box::new(wgpu_graphics::RoutedEncoder::new(
             native,
             Box::new(Recorder {
@@ -355,6 +365,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::new_with_hoisted_probe(false)
+    }
+
+    fn new_with_hoisted_probe(hoisted_probe: bool) -> Self {
         let instance = crate::instance::Instance::new(
             "shared core lifetime test",
             wgt::InstanceDescriptor {
@@ -390,6 +404,7 @@ impl Fixture {
         };
         let driver = Arc::new(Driver {
             mode: AtomicUsize::new(SUCCESS),
+            hoisted_probe,
             unlocked: AtomicBool::new(true),
             ..Default::default()
         });
@@ -789,6 +804,193 @@ fn canvas_texture(fixture: &Fixture, render: bool) -> Arc<Texture> {
         })
 }
 
+fn canvas_readback_buffer(fixture: &Fixture) -> Arc<Buffer> {
+    fixture
+        .device
+        .create_buffer(&crate::resource::BufferDescriptor {
+            label: None,
+            size: 512,
+            usage: wgt::BufferUsages::COPY_DST | wgt::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+}
+
+fn canvas_readback_layout() -> wgt::TexelCopyBufferLayout {
+    wgt::TexelCopyBufferLayout {
+        offset: 0,
+        bytes_per_row: Some(256),
+        rows_per_image: None,
+    }
+}
+
+#[test]
+fn shared_canvas_current_copy_retains_resources_without_expiry() {
+    let fixture = Fixture::new();
+    let texture = canvas_texture(&fixture, true);
+    let buffer = canvas_readback_buffer(&fixture);
+    let index = unsafe {
+        fixture.queue.copy_shared_canvas_submission(
+            &texture,
+            &buffer,
+            canvas_readback_layout(),
+            fixture.device.snatchable_lock.read(),
+        )
+    }
+    .unwrap();
+    assert!(index > 0);
+    assert!(texture
+        .raw(&fixture.device.snatchable_lock.read())
+        .is_some());
+    assert_eq!(
+        fixture
+            .queue
+            .lock_life()
+            .get_texture_latest_submission_index(&texture),
+        Some(index)
+    );
+    assert!(texture.initialization_status.read().mips[0]
+        .check(0..1)
+        .is_none());
+    assert!(!fixture.queue.lock_life().queue_empty());
+    fixture.driver.ready.store(index, Ordering::SeqCst);
+    fixture.device.poll(wgt::PollType::Poll).unwrap();
+    assert!(fixture.queue.lock_life().queue_empty());
+    assert!(texture
+        .raw(&fixture.device.snatchable_lock.read())
+        .is_some());
+}
+
+#[test]
+fn shared_canvas_current_copy_errors_release_guards_before_loss() {
+    for failure in 0..5 {
+        let fixture = Fixture::new();
+        let texture = canvas_texture(&fixture, true);
+        let buffer = canvas_readback_buffer(&fixture);
+        match failure {
+            0 => fixture.driver.clear_error.store(true, Ordering::SeqCst),
+            1 => fixture.driver.end_error.store(true, Ordering::SeqCst),
+            2 => fixture.driver.mode.store(REJECT, Ordering::SeqCst),
+            _ => {
+                fixture.driver.mode.store(PARTIAL, Ordering::SeqCst);
+                fixture
+                    .driver
+                    .drain_error
+                    .store(failure == 4, Ordering::SeqCst);
+            }
+        }
+        let result = unsafe {
+            fixture.queue.copy_shared_canvas_submission(
+                &texture,
+                &buffer,
+                canvas_readback_layout(),
+                fixture.device.snatchable_lock.read(),
+            )
+        };
+        assert!(result.is_err());
+        fixture.driver.join_probes();
+        assert!(!fixture.device.is_valid());
+        assert!(fixture.driver.unlocked.load(Ordering::SeqCst));
+        assert!(texture
+            .raw(&fixture.device.snatchable_lock.read())
+            .is_some());
+        assert_eq!(
+            fixture
+                .device
+                .last_successful_submission_index
+                .load(Ordering::SeqCst),
+            0
+        );
+        if failure >= 3 {
+            assert_eq!(
+                *fixture.driver.recoveries.lock().unwrap(),
+                [if failure == 4 {
+                    NativeRetirement::Unconfirmed
+                } else {
+                    NativeRetirement::Confirmed
+                }]
+            );
+            assert_eq!(fixture.queue.lock_life().queue_empty(), failure == 3);
+        } else {
+            assert!(fixture.driver.recoveries.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn shared_canvas_hoisted_barrier_errors_release_guards_before_loss() {
+    use crate::device::queue::QueueWriteError;
+
+    for finalizer in [false, true] {
+        for stage in 0..2 {
+            for error in 1..=2 {
+                let fixture = Fixture::new_with_hoisted_probe(true);
+                let texture = canvas_texture(&fixture, true);
+                let buffer = canvas_readback_buffer(&fixture);
+                let queued = fixture
+                    .device
+                    .create_buffer(&crate::resource::BufferDescriptor {
+                        label: None,
+                        size: 4,
+                        usage: wgt::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                fixture.queue.write_buffer(queued, 0, &[7, 11, 13, 17]);
+                assert!(fixture.driver.errors.lock().unwrap().is_empty());
+                fixture.driver.hoisted_faults[stage].store(error, Ordering::SeqCst);
+                let result = if finalizer {
+                    let graphics = fixture
+                        .device
+                        .graphics_submission
+                        .as_ref()
+                        .unwrap()
+                        .graphics_queue()
+                        .unwrap();
+                    unsafe {
+                        fixture.queue.finalize_shared_canvas_submission(
+                            &texture,
+                            fixture.device.snatchable_lock.read(),
+                            graphics,
+                        )
+                    }
+                    .map_err(QueueWriteError::Queue)
+                } else {
+                    unsafe {
+                        fixture.queue.copy_shared_canvas_submission(
+                            &texture,
+                            &buffer,
+                            canvas_readback_layout(),
+                            fixture.device.snatchable_lock.read(),
+                        )
+                    }
+                };
+                assert_eq!(
+                    fixture.driver.hoisted_faults[stage].load(Ordering::SeqCst),
+                    0
+                );
+                if error == 1 {
+                    assert!(matches!(
+                        result,
+                        Err(QueueWriteError::Queue(DeviceError::OutOfMemory))
+                    ));
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(QueueWriteError::Queue(DeviceError::Lost))
+                    ));
+                }
+                fixture.driver.join_probes();
+                assert!(!fixture.device.is_valid());
+                assert!(fixture.driver.events.lock().unwrap().contains(&"lost"));
+                assert!(fixture.driver.unlocked.load(Ordering::SeqCst));
+                assert_eq!(fixture.driver.submissions.load(Ordering::SeqCst), 0);
+                assert!(texture
+                    .raw(&fixture.device.snatchable_lock.read())
+                    .is_some());
+            }
+        }
+    }
+}
+
 #[test]
 fn shared_canvas_no_barrier_still_retains_a_real_finalization_submission() {
     let fixture = Fixture::new();
@@ -896,6 +1098,36 @@ impl hal::shared_image::ImageLease for UnrelatedLease {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+#[test]
+fn shared_canvas_seal_wrong_queue_preserves_the_foreign_writer() {
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let texture = canvas_texture(&first, false);
+    let desc = texture.descriptor();
+    let authority = crate::resource::SharedCanvasTexture {
+        texture: texture.clone(),
+        lease: Arc::new(UnrelatedLease),
+        native_descriptor: hal::TextureDescriptor {
+            label: None,
+            size: desc.size,
+            mip_level_count: desc.mip_level_count,
+            sample_count: desc.sample_count,
+            dimension: desc.dimension,
+            format: desc.format,
+            usage: texture._hal_usage | wgt::TextureUses::COPY_SRC | wgt::TextureUses::RESOURCE,
+            memory_flags: hal::MemoryFlags::empty(),
+            view_formats: Vec::new(),
+        },
+    };
+    assert!(matches!(
+        unsafe { second.queue.seal_shared_canvas(authority) },
+        Err(DeviceError::DeviceMismatch(_))
+    ));
+    assert!(first.device.is_valid() && second.device.is_valid());
+    assert!(texture.raw(&first.device.snatchable_lock.read()).is_some());
+    assert_eq!(second.driver.submissions.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -1028,6 +1260,17 @@ fn shared_native_lost_is_fatal_while_logical_loss_and_oom_stay_local() {
                 fixture.device.handle_hal_error(hal::DeviceError::Lost);
                 std::process::exit(87);
             }
+            "copy-native" => {
+                let texture = canvas_texture(&fixture, true);
+                let buffer = canvas_readback_buffer(&fixture);
+                fixture.driver.clear_native_lost.store(true, Ordering::SeqCst);
+                let _ = unsafe {
+                    fixture.queue.copy_shared_canvas_submission(
+                        &texture, &buffer, canvas_readback_layout(), fixture.device.snatchable_lock.read(),
+                    )
+                };
+                std::process::exit(87);
+            }
             "finalizer-native" => {
                 let texture = canvas_texture(&fixture, true);
                 fixture
@@ -1079,6 +1322,7 @@ fn shared_native_lost_is_fatal_while_logical_loss_and_oom_stay_local() {
     for (mode, expected) in [
         ("native", 86),
         ("finalizer-native", 86),
+        ("copy-native", 86),
         ("oom", 0),
         ("unexpected", 0),
         ("destroy", 0),

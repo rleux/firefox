@@ -1073,3 +1073,43 @@ fn returned_alias_drop_abandons_the_next_writing_reservation() {
     drop(work);
     validation_clean();
 }
+
+#[test]
+#[ignore = "Requires shared Vulkan, counters and Khronos validation"]
+fn budgeted_bind_failure_refunds_only_confirmed_cleanup() {
+    validation_clean();
+    let (_instance, _adapter, pair) = factory();
+    let owner = Arc::new(pair.graphics);
+    let device = owner
+        .device
+        .as_any()
+        .downcast_ref::<super::super::Device>()
+        .unwrap();
+    let before = device.mem_allocator.generate_report().total_allocated_bytes;
+    for uncertain in [false, true] {
+        let budget = Arc::new(crate::shared_image::AllocationBudget::new(1));
+        let result = super::super::device::with_texture_bind_failure(uncertain, || unsafe {
+            crate::shared_image::allocate_budgeted(owner.clone(), &descriptor(), budget.clone())
+        });
+        assert!(matches!(
+            result,
+            Err(ImageLeaseError::Device(crate::DeviceError::OutOfMemory))
+        ));
+        assert_eq!(
+            device.mem_allocator.generate_report().total_allocated_bytes,
+            before
+        );
+        assert_eq!(budget.live_allocations(), usize::from(uncertain));
+        assert_eq!(budget.is_poisoned(), uncertain);
+        if !uncertain {
+            let lease = unsafe {
+                crate::shared_image::allocate_budgeted(owner.clone(), &descriptor(), budget.clone())
+            }
+            .unwrap();
+            assert_eq!(budget.live_allocations(), 1);
+            drop(lease);
+            assert_eq!(budget.live_allocations(), 0);
+        }
+    }
+    validation_clean();
+}

@@ -25,6 +25,8 @@ pub struct WrVulkanNativePublication {
     epoch: Arc<ImageEpoch>,
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     view_format: TextureFormat,
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    frame: Option<Arc<SealedCanvasFrame>>,
 }
 
 /// Registration and deletion remain on the creating renderer thread.
@@ -39,6 +41,44 @@ pub struct WrVulkanNativeImage {
     view_format: TextureFormat,
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     handles: [Option<ExternalTextureHandle>; 2],
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    _frame: Option<Arc<SealedCanvasFrame>>,
+}
+
+/// Borrow a WG frame box for this call; the caller keeps ownership of the box.
+///
+/// # Safety
+/// A non-null pointer must reference a live NativeCanvasFrame for this call.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_native_publication_from_webgpu_frame(
+    frame: *const std::ffi::c_void,
+) -> *mut WrVulkanNativePublication {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        let result = (|| {
+            let frame = unsafe { frame.cast::<NativeCanvasFrame>().as_ref() }
+                .ok_or_else(|| String::from("Null native canvas frame"))?;
+            let frame = frame.frame().clone();
+            let view_format = frame.native_descriptor().format;
+            if !matches!(view_format, TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm) {
+                return Err("Native canvas storage requires RGBA8 or BGRA8".into());
+            }
+            let publication = WrVulkanNativePublication {
+                owner: frame.owner().clone(),
+                epoch: frame.epoch().clone(),
+                view_format,
+                frame: Some(frame),
+            };
+            publication.validate()?;
+            Ok(publication)
+        })();
+        return checked(result).map_or(ptr::null_mut(), |publication| Box::into_raw(Box::new(publication)));
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = frame;
+        ptr::null_mut()
+    }
 }
 
 #[no_mangle]
@@ -73,6 +113,7 @@ pub extern "C" fn wr_vulkan_native_publication_clone(
         owner: publication.owner.clone(),
         epoch: publication.epoch.clone(),
         view_format: publication.view_format,
+        frame: publication.frame.clone(),
     }));
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
@@ -174,6 +215,7 @@ pub extern "C" fn wr_vulkan_native_image_new(
                 _owner: publication.owner.clone(),
                 view_format: publication.view_format,
                 handles: [Some(handle), None],
+                _frame: publication.frame.clone(),
             })
         })();
         return checked(result).map_or(ptr::null_mut(), |image| Box::into_raw(Box::new(image)));
@@ -263,7 +305,10 @@ mod enabled {
         Device, ExternalTextureRegistry, ImageEpoch, SharedDeviceOptions, Texture, TextureFilter,
         TextureFormat,
     };
-    pub(super) use wgpu_bindings::unified::ProcessOwner;
+    pub(super) use wgpu_bindings::{
+        canvas::{NativeCanvasFrame, SealedCanvasFrame},
+        unified::ProcessOwner,
+    };
 
     pub(super) fn checked<T>(result: Result<T, String>) -> Option<T> {
         result
@@ -284,6 +329,7 @@ mod enabled {
                 owner,
                 epoch: finalized.publish_epoch(),
                 view_format,
+                frame: None,
             };
             let descriptor = publication.epoch.descriptor();
             match descriptor.format {

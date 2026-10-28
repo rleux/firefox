@@ -1698,6 +1698,41 @@ pub enum TextureClearMode {
     None,
 }
 
+/// Unique browser-canvas authority; public texture permissions remain unchanged.
+#[derive(Debug)]
+pub struct SharedCanvasTexture {
+    pub(crate) texture: Arc<Texture>,
+    pub(crate) lease: Arc<dyn hal::shared_image::ImageLease>,
+    pub(crate) native_descriptor: hal::TextureDescriptor<'static>,
+}
+
+impl SharedCanvasTexture {
+    pub fn texture(&self) -> &Arc<Texture> {
+        &self.texture
+    }
+}
+
+#[derive(Debug)]
+pub struct SealedCanvasTexture {
+    pub(crate) finalized: crate::device::queue::FinalizedCanvas,
+    pub(crate) logical_descriptor: wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
+}
+
+impl SealedCanvasTexture {
+    pub fn submission_index(&self) -> crate::SubmissionIndex {
+        self.finalized.submission_index()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::device::queue::FinalizedCanvas,
+        wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
+    ) {
+        (self.finalized, self.logical_descriptor)
+    }
+}
+
 #[derive(Debug)]
 pub struct TextureState {
     pub(crate) inner: Snatchable<TextureInner>,

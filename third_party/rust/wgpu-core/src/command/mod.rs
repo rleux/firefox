@@ -18,7 +18,7 @@ mod draw;
 mod encoder;
 mod encoder_command;
 #[cfg(all(test, feature = "noop", feature = "std"))]
-mod graphics_tests;
+pub(crate) mod graphics_tests;
 mod memory_init;
 mod pass;
 mod query;
@@ -678,6 +678,13 @@ impl InnerCommandEncoder {
         self.close_and_insert_at(0)
     }
 
+    pub(crate) fn close_and_push_front_with_deferred_loss(
+        &mut self,
+        defer_device_loss: bool,
+    ) -> Result<(), DeviceError> {
+        self.close_and_insert_at_impl(0, defer_device_loss)
+    }
+
     /// Finish the current command buffer and insert it at the given index
     /// in [`self.list`][l].
     ///
@@ -695,11 +702,24 @@ impl InnerCommandEncoder {
     /// [l]: InnerCommandEncoder::list
     /// [`DeferredQuerySetResolve::insertion_point`]: query::DeferredQuerySetResolve::insertion_point
     pub(crate) fn close_and_insert_at(&mut self, index: usize) -> Result<(), DeviceError> {
+        self.close_and_insert_at_impl(index, false)
+    }
+
+    fn close_and_insert_at_impl(
+        &mut self,
+        index: usize,
+        defer_device_loss: bool,
+    ) -> Result<(), DeviceError> {
         assert!(self.is_open);
         self.is_open = false;
 
-        let cmd_buf =
-            unsafe { self.raw.end_encoding() }.map_err(|e| self.device.handle_hal_error(e))?;
+        let cmd_buf = unsafe { self.raw.end_encoding() }.map_err(|error| {
+            if defer_device_loss {
+                self.device.map_hal_error_without_loss(error)
+            } else {
+                self.device.handle_hal_error(error)
+            }
+        })?;
         self.list.insert(index, cmd_buf);
 
         Ok(())
@@ -789,11 +809,24 @@ impl InnerCommandEncoder {
         &mut self,
         label: Option<&str>,
     ) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
+        self.open_pass_with_deferred_loss(label, false)
+    }
+
+    pub(crate) fn open_pass_with_deferred_loss(
+        &mut self,
+        label: Option<&str>,
+        defer_device_loss: bool,
+    ) -> Result<&mut dyn hal::DynCommandEncoder, DeviceError> {
         assert!(!self.is_open);
 
         let hal_label = hal_label(label, self.device.instance_flags);
-        unsafe { self.raw.begin_encoding(hal_label) }
-            .map_err(|e| self.device.handle_hal_error(e))?;
+        unsafe { self.raw.begin_encoding(hal_label) }.map_err(|error| {
+            if defer_device_loss {
+                self.device.map_hal_error_without_loss(error)
+            } else {
+                self.device.handle_hal_error(error)
+            }
+        })?;
         self.is_open = true;
 
         Ok(self.raw.as_mut())

@@ -2394,6 +2394,75 @@ impl Device {
         })
     }
 
+    /// Allocate a native browser canvas with fixed private readback/sampling uses.
+    ///
+    /// # Safety
+    /// Serialize the canvas actor and retain its exact shared graphics endpoint.
+    pub unsafe fn create_shared_canvas_texture(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+        graphics: Arc<hal::DynOpenDevice>,
+        budget: Arc<hal::shared_image::AllocationBudget>,
+    ) -> (Arc<Texture>, Option<resource::SharedCanvasTexture>) {
+        let (texture, allocation) = self.create_texture_with_allocator(desc, |hal_desc| {
+            if !is_shared_canvas_descriptor(desc)
+                || !self
+                    .graphics_submission
+                    .as_ref()
+                    .and_then(|provider| provider.graphics_queue())
+                    .is_some_and(|queue| core::ptr::eq(queue, graphics.queue.as_ref()))
+            {
+                return Err(self.handle_hal_error(hal::DeviceError::Unexpected).into());
+            }
+            let required = wgt::TextureUsages::COPY_SRC | wgt::TextureUsages::TEXTURE_BINDING;
+            let missing = required
+                - self
+                    .adapter
+                    .get_texture_format_features(desc.format)
+                    .allowed_usages;
+            if !missing.is_empty() {
+                return Err(resource::CreateTextureError::InvalidFormatUsages(
+                    missing,
+                    desc.format,
+                    false,
+                ));
+            }
+            let map_error = |error| match error {
+                hal::shared_image::ImageLeaseError::Device(error) => {
+                    self.handle_hal_error_with_nonfatal_oom(error)
+                }
+                error => {
+                    log::error!("Native canvas allocation rejected: {error}");
+                    self.handle_hal_error(hal::DeviceError::Unexpected)
+                }
+            };
+            let native = hal::TextureDescriptor {
+                label: None,
+                size: hal_desc.size,
+                mip_level_count: hal_desc.mip_level_count,
+                sample_count: hal_desc.sample_count,
+                dimension: hal_desc.dimension,
+                format: hal_desc.format,
+                usage: hal_desc.usage | wgt::TextureUses::COPY_SRC | wgt::TextureUses::RESOURCE,
+                memory_flags: hal_desc.memory_flags,
+                view_formats: hal_desc.view_formats.clone(),
+            };
+            let lease = unsafe { hal::shared_image::allocate_budgeted(graphics, &native, budget) }
+                .map_err(&map_error)?;
+            let raw =
+                unsafe { hal::shared_image::create_alias(lease.clone(), self.raw(), &native) }
+                    .map_err(map_error)?;
+            Ok((raw, (lease, native)))
+        });
+        let authority =
+            allocation.map(|(lease, native_descriptor)| resource::SharedCanvasTexture {
+                texture: texture.clone(),
+                lease,
+                native_descriptor,
+            });
+        (texture, authority)
+    }
+
     pub fn create_texture_from_returned_shared_image(
         self: &Arc<Self>,
         desc: &resource::TextureDescriptor,

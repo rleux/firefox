@@ -1211,81 +1211,11 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::TextureDescriptor,
     ) -> Result<super::Texture, crate::DeviceError> {
-        let image = self.create_image_without_memory(desc, None)?;
-
-        self.error_if_would_oom_on_resource_allocation(
-            gpu_allocator::MemoryLocation::GpuOnly,
-            &image.requirements,
-        )
-        .inspect_err(|_| {
-            unsafe { self.shared.raw.destroy_image(image.raw, None) };
-        })?;
-
-        let name = desc.label.unwrap_or("Unlabeled texture");
-
-        let allocation = self
-            .mem_allocator
-            .allocate(
-                super::MemoryPool::from_memory_flags(desc.memory_flags),
-                &gpu_allocator::vulkan::AllocationCreateDesc {
-                    name,
-                    requirements: vk::MemoryRequirements {
-                        memory_type_bits: image.requirements.memory_type_bits
-                            & self.valid_ash_memory_types,
-                        ..image.requirements
-                    },
-                    location: gpu_allocator::MemoryLocation::GpuOnly,
-                    linear: false,
-                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-                },
-            )
-            .inspect_err(|_| {
-                unsafe { self.shared.raw.destroy_image(image.raw, None) };
-            })?;
-
-        unsafe {
-            self.shared
-                .raw
-                .bind_image_memory(image.raw, allocation.memory(), allocation.offset())
-        }
-        .map_err(super::map_host_device_oom_err)
-        .inspect_err(|_| {
-            unsafe { self.shared.raw.destroy_image(image.raw, None) };
-        })?;
-
-        self.counters.texture_memory.add(allocation.size() as isize);
-        self.counters.textures.add(1);
-
-        Ok(unsafe {
-            self.texture_from_raw(
-                image.raw,
-                desc,
-                None,
-                super::TextureMemory::Allocation(allocation),
-            )
-        })
+        unsafe { self.create_texture_checked(desc) }.map_err(|failure| failure.error)
     }
 
     unsafe fn destroy_texture(&self, texture: super::Texture) {
-        if texture.drop_guard.is_none() {
-            unsafe { self.shared.raw.destroy_image(texture.raw, None) };
-        }
-
-        match texture.memory {
-            super::TextureMemory::Allocation(allocation) => {
-                self.counters.texture_memory.sub(allocation.size() as isize);
-                let result = self.mem_allocator.free(allocation);
-                if let Err(err) = result {
-                    log::warn!("Failed to free texture allocation: {err}");
-                }
-            }
-            super::TextureMemory::Dedicated(memory) => unsafe {
-                self.shared.raw.free_memory(memory, None);
-            },
-            super::TextureMemory::External => {}
-        }
-
-        self.counters.textures.sub(1);
+        unsafe { self.destroy_texture_checked(texture) };
     }
 
     unsafe fn add_raw_texture(&self, _texture: &super::Texture) {
@@ -3268,4 +3198,165 @@ impl super::DeviceShared {
 struct ImageWithoutMemory {
     raw: vk::Image,
     requirements: vk::MemoryRequirements,
+}
+
+
+#[cfg(test)]
+std::thread_local! {
+    static TEXTURE_BIND_FAILURE: core::cell::Cell<u8> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn with_texture_bind_failure<T>(
+    uncertain_cleanup: bool,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset(u8);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEXTURE_BIND_FAILURE.with(|fault| fault.set(self.0));
+        }
+    }
+    let reset = Reset(
+        TEXTURE_BIND_FAILURE.with(|fault| fault.replace(if uncertain_cleanup { 2 } else { 1 })),
+    );
+    let result = operation();
+    drop(reset);
+    result
+}
+
+pub(super) struct TextureCreationFailure {
+    pub(super) error: crate::DeviceError,
+    pub(super) cleanup_confirmed: bool,
+}
+
+impl TextureCreationFailure {
+    fn clean(error: crate::DeviceError) -> Self {
+        Self {
+            error,
+            cleanup_confirmed: true,
+        }
+    }
+}
+
+impl super::Device {
+    pub(super) unsafe fn create_texture_checked(
+        &self,
+        desc: &crate::TextureDescriptor<'_>,
+    ) -> Result<super::Texture, TextureCreationFailure> {
+        let image = self
+            .create_image_without_memory(desc, None)
+            .map_err(TextureCreationFailure::clean)?;
+
+        self.error_if_would_oom_on_resource_allocation(
+            gpu_allocator::MemoryLocation::GpuOnly,
+            &image.requirements,
+        )
+        .inspect_err(|_| {
+            unsafe { self.shared.raw.destroy_image(image.raw, None) };
+        })
+        .map_err(TextureCreationFailure::clean)?;
+
+        let name = desc.label.unwrap_or("Unlabeled texture");
+
+        let allocation = self
+            .mem_allocator
+            .allocate(
+                super::MemoryPool::from_memory_flags(desc.memory_flags),
+                &gpu_allocator::vulkan::AllocationCreateDesc {
+                    name,
+                    requirements: vk::MemoryRequirements {
+                        memory_type_bits: image.requirements.memory_type_bits
+                            & self.valid_ash_memory_types,
+                        ..image.requirements
+                    },
+                    location: gpu_allocator::MemoryLocation::GpuOnly,
+                    linear: false,
+                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+                },
+            )
+            .inspect_err(|_| {
+                unsafe { self.shared.raw.destroy_image(image.raw, None) };
+            })
+            .map_err(|error| TextureCreationFailure::clean(error.into()))?;
+
+        #[cfg(test)]
+        let fault = TEXTURE_BIND_FAILURE.with(|fault| fault.get());
+        #[cfg(test)]
+        let binding = if fault != 0 {
+            Err(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+        } else {
+            unsafe {
+                self.shared.raw.bind_image_memory(
+                    image.raw,
+                    allocation.memory(),
+                    allocation.offset(),
+                )
+            }
+        };
+        #[cfg(not(test))]
+        let binding = unsafe {
+            self.shared
+                .raw
+                .bind_image_memory(image.raw, allocation.memory(), allocation.offset())
+        };
+        if let Err(error) = binding {
+            unsafe { self.shared.raw.destroy_image(image.raw, None) };
+            let cleanup = self.mem_allocator.free(allocation);
+            #[cfg(test)]
+            let cleanup = if fault == 2 {
+                cleanup.and_then(|()| {
+                    Err(gpu_allocator::AllocationError::Internal(
+                        "Injected unconfirmed bind cleanup response".into(),
+                    ))
+                })
+            } else {
+                cleanup
+            };
+            if let Err(error) = &cleanup {
+                log::warn!("Failed to free unbound texture allocation: {error}");
+            }
+            return Err(TextureCreationFailure {
+                error: super::map_host_device_oom_err(error),
+                cleanup_confirmed: cleanup.is_ok(),
+            });
+        }
+
+        self.counters.texture_memory.add(allocation.size() as isize);
+        self.counters.textures.add(1);
+
+        Ok(unsafe {
+            self.texture_from_raw(
+                image.raw,
+                desc,
+                None,
+                super::TextureMemory::Allocation(allocation),
+            )
+        })
+    }
+
+    pub(super) unsafe fn destroy_texture_checked(&self, texture: super::Texture) -> bool {
+        let mut cleaned = true;
+        if texture.drop_guard.is_none() {
+            unsafe { self.shared.raw.destroy_image(texture.raw, None) };
+        }
+
+        match texture.memory {
+            super::TextureMemory::Allocation(allocation) => {
+                self.counters.texture_memory.sub(allocation.size() as isize);
+                let result = self.mem_allocator.free(allocation);
+                if let Err(err) = result {
+                    cleaned = false;
+                    log::warn!("Failed to free texture allocation: {err}");
+                }
+            }
+            super::TextureMemory::Dedicated(memory) => unsafe {
+                self.shared.raw.free_memory(memory, None);
+            },
+            super::TextureMemory::External => {}
+        }
+
+        self.counters.textures.sub(1);
+        cleaned
+    }
 }

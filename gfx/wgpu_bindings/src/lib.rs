@@ -15,6 +15,7 @@ use wgpu_core_remote_types::{
     RequestAdapterOptions, SamplerDescriptor, TextureDescriptor, TextureViewDescriptor,
 };
 
+pub mod canvas;
 pub mod client;
 pub mod command;
 pub mod error;

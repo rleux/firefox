@@ -167,18 +167,6 @@ impl Device {
             display_owner,
         })
     }
-    #[cfg(test)]
-    pub fn raw_device(&self) -> &hal::vulkan::Device {
-        self.open.device.as_ref().as_any().downcast_ref().expect("Vulkan device")
-    }
-    #[cfg(test)]
-    pub fn queue(&self) -> &hal::vulkan::Queue {
-        self.open.queue.as_ref().as_any().downcast_ref().expect("Vulkan queue")
-    }
-    #[cfg(test)]
-    pub(super) fn raw_adapter(&self) -> &hal::vulkan::Adapter {
-        self.adapter.as_any().downcast_ref().expect("Vulkan adapter")
-    }
 }
 
 fn supports_shader_api_version(version: u32) -> bool {

@@ -7,7 +7,6 @@ use crate::device::wgpu::tests::device;
 use crate::device::wgpu::{BufferPool, SubmissionQueue, TextureFilter};
 use crate::device::wgpu::tests::{ERRORS};
 use api::units::{DeviceIntPoint, DeviceIntSize};
-use ash::vk;
 use std::sync::atomic::Ordering;
 
 fn rect(x: i32, y: i32, w: i32, h: i32) -> DeviceIntRect {
@@ -59,27 +58,9 @@ fn mapped_buffer_copies_cover_color_formats_and_preserve_partial_updates() {
                 stride as u32,
             )
             .unwrap();
-            texture
-                .transition(&mut commands, wgt::TextureUses::COPY_DST)
-                .unwrap();
-            unsafe {
-                owner.raw_device().raw_device().cmd_clear_color_image(
-                    commands.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-                    texture.raw_texture().as_any().downcast_ref::<hal::vulkan::Texture>().unwrap().raw_handle(),
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &vk::ClearColorValue { float32: [1.0; 4] },
-                    &[vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    }],
-                );
-            }
-            texture
-                .transition(&mut commands, wgt::TextureUses::RESOURCE)
-                .unwrap();
+            crate::device::wgpu::tests::poison_uninitialized_texture(
+                &owner, &texture, &mut commands, bpp,
+            );
             assert!(!texture.initialized());
             texture
                 .copy_from_buffer(

@@ -266,10 +266,148 @@ impl Queue {
         #[cfg(feature = "std")]
         {
             self.device.check_is_valid()?;
-            texture.same_device_as(self.as_ref())?;
-            if !super::resource::is_shared_canvas_descriptor(texture.descriptor()) {
+            let desc = texture.descriptor();
+            let descriptor = hal::TextureDescriptor {
+                label: None,
+                size: desc.size,
+                mip_level_count: desc.mip_level_count,
+                sample_count: desc.sample_count,
+                dimension: desc.dimension,
+                format: desc.format,
+                usage: texture._hal_usage,
+                memory_flags: hal::MemoryFlags::empty(),
+                view_formats: desc
+                    .view_formats
+                    .iter()
+                    .copied()
+                    .filter(|format| *format != desc.format)
+                    .collect(),
+            };
+            unsafe { self.finalize_shared_canvas_descriptor(texture, lease, &descriptor) }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    unsafe fn finalize_shared_canvas_descriptor(
+        self: &Arc<Self>,
+        texture: &Arc<Texture>,
+        lease: Arc<dyn hal::shared_image::ImageLease>,
+        descriptor: &hal::TextureDescriptor<'_>,
+    ) -> Result<FinalizedCanvas, DeviceError> {
+        self.device.check_is_valid()?;
+        texture.same_device_as(self.as_ref())?;
+        if !super::resource::is_shared_canvas_descriptor(texture.descriptor()) {
+            return Err(DeviceError::Lost);
+        }
+        let graphics = self
+            .device
+            .graphics_submission
+            .as_ref()
+            .and_then(|provider| provider.graphics_queue())
+            .ok_or(DeviceError::Lost)?;
+        let snatch_guard = self.device.snatchable_lock.read();
+        let reservation = {
+            let TextureInner::Native { raw } = texture
+                .try_inner(&snatch_guard)
+                .map_err(|_| DeviceError::Lost)?
+            else {
                 return Err(DeviceError::Lost);
+            };
+            unsafe {
+                hal::shared_image::reserve_finalization(
+                    lease,
+                    self.device.raw(),
+                    self.raw(),
+                    raw.as_ref(),
+                    graphics,
+                    descriptor,
+                )
             }
+            .map_err(|_| DeviceError::Lost)?
+        };
+        let index =
+            unsafe { self.finalize_shared_canvas_submission(texture, snatch_guard, graphics) }?;
+        Ok(FinalizedCanvas { index, reservation })
+    }
+
+    /// # Safety
+    /// Serialize all access to this canvas and its logical device through sealing.
+    pub unsafe fn seal_shared_canvas(
+        self: &Arc<Self>,
+        canvas: crate::resource::SharedCanvasTexture,
+    ) -> Result<crate::resource::SealedCanvasTexture, DeviceError> {
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = canvas;
+            Err(DeviceError::Lost)
+        }
+        #[cfg(feature = "std")]
+        {
+            let logical_descriptor = canvas.texture.desc.clone();
+            let result = unsafe {
+                self.finalize_shared_canvas_descriptor(
+                    &canvas.texture,
+                    canvas.lease.clone(),
+                    &canvas.native_descriptor,
+                )
+            };
+            match result {
+                Ok(finalized) => Ok(crate::resource::SealedCanvasTexture {
+                    finalized,
+                    logical_descriptor,
+                }),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    /// Copies a live native canvas without granting public COPY_SRC or expiring it.
+    /// The destination is private snapshot scratch: its entire contents,
+    /// including initialized bytes and row padding, are cleared before copying.
+    ///
+    /// # Safety
+    /// Serialize the canvas actor through this operation and poll the returned index.
+    pub unsafe fn copy_shared_canvas_to_buffer(
+        self: &Arc<Self>,
+        canvas: &crate::resource::SharedCanvasTexture,
+        buffer: &Arc<Buffer>,
+        layout: wgt::TexelCopyBufferLayout,
+    ) -> Result<SubmissionIndex, QueueWriteError> {
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = (canvas, buffer, layout);
+            Err(DeviceError::Lost.into())
+        }
+        #[cfg(feature = "std")]
+        {
+            self.device.check_is_valid()?;
+            let texture = &canvas.texture;
+            texture.same_device_as(self.as_ref())?;
+            buffer.same_device(self.device.as_ref())?;
+            texture.check_valid()?;
+            buffer.check_is_valid()?;
+            self.validate_write_buffer_impl(buffer, 0, buffer.size)?;
+            let source = wgt::TexelCopyTextureInfo {
+                texture: (),
+                mip_level: 0,
+                origin: wgt::Origin3d::ZERO,
+                aspect: wgt::TextureAspect::All,
+            };
+            validate_texture_buffer_copy(
+                &source,
+                hal::FormatAspects::COLOR,
+                &texture.desc,
+                &layout,
+                true,
+            )?;
+            validate_linear_texture_data(
+                &layout,
+                texture.desc.format,
+                wgt::TextureAspect::All,
+                buffer.size,
+                CopySide::Destination,
+                &texture.desc.size,
+            )?;
             let graphics = self
                 .device
                 .graphics_submission
@@ -277,46 +415,143 @@ impl Queue {
                 .and_then(|provider| provider.graphics_queue())
                 .ok_or(DeviceError::Lost)?;
             let snatch_guard = self.device.snatchable_lock.read();
-            let reservation = {
-                let TextureInner::Native { raw } = texture
-                    .try_inner(&snatch_guard)
-                    .map_err(|_| DeviceError::Lost)?
-                else {
-                    return Err(DeviceError::Lost);
-                };
-                let desc = texture.descriptor();
-                let descriptor = hal::TextureDescriptor {
-                    label: None,
-                    size: desc.size,
-                    mip_level_count: desc.mip_level_count,
-                    sample_count: desc.sample_count,
-                    dimension: desc.dimension,
-                    format: desc.format,
-                    usage: texture._hal_usage,
-                    memory_flags: hal::MemoryFlags::empty(),
-                    view_formats: desc
-                        .view_formats
-                        .iter()
-                        .copied()
-                        .filter(|format| *format != desc.format)
-                        .collect(),
-                };
-                unsafe {
-                    hal::shared_image::reserve_finalization(
-                        lease,
-                        self.device.raw(),
-                        self.raw(),
-                        raw.as_ref(),
-                        graphics,
-                        &descriptor,
-                    )
-                }
-                .map_err(|_| DeviceError::Lost)?
-            };
-            let index =
-                unsafe { self.finalize_shared_canvas_submission(texture, snatch_guard, graphics) }?;
-            Ok(FinalizedCanvas { index, reservation })
+            {
+                let raw = texture.raw(&snatch_guard).ok_or(DeviceError::Lost)?;
+                buffer.try_raw(&snatch_guard)?;
+                hal::shared_image::validate_alias(
+                    canvas.lease.as_ref(),
+                    self.device.raw(),
+                    raw,
+                    graphics,
+                    &canvas.native_descriptor,
+                )
+                .map_err(|_| DeviceError::Lost)?;
+            }
+            unsafe { self.copy_shared_canvas_submission(texture, buffer, layout, snatch_guard) }
         }
+    }
+
+    #[cfg(feature = "std")]
+    pub(super) unsafe fn copy_shared_canvas_submission<'a>(
+        self: &'a Arc<Self>,
+        texture: &Arc<Texture>,
+        buffer: &Arc<Buffer>,
+        layout: wgt::TexelCopyBufferLayout,
+        snatch_guard: SnatchGuard<'a>,
+    ) -> Result<SubmissionIndex, QueueWriteError> {
+        let mut mutated = false;
+        let result: Result<SubmissionIndex, QueueWriteError> = (|| {
+            let mut submission = self.allocate_submission(snatch_guard)?;
+            let index = submission.index;
+            submission.defer_device_loss = true;
+            let mut pending_writes = self.pending_writes.lock();
+            mutated = true;
+            self.prepare_shared_canvas_pending(
+                texture,
+                &mut pending_writes,
+                &submission.snatch_guard,
+                wgt::TextureUses::COPY_SRC,
+            )?;
+            pending_writes.clear_buffer(
+                &self.device,
+                buffer,
+                0..buffer.size,
+                &submission.snatch_guard,
+            )?;
+            let destination_barrier = self
+                .device
+                .trackers
+                .lock()
+                .buffers
+                .set_single(buffer, wgt::BufferUses::COPY_DST)
+                .map(|transition| transition.into_hal(buffer, &submission.snatch_guard));
+            let raw_texture = texture
+                .raw(&submission.snatch_guard)
+                .ok_or(DeviceError::Lost)?;
+            let raw_buffer = buffer.try_raw(&submission.snatch_guard)?;
+            unsafe {
+                let encoder = pending_writes.activate();
+                encoder.transition_buffers(destination_barrier.as_slice());
+                encoder.copy_texture_to_buffer(
+                    raw_texture,
+                    wgt::TextureUses::COPY_SRC,
+                    raw_buffer,
+                    &[hal::BufferTextureCopy {
+                        buffer_layout: layout,
+                        texture_base: hal::TextureCopyBase {
+                            mip_level: 0,
+                            array_layer: 0,
+                            origin: wgt::Origin3d::ZERO,
+                            aspect: hal::FormatAspects::COLOR,
+                        },
+                        size: texture.desc.size.into(),
+                    }],
+                );
+            }
+            drop(submission.submit(pending_writes)?);
+            Ok(index)
+        })();
+        if result.is_err() && mutated {
+            self.device.lose("Native canvas readback failed");
+        }
+        result
+    }
+
+    #[cfg(feature = "std")]
+    fn prepare_shared_canvas_pending(
+        &self,
+        texture: &Arc<Texture>,
+        pending_writes: &mut PendingWrites,
+        snatch_guard: &SnatchGuard,
+        usage: wgt::TextureUses,
+    ) -> Result<(), DeviceError> {
+        let needs_clear = texture.initialization_status.read().mips[0]
+            .check(0..1)
+            .is_some();
+        pending_writes
+            .try_activate()
+            .map_err(|error| self.device.map_hal_error_without_loss(error))?;
+        pending_writes.insert_texture(texture);
+        if needs_clear {
+            let encoder = pending_writes.activate();
+            let mut trackers = self.device.trackers.lock();
+            crate::command::clear_texture(
+                texture,
+                TextureInitRange {
+                    mip_range: 0..1,
+                    layer_range: 0..1,
+                },
+                None,
+                encoder,
+                &mut trackers.textures,
+                &self.device.alignments,
+                self.device.zero_buffer.as_ref(),
+                snatch_guard,
+                self.device.instance_flags,
+                true,
+            )
+            .map_err(|error| match error {
+                ClearError::Device(error) => error,
+                _ => DeviceError::Lost,
+            })?;
+            texture.initialization_status.write().mips[0].drain(0..1);
+        }
+        let pending: Vec<_> = self
+            .device
+            .trackers
+            .lock()
+            .textures
+            .set_single(texture, texture.full_range.clone(), usage)
+            .collect();
+        if !pending.is_empty() {
+            let raw = texture.raw(snatch_guard).ok_or(DeviceError::Lost)?;
+            let barriers: Vec<_> = pending
+                .into_iter()
+                .map(|transition| transition.into_hal(raw))
+                .collect();
+            unsafe { pending_writes.activate().transition_textures(&barriers) };
+        }
+        Ok(())
     }
 
     #[cfg(feature = "std")]
@@ -331,60 +566,11 @@ impl Queue {
             let mut submission = self.allocate_submission(snatch_guard)?;
             let index = submission.index;
             submission.graphics_tail = Some(graphics);
-            let needs_clear = texture.initialization_status.read().mips[0]
-                .check(0..1)
-                .is_some();
             let mut pending_writes = self.pending_writes.lock();
             mutated = true;
-            pending_writes
-                .try_activate()
-                .map_err(|error| self.device.map_hal_error_without_loss(error))?;
-            pending_writes.insert_texture(texture);
-            if needs_clear {
-                let encoder = pending_writes.activate();
-                let mut trackers = self.device.trackers.lock();
-                crate::command::clear_texture(
-                    texture,
-                    TextureInitRange {
-                        mip_range: 0..1,
-                        layer_range: 0..1,
-                    },
-                    None,
-                    encoder,
-                    &mut trackers.textures,
-                    &self.device.alignments,
-                    self.device.zero_buffer.as_ref(),
-                    &submission.snatch_guard,
-                    self.device.instance_flags,
-                    true,
-                )
-                .map_err(|error| match error {
-                    ClearError::Device(error) => error,
-                    _ => DeviceError::Lost,
-                })?;
-                texture.initialization_status.write().mips[0].drain(0..1);
-            }
-            let pending: Vec<_> = self
-                .device
-                .trackers
-                .lock()
-                .textures
-                .set_single(
-                    texture,
-                    texture.full_range.clone(),
-                    wgt::TextureUses::RESOURCE,
-                )
-                .collect();
-            if !pending.is_empty() {
-                let raw = texture
-                    .raw(&submission.snatch_guard)
-                    .ok_or(DeviceError::Lost)?;
-                let barriers: Vec<_> = pending
-                    .into_iter()
-                    .map(|transition| transition.into_hal(raw))
-                    .collect();
-                unsafe { pending_writes.activate().transition_textures(&barriers) };
-            }
+            self.prepare_shared_canvas_pending(
+                texture, &mut pending_writes, &submission.snatch_guard, wgt::TextureUses::RESOURCE,
+            )?;
             let submitted = submission.submit(pending_writes)?;
             drop(submitted);
             Ok(index)
@@ -764,6 +950,7 @@ impl PendingWrites {
         &mut self,
         encoder: &mut EncoderInFlight,
         snatch_guard: &SnatchGuard,
+        defer_device_loss: bool,
     ) -> Result<Vec<FlushedStagingBuffer>, DeviceError> {
         let staging_buffers = mem::take(&mut self.hoisted_staging_buffers);
         let buffer_barriers = mem::take(&mut self.hoisted_buffer_barriers);
@@ -790,9 +977,12 @@ impl PendingWrites {
         if !barriers.is_empty() {
             encoder
                 .inner
-                .open_pass(Some("(wgpu internal) PendingWrites Transit"))?;
+                .open_pass_with_deferred_loss(
+                    Some("(wgpu internal) PendingWrites Transit"),
+                    defer_device_loss,
+                )?;
             unsafe { encoder.inner.raw.transition_buffers(&barriers) };
-            encoder.inner.close_and_push_front()?;
+            encoder.inner.close_and_push_front_with_deferred_loss(defer_device_loss)?;
         }
 
         Ok(staging_buffers)
@@ -849,7 +1039,7 @@ impl PendingWrites {
                 pending_blas_s,
             };
 
-            let staging_buffers = self.record_hoisted_barriers(&mut encoder, snatch_guard)?;
+            let staging_buffers = self.record_hoisted_barriers(&mut encoder, snatch_guard, defer_device_loss)?;
             encoder
                 .temp_resources
                 .extend(staging_buffers.into_iter().map(TempResource::StagingBuffer));
@@ -1046,6 +1236,7 @@ pub(crate) struct PendingSubmission<'a> {
     pub index: SubmissionIndex,
 
     graphics_tail: Option<&'a dyn hal::DynQueue>,
+    defer_device_loss: bool,
 }
 
 pub(crate) struct SubmissionResult<'a> {
@@ -2169,6 +2360,7 @@ impl Queue {
             surface_textures: FastHashMap::default(),
             index,
             graphics_tail: None,
+            defer_device_loss: false,
         };
 
         Ok(submission)
@@ -2202,6 +2394,7 @@ impl Queue {
             mut surface_textures,
             index: submit_index,
             graphics_tail,
+            defer_device_loss,
         } = prepared;
 
         let mut used_surface_textures = track::TextureUsageScope::default();
@@ -2249,7 +2442,7 @@ impl Queue {
             &self.device,
             self,
             &snatch_guard,
-            graphics_tail.is_some(),
+            defer_device_loss || graphics_tail.is_some(),
         ) {
             Ok(Some(pending_execution)) => {
                 executions.insert(0, pending_execution);

@@ -1004,6 +1004,15 @@ void wr_test_native_canvas_record(void*, uint64_t, uint64_t);
 void wr_test_native_canvas_verify(void*);
 void wr_test_native_canvas_finish(void*);
 void wr_test_native_canvas_delete(void*);
+void* wr_test_native_canvas_authority_new();
+void* wr_test_native_canvas_authority_prepare(void*, bool, bool);
+void wr_test_native_canvas_authority_release_frame(void*);
+void wr_test_native_canvas_authority_drop_actor(void*, bool);
+Renderer* wr_test_native_canvas_authority_renderer(void*);
+void wr_test_native_canvas_authority_record(void*, uint64_t, uint64_t);
+void wr_test_native_canvas_authority_verify(void*);
+void wr_test_native_canvas_authority_finish(void*);
+void wr_test_native_canvas_authority_delete(void*);
 void* wr_test_native_canvas_map_new(WrVulkanNativePublication**,
                                     WrVulkanNativePublication**);
 Renderer* wr_test_native_canvas_map_renderer(void*);
@@ -1176,6 +1185,57 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasHost) {
       wr_vulkan_external_images_delete(foreign);
       images = alias = foreign = nullptr;
       wr_test_native_canvas_finish(fixture);
+    }
+  });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasAuthority) {
+  OnRenderThread([] {
+    auto* fixture = wr_test_native_canvas_authority_new();
+    ASSERT_TRUE(fixture);
+    auto deleteFixture =
+        MakeScopeExit([&] { wr_test_native_canvas_authority_delete(fixture); });
+    EXPECT_FALSE(wr_vulkan_native_publication_from_webgpu_frame(nullptr));
+    for (int caseIndex = 0; caseIndex < 4; ++caseIndex) {
+      const bool bgra = caseIndex % 2 != 0;
+      auto* frame =
+          wr_test_native_canvas_authority_prepare(fixture, bgra, caseIndex < 2);
+      auto releaseFrame = MakeScopeExit([&] {
+        if (frame) wr_test_native_canvas_authority_release_frame(frame);
+      });
+      ASSERT_TRUE(frame);
+      auto* publication = wr_vulkan_native_publication_from_webgpu_frame(frame);
+      ASSERT_TRUE(publication);
+      RefPtr<RenderVulkanNativeTextureHost> host =
+          RenderVulkanNativeTextureHost::Create(publication);
+      ASSERT_TRUE(host);
+      auto* second = wr_vulkan_native_publication_from_webgpu_frame(frame);
+      ASSERT_TRUE(second);
+      wr_vulkan_native_publication_delete(second);
+      wr_test_native_canvas_authority_release_frame(frame);
+      frame = nullptr;
+      wr_test_native_canvas_authority_drop_actor(fixture, caseIndex == 3);
+      CheckNativeCanvasSnapshot(host, bgra, true);
+      auto* images = wr_vulkan_external_images_new(
+          wr_test_native_canvas_authority_renderer(fixture));
+      auto cleanup = MakeScopeExit([&] {
+        host = nullptr;
+        if (images) wr_vulkan_external_images_delete(images);
+      });
+      ASSERT_TRUE(images);
+      const auto normal = host->LockVulkan(0, images);
+      const auto opaque = host->LockVulkan(1, images);
+      ASSERT_EQ(normal.image_type, WrExternalImageType::NativeTexture);
+      ASSERT_EQ(opaque.image_type, WrExternalImageType::NativeTexture);
+      EXPECT_NE(normal.handle, opaque.handle);
+      wr_test_native_canvas_authority_record(fixture, normal.handle,
+                                             opaque.handle);
+      EXPECT_FALSE(host->UnlockVulkan(images));
+      host = nullptr;
+      wr_test_native_canvas_authority_verify(fixture);
+      wr_vulkan_external_images_delete(images);
+      images = nullptr;
+      wr_test_native_canvas_authority_finish(fixture);
     }
   });
 }

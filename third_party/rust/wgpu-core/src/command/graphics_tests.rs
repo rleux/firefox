@@ -135,7 +135,39 @@ struct NativeProbe {
     events: Vec<&'static str>,
     resets: Arc<AtomicUsize>,
     debug_depth: usize,
+    hoisted_faults: Option<[Arc<AtomicUsize>; 2]>,
+    hoisted: bool,
 }
+
+impl NativeProbe {
+    fn fail_hoisted(&self, stage: usize) -> Result<(), hal::DeviceError> {
+        match self
+            .hoisted_faults
+            .as_ref()
+            .map(|faults| faults[stage].swap(0, Ordering::SeqCst))
+        {
+            None | Some(0) => Ok(()),
+            Some(1) => Err(hal::DeviceError::OutOfMemory),
+            Some(2) => Err(hal::DeviceError::Unexpected),
+            _ => panic!("Invalid hoisted barrier fault"),
+        }
+    }
+}
+
+pub(crate) fn queue_barrier_fault_encoder(
+    raw: Box<dyn DynCommandEncoder>,
+    faults: [Arc<AtomicUsize>; 2],
+) -> Box<dyn DynCommandEncoder> {
+    Box::new(NativeProbe {
+        raw,
+        events: Vec::new(),
+        resets: Arc::default(),
+        debug_depth: 0,
+        hoisted_faults: Some(faults),
+        hoisted: false,
+    })
+}
+
 impl DynResource for NativeProbe {
     fn as_any(&self) -> &dyn Any {
         self
@@ -149,6 +181,10 @@ impl DynCommandEncoder for NativeProbe {
     unsafe fn begin_encoding(&mut self, label: hal::Label) -> Result<(), hal::DeviceError> {
         assert_eq!(self.debug_depth, 0);
         self.events.clear();
+        self.hoisted = label == Some("(wgpu internal) PendingWrites Transit");
+        if self.hoisted {
+            self.fail_hoisted(0)?;
+        }
         unsafe { self.raw.begin_encoding(label) }
     }
     unsafe fn discard_encoding(&mut self) {
@@ -157,6 +193,9 @@ impl DynCommandEncoder for NativeProbe {
     }
     unsafe fn end_encoding(&mut self) -> Result<Box<dyn DynCommandBuffer>, hal::DeviceError> {
         assert_eq!(self.debug_depth, 0);
+        if self.hoisted {
+            self.fail_hoisted(1)?;
+        }
         let raw = unsafe { self.raw.end_encoding()? };
         Ok(Box::new(NativeBuffer {
             raw: Some(raw),
@@ -600,6 +639,8 @@ impl Fixture {
             events: Vec::new(),
             resets: self.resets.clone(),
             debug_depth: 0,
+            hoisted_faults: None,
+            hoisted: false,
         });
         let encoder = unsafe {
             crate::graphics::GraphicsRecordingProvider::create_encoder(

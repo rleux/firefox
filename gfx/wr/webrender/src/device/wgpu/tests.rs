@@ -19,7 +19,6 @@ pub(super) fn device() -> Rc<Device> {
     eprintln!("Vulkan adapter: {:?}", device.info());
     device
 }
-use wgpu_hal::{CommandEncoder as _, Device as _, Queue as _};
 
 #[derive(Debug)]
 pub(super) enum Command {
@@ -123,8 +122,13 @@ fn open_device_and_submit_to_queue() {
     .unwrap();
     eprintln!("Vulkan adapter: {:?}", device.info());
     assert_eq!(device.info().backend, wgt::Backend::Vulkan);
-    assert!(device.raw_adapter().shared_instance().instance_api_version() >= ash::vk::API_VERSION_1_1);
-    assert!(device.raw_adapter().physical_device_capabilities().properties().api_version >= ash::vk::API_VERSION_1_1);
+    let graphics = hal::renderer::graphics_capabilities(
+        device.instance.as_ref(),
+        device.adapter.as_ref(),
+        device.open.device.as_ref(),
+    )
+    .unwrap();
+    assert!(graphics.validation_enabled);
     assert!(device.capabilities().limits.max_texture_dimension_2d >= 2048);
     unsafe {
         let raw = device.open.device.as_ref();
@@ -134,7 +138,7 @@ fn open_device_and_submit_to_queue() {
             .wait(fence.as_ref(), 1, Some(std::time::Duration::from_secs(10)))
             .unwrap();
         if !completed {
-            device.queue().wait_for_idle().unwrap();
+            device.open.queue.wait_for_idle().unwrap();
         }
         raw.destroy_fence(fence);
         assert!(completed);
@@ -157,6 +161,57 @@ fn buffer_allocation_bounds() {
 
 pub(super) fn upload_queue(device: &Rc<Device>) -> SubmissionQueue {
     SubmissionQueue::new(&Rc::new(BufferPool::new(device)), 3).unwrap()
+}
+
+pub(super) fn poison_uninitialized_texture(
+    device: &Rc<Device>,
+    texture: &Rc<Texture>,
+    commands: &mut Recording<'_>,
+    bytes_per_pixel: usize,
+) {
+    assert!(!texture.initialized());
+    let size = texture.size();
+    let alignment = device.capabilities().alignments.buffer_copy_pitch.get() as usize;
+    let pitch = (size.width as usize * bytes_per_pixel).div_ceil(alignment) * alignment;
+    let source = Buffer::new_with(
+        device,
+        pitch * size.height as usize,
+        wgt::BufferUses::COPY_SRC,
+        |bytes| {
+            bytes.fill(0xA5);
+            Ok(())
+        },
+    )
+    .unwrap();
+    source
+        .transition(commands, wgt::BufferUses::COPY_SRC)
+        .unwrap();
+    texture
+        .transition(commands, wgt::TextureUses::COPY_DST)
+        .unwrap();
+    unsafe {
+        commands.encoder().copy_buffer_to_texture(
+            &*source.raw,
+            texture.raw_texture(),
+            &[hal::BufferTextureCopy {
+                buffer_layout: wgt::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(pitch as u32),
+                    rows_per_image: None,
+                },
+                texture_base: hal::TextureCopyBase {
+                    mip_level: 0,
+                    array_layer: 0,
+                    origin: wgt::Origin3d::ZERO,
+                    aspect: hal::FormatAspects::COLOR,
+                },
+                size: size.into(),
+            }],
+        );
+    }
+    texture
+        .transition(commands, wgt::TextureUses::RESOURCE)
+        .unwrap();
 }
 
 pub(super) fn record_upload(

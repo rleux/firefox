@@ -4,7 +4,6 @@
 
 use super::*;
 use api::units::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
-use ash::vk;
 
 fn rect(x: i32, y: i32, width: i32, height: i32) -> DeviceIntRect {
     DeviceIntRect::from_origin_and_size(
@@ -48,27 +47,9 @@ fn texture_copies_initialize_and_preserve_destinations() {
             .unwrap();
         let mut commands = queue.recording().unwrap();
         // Seed undefined storage so zeroed allocations cannot hide a missing clear.
-        destination
-            .transition(&mut commands, wgt::TextureUses::COPY_DST)
-            .unwrap();
-        unsafe {
-            device.raw_device().raw_device().cmd_clear_color_image(
-                commands.encoder().as_any().downcast_ref::<hal::vulkan::CommandEncoder>().unwrap().raw_handle(),
-                destination.raw_texture().as_any().downcast_ref::<hal::vulkan::Texture>().unwrap().raw_handle(),
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue { float32: [1.0; 4] },
-                &[vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                }],
-            );
-        }
-        destination
-            .transition(&mut commands, wgt::TextureUses::RESOURCE)
-            .unwrap();
+        crate::device::wgpu::tests::poison_uninitialized_texture(
+            &device, &destination, &mut commands, bpp,
+        );
         assert!(!destination.initialized());
         destination
             .copy_from_texture(&mut commands, &source, rect(1, 1, 2, 2), rect(2, 1, 2, 2))
