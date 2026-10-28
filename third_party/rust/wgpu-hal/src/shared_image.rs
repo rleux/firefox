@@ -193,7 +193,7 @@ pub fn validate_alias(
 
 mod epoch;
 pub use epoch::{create_alias_from_returned, reserve_finalization};
-pub use epoch::{FinalizeReservation, ImageEpoch, ImagePayload, ReturnedImage};
+pub use epoch::{FinalizeReservation, ImageCloseStatus, ImageEpoch, ImagePayload, ReturnedImage};
 
 #[cfg(test)]
 #[path = "shared_image/budget_tests.rs"]

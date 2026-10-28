@@ -527,12 +527,18 @@ pub extern "C" fn wgpu_server_new(
 #[no_mangle]
 pub unsafe extern "C" fn wgpu_server_delete(global: *mut Global) {
     log::info!("Terminating WGPU server");
-    let _ = unsafe { Box::from_raw(global) };
+    let global = unsafe { Box::from_raw(global) };
+    if let Some(native) = &global.native_canvases {
+        native.shutdown_returns();
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn wgpu_server_poll_all_devices(global: &Global, force_wait: bool) {
     global.poll_all_devices(force_wait).unwrap();
+    if let Some(native) = &global.native_canvases {
+        native.maintain_returns();
+    }
 }
 
 #[no_mangle]

@@ -1028,6 +1028,8 @@ intptr_t wr_test_native_canvas_map_texture_count(void*);
 bool wr_test_native_canvas_map_live(void*, bool);
 void wr_test_native_canvas_map_finish(void*);
 void wr_test_native_canvas_map_delete(void*);
+void wr_test_native_canvas_reuse();
+void wr_test_native_canvas_unretired_return();
 void wr_test_native_canvas_routing_state();
 void* wr_test_native_canvas_routing_new();
 DocumentHandle* wr_test_native_canvas_routing_take_document(void*);
@@ -1226,6 +1228,14 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasHost) {
       wr_test_native_canvas_finish(fixture);
     }
   });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasUnretiredReturn) {
+  OnRenderThread([] { wr_test_native_canvas_unretired_return(); });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasReuse) {
+  OnRenderThread([] { wr_test_native_canvas_reuse(); });
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasAuthority) {

@@ -81,3 +81,28 @@ fn reused_epoch_descriptor_permissions_are_exact_not_the_physical_superset() {
     renamed.label = Some("new logical label");
     assert!(same_descriptor(&physical, &renamed));
 }
+
+#[test]
+fn conditional_close_preserves_payloads_and_does_not_claim_an_existing_marker() {
+    let mut status = Status {
+        closed: false,
+        payloads: 1,
+        marker: Marker::None,
+    };
+    assert_eq!(status.begin_close(true), ImageCloseStatus::Busy);
+    assert!(!status.closed);
+    assert!(status.marker == Marker::None);
+    status.payloads = 0;
+    assert_eq!(status.begin_close(true), ImageCloseStatus::Claimed);
+    assert!(status.marker == Marker::Reserved);
+    status.marker = Marker::Accepted;
+    assert_eq!(status.begin_close(true), ImageCloseStatus::AlreadyClosed);
+    assert!(status.marker == Marker::Accepted);
+    let mut generic = Status {
+        closed: false,
+        payloads: 1,
+        marker: Marker::None,
+    };
+    assert_eq!(generic.begin_close(false), ImageCloseStatus::Claimed);
+    assert_eq!(generic.payloads, 1);
+}

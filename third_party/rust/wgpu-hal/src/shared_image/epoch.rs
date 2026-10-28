@@ -2,6 +2,13 @@ use super::{ImageLease, ImageLeaseError};
 use alloc::{boxed::Box, sync::Arc};
 use core::fmt;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageCloseStatus {
+    Claimed,
+    Busy,
+    AlreadyClosed,
+}
+
 pub struct ImageEpoch {
     #[cfg(vulkan)]
     pub(crate) inner: crate::vulkan::shared_image::epoch::Epoch,
@@ -105,6 +112,22 @@ impl ImageEpoch {
         #[cfg(vulkan)]
         {
             return self.inner.begin_close(device, queue);
+        }
+        #[cfg(not(vulkan))]
+        {
+            let _ = (device, queue);
+            Err(ImageLeaseError::UnsupportedBackend)
+        }
+    }
+
+    pub fn try_begin_close_if_unused(
+        &self,
+        device: &dyn crate::DynDevice,
+        queue: &dyn crate::DynQueue,
+    ) -> Result<ImageCloseStatus, ImageLeaseError> {
+        #[cfg(vulkan)]
+        {
+            return self.inner.try_begin_close_if_unused(device, queue);
         }
         #[cfg(not(vulkan))]
         {

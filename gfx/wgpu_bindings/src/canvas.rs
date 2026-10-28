@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+mod returns;
+
 use crate::unified::ProcessOwner;
 use std::sync::Arc;
 use wgc::{
@@ -10,6 +12,8 @@ use wgc::{
     SubmissionIndex,
 };
 use wgh::shared_image::{AllocationBudget, ImageEpoch};
+
+const ALLOCATION_LIMIT: usize = 128;
 
 pub struct NativeCanvasAllocator {
     owner: Arc<ProcessOwner>,
@@ -20,7 +24,7 @@ impl NativeCanvasAllocator {
     pub fn new(owner: Arc<ProcessOwner>) -> Self {
         Self {
             owner,
-            budget: Arc::new(AllocationBudget::new(128)),
+            budget: Arc::new(AllocationBudget::new(ALLOCATION_LIMIT)),
         }
     }
 
@@ -39,6 +43,18 @@ impl NativeCanvasAllocator {
                 self.budget.clone(),
             )
         })
+    }
+
+    pub fn create_texture_from_returned(
+        &self,
+        device: &Arc<Device>,
+        descriptor: &TextureDescriptor<'_>,
+        returned: wgh::shared_image::ReturnedImage,
+    ) -> Result<(Arc<Texture>, Option<SharedCanvasTexture>), String> {
+        if !self.owner.is_ready() {
+            return Err("Native canvas owner is unavailable for allocation".into());
+        }
+        Ok(device.create_shared_canvas_texture_from_returned(descriptor, returned))
     }
 
     pub fn live_allocations(&self) -> usize {
@@ -178,6 +194,7 @@ struct Configurations {
 
 pub struct NativeCanvases {
     allocator: NativeCanvasAllocator,
+    returns: returns::Returns,
     configs: RefCell<Configurations>,
     protocol_error: Cell<bool>,
 }
@@ -203,8 +220,10 @@ fn validation(device: &Arc<Device>, message: impl Into<String>, operation: &'sta
 
 impl NativeCanvases {
     pub fn new(owner: Arc<ProcessOwner>) -> Self {
+        let returns = returns::Returns::new(owner.clone());
         Self {
             allocator: NativeCanvasAllocator::new(owner),
+            returns,
             configs: RefCell::new(Configurations {
                 next_generation: 0,
                 owners: HashMap::new(),
@@ -335,11 +354,32 @@ impl NativeCanvases {
                 return;
             };
             config.current = Current::InProgress { id: texture_id };
-            (config.info.clone(), device, config.native_supported)
+            (
+                config.info.clone(),
+                device,
+                config.queue.upgrade(),
+                config.native_supported,
+            )
         };
-        let (info, device, supported) = prepared;
+        let (info, device, queue, supported) = prepared;
+        global.poll_all_devices(false).unwrap();
+        self.maintain_returns();
+        let returned = queue
+            .as_ref()
+            .and_then(|queue| self.returns.take_ready(owner, &info, &device, queue));
+        if returned.is_none() && self.allocator.live_allocations() >= ALLOCATION_LIMIT {
+            self.returns.evict_ready();
+            global.poll_all_devices(false).unwrap();
+        }
         let (texture, canvas, admission_error) = if supported {
-            match self.allocator.create_texture(&device, &info.descriptor) {
+            let allocation = match returned {
+                Some(returned) => {
+                    self.allocator
+                        .create_texture_from_returned(&device, &info.descriptor, returned)
+                }
+                None => self.allocator.create_texture(&device, &info.descriptor),
+            };
+            match allocation {
                 Ok((texture, canvas)) => (texture, canvas, None),
                 Err(error) => (
                     device.create_texture_error(&info.descriptor),
@@ -415,6 +455,7 @@ impl NativeCanvases {
         };
         let texture = canvas.texture().clone();
         let device = texture.device().clone();
+        let producer_queue = queue.as_ref().map(Arc::downgrade).unwrap_or_default();
         enum SealError {
             Core(wgc::device::DeviceError),
             Admission(String),
@@ -431,7 +472,19 @@ impl NativeCanvases {
             )),
         };
         let current = match result {
-            Ok(frame) => Current::Sealed { id, frame },
+            Ok(frame) => {
+                let current = self
+                    .configs
+                    .borrow()
+                    .owners
+                    .get(&owner)
+                    .is_some_and(|config| config.info.generation == info.generation);
+                if current {
+                    self.returns
+                        .track(owner, &info, &device, producer_queue, &frame);
+                }
+                Current::Sealed { id, frame }
+            }
             Err(error) => {
                 texture.destroy();
                 if report_error {
@@ -618,6 +671,22 @@ impl NativeCanvases {
         }
     }
 
+    pub fn maintain_returns(&self) {
+        let configs = self
+            .configs
+            .borrow()
+            .owners
+            .iter()
+            .filter(|(_, config)| config.registered)
+            .map(|(owner, config)| (*owner, config.info.clone()))
+            .collect::<Vec<_>>();
+        self.returns.maintain(&configs);
+    }
+
+    pub fn shutdown_returns(&self) {
+        self.returns.shutdown();
+    }
+
     pub fn configuration_bgra(&self, owner: u64) -> Option<bool> {
         let configs = self.configs.borrow();
         match configs.owners.get(&owner)?.info.descriptor.format {
@@ -784,6 +853,7 @@ impl NativeCanvases {
     pub fn drop_configuration(&self, owner: u64) {
         self.seal_current(owner, false);
         let discarded = self.configs.borrow_mut().owners.remove(&owner);
+        self.returns.discard_owner(owner);
         if let Some(Configuration {
             current: Current::Writing { canvas, .. },
             ..

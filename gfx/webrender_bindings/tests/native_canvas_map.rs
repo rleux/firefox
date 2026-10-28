@@ -37,7 +37,7 @@ impl Drop for Armed {
         }
     }
 }
-struct Gate {
+pub(super) struct Gate {
     release: mpsc::Sender<()>,
     controller: Option<JoinHandle<bool>>,
     blocker: Submission,
@@ -45,7 +45,7 @@ struct Gate {
     _device: Rc<Device>,
 }
 impl Gate {
-    fn new(owner: &Arc<ProcessOwner>) -> Self {
+    pub(super) fn new(owner: &Arc<ProcessOwner>) -> Self {
         let control = unified::owner();
         let (ready_tx, ready_rx) = mpsc::channel();
         let (release, released) = mpsc::channel();
@@ -87,7 +87,7 @@ impl Gate {
             _device: device,
         }
     }
-    fn release(&mut self) -> bool {
+    pub(super) fn release(&mut self) -> bool {
         let _ = self.release.send(());
         let explicit = match self.controller.take().unwrap().join() {
             Ok(explicit) => explicit,

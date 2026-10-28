@@ -1,5 +1,7 @@
 use super::{Allocation, ImageLease, ImageLeaseError};
-use crate::shared_image::{FinalizeReservation, ImageEpoch, ImagePayload, ReturnedImage};
+use crate::shared_image::{
+    FinalizeReservation, ImageCloseStatus, ImageEpoch, ImagePayload, ReturnedImage,
+};
 use crate::vulkan::shared::QueueProgress;
 use crate::{
     vulkan::{Device, DeviceShared, Queue, ResourceIdentity, Texture},
@@ -83,6 +85,20 @@ struct Status {
     closed: bool,
     payloads: usize,
     marker: Marker,
+}
+
+impl Status {
+    fn begin_close(&mut self, only_unused: bool) -> ImageCloseStatus {
+        if self.closed {
+            return ImageCloseStatus::AlreadyClosed;
+        }
+        if only_unused && self.payloads != 0 {
+            return ImageCloseStatus::Busy;
+        }
+        self.closed = true;
+        self.marker = Marker::Reserved;
+        ImageCloseStatus::Claimed
+    }
 }
 
 fn ready(status: &Status) -> bool {
@@ -245,17 +261,30 @@ impl Epoch {
         device: &dyn crate::DynDevice,
         queue: &dyn crate::DynQueue,
     ) -> Result<bool, ImageLeaseError> {
+        self.close(device, queue, false)
+            .map(|status| status == ImageCloseStatus::Claimed)
+    }
+
+    pub(crate) fn try_begin_close_if_unused(
+        &self,
+        device: &dyn crate::DynDevice,
+        queue: &dyn crate::DynQueue,
+    ) -> Result<ImageCloseStatus, ImageLeaseError> {
+        self.close(device, queue, true)
+    }
+
+    fn close(
+        &self,
+        device: &dyn crate::DynDevice,
+        queue: &dyn crate::DynQueue,
+        only_unused: bool,
+    ) -> Result<ImageCloseStatus, ImageLeaseError> {
         self.validate_owner(device, queue)?;
         let allocation = allocation(self.lease.as_ref())?;
         let slot = allocation.publication.lock();
         current(&slot, self.serial)?;
         let mut status = self.record.status.lock();
-        if status.closed {
-            return Ok(false);
-        }
-        status.closed = true;
-        status.marker = Marker::Reserved;
-        Ok(true)
+        Ok(status.begin_close(only_unused))
     }
 
     pub(crate) fn marker_accepted(&self) {
