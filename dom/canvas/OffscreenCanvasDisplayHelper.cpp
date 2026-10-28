@@ -323,6 +323,7 @@ bool OffscreenCanvasDisplayHelper::CommitFrameToCompositor(
   }
 
   bool paintCallbacks = mData.mDoPaintCallbacks;
+  const bool allowSnapshotFallback = mData.mAllowSnapshotFallback;
   bool hasRemoteTextureDesc = false;
   RefPtr<layers::Image> image;
   RefPtr<layers::TextureClient> texture;
@@ -347,7 +348,7 @@ bool OffscreenCanvasDisplayHelper::CommitFrameToCompositor(
           flags |= layers::TextureFlags::WAIT_FOR_REMOTE_TEXTURE_OWNER;
         }
       }
-    } else {
+    } else if (allowSnapshotFallback) {
       if (layers::PersistentBufferProvider* provider =
               aContext->GetBufferProvider()) {
         texture = provider->GetTextureClient();
@@ -391,6 +392,11 @@ bool OffscreenCanvasDisplayHelper::CommitFrameToCompositor(
     imageBridge->UpdateCompositable(mImageContainer, textureDesc.textureId(),
                                     textureDesc.ownerId(), mData.mSize, flags,
                                     tracker);
+    return true;
+  }
+
+  if (!allowSnapshotFallback) {
+    mImageContainer->ClearImagesInHost(layers::ClearImagesType::All);
     return true;
   }
 

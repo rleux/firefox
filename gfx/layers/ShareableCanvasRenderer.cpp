@@ -202,6 +202,14 @@ void ShareableCanvasRenderer::UpdateCompositableClient() {
       return;
     }
 
+    if (!mData.mAllowSnapshotFallback) {
+      mFrontBufferFromDesc = nullptr;
+      if (mCanvasClient) mCanvasClient->Clear();
+      ClearCachedResources();
+      FireDidTransactionCallback();
+      return;
+    }
+
     EnsurePipeline();
 
     // Let's see if we can get a no-copy TextureClient from the canvas.

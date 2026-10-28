@@ -150,7 +150,9 @@ void WebRenderImageHost::PushPendingRemoteTexture(
   RefPtr<TextureHost> texture =
       RemoteTextureMap::Get()->GetOrCreateRemoteTextureHostWrapper(
           aTextureId, aOwnerId, aForPid, aSize, aFlags);
-  MOZ_ASSERT(texture);
+  if (!texture) {
+    return;
+  }
   mPendingRemoteTextureWrappers.push_back(
       CompositableTextureHostRef(texture.get()));
 }

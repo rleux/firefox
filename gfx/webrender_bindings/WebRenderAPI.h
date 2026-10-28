@@ -286,6 +286,15 @@ class WebRenderAPI final {
       RefPtr<widget::CompositorWidget> aWidget, const wr::WrWindowId& aWindowId,
       LayoutDeviceIntSize aSize, layers::WindowKind aWindowKind);
 
+#ifdef ENABLE_TESTS
+  // Adopts a dedicated real document/backend, with its renderer owned
+  // externally.
+  static already_AddRefed<WebRenderAPI> CreateForTesting(
+      wr::DocumentHandle* aOwnedDocument, WebRenderCapabilities aCapabilities);
+  void DestroyRendererForTesting(void (*aDeinitRenderer)(void*),
+                                 void* aFixture);
+#endif
+
   already_AddRefed<WebRenderAPI> Clone();
 
   void DestroyRenderer();

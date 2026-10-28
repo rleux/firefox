@@ -44,6 +44,7 @@ struct CanvasRendererData final {
   bool mDoPaintCallbacks = false;
   bool mIsOpaque = true;
   bool mIsAlphaPremult = true;
+  bool mAllowSnapshotFallback = true;
 
   gl::OriginPos mOriginPos = gl::OriginPos::TopLeft;
 

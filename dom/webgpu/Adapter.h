@@ -102,7 +102,7 @@ class Adapter final : public nsWrapperCache,
   const RefPtr<SupportedFeatures>& Features() const;
   const RefPtr<SupportedLimits>& Limits() const;
   const RefPtr<AdapterInfo>& Info() const;
-  bool SupportSharedTextureInSwapChain() const;
+  ffi::WGPUCanvasPresentationMode PresentationMode() const;
   uint64_t MissingFeatures() const;
 
   nsCString LabelOrId() const {

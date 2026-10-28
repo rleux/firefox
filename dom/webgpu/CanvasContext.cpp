@@ -126,60 +126,91 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
 
   mConfiguration = std::make_unique<dom::GPUCanvasConfiguration>(aConfig);
   mRemoteTextureOwnerId = Some(layers::RemoteTextureOwnerId::GetNext());
-  mUseSharedTextureInSwapChain =
-      aConfig.mDevice->mSupportSharedTextureInSwapChain;
-  if (mUseSharedTextureInSwapChain) {
+  mPresentationMode = aConfig.mDevice->PresentationMode();
+  if (mPresentationMode == ffi::WGPUCanvasPresentationMode_LegacyShared) {
+    bool useShared = true;
     bool client_can_use = wgpu_client_use_shared_texture_in_swapChain(
         ConvertTextureFormat(aConfig.mFormat));
     if (!client_can_use) {
       gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
                          "canvas configuration format not supported";
-      mUseSharedTextureInSwapChain = false;
+      useShared = false;
     }
-  }
-  if (!gfx::gfxVars::AllowWebGPUPresentWithoutReadback()) {
-    gfxCriticalNote
-        << "WebGPU: disabling SharedTexture swapchain: \n"
-           "`dom.webgpu.allow-present-without-readback` pref is false";
-    mUseSharedTextureInSwapChain = false;
-  }
+    if (!gfx::gfxVars::AllowWebGPUPresentWithoutReadback()) {
+      gfxCriticalNote
+          << "WebGPU: disabling SharedTexture swapchain: \n"
+             "`dom.webgpu.allow-present-without-readback` pref is false";
+      useShared = false;
+    }
 #ifdef XP_WIN
-  // When WebRender does not use hardware acceleration, disable shared texture
-  // in swap chain. Since compositor device might not exist.
-  if (gfx::gfxVars::UseSoftwareWebRender() &&
-      !gfx::gfxVars::AllowSoftwareWebRenderD3D11()) {
-    gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
-                       "WebRender is not using hardware acceleration";
-    mUseSharedTextureInSwapChain = false;
-  }
+    // When WebRender does not use hardware acceleration, disable shared texture
+    // in swap chain. Since compositor device might not exist.
+    if (gfx::gfxVars::UseSoftwareWebRender() &&
+        !gfx::gfxVars::AllowSoftwareWebRenderD3D11()) {
+      gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
+                         "WebRender is not using hardware acceleration";
+      useShared = false;
+    }
 #elif defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
-  // When DMABufDevice is not enabled, disable shared texture in swap chain.
-  const auto& modifiers = gfx::gfxVars::DMABufModifiersARGB();
-  if (modifiers.IsEmpty()) {
-    gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
-                       "missing GBM_FORMAT_ARGB8888 dmabuf format";
-    mUseSharedTextureInSwapChain = false;
-  }
+    // When DMABufDevice is not enabled, disable shared texture in swap chain.
+    const auto& modifiers = gfx::gfxVars::DMABufModifiersARGB();
+    if (modifiers.IsEmpty()) {
+      gfxCriticalNote << "WebGPU: disabling SharedTexture swapchain: \n"
+                         "missing GBM_FORMAT_ARGB8888 dmabuf format";
+      useShared = false;
+    }
 #endif
 
-  mCurrentTexture = aConfig.mDevice->InitSwapChain(
-      mConfiguration.get(), mRemoteTextureOwnerId.ref(),
-      mUseSharedTextureInSwapChain, mGfxFormat, mCanvasSize);
-  if (!mCurrentTexture) {
-    Unconfigure();
-    return;
+    if (!useShared) {
+      mPresentationMode = ffi::WGPUCanvasPresentationMode_Readback;
+    }
   }
 
-  mCurrentTexture->mTargetContext = this;
+  // configure stores the descriptor; native drawing-buffer allocation is lazy.
+  if (mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    if (!aConfig.mDevice->ConfigureSwapChain(
+            mConfiguration.get(), mRemoteTextureOwnerId.ref(),
+            mPresentationMode, mGfxFormat, mCanvasSize)) {
+      Unconfigure();
+      return;
+    }
+  } else {
+    mCurrentTexture = aConfig.mDevice->InitSwapChain(
+        mConfiguration.get(), mRemoteTextureOwnerId.ref(), mPresentationMode,
+        mGfxFormat, mCanvasSize);
+    if (!mCurrentTexture) {
+      Unconfigure();
+      return;
+    }
+  }
+
+  if (mCurrentTexture) {
+    mCurrentTexture->mTargetContext = this;
+  }
   mChild = aConfig.mDevice->GetChild();
   if (mCanvasElement) {
     mWaitingCanvasRendererInitialized = true;
   }
 
+  if (mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    mPendingSwapChainPresent = true;
+    mNewTextureRequested = false;
+  }
   ForceNewFrame();
 }
 
 void CanvasContext::Unconfigure() {
+  const bool wasNative =
+      mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative;
+  if (wasNative) {
+    // Expire the current texture without destroying a retained published image.
+    if (mCurrentTexture) {
+      mCurrentTexture->Destroy();
+    }
+    mPendingSwapChainPresent = false;
+    mNewTextureRequested = false;
+    mLastRemoteTextureId = Nothing();
+  }
   if (mChild && mChild->CanSend() && mRemoteTextureOwnerId) {
     if (mOffscreenCanvas) {
       if (RefPtr<layers::ImageBridgeChild> imageBridge =
@@ -199,6 +230,12 @@ void CanvasContext::Unconfigure() {
   mConfiguration = nullptr;
   mCurrentTexture = nullptr;
   mGfxFormat = gfx::SurfaceFormat::UNKNOWN;
+  if (wasNative) {
+    // Keep native transport policy while the now-unconfigured image is cleared.
+    ForceNewFrame();
+  } else {
+    mPresentationMode = ffi::WGPUCanvasPresentationMode_Readback;
+  }
 }
 
 NS_IMETHODIMP CanvasContext::SetDimensions(int32_t aWidth, int32_t aHeight) {
@@ -226,7 +263,7 @@ void CanvasContext::GetConfiguration(
 }
 
 RefPtr<Texture> CanvasContext::GetCurrentTexture(ErrorResult& aRv) {
-  if (!mCurrentTexture) {
+  if (!mConfiguration) {
     aRv.ThrowInvalidStateError("Canvas not configured");
     return nullptr;
   }
@@ -234,12 +271,16 @@ RefPtr<Texture> CanvasContext::GetCurrentTexture(ErrorResult& aRv) {
   MOZ_ASSERT(mConfiguration);
   MOZ_ASSERT(mRemoteTextureOwnerId.isSome());
 
-  if (mNewTextureRequested) {
+  // getCurrentTexture creates once, then returns the same object until expiry.
+  if (!mCurrentTexture || mNewTextureRequested) {
     mNewTextureRequested = false;
 
     mCurrentTexture = mConfiguration->mDevice->CreateTextureForSwapChain(
         mConfiguration.get(), mCanvasSize, mRemoteTextureOwnerId.ref());
     mCurrentTexture->mTargetContext = this;
+  }
+  if (mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    MaybeQueueSwapChainPresent();
   }
   return mCurrentTexture;
 }
@@ -249,9 +290,15 @@ void CanvasContext::MaybeQueueSwapChainPresent() {
     return;
   }
 
-  MOZ_ASSERT(mCurrentTexture);
+  const bool native =
+      mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative;
+  MOZ_ASSERT(mCurrentTexture || native);
+  if (native && (!mCurrentTexture || mNewTextureRequested)) {
+    return;
+  }
 
-  if (mCurrentTexture) {
+  if (mCurrentTexture &&
+      mPresentationMode != ffi::WGPUCanvasPresentationMode_UnifiedNative) {
     mChild->NotifyWaitForSubmit(mCurrentTexture->GetId());
   }
 
@@ -270,8 +317,10 @@ void CanvasContext::MaybeQueueSwapChainPresent() {
 
 Maybe<layers::SurfaceDescriptor> CanvasContext::SwapChainPresent() {
   mPendingSwapChainPresent = false;
+  const bool native =
+      mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative;
   if (!mChild || !mChild->CanSend() || mRemoteTextureOwnerId.isNothing() ||
-      !mCurrentTexture) {
+      (!mCurrentTexture && !native)) {
     return Nothing();
   }
 
@@ -283,11 +332,17 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::SwapChainPresent() {
   }
 
   mLastRemoteTextureId = Some(layers::RemoteTextureId::GetNext());
-  mChild->SwapChainPresent(mCurrentTexture->GetId(), *mLastRemoteTextureId,
-                           *mRemoteTextureOwnerId);
-  if (mUseSharedTextureInSwapChain) {
-    mCurrentTexture->Destroy();
-    mNewTextureRequested = true;
+  if (native && !mCurrentTexture) {
+    ffi::wgpu_client_native_canvas_blank_present(mChild->GetClient(),
+                                                 mLastRemoteTextureId->mId,
+                                                 mRemoteTextureOwnerId->mId);
+  } else {
+    mChild->SwapChainPresent(mCurrentTexture->GetId(), *mLastRemoteTextureId,
+                             *mRemoteTextureOwnerId);
+    if (mPresentationMode != ffi::WGPUCanvasPresentationMode_Readback) {
+      mCurrentTexture->Destroy();
+      mNewTextureRequested = true;
+    }
   }
 
   PROFILER_MARKER_UNTYPED("WebGPU: SwapChainPresent", GRAPHICS_WebGPU);
@@ -324,7 +379,11 @@ bool CanvasContext::InitializeCanvasRenderer(
   layers::CanvasRendererData data;
   data.mContext = this;
   data.mSize = mCanvasSize;
-  data.mIsOpaque = false;
+  data.mIsOpaque =
+      mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative &&
+      GetIsOpaque();
+  data.mAllowSnapshotFallback =
+      mPresentationMode != ffi::WGPUCanvasPresentationMode_UnifiedNative;
   data.mRemoteTextureOwnerId = mRemoteTextureOwnerId;
 
   aRenderer->Initialize(data);
@@ -474,6 +533,12 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::GetFrontBuffer(
     MOZ_ASSERT(!mPendingSwapChainPresent);
     return desc;
   }
+  if (mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative &&
+      mChild && mChild->CanSend() && mLastRemoteTextureId &&
+      mRemoteTextureOwnerId) {
+    return Some(layers::SurfaceDescriptorRemoteTexture(*mLastRemoteTextureId,
+                                                       *mRemoteTextureOwnerId));
+  }
   return Nothing();
 }
 
@@ -496,7 +561,11 @@ void CanvasContext::ForceNewFrame() {
   } else if (mOffscreenCanvas) {
     dom::OffscreenCanvasDisplayData data;
     data.mSize = mCanvasSize;
-    data.mIsOpaque = false;
+    data.mIsOpaque =
+        mPresentationMode == ffi::WGPUCanvasPresentationMode_UnifiedNative &&
+        GetIsOpaque();
+    data.mAllowSnapshotFallback =
+        mPresentationMode != ffi::WGPUCanvasPresentationMode_UnifiedNative;
     mOffscreenCanvas->UpdateDisplayData(data);
   }
 }

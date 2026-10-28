@@ -20,6 +20,7 @@
 #include "mozilla/webgpu/FrontBufferSnapshot.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
+#include "mozilla/webrender/WebRenderAPI.h"
 #include "nsXULAppAPI.h"
 
 #if defined(XP_WIN)
@@ -40,6 +41,24 @@ namespace mozilla::webgpu {
 const uint64_t POLL_TIME_MS = 100;
 
 static mozilla::LazyLogModule sLogger("WebGPU");
+
+struct NativeFrameDeleter {
+  void operator()(ffi::WGPUNativeCanvasFrame* aFrame) const {
+    ffi::wgpu_native_canvas_frame_delete(aFrame);
+  }
+};
+using NativeFrame =
+    mozilla::UniquePtr<ffi::WGPUNativeCanvasFrame, NativeFrameDeleter>;
+
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+struct NativePublicationDeleter {
+  void operator()(wr::WrVulkanNativePublication* aPublication) const {
+    wr::wr_vulkan_native_publication_delete(aPublication);
+  }
+};
+using NativePublication =
+    mozilla::UniquePtr<wr::WrVulkanNativePublication, NativePublicationDeleter>;
+#endif
 
 namespace ffi {
 
@@ -276,12 +295,12 @@ extern void wgpu_parent_queue_submit(
                       externalTextureSources);
 }
 
-extern void wgpu_parent_create_swap_chain(
+extern bool wgpu_parent_create_swap_chain(
     WGPUWebGPUParentPtr aParent, WGPUDeviceId aDeviceId, WGPUQueueId aQueueId,
     uint32_t aWidth, uint32_t aHeight, WGPUSurfaceFormat aFormat,
     const WGPUBufferId* aBufferIds, uintptr_t aBufferIdsLength,
     WGPURemoteTextureOwnerId aRemoteTextureOwnerId,
-    bool aUseSharedTextureInSwapChain) {
+    WGPUCanvasPresentationMode aMode, bool aOpaque) {
   auto* parent = static_cast<WebGPUParent*>(aParent);
   auto buffer_ids_span = Span(aBufferIds, aBufferIdsLength);
   auto buffer_ids = nsTArray<RawId>(aBufferIdsLength);
@@ -293,8 +312,18 @@ extern void wgpu_parent_create_swap_chain(
   auto desc = layers::RGBDescriptor(size, format, gfx::ColorSpace2::SRGB,
                                     gfx::TransferFunction::SRGB);
   auto owner = layers::RemoteTextureOwnerId{aRemoteTextureOwnerId};
-  parent->DeviceCreateSwapChain(aDeviceId, aQueueId, desc, buffer_ids, owner,
-                                aUseSharedTextureInSwapChain);
+  return parent->DeviceCreateSwapChain(aDeviceId, aQueueId, desc, buffer_ids,
+                                       owner, aMode, aOpaque);
+}
+
+extern bool wgpu_parent_present_native_canvas(
+    WGPUWebGPUParentPtr aParent, WGPURemoteTextureOwnerId aOwnerId,
+    WGPURemoteTextureId aRemoteTextureId, WGPUNativeCanvasFrame* aFrame,
+    uint64_t aSubmissionIndex) {
+  auto* parent = static_cast<WebGPUParent*>(aParent);
+  return parent->PresentNativeCanvas(layers::RemoteTextureOwnerId{aOwnerId},
+                                     layers::RemoteTextureId{aRemoteTextureId},
+                                     aFrame, aSubmissionIndex);
 }
 
 extern void wgpu_parent_swap_chain_present(
@@ -402,6 +431,8 @@ class PresentationData {
 
  public:
   WeakPtr<WebGPUParent> mParent;
+  const ffi::WGPUCanvasPresentationMode mMode;
+  const bool mOpaque;
   bool mUseSharedTextureInSwapChain;
   const RawId mDeviceId;
   const RawId mQueueId;
@@ -429,12 +460,15 @@ class PresentationData {
 
   bool mReadbackSnapshotCallbackCalled = false;
 
-  PresentationData(WebGPUParent* aParent, bool aUseSharedTextureInSwapChain,
-                   RawId aDeviceId, RawId aQueueId,
+  PresentationData(WebGPUParent* aParent, ffi::WGPUCanvasPresentationMode aMode,
+                   bool aOpaque, RawId aDeviceId, RawId aQueueId,
                    const layers::RGBDescriptor& aDesc, uint32_t aBufferStride,
                    size_t aBufferSize, const nsTArray<RawId>& aBufferIds)
       : mParent(aParent),
-        mUseSharedTextureInSwapChain(aUseSharedTextureInSwapChain),
+        mMode(aMode),
+        mOpaque(aOpaque),
+        mUseSharedTextureInSwapChain(
+            aMode == ffi::WGPUCanvasPresentationMode_LegacyShared),
         mDeviceId(aDeviceId),
         mQueueId(aQueueId),
         mDesc(aDesc),
@@ -755,55 +789,115 @@ void WebGPUParent::OnSubmittedWorkDoneCallback(uint8_t* userdata) {
 
 // TODO: proper destruction
 
-void WebGPUParent::DeviceCreateSwapChain(
+bool WebGPUParent::DeviceCreateSwapChain(
     RawId aDeviceId, RawId aQueueId, const layers::RGBDescriptor& aDesc,
     const nsTArray<RawId>& aBufferIds,
     const layers::RemoteTextureOwnerId& aOwnerId,
-    bool aUseSharedTextureInSwapChain) {
+    ffi::WGPUCanvasPresentationMode aMode, bool aOpaque) {
   switch (aDesc.format()) {
     case gfx::SurfaceFormat::R8G8B8A8:
     case gfx::SurfaceFormat::B8G8R8A8:
       break;
     default:
       MOZ_ASSERT_UNREACHABLE("Invalid surface format!");
-      return;
+      return false;
   }
 
+  if (aMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    bool bgra = false;
+    if (!ffi::wgpu_server_native_canvas_configuration_bgra(
+            mContext.get(), aOwnerId.mId, &bgra) ||
+        aDesc.format() != (bgra ? gfx::SurfaceFormat::B8G8R8A8
+                                : gfx::SurfaceFormat::R8G8B8A8)) {
+      return false;
+    }
+  }
+
+  const bool native = aMode == ffi::WGPUCanvasPresentationMode_UnifiedNative;
   const auto bufferStrideWithMask =
       Device::BufferStrideWithMask(aDesc.size(), aDesc.format());
-  if (!bufferStrideWithMask.isValid()) {
+  if (!native && !bufferStrideWithMask.isValid()) {
     MOZ_ASSERT_UNREACHABLE("Invalid width / buffer stride!");
-    return;
+    return false;
   }
 
   constexpr uint32_t kBufferAlignmentMask = 0xff;
-  const uint32_t bufferStride =
-      bufferStrideWithMask.value() & ~kBufferAlignmentMask;
+  uint32_t bufferStride =
+      bufferStrideWithMask.isValid()
+          ? bufferStrideWithMask.value() & ~kBufferAlignmentMask
+          : 0;
 
   const auto rows = CheckedInt<uint32_t>(aDesc.size().height);
-  if (!rows.isValid()) {
+  if (!native && !rows.isValid()) {
     MOZ_ASSERT_UNREACHABLE("Invalid height!");
-    return;
+    return false;
   }
 
-  const auto bufferSize = CheckedInt<size_t>(rows.value()) * bufferStride;
-  if (!bufferSize.isValid()) {
+  const auto bufferSize =
+      CheckedInt<size_t>(aDesc.size().height) * bufferStride;
+  if (!native && !bufferSize.isValid()) {
     MOZ_ASSERT_UNREACHABLE("Buffer size overflowed!");
-    return;
+    return false;
+  }
+
+  size_t scratchSize = 0;
+  if (bufferStrideWithMask.isValid() && rows.isValid() &&
+      bufferSize.isValid()) {
+    scratchSize = bufferSize.value();
+  } else {
+    bufferStride = 0;
   }
 
   if (!mRemoteTextureOwner) {
     mRemoteTextureOwner =
         MakeRefPtr<layers::RemoteTextureOwnerClient>(OtherPid());
   }
-  mRemoteTextureOwner->RegisterTextureOwner(aOwnerId);
-
-  auto data = MakeRefPtr<PresentationData>(
-      this, aUseSharedTextureInSwapChain, aDeviceId, aQueueId, aDesc,
-      bufferStride, bufferSize.value(), aBufferIds);
-  if (!mPresentationDataMap.emplace(aOwnerId, data).second) {
-    NS_ERROR("External image is already registered as WebGPU canvas!");
+  if (mPresentationDataMap.find(aOwnerId) != mPresentationDataMap.end() ||
+      !mRemoteTextureOwner->RegisterTextureOwner(aOwnerId)) {
+    return false;
   }
+
+  auto data = MakeRefPtr<PresentationData>(this, aMode, aOpaque, aDeviceId,
+                                           aQueueId, aDesc, bufferStride,
+                                           scratchSize, aBufferIds);
+  mPresentationDataMap.emplace(aOwnerId, data);
+  return true;
+}
+
+bool WebGPUParent::PresentNativeCanvas(
+    const layers::RemoteTextureOwnerId& aOwnerId,
+    const layers::RemoteTextureId& aRemoteTextureId,
+    ffi::WGPUNativeCanvasFrame* aFrame, uint64_t aSubmissionIndex) {
+  NativeFrame frame(aFrame);
+  const auto lookup = mPresentationDataMap.find(aOwnerId);
+  if (lookup == mPresentationDataMap.end() ||
+      lookup->second->mMode != ffi::WGPUCanvasPresentationMode_UnifiedNative ||
+      !mRemoteTextureOwner || !mRemoteTextureOwner->IsRegistered(aOwnerId)) {
+    return false;
+  }
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  const RefPtr<PresentationData> data = lookup->second;
+  bool accepted = false;
+  if (!frame) {
+    accepted = mRemoteTextureOwner->PushNativeErrorTexture(
+        aRemoteTextureId, aOwnerId, data->mDesc.size(), data->mDesc.format(),
+        data->mOpaque);
+  } else {
+    auto* publication =
+        wr::wr_vulkan_native_publication_from_webgpu_frame(frame.get());
+    if (!publication) {
+      return false;
+    }
+    accepted = mRemoteTextureOwner->PushNativeTexture(
+        aRemoteTextureId, aOwnerId, publication, data->mOpaque);
+  }
+  if (accepted) {
+    data->mSubmissionIndex = aSubmissionIndex;
+  }
+  return accepted;
+#else
+  return false;
+#endif
 }
 
 struct ReadbackPresentRequest {
@@ -1034,6 +1128,121 @@ ipc::IPCResult WebGPUParent::GetFrontBufferSnapshot(
     return IPC_OK();
   }
 
+  if (data->mMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    bool copied = false;
+    const auto kind = ffi::wgpu_server_native_canvas_snapshot_kind(
+        mContext.get(), aOwnerId.mId);
+    if (kind == ffi::WGPUNativeCanvasSnapshotKind_Published) {
+      if (mRemoteTextureOwner && mRemoteTextureOwner->IsRegistered(aOwnerId)) {
+        aSnapshot = mRemoteTextureOwner->GetLatestBufferSnapshot(aOwnerId);
+      }
+      return IPC_OK();
+    }
+    if (kind == ffi::WGPUNativeCanvasSnapshotKind_Unavailable ||
+        size.width <= 0 || size.height <= 0) {
+      return IPC_OK();
+    }
+    const CheckedInt<size_t> rowBytes = CheckedInt<size_t>(size.width) * 4;
+    const auto length = rowBytes * size.height;
+    if (!length.isValid()) {
+      return IPC_OK();
+    }
+    const auto stride = rowBytes.value();
+    auto handle = ipc::shared_memory::Create(length.value());
+    auto mapping = handle.Map();
+    if (!handle || !mapping) {
+      return IPC_OK();
+    }
+    switch (kind) {
+      case ffi::WGPUNativeCanvasSnapshotKind_Blank:
+      case ffi::WGPUNativeCanvasSnapshotKind_Error:
+        memset(mapping.DataAs<uint8_t>(), 0, mapping.Size());
+        copied = true;
+        break;
+      case ffi::WGPUNativeCanvasSnapshotKind_Published:
+        MOZ_ASSERT_UNREACHABLE("Published snapshot handled before allocation");
+        break;
+      case ffi::WGPUNativeCanvasSnapshotKind_Sealed: {
+        NativeFrame frame(ffi::wgpu_server_native_canvas_snapshot_frame(
+            mContext.get(), aOwnerId.mId));
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+        if (frame) {
+          NativePublication publication(
+              wr::wr_vulkan_native_publication_from_webgpu_frame(frame.get()));
+          if (publication) {
+            wr::DeviceIntRect rect;
+            rect.min = {0, 0};
+            rect.max = {size.width, size.height};
+            auto format = wr::ImageFormat::R8;
+            copied = wr::wr_vulkan_native_publication_snapshot(
+                publication.get(), rect, stride, mapping.DataAs<uint8_t>(),
+                mapping.Size(), &format);
+            const auto expected =
+                wr::SurfaceFormatToImageFormat(data->mDesc.format());
+            copied = copied && expected && format == *expected;
+          }
+        }
+#endif
+        break;
+      }
+      case ffi::WGPUNativeCanvasSnapshotKind_Writing: {
+        if (!data->mBufferStride || !data->mBufferSize) {
+          break;
+        }
+        RawId bufferId = 0;
+        auto returnBuffer = MakeScopeExit([&] {
+          if (bufferId) data->mAvailableBufferIds.push_back(bufferId);
+        });
+        if (!data->mAvailableBufferIds.empty()) {
+          bufferId = data->mAvailableBufferIds.back();
+          data->mAvailableBufferIds.pop_back();
+        } else if (!data->mUnassignedBufferIds.empty()) {
+          bufferId = data->mUnassignedBufferIds.back();
+          data->mUnassignedBufferIds.pop_back();
+          if (!ffi::wgpu_server_native_canvas_create_snapshot_buffer(
+                  mContext.get(), aOwnerId.mId, bufferId, data->mBufferSize)) {
+            data->mUnassignedBufferIds.push_back(bufferId);
+            bufferId = 0;
+          }
+        }
+        if (!bufferId) break;
+        const auto index = ffi::wgpu_server_native_canvas_copy_to_buffer(
+            mContext.get(), aOwnerId.mId, bufferId, data->mBufferStride);
+        if (!index) break;
+        data->mSubmissionIndex = index;
+        ffi::wgpu_server_device_poll(mContext.get(), data->mDeviceId, true);
+        const auto status = ffi::wgpu_server_buffer_map_blocking(
+            mContext.get(), data->mDeviceId, bufferId, 0, data->mBufferSize,
+            ffi::WGPUHostMap_Read);
+        if (status != ffi::WGPUBufferMapAsyncStatus_Success) break;
+        auto unmap = MakeScopeExit(
+            [&] { ffi::wgpu_server_buffer_unmap(mContext.get(), bufferId); });
+        auto mapped = MappedRangeGuard::Create(mContext.get(), bufferId, 0,
+                                               data->mBufferSize);
+        if (!mapped) break;
+        const auto bytesPerRow = CheckedInt<size_t>(size.width) * 4;
+        if (!bytesPerRow.isValid() || bytesPerRow.value() > size_t(stride) ||
+            bytesPerRow.value() > data->mBufferStride)
+          break;
+        memset(mapping.DataAs<uint8_t>(), 0, mapping.Size());
+        for (int32_t row = 0; row < size.height; ++row) {
+          memcpy(mapping.DataAs<uint8_t>() + size_t(row) * stride,
+                 mapped->AsSpan().data() + size_t(row) * data->mBufferStride,
+                 bytesPerRow.value());
+        }
+        copied = true;
+        break;
+      }
+      case ffi::WGPUNativeCanvasSnapshotKind_Unavailable:
+        break;
+    }
+    if (copied) {
+      aSnapshot = {std::move(handle), uint32_t(size.width),
+                   uint32_t(size.height), stride};
+    }
+    return IPC_OK();
+  }
+
   if (data->mLastSubmittedTextureId.isNothing()) {
     // No commands referencing the canvas have ever been submitted, so it's
     // blank.
@@ -1190,6 +1399,9 @@ void WebGPUParent::SwapChainPresent(
   }
 
   RefPtr<PresentationData> data = lookup->second.get();
+  if (data->mMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    return;
+  }
 
   if (data->mUseSharedTextureInSwapChain) {
     auto it = mSharedTextures.find(aTextureId);
@@ -1382,6 +1594,9 @@ ipc::IPCResult WebGPUParent::RecvMessages(
                             shmem_mapping_slices);
 
   mTempMappings.clear();
+  if (ffi::wgpu_server_native_canvas_protocol_error(mContext.get())) {
+    return IPC_FAIL(this, "Native canvas owner/publication admission rejected");
+  }
 
   return IPC_OK();
 }
@@ -1500,6 +1715,9 @@ void WebGPUParent::EnsureSharedTextureForReadBackPresent(
   }
 
   RefPtr<PresentationData> data = lookup->second.get();
+  if (data->mMode == ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    return;
+  }
   if (data->mUseSharedTextureInSwapChain) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");
     return;

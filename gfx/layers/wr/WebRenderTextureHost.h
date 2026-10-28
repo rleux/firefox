@@ -61,6 +61,12 @@ class WebRenderTextureHost final : public TextureHost {
 
   WebRenderTextureHost* AsWebRenderTextureHost() override { return this; }
 
+#if defined(XP_LINUX) && !defined(ANDROID)
+  VulkanNativeTextureHost* AsVulkanNativeTextureHost() override {
+    return mWrappedTextureHost->AsVulkanNativeTextureHost();
+  }
+#endif
+
   RemoteTextureHostWrapper* AsRemoteTextureHostWrapper() override {
     return mWrappedTextureHost->AsRemoteTextureHostWrapper();
   }

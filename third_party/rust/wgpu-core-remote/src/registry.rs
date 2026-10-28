@@ -28,6 +28,10 @@ impl<T: StorageItem> Registry<T> {
 }
 
 impl<T: StorageItem> Registry<T> {
+    pub(crate) fn is_assigned(&self, id: Id<T::Marker>) -> bool {
+        self.storage.is_assigned(id)
+    }
+
     pub(crate) fn assign(&mut self, id: Id<T::Marker>, value: T) -> Id<T::Marker> {
         self.storage.insert(id, value);
         id
@@ -39,6 +43,10 @@ impl<T: StorageItem> Registry<T> {
 }
 
 impl<T: StorageItem + Clone> Registry<T> {
+    pub(crate) fn try_get(&self, id: Id<T::Marker>) -> Option<T> {
+        self.storage.try_get(id)
+    }
+
     pub(crate) fn get(&self, id: Id<T::Marker>) -> T {
         self.storage.get(id)
     }

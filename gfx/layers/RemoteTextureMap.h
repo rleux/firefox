@@ -218,7 +218,7 @@ class RemoteTextureOwnerClient final {
   explicit RemoteTextureOwnerClient(const base::ProcessId aForPid);
 
   bool IsRegistered(const RemoteTextureOwnerId aOwnerId);
-  void RegisterTextureOwner(const RemoteTextureOwnerId aOwnerId,
+  bool RegisterTextureOwner(const RemoteTextureOwnerId aOwnerId,
                             bool aSharedRecycling = false);
   void UnregisterTextureOwner(const RemoteTextureOwnerId aOwnerId);
   void UnregisterAllTextureOwners();
@@ -245,7 +245,12 @@ class RemoteTextureOwnerClient final {
   // Takes unique publication ownership, including rejected pushes.
   bool PushNativeTexture(const RemoteTextureId aTextureId,
                          const RemoteTextureOwnerId aOwnerId,
-                         wr::WrVulkanNativePublication* aPublication);
+                         wr::WrVulkanNativePublication* aPublication,
+                         bool aOpaque = false);
+  bool PushNativeErrorTexture(const RemoteTextureId aTextureId,
+                              const RemoteTextureOwnerId aOwnerId,
+                              const gfx::IntSize& aSize,
+                              gfx::SurfaceFormat aFormat, bool aOpaque);
 #endif
   void PushDummyTexture(const RemoteTextureId aTextureId,
                         const RemoteTextureOwnerId aOwnerId);
@@ -301,7 +306,7 @@ class RemoteTextureMap {
   // gl::SharedSurface is pushed only when the surface needs to be kept alive
   // during TextureHost usage. The texture data and the surface might be
   // recycled when TextureHost is destroyed.
-  void PushTexture(const RemoteTextureId aTextureId,
+  bool PushTexture(const RemoteTextureId aTextureId,
                    const RemoteTextureOwnerId aOwnerId,
                    const base::ProcessId aForPid,
                    UniquePtr<TextureData>&& aTextureData,
@@ -316,7 +321,7 @@ class RemoteTextureMap {
   webgpu::FrontBufferSnapshot GetLatestBufferSnapshot(
       const RemoteTextureOwnerId aOwnerId, const base::ProcessId aForPid);
 
-  void RegisterTextureOwner(
+  bool RegisterTextureOwner(
       const RemoteTextureOwnerId aOwnerId, const base::ProcessId aForPid,
       const RefPtr<RemoteTextureRecycleBin>& aRecycleBin = nullptr);
   void UnregisterTextureOwner(const RemoteTextureOwnerId aOwnerId,
@@ -452,6 +457,11 @@ class RemoteTextureMap {
     CompositableTextureHostRef mRemoteTextureHost;
     bool mReadyCheckSuppressed = false;
   };
+
+  bool TextureIdOwnedByAnother(const MonitorAutoLock& aProofOfLock,
+                               base::ProcessId aForPid,
+                               RemoteTextureOwnerId aOwnerId,
+                               RemoteTextureId aTextureId) const;
 
   void UpdateTexture(const MonitorAutoLock& aProofOfLock,
                      RemoteTextureMap::TextureOwner* aOwner,

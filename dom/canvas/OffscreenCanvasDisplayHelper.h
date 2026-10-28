@@ -29,6 +29,7 @@ struct OffscreenCanvasDisplayData final {
   bool mDoPaintCallbacks = false;
   bool mIsOpaque = true;
   bool mIsAlphaPremult = true;
+  bool mAllowSnapshotFallback = true;
   mozilla::gl::OriginPos mOriginPos = gl::OriginPos::TopLeft;
 };
 

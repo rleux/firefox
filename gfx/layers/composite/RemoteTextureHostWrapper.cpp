@@ -10,6 +10,9 @@
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/RemoteTextureMap.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
+#if defined(XP_LINUX) && !defined(ANDROID)
+#  include "mozilla/layers/VulkanNativeTextureHost.h"
+#endif
 #include "mozilla/webrender/RenderTextureHostWrapper.h"
 #include "mozilla/webrender/RenderThread.h"
 
@@ -105,6 +108,12 @@ void RemoteTextureHostWrapper::MaybeCreateRenderTexture() {
   if (!mRemoteTexture) {
     return;
   }
+#if defined(XP_LINUX) && !defined(ANDROID)
+  if (auto* native = mRemoteTexture->AsVulkanNativeTextureHost();
+      native && native->IsError()) {
+    return;
+  }
+#endif
   MOZ_ASSERT(mRemoteTexture->mExternalImageId.isSome());
 
   // mRemoteTexture is also used for WebRender rendering.
@@ -137,6 +146,13 @@ void RemoteTextureHostWrapper::PushDisplayItems(
     const wr::LayoutRect& aClip, wr::ImageRendering aFilter,
     const Range<wr::ImageKey>& aImageKeys, PushDisplayItemFlagSet aFlags) {
   MOZ_ASSERT(mRemoteTexture, "TextureHost isn't valid yet");
+#if defined(XP_LINUX) && !defined(ANDROID)
+  if (auto* native = AsVulkanNativeTextureHost(); native && native->IsError()) {
+    native->PushDisplayItems(aBuilder, aBounds, aClip, aFilter, aImageKeys,
+                             aFlags);
+    return;
+  }
+#endif
   MOZ_ASSERT(aImageKeys.length() > 0);
   if (!mRemoteTexture) {
     return;

@@ -113,7 +113,8 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
   Maybe<layers::RemoteTextureId> mLastRemoteTextureId;
   Maybe<layers::RemoteTextureOwnerId> mRemoteTextureOwnerId;
   RefPtr<layers::FwdTransactionTracker> mFwdTransactionTracker;
-  bool mUseSharedTextureInSwapChain = false;
+  ffi::WGPUCanvasPresentationMode mPresentationMode =
+      ffi::WGPUCanvasPresentationMode_Readback;
   bool mNewTextureRequested = false;
 };
 

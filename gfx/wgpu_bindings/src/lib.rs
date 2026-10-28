@@ -133,6 +133,25 @@ fn make_byte_buf<T: serde::Serialize>(data: &T) -> ByteBuf {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CanvasPresentationMode {
+    Readback,
+    LegacyShared,
+    UnifiedNative,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeCanvasSnapshotKind {
+    Blank,
+    Writing,
+    Sealed,
+    Published,
+    Error,
+    Unavailable,
+}
+
+#[repr(C)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AdapterInformation<S> {
     id: id::AdapterId,
@@ -145,7 +164,7 @@ pub struct AdapterInformation<S> {
     driver: S,
     driver_info: S,
     backend: wgt::Backend,
-    support_use_shared_texture_in_swap_chain: bool,
+    canvas_presentation_mode: CanvasPresentationMode,
     subgroup_min_size: u32,
     subgroup_max_size: u32,
 }
@@ -301,12 +320,17 @@ pub(crate) enum Message<'a> {
         format: SurfaceFormat,
         buffer_ids: [id::BufferId; MAX_SWAPCHAIN_BUFFER_COUNT],
         remote_texture_owner_id: RemoteTextureOwnerId,
-        use_shared_texture_in_swap_chain: bool,
+        presentation_mode: CanvasPresentationMode,
+        opaque: bool,
     },
     SwapChainPresent {
         texture_id: id::TextureId,
         command_encoder_id: id::CommandEncoderId,
         command_buffer_id: id::CommandBufferId,
+        remote_texture_id: RemoteTextureId,
+        remote_texture_owner_id: RemoteTextureOwnerId,
+    },
+    NativeCanvasBlankPresent {
         remote_texture_id: RemoteTextureId,
         remote_texture_owner_id: RemoteTextureOwnerId,
     },

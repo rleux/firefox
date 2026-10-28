@@ -354,8 +354,8 @@ const RefPtr<SupportedFeatures>& Adapter::Features() const { return mFeatures; }
 const RefPtr<SupportedLimits>& Adapter::Limits() const { return mLimits; }
 const RefPtr<AdapterInfo>& Adapter::Info() const { return mInfo; }
 
-bool Adapter::SupportSharedTextureInSwapChain() const {
-  return mInfoInner->support_use_shared_texture_in_swap_chain;
+ffi::WGPUCanvasPresentationMode Adapter::PresentationMode() const {
+  return mInfoInner->canvas_presentation_mode;
 }
 
 static std::string_view ToJsKey(const Limit limit) {

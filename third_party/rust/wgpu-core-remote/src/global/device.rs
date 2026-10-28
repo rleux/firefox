@@ -63,12 +63,7 @@ impl Global {
         desc: &BufferDescriptor,
         id_in: id::BufferId,
     ) {
-        let mut hub = self.hub.borrow_mut();
-        let Hub {
-            buffers, devices, ..
-        } = &mut *hub;
-
-        let device = devices.get(device_id);
+        let device = self.hub.borrow().devices.get(device_id);
 
         let desc = resource::BufferDescriptor {
             label: desc.label.as_ref().map(|s| Cow::Borrowed(s.deref())),
@@ -82,7 +77,7 @@ impl Global {
 
         let buffer = device.create_buffer(&desc);
 
-        buffers.assign(id_in, buffer);
+        self.hub.borrow_mut().buffers.assign(id_in, buffer);
     }
 
     /// Assign `id_in` an error with the given `label`.
@@ -233,6 +228,60 @@ impl Global {
         hub.buffers.remove(buffer_id)
     }
 
+    pub fn resolve_canvas_device_queue(
+        &self,
+        device_id: DeviceId,
+        queue_id: id::QueueId,
+    ) -> Option<(
+        Arc<wgpu_core::device::Device>,
+        Arc<wgpu_core::device::queue::Queue>,
+    )> {
+        let (device, queue) = {
+            let hub = self.hub.borrow();
+            (
+                hub.devices.try_get(device_id)?,
+                hub.queues.try_get(queue_id)?,
+            )
+        };
+        use wgpu_core::resource::ParentDevice as _;
+        queue.same_device(&device).ok()?;
+        Some((device, queue))
+    }
+
+    pub fn resolve_canvas_buffer(&self, id: id::BufferId) -> Option<Arc<resource::Buffer>> {
+        self.hub.borrow().buffers.try_get(id)
+    }
+
+    pub fn canvas_buffer_id_available(&self, id: id::BufferId) -> bool {
+        !self.hub.borrow().buffers.is_assigned(id)
+    }
+
+    pub fn register_canvas_buffer(&self, id: id::BufferId, buffer: Arc<resource::Buffer>) -> bool {
+        let mut hub = self.hub.borrow_mut();
+        if hub.buffers.is_assigned(id) {
+            return false;
+        }
+        hub.buffers.assign(id, buffer);
+        true
+    }
+
+    pub fn canvas_texture_id_available(&self, id: id::TextureId) -> bool {
+        !self.hub.borrow().textures.is_assigned(id)
+    }
+
+    pub fn register_canvas_texture(
+        &self,
+        id: id::TextureId,
+        texture: Arc<resource::Texture>,
+    ) -> bool {
+        let mut hub = self.hub.borrow_mut();
+        if hub.textures.is_assigned(id) {
+            return false;
+        }
+        hub.textures.assign(id, texture);
+        true
+    }
+
     pub fn device_create_texture(
         &self,
         device_id: DeviceId,
@@ -332,10 +381,7 @@ impl Global {
     }
 
     pub fn texture_destroy(&self, texture_id: id::TextureId) {
-        let hub = self.hub.borrow();
-
-        let texture = hub.textures.get(texture_id);
-
+        let texture = self.hub.borrow().textures.get(texture_id);
         texture.destroy();
     }
 
@@ -1183,8 +1229,7 @@ impl Global {
         device_id: DeviceId,
         poll_type: wgt::PollType<SubmissionIndex>,
     ) -> Result<wgt::PollStatus, WaitIdleError> {
-        let hub = self.hub.borrow();
-        let device = hub.devices.get(device_id);
+        let device = self.hub.borrow().devices.get(device_id);
 
         device.poll(poll_type)
     }
@@ -1241,8 +1286,7 @@ impl Global {
     }
 
     pub fn device_destroy(&self, device_id: DeviceId) {
-        let hub = self.hub.borrow();
-        let device = hub.devices.get(device_id);
+        let device = self.hub.borrow().devices.get(device_id);
 
         device.destroy();
     }
@@ -1278,9 +1322,7 @@ impl Global {
         size: Option<BufferAddress>,
         callback: Option<BufferMapCallback>,
     ) -> Option<SubmissionIndex> {
-        let hub = self.hub.borrow();
-
-        let buffer = hub.buffers.get(buffer_id);
+        let buffer = self.hub.borrow().buffers.get(buffer_id);
 
         buffer.map_async(
             resource::MapModeFlags::from_bits_retain(mode.bits()),
@@ -1304,9 +1346,7 @@ impl Global {
     }
 
     pub fn buffer_unmap(&self, buffer_id: id::BufferId) {
-        let hub = self.hub.borrow();
-
-        let buffer = hub.buffers.get(buffer_id);
+        let buffer = self.hub.borrow().buffers.get(buffer_id);
 
         buffer.unmap();
     }

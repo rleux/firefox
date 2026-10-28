@@ -4,6 +4,8 @@
 
 #include "VulkanNativeTextureHost.h"
 
+#include <cstring>
+
 #include "mozilla/CheckedInt.h"
 #include "mozilla/ipc/SharedMemoryMapping.h"
 #include "mozilla/layers/AsyncImagePipelineManager.h"
@@ -34,17 +36,33 @@ already_AddRefed<VulkanNativeTextureHost> VulkanNativeTextureHost::Create(
   return host.forget();
 }
 
+already_AddRefed<VulkanNativeTextureHost> VulkanNativeTextureHost::CreateError(
+    TextureFlags aFlags, const gfx::IntSize& aSize,
+    gfx::SurfaceFormat aFormat) {
+  if (aSize.width < 0 || aSize.height < 0 ||
+      (aFormat != gfx::SurfaceFormat::R8G8B8A8 &&
+       aFormat != gfx::SurfaceFormat::B8G8R8A8)) {
+    return nullptr;
+  }
+  RefPtr<VulkanNativeTextureHost> host =
+      new VulkanNativeTextureHost(aFlags, Publication(), aSize, aFormat, true);
+  return host.forget();
+}
+
 VulkanNativeTextureHost::VulkanNativeTextureHost(TextureFlags aFlags,
                                                  Publication&& aPublication,
                                                  const gfx::IntSize& aSize,
-                                                 gfx::SurfaceFormat aFormat)
+                                                 gfx::SurfaceFormat aFormat,
+                                                 bool aIsError)
     : TextureHost(TextureHostType::VulkanNative, aFlags),
       mPublication(std::move(aPublication)),
       mSize(aSize),
-      mFormat(aFormat) {}
+      mFormat(aFormat),
+      mOpaque(!!(aFlags & TextureFlags::IS_OPAQUE)),
+      mIsError(aIsError) {}
 
 webgpu::FrontBufferSnapshot VulkanNativeTextureHost::GetSnapshot() const {
-  if (!mPublication || mSize.width <= 0 || mSize.height <= 0) {
+  if ((!mPublication && !mIsError) || mSize.width <= 0 || mSize.height <= 0) {
     return {};
   }
   const CheckedInt<size_t> stride = CheckedInt<size_t>(mSize.width) * 4;
@@ -56,6 +74,11 @@ webgpu::FrontBufferSnapshot VulkanNativeTextureHost::GetSnapshot() const {
   auto mapping = handle.Map();
   if (!handle || !mapping) {
     return {};
+  }
+  if (mIsError) {
+    memset(mapping.DataAs<uint8_t>(), 0, length.value());
+    return {std::move(handle), uint32_t(mSize.width), uint32_t(mSize.height),
+            stride.value()};
   }
   wr::DeviceIntRect rect;
   rect.min.x = 0;
@@ -79,19 +102,18 @@ webgpu::FrontBufferSnapshot VulkanNativeTextureHost::GetSnapshot() const {
 void VulkanNativeTextureHost::PushResourceUpdates(
     wr::TransactionBuilder& aResources, ResourceUpdateOp aOp,
     const Range<wr::ImageKey>& aImageKeys, const wr::ExternalImageId& aExtID) {
-  MOZ_RELEASE_ASSERT(aImageKeys.length() == 1);
+  MOZ_RELEASE_ASSERT(!mIsError && aImageKeys.length() == 1);
   const auto format = wr::SurfaceFormatToImageFormat(mFormat);
   MOZ_RELEASE_ASSERT(format);
-  wr::ImageDescriptor descriptor(mSize, *format,
-                                 (GetFlags() & TextureFlags::IS_OPAQUE)
-                                     ? wr::OpacityType::Opaque
-                                     : wr::OpacityType::HasAlphaChannel);
+  wr::ImageDescriptor descriptor(
+      mSize, *format,
+      mOpaque ? wr::OpacityType::Opaque : wr::OpacityType::HasAlphaChannel);
   const auto type =
       wr::ExternalImageType::TextureHandle(wr::ImageBufferKind::Texture2D);
   const auto method = aOp == ADD_IMAGE
                           ? &wr::TransactionBuilder::AddExternalImage
                           : &wr::TransactionBuilder::UpdateExternalImage;
-  const uint8_t channel = (GetFlags() & TextureFlags::IS_OPAQUE) ? 1 : 0;
+  const uint8_t channel = mOpaque ? 1 : 0;
   (aResources.*method)(aImageKeys[0], descriptor, aExtID, type, channel, false);
 }
 
@@ -99,9 +121,15 @@ void VulkanNativeTextureHost::PushDisplayItems(
     wr::DisplayListBuilder& aBuilder, const wr::LayoutRect& aBounds,
     const wr::LayoutRect& aClip, wr::ImageRendering aFilter,
     const Range<wr::ImageKey>& aImageKeys, PushDisplayItemFlagSet) {
+  if (mIsError) {
+    if (mOpaque) {
+      aBuilder.PushRect(aBounds, aClip, true, false, false,
+                        wr::ColorF{0.0f, 0.0f, 0.0f, 1.0f});
+    }
+    return;
+  }
   MOZ_RELEASE_ASSERT(aImageKeys.length() == 1);
-  aBuilder.PushImage(aBounds, aClip, true, false, aFilter, aImageKeys[0],
-                     !(mFlags & TextureFlags::NON_PREMULTIPLIED),
+  aBuilder.PushImage(aBounds, aClip, true, false, aFilter, aImageKeys[0], true,
                      wr::ColorF{1.0f, 1.0f, 1.0f, 1.0f});
 }
 

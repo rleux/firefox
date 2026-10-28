@@ -60,11 +60,17 @@ class WebGPUParent final : public PWebGPUParent, public SupportsWeakPtr {
   void QueueSubmit(RawId aQueueId, Span<const RawId> aCommandBuffers,
                    Span<const RawId> aTextureIds,
                    Span<const RawId> aExternalTextureSourceIds);
-  void DeviceCreateSwapChain(RawId aDeviceId, RawId aQueueId,
+  bool DeviceCreateSwapChain(RawId aDeviceId, RawId aQueueId,
                              const layers::RGBDescriptor& aDesc,
                              const nsTArray<RawId>& aBufferIds,
                              const layers::RemoteTextureOwnerId& aOwnerId,
-                             bool aUseSharedTextureInSwapChain);
+                             ffi::WGPUCanvasPresentationMode aMode,
+                             bool aOpaque);
+
+  bool PresentNativeCanvas(const layers::RemoteTextureOwnerId& aOwnerId,
+                           const layers::RemoteTextureId& aRemoteTextureId,
+                           ffi::WGPUNativeCanvasFrame* aFrame,
+                           uint64_t aSubmissionIndex);
 
   void SwapChainPresent(RawId aTextureId, RawId aCommandEncoderId,
                         RawId aCommandBufferId,

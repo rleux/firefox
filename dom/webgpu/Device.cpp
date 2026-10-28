@@ -68,8 +68,7 @@ Device::Device(Adapter* const aParent, RawId aDeviceId, RawId aQueueId,
       mFeatures(std::move(aFeatures)),
       mLimits(std::move(aLimits)),
       mAdapterInfo(std::move(aAdapterInfo)),
-      mSupportSharedTextureInSwapChain(
-          aParent->SupportSharedTextureInSwapChain()),
+      mCanvasPresentationMode(aParent->PresentationMode()),
       mLost(false),
       mLostPromise(std::move(aLostPromise)),
       mQueue(new class Queue(this, aQueueId)) {
@@ -106,8 +105,8 @@ already_AddRefed<Buffer> Device::CreateBuffer(
 }
 
 /* static */ dom::GPUTextureDescriptor Device::SwapChainTextureDescriptor(
-    const dom::GPUCanvasConfiguration& aConfig,
-    const gfx::IntSize& aCanvasSize) {
+    const dom::GPUCanvasConfiguration& aConfig, const gfx::IntSize& aCanvasSize,
+    ffi::WGPUCanvasPresentationMode aMode) {
   dom::GPUTextureDescriptor desc;
   desc.mDimension = dom::GPUTextureDimension::_2d;
   auto& sizeDict = desc.mSize.SetAsGPUExtent3DDict();
@@ -117,7 +116,10 @@ already_AddRefed<Buffer> Device::CreateBuffer(
   desc.mFormat = aConfig.mFormat;
   desc.mMipLevelCount = 1;
   desc.mSampleCount = 1;
-  desc.mUsage = aConfig.mUsage | dom::GPUTextureUsage_Binding::COPY_SRC;
+  desc.mUsage = aConfig.mUsage;
+  if (aMode != ffi::WGPUCanvasPresentationMode_UnifiedNative) {
+    desc.mUsage |= dom::GPUTextureUsage_Binding::COPY_SRC;
+  }
   desc.mViewFormats = aConfig.mViewFormats;
   return desc;
 }
@@ -126,7 +128,8 @@ already_AddRefed<Texture> Device::CreateTextureForSwapChain(
     const dom::GPUCanvasConfiguration* const aConfig,
     const gfx::IntSize& aCanvasSize, layers::RemoteTextureOwnerId aOwnerId) {
   MOZ_ASSERT(aConfig);
-  return CreateTexture(SwapChainTextureDescriptor(*aConfig, aCanvasSize),
+  return CreateTexture(SwapChainTextureDescriptor(*aConfig, aCanvasSize,
+                                                  mCanvasPresentationMode),
                        Some(aOwnerId));
 }
 
@@ -976,34 +979,47 @@ already_AddRefed<dom::Promise> Device::CreateRenderPipelineAsync(
   return promise.forget();
 }
 
-already_AddRefed<Texture> Device::InitSwapChain(
+bool Device::ConfigureSwapChain(
     const dom::GPUCanvasConfiguration* const aConfig,
     const layers::RemoteTextureOwnerId aOwnerId,
-    bool aUseSharedTextureInSwapChain, gfx::SurfaceFormat aFormat,
+    ffi::WGPUCanvasPresentationMode aMode, gfx::SurfaceFormat aFormat,
     gfx::IntSize aCanvasSize) {
   MOZ_ASSERT(aConfig);
 
   // Check that aCanvasSize and aFormat will generate a texture stride
   // within limits.
   const auto bufferStrideWithMask = BufferStrideWithMask(aCanvasSize, aFormat);
-  if (!bufferStrideWithMask.isValid()) {
-    return nullptr;
+  if (aMode != ffi::WGPUCanvasPresentationMode_UnifiedNative &&
+      !bufferStrideWithMask.isValid()) {
+    return false;
   }
 
   const layers::RGBDescriptor rgbDesc(aCanvasSize, aFormat,
                                       gfx::ColorSpace2::SRGB,
                                       gfx::TransferFunction::SRGB);
 
-  auto textureDesc = SwapChainTextureDescriptor(*aConfig, aCanvasSize);
+  auto textureDesc = SwapChainTextureDescriptor(*aConfig, aCanvasSize, aMode);
   ConvertTextureDescriptor ffiDesc(textureDesc);
 
   ffi::wgpu_client_create_swap_chain(
       GetClient(), GetId(), mQueue->GetId(), ffiDesc.Get(),
-      (int8_t)rgbDesc.format(), aOwnerId.mId, aUseSharedTextureInSwapChain);
+      (int8_t)rgbDesc.format(), aOwnerId.mId, aMode,
+      aConfig->mAlphaMode == dom::GPUCanvasAlphaMode::Opaque);
 
+  return true;
+}
+
+already_AddRefed<Texture> Device::InitSwapChain(
+    const dom::GPUCanvasConfiguration* const aConfig,
+    const layers::RemoteTextureOwnerId aOwnerId,
+    ffi::WGPUCanvasPresentationMode aMode, gfx::SurfaceFormat aFormat,
+    gfx::IntSize aCanvasSize) {
+  if (!ConfigureSwapChain(aConfig, aOwnerId, aMode, aFormat, aCanvasSize)) {
+    return nullptr;
+  }
   // TODO: `mColorSpace`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846608>
-  // TODO: `mAlphaMode`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846605>
-  return CreateTexture(textureDesc, Some(aOwnerId));
+  return CreateTexture(SwapChainTextureDescriptor(*aConfig, aCanvasSize, aMode),
+                       Some(aOwnerId));
 }
 
 bool Device::CheckNewWarning(const nsACString& aMessage) {

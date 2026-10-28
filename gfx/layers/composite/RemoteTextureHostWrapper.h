@@ -67,6 +67,13 @@ class RemoteTextureHostWrapper : public TextureHost {
 
   void SetReadFence(Fence* aReadFence) override;
 
+#if defined(XP_LINUX) && !defined(ANDROID)
+  VulkanNativeTextureHost* AsVulkanNativeTextureHost() override {
+    return mRemoteTexture ? mRemoteTexture->AsVulkanNativeTextureHost()
+                          : nullptr;
+  }
+#endif
+
   RemoteTextureHostWrapper* AsRemoteTextureHostWrapper() override {
     return this;
   }

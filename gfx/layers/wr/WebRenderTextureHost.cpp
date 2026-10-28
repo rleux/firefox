@@ -3,6 +3,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "WebRenderTextureHost.h"
+#if defined(XP_LINUX) && !defined(ANDROID)
+#  include "mozilla/layers/VulkanNativeTextureHost.h"
+#endif
 
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/LayersSurfaces.h"
@@ -183,6 +186,13 @@ void WebRenderTextureHost::PushDisplayItems(
     wr::DisplayListBuilder& aBuilder, const wr::LayoutRect& aBounds,
     const wr::LayoutRect& aClip, wr::ImageRendering aFilter,
     const Range<wr::ImageKey>& aImageKeys, PushDisplayItemFlagSet aFlags) {
+#if defined(XP_LINUX) && !defined(ANDROID)
+  if (auto* native = AsVulkanNativeTextureHost(); native && native->IsError()) {
+    native->PushDisplayItems(aBuilder, aBounds, aClip, aFilter, aImageKeys,
+                             aFlags);
+    return;
+  }
+#endif
   MOZ_ASSERT(aImageKeys.length() > 0);
 
   mWrappedTextureHost->PushDisplayItems(aBuilder, aBounds, aClip, aFilter,

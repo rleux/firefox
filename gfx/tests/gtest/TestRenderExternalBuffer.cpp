@@ -46,6 +46,11 @@
 #  include "mozilla/webrender/RenderDMABUFTextureHost.h"
 #  include "mozilla/webrender/RenderVulkanDMABufTextureHost.h"
 #  ifdef MOZ_WEBRENDER_VULKAN
+#    include "mozilla/AppUnits.h"
+#    include "mozilla/layers/AsyncImagePipelineManager.h"
+#    include "mozilla/layers/VulkanNativeTextureHost.h"
+#    include "mozilla/layers/WebRenderImageHost.h"
+#    include "mozilla/webgpu/ffi/wgpu.h"
 #    include "mozilla/webrender/RenderVulkanNativeTextureHost.h"
 #  endif
 #  include "mozilla/widget/DMABufAccess.h"
@@ -1023,10 +1028,44 @@ intptr_t wr_test_native_canvas_map_texture_count(void*);
 bool wr_test_native_canvas_map_live(void*, bool);
 void wr_test_native_canvas_map_finish(void*);
 void wr_test_native_canvas_map_delete(void*);
+void wr_test_native_canvas_routing_state();
+void* wr_test_native_canvas_routing_new();
+DocumentHandle* wr_test_native_canvas_routing_take_document(void*);
+Renderer* wr_test_native_canvas_routing_renderer(void*);
+WrVulkanExternalImages* wr_test_native_canvas_routing_images(void*);
+int32_t wr_test_native_canvas_routing_max_texture_size(void*);
+webgpu::ffi::WGPUNativeCanvasFrame* wr_test_native_canvas_routing_frame(
+    void*, uint32_t);
+void wr_test_native_canvas_routing_render(void*, uint32_t);
+void wr_test_native_canvas_routing_deinit_renderer(void*);
+void wr_test_native_canvas_routing_delete(void*);
 void* wr_test_foreign_rgb_new(int32_t*);
 void wr_test_foreign_rgb_import(void*, int32_t, uint32_t, uint64_t);
 void wr_test_foreign_rgb_delete(void*);
 int32_t wr_test_foreign_rgb_ready(void*);
+}
+
+extern "C" uint64_t wr_test_native_canvas_routing_lock(
+    uint64_t aExternalId, uint8_t aChannel, WrVulkanExternalImages* aImages) {
+  MOZ_RELEASE_ASSERT(RenderThread::IsInRenderThread() && aImages);
+  auto* host =
+      RenderThread::Get()->GetRenderTexture(wr::ToExternalImageId(aExternalId));
+  MOZ_RELEASE_ASSERT(host);
+  const auto image = host->LockVulkan(aChannel, aImages);
+  if (image.image_type == WrExternalImageType::Invalid) {
+    return 0;
+  }
+  MOZ_RELEASE_ASSERT(image.image_type == WrExternalImageType::NativeTexture);
+  return image.handle;
+}
+
+extern "C" void wr_test_native_canvas_routing_unlock(
+    uint64_t aExternalId, WrVulkanExternalImages* aImages) {
+  MOZ_RELEASE_ASSERT(RenderThread::IsInRenderThread() && aImages);
+  auto* host =
+      RenderThread::Get()->GetRenderTexture(wr::ToExternalImageId(aExternalId));
+  MOZ_RELEASE_ASSERT(host);
+  MOZ_RELEASE_ASSERT(!host->UnlockVulkan(aImages));
 }
 
 TEST_F(RenderExternalBuffer, DISABLED_VulkanUnifiedOwnerBootstrap) {
@@ -1436,6 +1475,256 @@ TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasMap) {
     images = nullptr;
     wr_test_native_canvas_map_finish(fixture);
   });
+}
+
+TEST_F(RenderExternalBuffer, DISABLED_VulkanNativeCanvasRouting) {
+  void* fixture = nullptr;
+  RefPtr<WebRenderAPI> api;
+  RefPtr<layers::AsyncImagePipelineManager> manager;
+  RefPtr<layers::WebRenderImageHost> imageHost;
+  RefPtr<layers::RemoteTextureOwnerClient> client;
+  Maybe<PipelineId> active;
+  auto cleanup = MakeScopeExit([&] {
+    OnCompositorThread([&] {
+      if (client) client->UnregisterAllTextureOwners();
+      if (manager) {
+        if (active) {
+          TransactionBuilder transaction(api);
+          manager->RemoveAsyncImagePipeline(active.ref(), nullptr, transaction);
+          api->SendTransaction(transaction);
+          active = Nothing();
+        }
+        manager->Destroy();
+        manager = nullptr;
+      }
+      if (imageHost) imageHost->OnReleased();
+      imageHost = nullptr;
+      client = nullptr;
+    });
+    OnRenderThread([&] {
+      if (api) {
+        api->DestroyRendererForTesting(
+            wr_test_native_canvas_routing_deinit_renderer, fixture);
+      } else if (fixture) {
+        wr_test_native_canvas_routing_deinit_renderer(fixture);
+      }
+    });
+    api = nullptr;
+    OnRenderThread([&] {
+      if (fixture) wr_test_native_canvas_routing_delete(fixture);
+    });
+  });
+  OnRenderThread([&] {
+    wr_test_native_canvas_routing_state();
+    fixture = wr_test_native_canvas_routing_new();
+    ASSERT_TRUE(fixture);
+    WebRenderCapabilities capabilities;
+    capabilities.mMaxTextureSize =
+        wr_test_native_canvas_routing_max_texture_size(fixture);
+    ASSERT_GE(capabilities.mMaxTextureSize, 3);
+    auto* document = wr_test_native_canvas_routing_take_document(fixture);
+    ASSERT_TRUE(document);
+    api = WebRenderAPI::CreateForTesting(document, capabilities);
+  });
+  ASSERT_TRUE(api);
+  const auto pid = base::GetCurrentProcId();
+  OnCompositorThread([&] {
+    RefPtr<WebRenderAPI> managerApi = api;
+    manager = MakeRefPtr<layers::AsyncImagePipelineManager>(
+        std::move(managerApi), false);
+    imageHost = MakeRefPtr<layers::WebRenderImageHost>(layers::TextureInfo(
+        layers::CompositableType::IMAGE, layers::ImageUsageType::Canvas,
+        layers::TextureFlags::DEFAULT));
+    client = MakeRefPtr<layers::RemoteTextureOwnerClient>(pid);
+  });
+  ASSERT_TRUE(manager && imageHost && client);
+  for (uint32_t alpha = 0; alpha < 2; ++alpha) {
+    const bool opaque = alpha == 0;
+    const PipelineId pipeline{0, 71 + alpha};
+    const PipelineId root{0, 70};
+    const auto owner = layers::RemoteTextureOwnerId::GetNext();
+    bool registered = false;
+    bool blankApplied = false;
+    OnCompositorThread([&] {
+      registered = client->RegisterTextureOwner(owner);
+      ASSERT_TRUE(registered);
+      manager->AddAsyncImagePipeline(pipeline, imageHost);
+      active = Some(pipeline);
+      manager->UpdateAsyncImagePipeline(
+          pipeline, LayoutDeviceRect(0, 0, 3, 2), WrRotation::Degree0,
+          ImageRendering::Pixelated, MixBlendMode::Normal);
+      RefPtr<layers::RemoteTextureOwnerClient> foreign =
+          MakeRefPtr<layers::RemoteTextureOwnerClient>(pid);
+      EXPECT_FALSE(foreign->RegisterTextureOwner(owner));
+      EXPECT_FALSE(foreign->IsRegistered(owner));
+      EXPECT_TRUE(client->IsRegistered(owner));
+      const auto blank = layers::RemoteTextureId::GetNext();
+      ASSERT_TRUE(client->PushNativeErrorTexture(
+          blank, owner, IntSize(3, 2), SurfaceFormat::R8G8B8A8, opaque));
+      imageHost->PushPendingRemoteTexture(blank, owner, pid, IntSize(3, 2),
+                                          layers::TextureFlags::DEFAULT);
+      imageHost->UseRemoteTexture(false);
+      TransactionBuilder transaction(api);
+      manager->ApplyAsyncImageForPipeline(pipeline, transaction, transaction,
+                                          nullptr, nullptr);
+      auto* native =
+          imageHost->GetCurrentTextureHost()->AsVulkanNativeTextureHost();
+      ASSERT_TRUE(native && native->IsError());
+      EXPECT_EQ(native->NumSubTextures(), 0U);
+      EXPECT_FALSE(native->GetMaybeExternalImageId());
+      DisplayListBuilder builder(root, api->GetCapabilities().mBackendType);
+      builder.Begin(AppUnitsPerCSSPixel());
+      const auto bounds = wr::ToLayoutRect(LayoutDeviceRect(0, 0, 3, 2));
+      builder.PushRect(
+          bounds, bounds, true, false, false,
+          ColorF{23.0f / 255.0f, 47.0f / 255.0f, 89.0f / 255.0f, 1.0f});
+      builder.PushIFrame(LayoutDeviceRect(0, 0, 3, 2), true, pipeline, false);
+      BuiltDisplayList display;
+      builder.End(display);
+      transaction.SetRootPipeline(root);
+      transaction.SetDocumentView(LayoutDeviceIntRect(0, 0, 3, 2));
+      transaction.SetDisplayList(
+          Epoch{alpha + 1}, api->GetNamespace(), root, display.dl_desc,
+          display.dl_items, display.dl_spatial_tree, display.dl_interner_delta);
+
+      transaction.GenerateFrame(VsyncId(), false, false,
+                                RenderReasons::TESTING);
+      api->SendTransaction(transaction);
+      blankApplied = true;
+    });
+    ASSERT_TRUE(registered && blankApplied);
+    OnRenderThread(
+        [&] { wr_test_native_canvas_routing_render(fixture, alpha * 3 + 1); });
+    for (uint32_t step = 0; step < 3; ++step) {
+      const auto id = layers::RemoteTextureId::GetNext();
+      const bool error = step == 1;
+      webgpu::ffi::WGPUNativeCanvasFrame* frame = nullptr;
+      if (!error) {
+        OnRenderThread([&] {
+          frame = wr_test_native_canvas_routing_frame(
+              fixture, alpha * 2 + (step == 2 ? 1 : 0));
+        });
+        ASSERT_TRUE(frame);
+      }
+      auto releaseFrame = MakeScopeExit([&] {
+        if (frame) webgpu::ffi::wgpu_native_canvas_frame_delete(frame);
+      });
+      bool applied = false;
+      Maybe<ExternalImageId> errorWrapper;
+      OnCompositorThread([&] {
+        bool accepted;
+        if (error) {
+          accepted = client->PushNativeErrorTexture(
+              id, owner, IntSize(3, 2), SurfaceFormat::R8G8B8A8, opaque);
+        } else {
+          auto* publication =
+              wr_vulkan_native_publication_from_webgpu_frame(frame);
+          ASSERT_TRUE(publication);
+          accepted = client->PushNativeTexture(id, owner, publication, opaque);
+        }
+        ASSERT_TRUE(accepted);
+        imageHost->PushPendingRemoteTexture(id, owner, pid, IntSize(3, 2),
+                                            layers::TextureFlags::DEFAULT);
+        imageHost->UseRemoteTexture(false);
+        auto* texture = imageHost->GetCurrentTextureHost();
+        ASSERT_TRUE(texture);
+        layers::RemoteTextureMap::Get()->GetRemoteTexture(
+            texture->AsRemoteTextureHostWrapper());
+        auto* native = texture->AsVulkanNativeTextureHost();
+        ASSERT_TRUE(native);
+        EXPECT_EQ(native->IsError(), error);
+        EXPECT_EQ(texture->NumSubTextures(), error ? 0U : 1U);
+        layers::TextureFlags flags =
+            (native->GetFlags() & ~layers::TextureFlags::IS_OPAQUE) |
+            layers::TextureFlags::NON_PREMULTIPLIED;
+        if (!opaque) flags |= layers::TextureFlags::IS_OPAQUE;
+        native->SetFlags(flags);
+        layers::TextureFlags wrapperFlags =
+            (texture->GetFlags() & ~layers::TextureFlags::IS_OPAQUE) |
+            layers::TextureFlags::NON_PREMULTIPLIED;
+        if (!opaque) wrapperFlags |= layers::TextureFlags::IS_OPAQUE;
+        texture->SetFlags(wrapperFlags);
+        if (error) {
+          EXPECT_FALSE(native->GetMaybeExternalImageId());
+          errorWrapper = texture->GetMaybeExternalImageId();
+          ASSERT_TRUE(errorWrapper);
+        }
+        if (step == 0) {
+          EXPECT_FALSE(client->PushNativeErrorTexture(
+              id, owner, IntSize(3, 2), SurfaceFormat::R8G8B8A8, opaque));
+          const auto otherOwner = layers::RemoteTextureOwnerId::GetNext();
+          ASSERT_TRUE(client->RegisterTextureOwner(otherOwner));
+          EXPECT_FALSE(client->PushNativeErrorTexture(
+              id, otherOwner, IntSize(3, 2), SurfaceFormat::R8G8B8A8, opaque));
+          EXPECT_FALSE(layers::RemoteTextureMap::Get()
+                           ->GetOrCreateRemoteTextureHostWrapper(
+                               id, otherOwner, pid, IntSize(3, 2),
+                               layers::TextureFlags::DEFAULT));
+          client->UnregisterTextureOwner(otherOwner);
+          auto rightful = layers::RemoteTextureMap::Get()
+                              ->GetOrCreateRemoteTextureHostWrapper(
+                                  id, owner, pid, IntSize(3, 2),
+                                  layers::TextureFlags::DEFAULT);
+          EXPECT_EQ(rightful.get(), texture);
+        }
+        TransactionBuilder transaction(api);
+        manager->ApplyAsyncImageForPipeline(pipeline, transaction, transaction,
+                                            nullptr, nullptr);
+        EXPECT_FALSE(transaction.IsResourceUpdatesEmpty());
+
+        transaction.GenerateFrame(VsyncId(), false, false,
+                                  RenderReasons::TESTING);
+        api->SendTransaction(transaction);
+        applied = true;
+      });
+      ASSERT_TRUE(applied);
+      if (frame) {
+        webgpu::ffi::wgpu_native_canvas_frame_delete(frame);
+        frame = nullptr;
+      }
+      OnRenderThread([&] {
+        if (errorWrapper) {
+          EXPECT_FALSE(
+              RenderThread::Get()->GetRenderTexture(errorWrapper.ref()));
+        }
+        wr_test_native_canvas_routing_render(fixture, alpha * 3 + step);
+      });
+      if (step == 0) {
+        OnCompositorThread([&] {
+          TransactionBuilder transaction(api);
+          manager->ApplyAsyncImageForPipeline(
+              pipeline, static_cast<layers::TextureHost*>(nullptr),
+              transaction);
+          EXPECT_TRUE(transaction.IsResourceUpdatesEmpty());
+          transaction.GenerateFrame(VsyncId(), false, false,
+                                    RenderReasons::TESTING);
+          api->SendTransaction(transaction);
+        });
+        OnRenderThread(
+            [&] { wr_test_native_canvas_routing_render(fixture, alpha * 3); });
+      }
+    }
+    OnCompositorThread([&] {
+      imageHost->ClearImages(layers::ClearImagesType::All);
+      EXPECT_FALSE(imageHost->GetCurrentTextureHost());
+      TransactionBuilder transaction(api);
+      manager->ApplyAsyncImageForPipeline(pipeline, transaction, transaction,
+                                          nullptr, nullptr);
+      EXPECT_FALSE(transaction.IsResourceUpdatesEmpty());
+      transaction.GenerateFrame(VsyncId(), false, false,
+                                RenderReasons::TESTING);
+      api->SendTransaction(transaction);
+    });
+    OnRenderThread([&] { wr_test_native_canvas_routing_render(fixture, 4); });
+    OnCompositorThread([&] {
+      TransactionBuilder transaction(api);
+      manager->RemoveAsyncImagePipeline(pipeline, nullptr, transaction);
+      api->SendTransaction(transaction);
+      active = Nothing();
+      imageHost->OnReleased();
+      client->UnregisterTextureOwner(owner);
+    });
+  }
 }
 
 static layers::SurfaceDescriptorDMABuf ForeignPublicationForTest(

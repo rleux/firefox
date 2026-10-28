@@ -17,6 +17,12 @@ class VulkanNativeTextureHost final : public TextureHost {
   static already_AddRefed<VulkanNativeTextureHost> Create(
       TextureFlags aFlags, wr::WrVulkanNativePublication* aPublication);
 
+  static already_AddRefed<VulkanNativeTextureHost> CreateError(
+      TextureFlags aFlags, const gfx::IntSize& aSize,
+      gfx::SurfaceFormat aFormat);
+
+  bool IsError() const { return mIsError; }
+  uint32_t NumSubTextures() override { return mIsError ? 0 : 1; }
   gfx::SurfaceFormat GetFormat() const override { return mFormat; }
   gfx::IntSize GetSize() const override { return mSize; }
   VulkanNativeTextureHost* AsVulkanNativeTextureHost() override { return this; }
@@ -44,12 +50,14 @@ class VulkanNativeTextureHost final : public TextureHost {
   using Publication =
       mozilla::UniquePtr<wr::WrVulkanNativePublication, PublicationDeleter>;
   VulkanNativeTextureHost(TextureFlags, Publication&&, const gfx::IntSize&,
-                          gfx::SurfaceFormat);
+                          gfx::SurfaceFormat, bool aIsError = false);
   ~VulkanNativeTextureHost() override = default;
 
   Publication mPublication;
   const gfx::IntSize mSize;
   const gfx::SurfaceFormat mFormat;
+  const bool mOpaque;
+  const bool mIsError;
 };
 
 }  // namespace mozilla::layers

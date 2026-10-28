@@ -55,10 +55,11 @@ bool RemoteTextureOwnerClient::IsRegistered(
   return true;
 }
 
-void RemoteTextureOwnerClient::RegisterTextureOwner(
+bool RemoteTextureOwnerClient::RegisterTextureOwner(
     const RemoteTextureOwnerId aOwnerId, bool aSharedRecycling) {
-  MOZ_ASSERT(mOwnerIds.find(aOwnerId) == mOwnerIds.end());
-  mOwnerIds.emplace(aOwnerId);
+  if (mOwnerIds.find(aOwnerId) != mOwnerIds.end()) {
+    return false;
+  }
   RefPtr<RemoteTextureRecycleBin> recycleBin;
   if (aSharedRecycling) {
     if (!mSharedRecycleBin) {
@@ -66,7 +67,12 @@ void RemoteTextureOwnerClient::RegisterTextureOwner(
     }
     recycleBin = mSharedRecycleBin;
   }
-  RemoteTextureMap::Get()->RegisterTextureOwner(aOwnerId, mForPid, recycleBin);
+  if (!RemoteTextureMap::Get()->RegisterTextureOwner(aOwnerId, mForPid,
+                                                     recycleBin)) {
+    return false;
+  }
+  mOwnerIds.emplace(aOwnerId);
+  return true;
 }
 
 void RemoteTextureOwnerClient::UnregisterTextureOwner(
@@ -249,28 +255,44 @@ bool RemoteTextureOwnerClient::PushVulkanTexture(
   if (!host) {
     return false;
   }
-  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
-                                       host, nullptr);
-  return true;
+  return RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid,
+                                              nullptr, host, nullptr);
 }
 
 #if defined(XP_LINUX) && !defined(ANDROID)
 bool RemoteTextureOwnerClient::PushNativeTexture(
     const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
-    wr::WrVulkanNativePublication* aPublication) {
+    wr::WrVulkanNativePublication* aPublication, bool aOpaque) {
   if (!IsRegistered(aOwnerId)) {
     wr::wr_vulkan_native_publication_delete(aPublication);
     return false;
   }
   RefPtr<TextureHost> host = VulkanNativeTextureHost::Create(
-      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT,
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT |
+          (aOpaque ? TextureFlags::IS_OPAQUE : TextureFlags::DEFAULT),
       aPublication);
   if (!host) {
     return false;
   }
-  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
-                                       host, nullptr);
-  return true;
+  return RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid,
+                                              nullptr, host, nullptr);
+}
+
+bool RemoteTextureOwnerClient::PushNativeErrorTexture(
+    const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+    const gfx::IntSize& aSize, gfx::SurfaceFormat aFormat, bool aOpaque) {
+  if (!IsRegistered(aOwnerId)) {
+    return false;
+  }
+  RefPtr<TextureHost> host = VulkanNativeTextureHost::CreateError(
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT |
+          (aOpaque ? TextureFlags::IS_OPAQUE : TextureFlags::DEFAULT),
+      aSize, aFormat);
+  if (!host) {
+    return false;
+  }
+  return RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid,
+                                              nullptr, host, nullptr);
 }
 #endif
 
@@ -427,7 +449,42 @@ bool RemoteTextureMap::RecycleTexture(
   return true;
 }
 
-void RemoteTextureMap::PushTexture(
+bool RemoteTextureMap::TextureIdOwnedByAnother(
+    const MonitorAutoLock&, base::ProcessId aForPid,
+    RemoteTextureOwnerId aOwnerId, RemoteTextureId aTextureId) const {
+  const auto wrapper =
+      mRemoteTextureHostWrapperHolders.find(std::pair(aForPid, aTextureId));
+  if (wrapper != mRemoteTextureHostWrapperHolders.end()) {
+    auto* remote = wrapper->second->mRemoteTextureHostWrapper
+                       ->AsRemoteTextureHostWrapper();
+    if (!remote || remote->mOwnerId != aOwnerId) {
+      return true;
+    }
+  }
+  for (const auto& entry : mTextureOwners) {
+    if (entry.first.first != aForPid || entry.first.second == aOwnerId) {
+      continue;
+    }
+    const auto& owner = entry.second;
+    if (owner->mLatestPushedTextureId == aTextureId ||
+        owner->mLatestUsingTextureId == aTextureId) {
+      return true;
+    }
+    for (const auto* holders :
+         {&owner->mWaitingTextureDataHolders, &owner->mUsingTextureDataHolders,
+          &owner->mReleasingTextureDataHolders}) {
+      if (std::any_of(holders->begin(), holders->end(),
+                      [&](const auto& holder) {
+                        return holder->mTextureId == aTextureId;
+                      })) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool RemoteTextureMap::PushTexture(
     const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
     const base::ProcessId aForPid, UniquePtr<TextureData>&& aTextureData,
     RefPtr<TextureHost>& aTextureHost,
@@ -442,9 +499,11 @@ void RemoteTextureMap::PushTexture(
     MonitorAutoLock lock(mMonitor);
 
     auto* owner = GetTextureOwner(lock, aOwnerId, aForPid);
-    if (!owner) {
-      MOZ_ASSERT_UNREACHABLE("unexpected to be called");
-      return;
+    if (!owner || !aTextureId.mId ||
+        aTextureId <= owner->mLatestPushedTextureId ||
+        aTextureId <= owner->mLatestUsingTextureId ||
+        TextureIdOwnedByAnother(lock, aForPid, aOwnerId, aTextureId)) {
+      return false;
     }
 
     if (owner->mIsContextLost &&
@@ -533,6 +592,7 @@ void RemoteTextureMap::PushTexture(
   for (auto& callback : renderingReadyCallbacks) {
     callback(info);
   }
+  return true;
 }
 
 bool RemoteTextureMap::RemoveTexture(const RemoteTextureId aTextureId,
@@ -666,16 +726,15 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
   return snapshot;
 }
 
-void RemoteTextureMap::RegisterTextureOwner(
+bool RemoteTextureMap::RegisterTextureOwner(
     const RemoteTextureOwnerId aOwnerId, const base::ProcessId aForPid,
     const RefPtr<RemoteTextureRecycleBin>& aRecycleBin) {
   MonitorAutoLock lock(mMonitor);
 
   const auto key = std::pair(aForPid, aOwnerId);
   auto it = mTextureOwners.find(key);
-  if (it != mTextureOwners.end()) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
-    return;
+  if (!aOwnerId.mId || it != mTextureOwners.end()) {
+    return false;
   }
   auto owner = std::make_unique<TextureOwner>();
   if (aRecycleBin) {
@@ -692,6 +751,7 @@ void RemoteTextureMap::RegisterTextureOwner(
   }
 
   mTextureOwners.emplace(key, std::move(owner));
+  return true;
 }
 
 void RemoteTextureMap::KeepTextureDataAliveForTextureHostIfNecessary(
@@ -1272,9 +1332,18 @@ RefPtr<TextureHost> RemoteTextureMap::GetOrCreateRemoteTextureHostWrapper(
   MOZ_ASSERT(CompositorThreadHolder::IsInCompositorThread());
   MonitorAutoLock lock(mMonitor);
 
+  if (!aTextureId.mId || !aOwnerId.mId ||
+      TextureIdOwnedByAnother(lock, aForPid, aOwnerId, aTextureId)) {
+    return nullptr;
+  }
   const auto key = std::pair(aForPid, aTextureId);
   auto it = mRemoteTextureHostWrapperHolders.find(key);
   if (it != mRemoteTextureHostWrapperHolders.end()) {
+    auto* remote =
+        it->second->mRemoteTextureHostWrapper->AsRemoteTextureHostWrapper();
+    if (!remote || remote->mOwnerId != aOwnerId || remote->mSize != aSize) {
+      return nullptr;
+    }
     return it->second->mRemoteTextureHostWrapper;
   }
 
@@ -1300,7 +1369,9 @@ void RemoteTextureMap::UnregisterRemoteTextureHostWrapper(
 
     const auto key = std::pair(aForPid, aTextureId);
     auto it = mRemoteTextureHostWrapperHolders.find(key);
-    if (it == mRemoteTextureHostWrapperHolders.end()) {
+    if (it == mRemoteTextureHostWrapperHolders.end() ||
+        it->second->mRemoteTextureHostWrapper->AsRemoteTextureHostWrapper()
+                ->mOwnerId != aOwnerId) {
       MOZ_ASSERT_UNREACHABLE("unexpected to be called");
       return;
     }

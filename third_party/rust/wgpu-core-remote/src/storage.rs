@@ -48,6 +48,11 @@ impl<T> Storage<T>
 where
     T: StorageItem,
 {
+    pub(crate) fn is_assigned(&self, id: Id<T::Marker>) -> bool {
+        let (index, _) = id.unzip();
+        matches!(self.map.get(index as usize), Some(Element::Occupied(..)))
+    }
+
     pub(crate) fn insert(&mut self, id: Id<T::Marker>, value: T) {
         let (index, epoch) = id.unzip();
         let index = index as usize;
@@ -102,6 +107,14 @@ impl<T> Storage<T>
 where
     T: StorageItem + Clone,
 {
+    pub(crate) fn try_get(&self, id: Id<T::Marker>) -> Option<T> {
+        let (index, epoch) = id.unzip();
+        match self.map.get(index as usize) {
+            Some(Element::Occupied(value, stored)) if *stored == epoch => Some(value.clone()),
+            _ => None,
+        }
+    }
+
     /// Get an owned reference to an item.
     /// Panics if there is an epoch mismatch, the entry is empty or in error.
     pub(crate) fn get(&self, id: Id<T::Marker>) -> T {

@@ -637,7 +637,7 @@ pub extern "C" fn wgpu_client_receive_server_message(client: &Client, byte_buf: 
                 limits,
                 name,
                 vendor,
-                support_use_shared_texture_in_swap_chain,
+                canvas_presentation_mode,
                 subgroup_min_size,
                 subgroup_max_size,
             }) = adapter_information
@@ -658,7 +658,7 @@ pub extern "C" fn wgpu_client_receive_server_message(client: &Client, byte_buf: 
                     limits,
                     name: nss(&name),
                     vendor,
-                    support_use_shared_texture_in_swap_chain,
+                    canvas_presentation_mode,
                     subgroup_min_size,
                     subgroup_max_size,
                 };
@@ -913,7 +913,8 @@ pub extern "C" fn wgpu_client_create_swap_chain(
     desc: &FfiTextureDescriptor,
     format: crate::SurfaceFormat,
     remote_texture_owner_id: crate::RemoteTextureOwnerId,
-    use_shared_texture_in_swap_chain: bool,
+    presentation_mode: crate::CanvasPresentationMode,
+    opaque: bool,
 ) {
     let identities = client.identities.lock();
     let buffer_ids: [id::BufferId; crate::MAX_SWAPCHAIN_BUFFER_COUNT] =
@@ -927,9 +928,22 @@ pub extern "C" fn wgpu_client_create_swap_chain(
         desc: desc.to_wgpu(),
         buffer_ids,
         remote_texture_owner_id,
-        use_shared_texture_in_swap_chain,
+        presentation_mode,
+        opaque,
     };
     client.queue_message(&message);
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_client_native_canvas_blank_present(
+    client: &Client,
+    remote_texture_id: crate::RemoteTextureId,
+    remote_texture_owner_id: crate::RemoteTextureOwnerId,
+) {
+    client.queue_message(&Message::NativeCanvasBlankPresent {
+        remote_texture_id,
+        remote_texture_owner_id,
+    });
 }
 
 #[no_mangle]

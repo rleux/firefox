@@ -91,7 +91,10 @@ class Device final : public DOMEventTargetHelper,
   RefPtr<SupportedFeatures> mFeatures;
   RefPtr<SupportedLimits> mLimits;
   RefPtr<AdapterInfo> mAdapterInfo;
-  const bool mSupportSharedTextureInSwapChain;
+  const ffi::WGPUCanvasPresentationMode mCanvasPresentationMode;
+  ffi::WGPUCanvasPresentationMode PresentationMode() const {
+    return mCanvasPresentationMode;
+  }
 
   static CheckedInt<uint32_t> BufferStrideWithMask(
       const gfx::IntSize& aSize, const gfx::SurfaceFormat& aFormat);
@@ -102,10 +105,14 @@ class Device final : public DOMEventTargetHelper,
                   RefPtr<AdapterInfo> aAdapterInfo,
                   RefPtr<dom::Promise> aLostPromise);
 
+  bool ConfigureSwapChain(const dom::GPUCanvasConfiguration* const aConfig,
+                          const layers::RemoteTextureOwnerId aOwnerId,
+                          ffi::WGPUCanvasPresentationMode aMode,
+                          gfx::SurfaceFormat aFormat, gfx::IntSize aCanvasSize);
   already_AddRefed<Texture> InitSwapChain(
       const dom::GPUCanvasConfiguration* const aConfig,
       const layers::RemoteTextureOwnerId aOwnerId,
-      bool aUseSharedTextureInSwapChain, gfx::SurfaceFormat aFormat,
+      ffi::WGPUCanvasPresentationMode aMode, gfx::SurfaceFormat aFormat,
       gfx::IntSize aCanvasSize);
   bool CheckNewWarning(const nsACString& aMessage);
 
@@ -146,7 +153,7 @@ class Device final : public DOMEventTargetHelper,
 
   static dom::GPUTextureDescriptor SwapChainTextureDescriptor(
       const dom::GPUCanvasConfiguration& aConfig,
-      const gfx::IntSize& aCanvasSize);
+      const gfx::IntSize& aCanvasSize, ffi::WGPUCanvasPresentationMode aMode);
   already_AddRefed<Texture> CreateTextureForSwapChain(
       const dom::GPUCanvasConfiguration* const aConfig,
       const gfx::IntSize& aCanvasSize,

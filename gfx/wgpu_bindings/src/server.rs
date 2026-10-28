@@ -303,6 +303,8 @@ pub struct Global {
     owner: WebGPUParentPtr,
     global: wgpu_core_remote::global::Global,
     unified: Option<Arc<crate::unified::ProcessOwner>>,
+    native_canvases: Option<crate::canvas::NativeCanvases>,
+    native_protocol_error: std::cell::Cell<bool>,
 
     /// Swap chain texture descriptors.
     ///
@@ -328,6 +330,84 @@ impl Global {
         );
         true
     }
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_protocol_error(global: &Global) -> bool {
+    global.native_protocol_error.get()
+        || global
+            .native_canvases
+            .as_ref()
+            .is_some_and(|native| native.protocol_error())
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_configuration_bgra(
+    global: &Global,
+    owner: crate::RemoteTextureOwnerId,
+    output: &mut bool,
+) -> bool {
+    if let Some(bgra) = global
+        .native_canvases
+        .as_ref()
+        .and_then(|native| native.configuration_bgra(owner.0))
+    {
+        *output = bgra;
+        true
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_snapshot_kind(
+    global: &Global,
+    owner: crate::RemoteTextureOwnerId,
+) -> crate::NativeCanvasSnapshotKind {
+    global
+        .native_canvases
+        .as_ref()
+        .map_or(crate::NativeCanvasSnapshotKind::Unavailable, |native| {
+            native.snapshot_kind(owner.0)
+        })
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_snapshot_frame(
+    global: &Global,
+    owner: crate::RemoteTextureOwnerId,
+) -> *mut crate::canvas::NativeCanvasFrame {
+    global
+        .native_canvases
+        .as_ref()
+        .and_then(|native| native.snapshot_frame(owner.0))
+        .map_or(std::ptr::null_mut(), |frame| {
+            Box::into_raw(Box::new(crate::canvas::NativeCanvasFrame::new(frame)))
+        })
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_create_snapshot_buffer(
+    global: &Global,
+    owner: crate::RemoteTextureOwnerId,
+    buffer_id: id::BufferId,
+    size: u64,
+) -> bool {
+    global.native_canvases.as_ref().is_some_and(|native| {
+        native.create_snapshot_buffer(&global.global, owner.0, buffer_id, size)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_server_native_canvas_copy_to_buffer(
+    global: &Global,
+    owner: crate::RemoteTextureOwnerId,
+    buffer_id: id::BufferId,
+    stride: u32,
+) -> u64 {
+    global.native_canvases.as_ref().map_or(0, |native| {
+        native.copy_current_to_buffer(&global.global, owner.0, buffer_id, stride)
+    })
 }
 
 impl std::ops::Deref for Global {
@@ -426,10 +506,15 @@ pub extern "C" fn wgpu_server_new(
             None,
         )
     };
+    let native_canvases = unified
+        .as_ref()
+        .map(|owner| crate::canvas::NativeCanvases::new(owner.clone()));
     Box::into_raw(Box::new(Global {
         owner,
         global,
         unified,
+        native_canvases,
+        native_protocol_error: std::cell::Cell::new(false),
         swap_chain_configs: Mutex::new(HashMap::new()),
     }))
 }
@@ -1295,12 +1380,24 @@ pub unsafe extern "C" fn wgpu_server_device_create_texture(
 
 #[no_mangle]
 pub extern "C" fn wgpu_server_texture_destroy(global: &Global, id: id::TextureId) {
-    global.texture_destroy(id);
+    if global
+        .native_canvases
+        .as_ref()
+        .is_none_or(|native| native.destroy_texture(id))
+    {
+        global.texture_destroy(id);
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn wgpu_server_texture_drop(global: &Global, id: id::TextureId) {
-    global.texture_remove(id);
+    if global
+        .native_canvases
+        .as_ref()
+        .is_none_or(|native| native.drop_texture(id))
+    {
+        global.texture_remove(id);
+    }
 }
 
 #[no_mangle]
@@ -1844,8 +1941,16 @@ extern "C" {
         buffer_ids: *const id::BufferId,
         buffer_ids_length: usize,
         remote_texture_owner_id: crate::RemoteTextureOwnerId,
-        use_shared_texture_in_swap_chain: bool,
-    );
+        presentation_mode: crate::CanvasPresentationMode,
+        opaque: bool,
+    ) -> bool;
+    fn wgpu_parent_present_native_canvas(
+        parent: WebGPUParentPtr,
+        remote_texture_owner_id: crate::RemoteTextureOwnerId,
+        remote_texture_id: crate::RemoteTextureId,
+        frame: *mut crate::canvas::NativeCanvasFrame,
+        submission_index: u64,
+    ) -> bool;
     fn wgpu_parent_swap_chain_present(
         parent: WebGPUParentPtr,
         texture_id: id::TextureId,
@@ -2462,9 +2567,8 @@ impl Global {
             }
             #[allow(unused_variables)]
             DeviceAction::CreateTexture(id, desc, swap_chain_id) => {
-                if swap_chain_id.is_some() && self.unified.is_some() {
-                    self.create_texture_error(device_id, id, &desc);
-                    self.reject_unified_canvas(device_id, "GPUCanvasContext.getCurrentTexture");
+                if let (Some(owner), Some(native)) = (swap_chain_id, &self.native_canvases) {
+                    native.create_current(&self.global, owner.0, device_id, id);
                     return;
                 }
                 let desc = if let Some(swap_chain_id) = swap_chain_id {
@@ -2801,6 +2905,9 @@ pub unsafe extern "C" fn wgpu_server_messages(
     let mut deserializer = bincode::Deserializer::from_slice(serialized_messages, options);
 
     for _ in 0..nr_of_messages {
+        if wgpu_server_native_canvas_protocol_error(global) {
+            break;
+        }
         let message: Message = serde::Deserialize::deserialize(&mut deserializer).unwrap();
         unsafe {
             process_message(global, data_buffers, shmem_mappings, message);
@@ -2997,7 +3104,13 @@ unsafe fn process_message(
                     driver: Cow::Owned(driver),
                     driver_info: Cow::Owned(driver_info),
                     backend,
-                    support_use_shared_texture_in_swap_chain,
+                    canvas_presentation_mode: if global.unified.is_some() {
+                        crate::CanvasPresentationMode::UnifiedNative
+                    } else if support_use_shared_texture_in_swap_chain {
+                        crate::CanvasPresentationMode::LegacyShared
+                    } else {
+                        crate::CanvasPresentationMode::Readback
+                    },
                     subgroup_min_size,
                     subgroup_max_size,
                 };
@@ -3116,11 +3229,9 @@ unsafe fn process_message(
             format,
             buffer_ids,
             remote_texture_owner_id,
-            use_shared_texture_in_swap_chain,
+            presentation_mode,
+            opaque,
         } => {
-            if global.reject_unified_canvas(device_id, "GPUCanvasContext.configure") {
-                return;
-            }
             let (sanitized_desc, size) = {
                 let TextureDescriptor {
                     size: wgt::Extent3d { width, height, .. },
@@ -3150,6 +3261,45 @@ unsafe fn process_message(
                     size,
                 )
             };
+
+            if let Some(native) = &global.native_canvases {
+                if presentation_mode != crate::CanvasPresentationMode::UnifiedNative {
+                    native.reject_protocol();
+                    return;
+                }
+                let Some(info) = native.configure(
+                    &global.global,
+                    remote_texture_owner_id.0,
+                    device_id,
+                    queue_id,
+                    &sanitized_desc,
+                    opaque,
+                ) else {
+                    return;
+                };
+                let owner_id = remote_texture_owner_id.0;
+                let registered = unsafe {
+                    wgpu_parent_create_swap_chain(
+                        global.owner,
+                        device_id,
+                        queue_id,
+                        size.width,
+                        size.height,
+                        format,
+                        buffer_ids.as_ptr(),
+                        buffer_ids.len(),
+                        remote_texture_owner_id,
+                        presentation_mode,
+                        opaque,
+                    )
+                };
+                native.configured(owner_id, info.generation, registered);
+                return;
+            }
+            if presentation_mode == crate::CanvasPresentationMode::UnifiedNative {
+                global.native_protocol_error.set(true);
+                return;
+            }
 
             unsafe {
                 assert!(wgpu_texture_format_is_valid_for_webidl(&nsCString::from(
@@ -3185,7 +3335,8 @@ unsafe fn process_message(
                     buffer_ids.as_ptr(),
                     buffer_ids.len(),
                     remote_texture_owner_id,
-                    use_shared_texture_in_swap_chain,
+                    presentation_mode,
+                    opaque,
                 );
             }
         }
@@ -3196,8 +3347,33 @@ unsafe fn process_message(
             remote_texture_id,
             remote_texture_owner_id,
         } => {
-            if global.unified.is_some() {
-                log::warn!("Unified native canvas presentation is unavailable");
+            if let Some(native) = &global.native_canvases {
+                let Some(publication) = native.prepare_present(
+                    remote_texture_owner_id.0,
+                    texture_id,
+                    remote_texture_id.0,
+                ) else {
+                    return;
+                };
+                let frame = publication
+                    .frame
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |frame| {
+                        Box::into_raw(Box::new(crate::canvas::NativeCanvasFrame::new(
+                            frame.clone(),
+                        )))
+                    });
+                let owner_id = remote_texture_owner_id.0;
+                let admitted = unsafe {
+                    wgpu_parent_present_native_canvas(
+                        global.owner,
+                        remote_texture_owner_id,
+                        remote_texture_id,
+                        frame,
+                        publication.submission_index,
+                    )
+                };
+                native.presented(owner_id, publication, admitted);
                 return;
             }
             wgpu_parent_swap_chain_present(
@@ -3209,11 +3385,39 @@ unsafe fn process_message(
                 remote_texture_owner_id,
             );
         }
+        Message::NativeCanvasBlankPresent {
+            remote_texture_id,
+            remote_texture_owner_id,
+        } => {
+            let Some(native) = &global.native_canvases else {
+                global.native_protocol_error.set(true);
+                return;
+            };
+            let Some(publication) =
+                native.prepare_blank(remote_texture_owner_id.0, remote_texture_id.0)
+            else {
+                return;
+            };
+            let owner_id = remote_texture_owner_id.0;
+            let admitted = unsafe {
+                wgpu_parent_present_native_canvas(
+                    global.owner,
+                    remote_texture_owner_id,
+                    remote_texture_id,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            native.presented(owner_id, publication, admitted);
+        }
         Message::SwapChainDrop {
             remote_texture_owner_id,
             txn_type,
             txn_id,
         } => {
+            if let Some(native) = &global.native_canvases {
+                native.drop_configuration(remote_texture_owner_id.0);
+            }
             global
                 .swap_chain_configs
                 .lock()
@@ -3227,21 +3431,41 @@ unsafe fn process_message(
             global.buffer_destroy(id);
         }
         Message::DestroyTexture(id) => {
-            wgpu_server_remove_shared_texture(global.owner, id);
-            global.texture_destroy(id);
+            if let Some(native) = &global.native_canvases {
+                if native.destroy_texture(id) {
+                    global.texture_destroy(id);
+                }
+            } else {
+                wgpu_server_remove_shared_texture(global.owner, id);
+                global.texture_destroy(id);
+            }
         }
         Message::DestroyExternalTexture(id) => global.external_texture_destroy(id),
         Message::DestroyExternalTextureSource(id) => {
             wgpu_parent_destroy_external_texture_source(global.owner, id);
         }
-        Message::DestroyDevice(id) => global.device_destroy(id),
+        Message::DestroyDevice(id) => {
+            if global
+                .native_canvases
+                .as_ref()
+                .is_none_or(|native| native.destroy_device(id))
+            {
+                global.device_destroy(id);
+            }
+        }
 
         Message::DropAdapter(id) => {
             global.adapter_remove(id);
         }
         Message::DropDevice(id) => {
-            wgpu_server_pre_device_drop(global.owner, id);
-            global.device_remove(id);
+            if global
+                .native_canvases
+                .as_ref()
+                .is_none_or(|native| native.destroy_device(id))
+            {
+                wgpu_server_pre_device_drop(global.owner, id);
+                global.device_remove(id);
+            }
         }
         Message::DropQueue(id) => {
             global.queue_remove(id);
@@ -3287,8 +3511,14 @@ unsafe fn process_message(
             global.render_pipeline_remove(id);
         }
         Message::DropTexture(id) => {
-            wgpu_server_remove_shared_texture(global.owner, id);
-            global.texture_remove(id);
+            if let Some(native) = &global.native_canvases {
+                if native.drop_texture(id) {
+                    global.texture_remove(id);
+                }
+            } else {
+                wgpu_server_remove_shared_texture(global.owner, id);
+                global.texture_remove(id);
+            }
         }
         Message::DropTextureView(id) => {
             global.texture_view_remove(id);

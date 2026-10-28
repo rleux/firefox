@@ -17,6 +17,9 @@
 #include "mozilla/layers/SharedSurfacesParent.h"
 #include "mozilla/layers/WebRenderImageHost.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
+#if defined(XP_LINUX) && !defined(ANDROID)
+#  include "mozilla/layers/VulkanNativeTextureHost.h"
+#endif
 #include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -235,6 +238,25 @@ Maybe<TextureHost::ResourceUpdateOp> AsyncImagePipelineManager::UpdateImageKeys(
     RemoteTextureMap::Get()->GetRemoteTexture(wrapper);
   }
 
+#if defined(XP_LINUX) && !defined(ANDROID)
+  auto* native = aTexture ? aTexture->AsVulkanNativeTextureHost() : nullptr;
+  const bool clearNative =
+      !aTexture && !aPipeline->mImageHost->GetCurrentTextureHost() &&
+      aPipeline->mCurrentTexture &&
+      aPipeline->mCurrentTexture->AsVulkanNativeTextureHost();
+  if (clearNative || (native && native->IsError())) {
+    for (auto key : aPipeline->mKeys) {
+      aSceneBuilderTxn.DeleteImage(key);
+    }
+    aPipeline->mKeys.Clear();
+    aPipeline->mCurrentTexture = aTexture;
+    aPipeline->mUseExternalImage = false;
+    aPipeline->mVideoOverlayDisabled = false;
+    aPipeline->mIsChanged = true;
+    return Nothing();
+  }
+#endif
+
   if (!aTexture || aTexture->NumSubTextures() == 0) {
     // We don't have a new texture or texture does not have SubTextures, there
     // isn't much we can do.
@@ -428,9 +450,27 @@ void AsyncImagePipelineManager::ApplyAsyncImageForPipeline(
     AsyncImagePipeline* aPipeline, TextureHost* aTexture,
     wr::TransactionBuilder& aSceneBuilderTxn,
     wr::TransactionBuilder& aMaybeFastTxn) {
+#if defined(XP_LINUX) && !defined(ANDROID)
+  const bool hadNativeCurrent =
+      aPipeline->mCurrentTexture &&
+      aPipeline->mCurrentTexture->AsVulkanNativeTextureHost();
+#endif
   nsTArray<wr::ImageKey> keys;
   auto op = UpdateImageKeys(aEpoch, aPipelineId, aPipeline, aTexture, keys,
                             aSceneBuilderTxn, aMaybeFastTxn);
+
+#if defined(XP_LINUX) && !defined(ANDROID)
+  if (hadNativeCurrent && !aPipeline->mCurrentTexture) {
+    aPipeline->mIsChanged = false;
+    aPipeline->mDLBuilder.Begin(AppUnitsPerCSSPixel());
+    wr::BuiltDisplayList dl;
+    aPipeline->mDLBuilder.End(dl);
+    aSceneBuilderTxn.SetDisplayList(aEpoch, mIdNamespace, aPipelineId,
+                                    dl.dl_desc, dl.dl_items, dl.dl_spatial_tree,
+                                    dl.dl_interner_delta);
+    return;
+  }
+#endif
 
   bool updateDisplayList =
       aPipeline->mInitialised &&
@@ -482,7 +522,17 @@ void AsyncImagePipelineManager::ApplyAsyncImageForPipeline(
                                     referenceFrameId.ref());
   }
 
-  if (aPipeline->mCurrentTexture && !keys.IsEmpty()) {
+#if defined(XP_LINUX) && !defined(ANDROID)
+  auto* native = aPipeline->mCurrentTexture->AsVulkanNativeTextureHost();
+  if (native && native->IsError()) {
+    const auto rect = wr::ToLayoutRect(LayoutDeviceRect(
+        0, 0, native->GetSize().width, native->GetSize().height));
+    native->PushDisplayItems(aPipeline->mDLBuilder, rect, rect,
+                             aPipeline->mFilter,
+                             Range<wr::ImageKey>(nullptr, 0), {});
+  } else
+#endif
+      if (aPipeline->mCurrentTexture && !keys.IsEmpty()) {
     LayoutDeviceRect rect(0, 0, aPipeline->mCurrentTexture->GetSize().width,
                           aPipeline->mCurrentTexture->GetSize().height);
 

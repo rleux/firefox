@@ -476,6 +476,27 @@ WebRenderAPI::~WebRenderAPI() {
   wr_api_delete(mDocHandle);
 }
 
+#ifdef ENABLE_TESTS
+already_AddRefed<WebRenderAPI> WebRenderAPI::CreateForTesting(
+    wr::DocumentHandle* aOwnedDocument, WebRenderCapabilities aCapabilities) {
+  MOZ_RELEASE_ASSERT(aOwnedDocument);
+  RefPtr<WebRenderAPI> api =
+      new WebRenderAPI(aOwnedDocument, wr::WindowId{0},
+                       std::move(aCapabilities), layers::SyncHandle{});
+  return api.forget();
+}
+
+void WebRenderAPI::DestroyRendererForTesting(void (*aDeinitRenderer)(void*),
+                                             void* aFixture) {
+  MOZ_RELEASE_ASSERT(RenderThread::IsInRenderThread());
+  MOZ_RELEASE_ASSERT(!mRootApi && !mRootDocumentApi && !mRendererDestroyed &&
+                     aDeinitRenderer);
+  wr_api_stop_render_backend(mDocHandle);
+  aDeinitRenderer(aFixture);
+  mRendererDestroyed = true;
+}
+#endif
+
 void WebRenderAPI::DestroyRenderer() {
   MOZ_RELEASE_ASSERT(!mRootApi);
 
