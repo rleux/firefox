@@ -479,11 +479,11 @@ pub extern "C" fn wgpu_server_unified_available(is_gpu_process: bool) -> bool {
 #[no_mangle]
 pub extern "C" fn wgpu_server_new(
     owner: WebGPUParentPtr,
-    unified_requested: bool,
+    unified_enabled: bool,
     is_gpu_process: bool,
 ) -> *mut Global {
     log::info!("Initializing WGPU server");
-    let (global, unified) = if unified_requested {
+    let (global, unified) = if unified_enabled {
         let Some(shared) = crate::unified::available_owner(is_gpu_process) else {
             log::warn!("Unified WebGPU native owner is unavailable");
             return std::ptr::null_mut();

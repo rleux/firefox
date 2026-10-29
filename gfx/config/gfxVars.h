@@ -304,11 +304,12 @@ class gfxVars final {
 #undef GFX_VAR_DECL
 
   static bool WebRenderUnifiedWebGPURequired() {
-    return WebRenderUnifiedWebGPURequested();
+    return WebRenderUnifiedWebGPURequested() && GPUProcessEnabled() &&
+           UseWebRenderVulkan();
   }
 
   static bool UseWebRenderUnifiedWebGPU() {
-    return WebRenderUnifiedWebGPURequired() && UseWebRenderVulkan() &&
+    return WebRenderUnifiedWebGPURequired() &&
            WebRenderUnifiedWebGPUSupported();
   }
 

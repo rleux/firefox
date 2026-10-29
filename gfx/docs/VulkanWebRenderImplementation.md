@@ -110,6 +110,7 @@ and checks surfaces and alpha visuals on that device's selected adapter. A faile
 crashed or malformed shared probe preserves the ordinary WR result. Native WebGPU
 requests are denied when sharing is required but unavailable; ordinary Vulkan WR
 continues. Baseline WebGPU blocklist and security decisions remain unchanged.
+GPU-process absence retains the separate ordinary-WebGPU policy.
 Alpha-visual admission uses the effective renderer mode's result. Probe selections
 are advisory; runtime owner and surface checks remain authoritative.
 

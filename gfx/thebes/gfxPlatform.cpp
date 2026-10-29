@@ -3264,28 +3264,24 @@ void gfxPlatform::InitWebGPUConfig() {
     }
   }
 
-  if (gfxVars::WebRenderUnifiedWebGPURequested()) {
-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) && \
-    defined(MOZ_WEBRENDER_VULKAN)
-    if (!gfxConfig::IsEnabled(Feature::GPU_PROCESS)) {
-      featureWebGPU.ForceDisable(
-          FeatureStatus::UnavailableNoGpuProcess,
-          "Unified WebGPU requires the GPU process",
-          "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_GPU_PROCESS"_ns);
-    } else if (!gfxVars::UseWebRenderVulkan()) {
-      featureWebGPU.ForceDisable(
-          FeatureStatus::Unavailable,
-          "Unified WebGPU rendering requires Vulkan WebRender",
-          "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_VULKAN"_ns);
-    }
-#else
+  if (gfxConfig::IsEnabled(Feature::GPU_PROCESS) &&
+      gfxVars::WebRenderUnifiedWebGPURequested() &&
+      !gfxVars::UseWebRenderVulkan()) {
+    featureWebGPU.ForceDisable(
+        FeatureStatus::Unavailable,
+        "Unified WebGPU rendering requires Vulkan WebRender",
+        "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_VULKAN"_ns);
+  }
+#if !defined(XP_LINUX) || defined(MOZ_WIDGET_ANDROID) || \
+    !defined(MOZ_WEBRENDER_VULKAN)
+  else if (gfxVars::WebRenderUnifiedWebGPURequired()) {
     featureWebGPU.ForceDisable(
         FeatureStatus::Unavailable,
         "Unified WebGPU native canvas transport is unsupported on this "
         "platform",
         "FEATURE_FAILURE_WEBGPU_UNIFIED_UNSUPPORTED_PLATFORM"_ns);
-#endif
   }
+#endif
 
   gfxVars::SetAllowWebGPU(featureWebGPU.IsEnabled());
 

@@ -89,7 +89,6 @@ class TestUnifiedWebGPUStartup(MarionetteTestCase):
     vulkan_pref = "gfx.webrender.vulkan"
     requires_vulkan = "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_VULKAN"
     unsupported_platform = "FEATURE_FAILURE_WEBGPU_UNIFIED_UNSUPPORTED_PLATFORM"
-    requires_gpu_process = "FEATURE_FAILURE_WEBGPU_UNIFIED_REQUIRES_GPU_PROCESS"
 
     def setUp(self):
         super().setUp()
@@ -139,7 +138,6 @@ class TestUnifiedWebGPUStartup(MarionetteTestCase):
                 {
                     self.requires_vulkan,
                     self.unsupported_platform,
-                    self.requires_gpu_process,
                 }
             ),
             failures,
@@ -295,25 +293,112 @@ class TestUnifiedWebGPUStartup(MarionetteTestCase):
                 parse_shared_native_probe(output)
 
     def test_requested_without_vulkan_requires_restart(self):
-        self.restart_with_prefs(unified=True, vulkan=False)
+        options = {
+            "gfx.webrender.all": True,
+            "layers.gpu-process.enabled": True,
+            "layers.gpu-process.force-enabled": True,
+        }
+        self.restart_with_prefs(unified=False, vulkan=False, **options)
+        backend = Wait(self.marionette, timeout=30).until(lambda _: self.backend_info())
+        if self.gpu_pid() == -1 or backend["process"] != "GPU":
+            self.skipTest("Requires a GPU process with sharing disabled")
+        self.restart_with_prefs(unified=True, vulkan=False, **options)
         self.assert_unified_unavailable()
 
         self.marionette.set_pref(self.unified_pref, False)
         self.marionette.set_pref(self.vulkan_pref, True)
         self.assert_unified_unavailable()
 
-        self.restart_with_prefs(unified=False, vulkan=False)
+        self.restart_with_prefs(unified=False, vulkan=False, **options)
         self.assert_no_unified_failure()
 
     def test_disabled_gate_ignores_live_enable(self):
-        self.restart_with_prefs(unified=False, vulkan=False)
+        options = {
+            "gfx.webrender.all": True,
+            "layers.gpu-process.enabled": True,
+            "layers.gpu-process.force-enabled": True,
+        }
+        self.restart_with_prefs(unified=False, vulkan=False, **options)
+        backend = Wait(self.marionette, timeout=30).until(lambda _: self.backend_info())
+        if self.gpu_pid() == -1 or backend["process"] != "GPU":
+            self.skipTest("Requires a GPU process with sharing disabled")
         self.assert_no_unified_failure()
 
         self.marionette.set_pref(self.unified_pref, True)
         self.assert_no_unified_failure()
 
-        self.restart_with_prefs(unified=True, vulkan=False)
+        self.restart_with_prefs(unified=True, vulkan=False, **options)
         self.assert_unified_unavailable()
+
+    def test_requested_without_gpu_process_uses_ordinary_vulkan(self):
+        self.check_requested_without_gpu_process_uses_ordinary_renderer(True, "Vulkan")
+
+    def test_requested_without_gpu_process_uses_ordinary_gl(self):
+        self.check_requested_without_gpu_process_uses_ordinary_renderer(False, "OpenGL")
+
+    def check_requested_without_gpu_process_uses_ordinary_renderer(
+        self, vulkan, expected_backend
+    ):
+        if self.marionette.session_capabilities.get("platformName") != "linux":
+            self.skipTest("Requires a Linux parent-process renderer")
+        options = {
+            "gfx.webrender.all": False,
+            "gfx.webgpu.ignore-blocklist": False,
+            "layers.gpu-process.enabled": False,
+            "layers.gpu-process.force-enabled": False,
+            "dom.webgpu.allow-in-parent": True,
+            "dom.webgpu.enabled": True,
+            "remote.screenshot.use_readback": True,
+            "gfx.color_management.mode": 0,
+        }
+        self.restart_with_prefs(unified=False, vulkan=vulkan, **options)
+        backend = Wait(self.marionette, timeout=30).until(lambda _: self.backend_info())
+        self.assertEqual(self.gpu_pid(), -1)
+        if backend["backend"] != expected_backend or backend["process"] != "Parent":
+            self.skipTest("Gate-off prerequisite: ordinary parent-process renderer")
+        with self.marionette.using_context("content"):
+            self.marionette.navigate(self.marionette.absolute_url("test.html"))
+            adapter = self.marionette.execute_async_script(
+                """
+                const done = arguments[arguments.length - 1];
+                navigator.gpu?.requestAdapter().then(
+                    adapter => done(Boolean(adapter)), () => done(false)
+                ) ?? done(false);
+                """
+            )
+        if not adapter:
+            self.skipTest("Gate-off prerequisite: ordinary parent-process WebGPU adapter")
+        self.assert_no_unified_failure()
+        self.assert_canvas_usage(native=False, color=[1, 0, 0, 1])
+        self.assert_readback_color([255, 0, 0, 255])
+
+        self.restart_with_prefs(unified=True, vulkan=vulkan, **options)
+        backend = Wait(self.marionette, timeout=30).until(lambda _: self.backend_info())
+        self.assertEqual(self.gpu_pid(), -1)
+        self.assertEqual(backend["backend"], expected_backend)
+        self.assertEqual(backend["process"], "Parent")
+        self.assert_no_unified_failure()
+        self.assert_canvas_usage(native=False, color=[0, 1, 0, 1])
+        self.assert_readback_color([0, 255, 0, 255])
+
+        self.marionette.set_pref(self.unified_pref, False)
+        self.marionette.set_pref(self.vulkan_pref, not vulkan)
+        backend = self.backend_info()
+        self.assertEqual(self.gpu_pid(), -1)
+        self.assertEqual(backend["backend"], expected_backend)
+        self.assertEqual(backend["process"], "Parent")
+        self.assert_no_unified_failure()
+        self.assert_canvas_usage(native=False, color=[0, 0, 1, 1])
+        self.assert_readback_color([0, 0, 255, 255])
+
+        self.restart_with_prefs(unified=True, vulkan=vulkan, **options)
+        backend = Wait(self.marionette, timeout=30).until(lambda _: self.backend_info())
+        self.assertEqual(self.gpu_pid(), -1)
+        self.assertEqual(backend["backend"], expected_backend)
+        self.assertEqual(backend["process"], "Parent")
+        self.assert_no_unified_failure()
+        self.assert_canvas_usage(native=False, color=[1, 1, 0, 1])
+        self.assert_readback_color([255, 255, 0, 255])
 
     def test_non_vulkan_webgpu_backend_keeps_ordinary_vulkan_ui(self):
         if self.marionette.session_capabilities.get("platformName") != "linux":

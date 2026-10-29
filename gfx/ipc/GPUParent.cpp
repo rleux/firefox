@@ -417,8 +417,7 @@ mozilla::ipc::IPCResult GPUParent::RecvInit(
 
 #endif
 
-  if (gfxVars::UseWebRenderUnifiedWebGPU() &&
-      gfxVars::UseWebRenderVulkan()) {
+  if (gfxVars::UseWebRenderUnifiedWebGPU()) {
 #ifdef MOZ_WEBRENDER_VULKAN
     mUnifiedOwner.reset(wr::wr_unified_owner_new(
         XRE_IsGPUProcess(), gfxVars::UseWebRenderVulkan()));
@@ -608,8 +607,7 @@ static void CopyFeatureChange(Feature aFeature, Maybe<FeatureFailure>* aOut) {
 }
 
 mozilla::ipc::IPCResult GPUParent::RecvGetDeviceStatus(GPUDeviceData* aOut) {
-  if (gfxVars::UseWebRenderUnifiedWebGPU() &&
-      gfxVars::UseWebRenderVulkan()) {
+  if (gfxVars::UseWebRenderUnifiedWebGPU()) {
 #ifdef MOZ_WEBRENDER_VULKAN
     if (!mUnifiedOwner || !wr::wr_unified_owner_is_ready(mUnifiedOwner.get())) {
       return IPC_FAIL(this, "Unified WebGPU native owner is not ready");
