@@ -243,7 +243,7 @@ pub use crate::composite::{MappableCompositor, MappedTileInfo, SWGLCompositeSurf
 pub use crate::device::wgpu;
 pub use crate::device::{UploadMethod, VertexUsageHint, get_unoptimized_shader_source};
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, ShaderError};
-pub use crate::device::{Device, DeviceOptions, GlBackendConfig, GpuBackendConfig, GraphicsApi, GraphicsApiInfo};
+pub use crate::device::{Device, DeviceOptions, GlBackendConfig, GpuBackendConfig, GpuSubmissionStatus, GraphicsApi, GraphicsApiInfo, PresentResult};
 pub use crate::profiler::{ProfilerHooks, ProfileCounterValue, set_profiler_hooks};
 pub use crate::renderer::{
     CpuProfile, DebugFlags, GpuProfile,

@@ -72,6 +72,8 @@ pub(in crate::device) struct RenderDevice {
     skipped_pass: bool,
     frame: GpuFrameId,
     inside_frame: bool,
+    capture_pending: bool,
+    capture_this_frame: bool,
     pub(super) submitted: core::SubmissionIndex,
     pub(super) completed: Arc<AtomicU64>,
     in_flight: VecDeque<core::SubmissionIndex>,
@@ -145,6 +147,8 @@ impl RenderDevice {
             skipped_pass: false,
             frame: GpuFrameId::new(0),
             inside_frame: false,
+            capture_pending: false,
+            capture_this_frame: false,
             submitted: 0,
             completed: Arc::new(AtomicU64::new(0)),
             in_flight: VecDeque::new(),
@@ -201,6 +205,14 @@ impl RenderDevice {
                 let _ = self.failure.set(error);
                 self.pass = None;
                 self.encoder = None;
+                self.inside_frame = false;
+                self.capture_pending = false;
+                self.capture_this_frame = false;
+                self.skipped_pass = false;
+                self.textures.set_output(None);
+                if let Some(surface) = &mut self.surface {
+                    let _ = surface.discard();
+                }
                 None
             }
         }
@@ -216,6 +228,19 @@ impl RenderDevice {
             }
         }
         Ok(true)
+    }
+    fn drain(&mut self) -> Result<()> {
+        if self.inside_frame {
+            return Err("Vulkan surface lifecycle changes require a frame boundary".into());
+        }
+        if let Some(error) = self.failure().map(str::to_owned) {
+            let _ = self.poll();
+            return Err(error);
+        }
+        let index = self.submit()?;
+        self.owner.wait_for(index).map_err(|e| e.to_string())?;
+        self.completed.fetch_max(index, Ordering::Release);
+        self.poll()
     }
     fn commands(&mut self) -> Result<Arc<core::command::CommandEncoder>> {
         if self.encoder.is_none() {
@@ -259,8 +284,10 @@ impl RenderDevice {
             .map_err(|e| e.to_string())?;
         if present {
             if let Some(surface) = &mut self.surface {
-                self.textures.set_output(None);
-                surface.present()?;
+                if surface.has_output() {
+                    self.textures.set_output(None);
+                    surface.present()?;
+                }
             }
         }
         let completed = self.completed.clone();
@@ -292,6 +319,7 @@ impl RenderDevice {
                 .ok_or("Vulkan frame identifiers exhausted")?,
         );
         self.inside_frame = true;
+        self.capture_this_frame = std::mem::take(&mut self.capture_pending);
         if let Some(surface) = &mut self.surface {
             surface.begin_frame();
         }
@@ -304,7 +332,23 @@ impl RenderDevice {
         if !self.inside_frame || self.pass.is_some() || self.skipped_pass {
             return Err("Vulkan frame has unfinished passes".into());
         }
+        let capture = std::mem::take(&mut self.capture_this_frame);
+        let had_output = self.surface.as_ref().is_some_and(|s| s.has_output());
+        let snapshot = if capture && self.surface.as_ref().is_some_and(|s| s.snapshot_enabled()) {
+            let encoder = self.commands()?;
+            Some(self.surface.as_ref().unwrap().snapshot(&encoder)?)
+        } else {
+            None
+        };
         let index = self.submit_inner(true)?;
+        if had_output || (capture && self.surface.is_some()) {
+            let presented = self
+                .surface
+                .as_ref()
+                .is_some_and(|s| s.outcome == Some(PresentResult::Presented));
+            self.textures
+                .set_output(if presented { snapshot } else { None });
+        }
         self.inside_frame = false;
         Ok(index)
     }

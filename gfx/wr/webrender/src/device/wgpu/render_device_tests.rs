@@ -769,3 +769,134 @@ fn native_backend_failure_discards_deferred_passes_and_unsubmitted_work() {
     assert!(wrapper.failure().is_some());
     wrapper.deinit();
 }
+
+#[test]
+#[ignore = "Requires Vulkan and Khronos validation"]
+fn native_backend_completion_publication_survives_concurrent_core_polling() {
+    use std::sync::atomic::AtomicBool;
+    let owner = Arc::new(device());
+    let mut backend = RenderDevice::new(owner.clone()).unwrap();
+    let stop = AtomicBool::new(false);
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Acquire) {
+                owner.poll().unwrap();
+                std::thread::yield_now();
+            }
+        });
+        let mut last = 0;
+        for _ in 0..128 {
+            backend.begin_frame().unwrap();
+            last = backend.end_frame().unwrap();
+        }
+        owner.wait_for(last).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while backend.completed.load(Ordering::Acquire) < last
+            && std::time::Instant::now() < deadline
+        {
+            owner.poll().unwrap();
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Release);
+        assert!(backend.completed.load(Ordering::Acquire) >= last);
+    });
+    backend.deinit();
+    assert!(backend.failure().is_none());
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}
+
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[test]
+#[ignore = "Requires native X11, Vulkan presentation and Khronos validation"]
+fn native_surface_capture_requests_are_consumed_without_output() {
+    use super::super::{surface_testing, Options, X11Window};
+    use crate::device::GpuBackend;
+
+    super::super::tests::validation_logging();
+    let window = Rc::new(unsafe { X11Window::new() });
+    let mut native = RenderDevice::new_windowed(&Options {
+        window: Some(window),
+        validation: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let draw = |native: &mut RenderDevice| {
+        native.begin_frame().unwrap();
+        native
+            .begin_render_pass(&pass(DeviceIntSize::new(64, 48)))
+            .unwrap();
+        native.end_render_pass(StoreOp::Store).unwrap();
+        native.end_frame().unwrap();
+    };
+
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    draw(&mut native);
+    let snapshot = native.textures.output().unwrap();
+    native.begin_frame().unwrap();
+    native.end_frame().unwrap();
+    assert!(Arc::ptr_eq(&snapshot, &native.textures.output().unwrap()));
+    let mut pixels = [0; 12];
+    native
+        .capture_into(
+            snapshot,
+            DeviceIntRect::from_origin_and_size(
+                api::units::DeviceIntPoint::new(1, 1),
+                DeviceIntSize::new(3, 1),
+            ),
+            ImageFormat::BGRA8,
+            &mut pixels,
+        )
+        .unwrap();
+    assert_eq!(pixels, [255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    native.begin_frame().unwrap();
+    native.end_frame().unwrap();
+    assert!(!GpuBackend::readback_ready(&native));
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    draw(&mut native);
+    assert!(GpuBackend::readback_ready(&native));
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    surface_testing::ACQUIRE.with(|s| s.set(Some(wgt::SurfaceStatus::Timeout)));
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    draw(&mut native);
+    assert!(GpuBackend::readback_ready(&native));
+
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    GpuBackend::set_surface_paused(&mut native, true).unwrap();
+    GpuBackend::set_surface_paused(&mut native, false).unwrap();
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    GpuBackend::set_surface_paused(&mut native, true).unwrap();
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    GpuBackend::set_surface_paused(&mut native, false).unwrap();
+    draw(&mut native);
+    assert!(!GpuBackend::readback_ready(&native));
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    draw(&mut native);
+    assert!(GpuBackend::readback_ready(&native));
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    native.begin_frame().unwrap();
+    assert!(GpuBackend::prepare_readback(&mut native).unwrap());
+    native.owner.device.destroy();
+    assert!(native.operation(RenderDevice::end_frame).is_none());
+    assert!(!native.capture_pending);
+    assert!(!native.capture_this_frame);
+    assert!(!GpuBackend::readback_ready(&native));
+    GpuBackend::deinit(&mut native);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}

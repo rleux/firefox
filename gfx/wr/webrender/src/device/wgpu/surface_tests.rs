@@ -154,4 +154,4 @@ fn invalid_native_display_is_rejected_before_vulkan_initialization() {
 
 #[cfg(all(target_os = "linux", feature = "debugger"))]
 #[path = "surface_x11_tests.rs"]
-mod x11;
+pub(in crate::device::wgpu) mod x11;

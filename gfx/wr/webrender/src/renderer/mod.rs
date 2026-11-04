@@ -1569,6 +1569,34 @@ impl Renderer {
         self.force_redraw = true;
     }
 
+    /// Poll queue completion even while idle. Indices belong to this renderer.
+    pub fn gpu_submission_status(&mut self) -> Result<Option<crate::GpuSubmissionStatus>, RendererError> {
+        self.device.gpu_submission_status().map_err(RendererError::Device)
+    }
+
+    /// Drain work and release swapchain images while retaining the native window.
+    pub fn set_surface_paused(&mut self, paused: bool) -> Result<(),RendererError> {
+        self.device.set_surface_paused(paused).map_err(RendererError::Device)?;
+        if !paused { self.force_redraw(); }
+        Ok(())
+    }
+
+    /// Detach or replace the pinned native owner between frames on the same display.
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    pub fn set_wgpu_surface(&mut self, window: Option<Rc<dyn crate::wgpu::SurfaceWindow>>, options: crate::wgpu::SurfaceOptions) -> Result<(),RendererError> {
+        self.device.set_wgpu_surface(window,options).map_err(RendererError::Device)?;
+        self.force_redraw();
+        Ok(())
+    }
+
+    /// Request one snapshot after resource updates and before rendering.
+    /// False means surface readback is unavailable; failed GPU frames consume the request.
+    pub fn prepare_readback(&mut self) -> Result<bool,RendererError> {
+        let supported=self.device.prepare_readback().map_err(RendererError::Device)?;
+        if supported { self.force_redraw(); }
+        Ok(supported)
+    }
+
     /// Renders the current frame.
     ///
     /// A Frame is supplied by calling [`generate_frame()`][webrender_api::Transaction::generate_frame].
@@ -2040,6 +2068,8 @@ impl Renderer {
         self.staging_texture_pool.end_frame(&mut self.device);
         self.texture_upload_buffer_pool.end_frame(&mut self.device);
         self.device.end_frame();
+        results.present_result = self.device.present_result();
+        if results.present_result.is_some_and(|r|r!=crate::PresentResult::Presented) { self.force_redraw=true; }
 
         if debug_overlay.is_some() {
             self.last_time = current_time;
@@ -4195,13 +4225,16 @@ impl Renderer {
     }
 
     /// Reads back the presented frame; used by Gecko's WR bindings.
+    /// For backend presentation, request prepare_readback before rendering.
+    /// Without a captured frame no pixels are written.
     pub fn read_pixels_into(&mut self, rect: FramebufferIntRect, format: ImageFormat, output: &mut [u8]) {
+        if !self.device.readback_ready() { return; }
         self.device.read_pixels_into(ReadTarget::Default, rect, format, output);
     }
 
     pub fn read_pixels_rgba8(&mut self, rect: FramebufferIntRect) -> Vec<u8> {
         let mut pixels = vec![0; (rect.area() * 4) as usize];
-        self.device.read_pixels_into(ReadTarget::Default, rect, ImageFormat::RGBA8, &mut pixels);
+        self.read_pixels_into(rect, ImageFormat::RGBA8, &mut pixels);
         pixels
     }
 
@@ -4403,6 +4436,9 @@ impl RendererStats {
 /// some non-repr(C) data.
 #[derive(Debug, Default)]
 pub struct RenderResults {
+    /// Backend presentation outcome. Retry requires another render without a new scene;
+    /// Occluded waits for visibility, and SizeMismatch requests updated window dimensions.
+    pub present_result: Option<crate::PresentResult>,
     /// Statistics about the frame that was rendered.
     pub stats: RendererStats,
 

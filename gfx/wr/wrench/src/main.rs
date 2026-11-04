@@ -174,7 +174,59 @@ mod swgl {
     pub struct Context;
 }
 
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+pub struct VulkanWindow {
+    window: Window,
+    _display: winit::event_loop::OwnedDisplayHandle,
+}
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+impl VulkanWindow {
+    fn new(event_loop: &ActiveEventLoop, size: DeviceIntSize) -> Rc<Self> {
+        let window = event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_title("Wrench Vulkan")
+                    .with_inner_size(LogicalSize::new(size.width as f64, size.height as f64)),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                window.window_handle().unwrap().as_raw(),
+                RawWindowHandle::Xlib(_)
+            ),
+            "--vulkan currently requires an X11 window"
+        );
+        Rc::new(Self {
+            window,
+            _display: event_loop.owned_display_handle(),
+        })
+    }
+}
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+impl winit::raw_window_handle::HasDisplayHandle for VulkanWindow {
+    fn display_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::DisplayHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        winit::raw_window_handle::HasDisplayHandle::display_handle(&self.window)
+    }
+}
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+impl HasWindowHandle for VulkanWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<winit::raw_window_handle::WindowHandle<'_>, winit::raw_window_handle::HandleError>
+    {
+        self.window.window_handle()
+    }
+}
+#[cfg(all(feature = "vulkan", target_os = "linux"))]
+// Winit's X11 owner has immutable native window/connection identities and destroys the window only on Drop.
+unsafe impl webrender::wgpu::SurfaceWindow for VulkanWindow {}
+
 pub enum WindowWrapper {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    Vulkan { window: Rc<VulkanWindow>, vsync:bool, validation:bool },
     Windowed {
         window: Window,
         gl_surface: Surface<WindowSurface>,
@@ -199,6 +251,11 @@ pub enum WindowWrapper {
 pub struct HeadlessEventIterater;
 
 impl WindowWrapper {
+    pub fn is_vulkan(&self)->bool {
+        #[cfg(all(feature="vulkan",target_os="linux"))]
+        if matches!(self,Self::Vulkan{..}) { return true; }
+        false
+    }
     #[cfg(feature = "software")]
     fn upload_software_to_native(&self) {
         if matches!(self, WindowWrapper::Headless { .. }) { return }
@@ -234,6 +291,8 @@ impl WindowWrapper {
             }
             WindowWrapper::Angle { context, .. } => context.swap_buffers().unwrap(),
             WindowWrapper::Headless { .. } => {}
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { .. } => {}
         }
     }
 
@@ -246,6 +305,8 @@ impl WindowWrapper {
             WindowWrapper::Windowed { window, .. } => inner_size(window),
             WindowWrapper::Angle { window, .. } => inner_size(window),
             WindowWrapper::Headless { context, .. } => DeviceIntSize::new(context.width, context.height),
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { window,.. } => inner_size(&window.window),
         }
     }
 
@@ -254,6 +315,8 @@ impl WindowWrapper {
             WindowWrapper::Windowed { window, .. } => window.scale_factor() as f32,
             WindowWrapper::Angle { window, .. } => window.scale_factor() as f32,
             WindowWrapper::Headless { .. } => 1.0,
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { window,.. } => window.window.scale_factor() as f32,
         }
     }
 
@@ -266,6 +329,8 @@ impl WindowWrapper {
                 let _ = window.request_inner_size(LogicalSize::new(size.width as f64, size.height as f64));
             },
             WindowWrapper::Headless { .. } => unimplemented!(),
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { window,.. } => { let _=window.window.request_inner_size(LogicalSize::new(size.width as f64,size.height as f64)); },
         }
     }
 
@@ -274,11 +339,15 @@ impl WindowWrapper {
             WindowWrapper::Windowed { window, .. } => window.set_title(title),
             WindowWrapper::Angle { window, .. } => window.set_title(title),
             WindowWrapper::Headless { .. } => (),
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { window,.. } => window.window.set_title(title),
         }
     }
 
     pub fn software_gl(&self) -> Option<&swgl::Context> {
         match self {
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { .. } => None,
             WindowWrapper::Windowed { sw_ctx, .. } |
             WindowWrapper::Angle { sw_ctx, .. } |
             WindowWrapper::Headless { sw_ctx, .. } => sw_ctx.as_ref(),
@@ -287,6 +356,8 @@ impl WindowWrapper {
 
     pub fn native_gl(&self) -> &dyn gl::Gl {
         match self {
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { .. } => panic!("Vulkan has no GL context"),
             WindowWrapper::Windowed { gl, .. } |
             WindowWrapper::Angle { gl, .. } |
             WindowWrapper::Headless { gl, .. } => &**gl,
@@ -313,6 +384,8 @@ impl WindowWrapper {
 
     pub fn clone_gl(&self) -> Rc<dyn gl::Gl> {
         match self {
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan { .. } => panic!("Vulkan has no GL context"),
             WindowWrapper::Windowed { gl, sw_ctx, .. } |
             WindowWrapper::Angle { gl, sw_ctx, .. } |
             WindowWrapper::Headless { gl, sw_ctx, .. } => {
@@ -678,6 +751,9 @@ struct WrenchApp {
     // -- Config --
     size: DeviceIntSize,
     vsync: bool,
+    vulkan: bool,
+    #[cfg_attr(not(all(feature="vulkan",target_os="linux")),allow(dead_code))]
+    vulkan_validation: bool,
     angle: bool,
     software: bool,
     using_compositor: bool,
@@ -746,7 +822,11 @@ struct WrenchApp {
 
 impl ApplicationHandler for WrenchApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if let Some(window)=&self.window {
+            if window.is_vulkan() {
+                if let Some(wrench)=&mut self.wrench {wrench.renderer.set_surface_paused(false).unwrap();}
+                if let Some(show)=&mut self.show_state {show.do_render=true;}
+            }
             return;
         }
 
@@ -774,6 +854,11 @@ impl ApplicationHandler for WrenchApp {
                 gl,
                 sw_ctx,
             }
+        } else if self.vulkan {
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            { WindowWrapper::Vulkan{window:VulkanWindow::new(event_loop,self.size),vsync:self.vsync,validation:self.vulkan_validation} }
+            #[cfg(not(all(feature="vulkan",target_os="linux")))]
+            panic!("--vulkan requires Linux and --features vulkan")
         } else if self.angle {
             // Angle is only supported on Windows. The non-Windows stub for
             // angle::Context::with_window always returns Err, so guard this
@@ -809,15 +894,14 @@ impl ApplicationHandler for WrenchApp {
             make_window_with_fallback(event_loop, self.size, self.vsync, self.gl_request, self.software)
         };
 
-        let gl = window.gl();
-        gl.clear_color(0.3, 0.0, 0.0, 1.0);
-        println!("OpenGL version {}, {}", gl.get_string(gl::VERSION), gl.get_string(gl::RENDERER));
+        if !window.is_vulkan() {
+            let gl = window.gl();
+            gl.clear_color(0.3, 0.0, 0.0, 1.0);
+            println!("OpenGL version {}, {}", gl.get_string(gl::VERSION), gl.get_string(gl::RENDERER));
+        }
         println!("hidpi factor: {}", window.hidpi_factor());
 
-        let init_target_dbg = self.color_target_init || matches!(
-            self.subcommand.as_str(),
-            "reftest"
-        );
+        let init_target_dbg = !window.is_vulkan() && (self.color_target_init || self.subcommand=="reftest");
 
         let needs_frame_notifier = matches!(
             self.subcommand.as_str(),
@@ -1001,6 +1085,13 @@ impl ApplicationHandler for WrenchApp {
         }
     }
 
+    fn suspended(&mut self,_event_loop:&ActiveEventLoop) {
+        if self.window.as_ref().is_some_and(|w|w.is_vulkan()) {
+            if let Some(wrench)=&mut self.wrench {wrench.renderer.set_surface_paused(true).unwrap();}
+            if let Some(show)=&mut self.show_state {show.do_render=false;}
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1012,7 +1103,11 @@ impl ApplicationHandler for WrenchApp {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Focused(..) => show.do_render = true,
+            WindowEvent::Focused(..) | WindowEvent::Resized(..) => show.do_render = true,
+            WindowEvent::Occluded(occluded) => {
+                wrench.renderer.set_surface_paused(occluded).unwrap();
+                show.do_render=!occluded;
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 if let Some(ref window) = self.window {
                     let pos: LogicalPosition<f32> =
@@ -1168,12 +1263,21 @@ impl ApplicationHandler for WrenchApp {
                 wrench.show_onscreen_help();
             }
 
-            wrench.render();
+            let results=wrench.render();
+            if matches!(results.present_result,Some(webrender::PresentResult::Retry | webrender::PresentResult::SizeMismatch)) {
+                show.do_render=true;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(16)));
+            }
             window.upload_software_to_native();
             window.swap_buffers();
 
             if show.do_loop {
                 show.thing.next_frame();
+            }
+        }
+        if let Some(status)=wrench.renderer.gpu_submission_status().unwrap() {
+            if status.completed<status.submitted {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now()+std::time::Duration::from_millis(16)));
             }
         }
     }
@@ -1208,6 +1312,9 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
 
     let dump_shader_source = args.value_of("dump_shader_source").map(String::from);
     let headless = args.is_present("headless");
+    let vulkan=args.is_present("vulkan");
+    let vulkan_validation=args.is_present("vulkan_validation");
+    if vulkan { assert!(matches!(args.subcommand_name().unwrap_or("show"),"show"|"png"|"reftest"|"test_init"|"test_invalidation"),"this Wrench command requires OpenGL"); }
     let angle = args.is_present("angle");
     let software = args.is_present("software");
     let vsync = args.is_present("vsync");
@@ -1341,7 +1448,7 @@ fn build_app(args: clap::ArgMatches, proxy: Option<EventLoopProxy<()>>) -> Wrenc
     };
 
     WrenchApp {
-        size, vsync, angle, software, using_compositor, gl_request, headless,
+        size, vsync, vulkan, vulkan_validation, angle, software, using_compositor, gl_request, headless,
         res_path, use_optimized_shaders, rebuild, no_subpixel_aa, verbose,
         no_scissor, no_batch_global, color_target_init, precache, dump_shader_source, profiler_ui,
         subcommand, compositor_clips, reftest_specific, reftest_fuzz,
@@ -1576,7 +1683,13 @@ pub fn main() {
     let exit_code = if args.is_present("headless") {
         run_headless(args)
     } else {
-        let event_loop = EventLoop::new().expect("failed to create event loop");
+        let mut builder=EventLoop::builder();
+        #[cfg(all(feature="vulkan",target_os="linux"))]
+        if args.is_present("vulkan") {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }
+        let event_loop = builder.build().expect("failed to create event loop");
         run(event_loop, args)
     };
     if exit_code != 0 {

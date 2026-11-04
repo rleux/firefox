@@ -89,7 +89,7 @@ pub fn png(
 
     // wait for the frame
     rx.recv().unwrap();
-    wrench.render();
+    wrench.render_for_readback(window);
 
     let (fb_size, data, settings) = match surface {
         ReadSurface::Screen => {
@@ -97,7 +97,7 @@ pub fn png(
             let rect = FramebufferIntSize::new(dim.width, dim.height).into();
             let data = wrench.renderer.read_pixels_rgba8(rect);
             (dim, data, SaveSettings {
-                flip_vertical: true,
+                flip_vertical: !wrench.renderer.device.surface_origin_is_top_left(),
                 try_crop: true,
             })
         }

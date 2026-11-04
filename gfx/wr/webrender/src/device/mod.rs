@@ -47,6 +47,28 @@ pub enum GpuBackendConfig {
     Vulkan(wgpu::Options),
 }
 
+/// Outcome of presentation performed by the backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentResult {
+    /// Submitted for presentation, not necessarily displayed yet.
+    Presented,
+    /// Render again on the next refresh even without a new scene.
+    Retry,
+    /// Wait until the window becomes visible before retrying.
+    Occluded,
+    /// Refresh the window dimensions before rendering again.
+    SizeMismatch,
+}
+
+/// Core submission indices belong to one renderer and reset on recreation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuSubmissionStatus {
+    /// Latest core work, including resource-only and presentation submissions.
+    pub submitted: u64,
+    /// All work through this index has completed successfully.
+    pub completed: u64,
+}
+
 /// What the GL backend needs from the embedder.
 pub struct GlBackendConfig {
     /// The context to render through, which must be current on the render
@@ -107,6 +129,23 @@ pub trait GpuBackend {
 
     /// A permanent backend error requiring renderer recovery.
     fn failure(&self) -> Option<&str> { None }
+
+    fn present_result(&self) -> Option<PresentResult> { None }
+
+    /// Polls completion without submitting work, including after a failed frame.
+    fn gpu_submission_status(&mut self) -> Result<Option<GpuSubmissionStatus>, String> { Ok(None) }
+
+    fn set_surface_paused(&mut self, _paused: bool) -> Result<(), String> { Ok(()) }
+
+    /// Request a snapshot of the next GPU frame when supported.
+    /// Failed GPU frame attempts consume the request.
+    fn prepare_readback(&mut self) -> Result<bool, String> { Ok(true) }
+    fn readback_ready(&self) -> bool { true }
+
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    fn set_wgpu_surface(&mut self, _window: Option<Rc<dyn wgpu::SurfaceWindow>>, _options: wgpu::SurfaceOptions) -> Result<(), String> {
+        Err("This backend does not manage a Vulkan surface".into())
+    }
 
     #[cfg(test)]
     fn wgpu_test_fail_submit(&mut self) { panic!("Not a Vulkan backend") }

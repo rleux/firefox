@@ -1193,7 +1193,7 @@ impl<'a> ReftestHarness<'a> {
 
         // wait for the frame
         self.rx.recv().unwrap();
-        let results = self.wrench.render();
+        let results = self.wrench.render_for_readback(self.window);
 
         let window_size = self.window.get_inner_size();
         assert!(
@@ -1204,10 +1204,18 @@ impl<'a> ReftestHarness<'a> {
 
         // taking the bottom left sub-rectangle
         let rect = FramebufferIntRect::from_origin_and_size(
-            FramebufferIntPoint::new(0, window_size.height - size.height),
+            FramebufferIntPoint::new(0, if self.wrench.renderer.device.surface_origin_is_top_left() {0} else {window_size.height - size.height}),
             FramebufferIntSize::new(size.width, size.height),
         );
-        let pixels = self.wrench.renderer.read_pixels_rgba8(rect);
+        let mut pixels = self.wrench.renderer.read_pixels_rgba8(rect);
+        if self.wrench.renderer.device.surface_origin_is_top_left() {
+            let stride=size.width as usize*4;
+            for y in 0..size.height as usize/2 {
+                let other=size.height as usize-1-y;
+                let (before,after)=pixels.split_at_mut(other*stride);
+                before[y*stride..(y+1)*stride].swap_with_slice(&mut after[..stride]);
+            }
+        }
         self.window.swap_buffers();
 
         let write_debug_images = false;

@@ -44,6 +44,7 @@ core-graphics = "0.23"
 core-foundation = "0.9"
 
 [features]
+vulkan = ["webrender/vulkan"]
 default = [ "env_logger" ]
 headless = [ "osmesa-sys", "osmesa-src" ]
 software = [ "swgl" ]

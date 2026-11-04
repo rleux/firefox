@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
+use crate::wgpu::{SurfaceWindow, SurfaceOptions};
 use crate::device as wr;
 use crate::device::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
 use crate::internal_types::{RenderTargetInfo, Swizzle, SwizzleSettings};
@@ -109,6 +110,73 @@ impl wr::GpuBackend for RenderDevice {
     }
     fn failure(&self) -> Option<&str> {
         RenderDevice::failure(self)
+    }
+    fn present_result(&self) -> Option<wr::PresentResult> {
+        self.surface.as_ref().and_then(|s| s.outcome)
+    }
+    fn gpu_submission_status(&mut self) -> Result<Option<wr::GpuSubmissionStatus>, String> {
+        let result = self.poll();
+        if let Err(error) = result {
+            self.record_result::<()>(Err(error));
+        }
+        if let Some(error) = self.failure() {
+            return Err(error.to_owned());
+        }
+        Ok(Some(wr::GpuSubmissionStatus {
+            submitted: self.submitted,
+            completed: self.completed.load(Ordering::Acquire),
+        }))
+    }
+    fn set_surface_paused(&mut self, paused: bool) -> Result<(), String> {
+        if self.surface.is_none() {
+            return Ok(());
+        }
+        let result = self
+            .drain()
+            .and_then(|_| self.surface.as_mut().unwrap().pause(paused));
+        if result.is_ok() {
+            self.capture_pending = false;
+            self.capture_this_frame = false;
+        }
+        result
+    }
+    fn set_wgpu_surface(
+        &mut self,
+        window: Option<Rc<dyn SurfaceWindow>>,
+        options: SurfaceOptions,
+    ) -> Result<(), String> {
+        if self.surface.is_none() {
+            return Err("Vulkan device was not created for window presentation".into());
+        }
+        let drained = self.drain();
+        let result = if window.is_none() {
+            self.textures.set_output(None);
+            let detached = self.surface.as_mut().unwrap().replace(None, options);
+            drained.and(detached)
+        } else {
+            drained.and_then(|_| self.surface.as_mut().unwrap().replace(window, options))
+        };
+        if result.is_ok() {
+            self.capture_pending = false;
+            self.capture_this_frame = false;
+            self.textures.set_output(None);
+        }
+        result
+    }
+    fn prepare_readback(&mut self) -> Result<bool, String> {
+        let result = self
+            .surface
+            .as_mut()
+            .map(|s| s.enable_readback())
+            .unwrap_or(Ok(true));
+        let supported = self
+            .record_result(result)
+            .ok_or_else(|| self.failure().unwrap().to_owned())?;
+        self.capture_pending |= supported && self.surface.is_some();
+        Ok(supported)
+    }
+    fn readback_ready(&self) -> bool {
+        self.textures.output().is_some()
     }
     fn blend_barrier(&self) {}
     fn shader_feature_flags(&self) -> ShaderFeatureFlags {

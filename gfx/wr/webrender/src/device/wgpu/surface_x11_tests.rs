@@ -314,7 +314,7 @@ fn native_surface_direct_output_discard_resize_and_snapshot() {
         surface.discard().unwrap();
         surface.begin_frame();
     }
-    surface.enable_readback();
+    assert!(surface.enable_readback().unwrap());
     let image = surface.acquire([64, 48]).unwrap().unwrap();
     let cmd = clear(&owner, &image, wgt::Color::RED);
     let first = owner.submit(&[cmd]).unwrap();

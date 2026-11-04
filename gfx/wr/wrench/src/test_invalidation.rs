@@ -733,12 +733,12 @@ impl<'a> TestHarness<'a> {
             NotifierEvent::WakeUp { composite_needed } => composite_needed,
             NotifierEvent::ShutDown => unreachable!(),
         };
-        let results = self.wrench.render();
+        let results = self.wrench.render_for_readback(self.window);
 
         let probe_pixel = probe.map(|(x, y)| {
             let window_size = self.window.get_inner_size();
             let rect = FramebufferIntRect::from_origin_and_size(
-                FramebufferIntPoint::new(x, window_size.height - 1 - y),
+                FramebufferIntPoint::new(x, if self.wrench.renderer.device.surface_origin_is_top_left() {y} else {window_size.height - 1 - y}),
                 FramebufferIntSize::new(1, 1),
             );
             let pixels = self.wrench.renderer.read_pixels_rgba8(rect);

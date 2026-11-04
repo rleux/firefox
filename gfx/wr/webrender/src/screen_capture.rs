@@ -426,6 +426,7 @@ impl Renderer {
         image_format: ImageFormat,
     ) -> Option<(RecordedFrameHandle, DeviceIntSize)> {
         let device_size = self.device_size()?;
+        if !self.device.readback_ready() { return None; }
         self.device.begin_frame();
 
         let (handle, _) = self
@@ -488,6 +489,7 @@ impl Renderer {
         buffer_size: DeviceIntSize,
         image_format: ImageFormat,
     ) -> (AsyncScreenshotHandle, DeviceIntSize) {
+        if !self.device.readback_ready() { return (AsyncScreenshotHandle(0),DeviceIntSize::zero()); }
         self.device.begin_frame();
 
         let handle = self
