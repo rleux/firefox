@@ -2,10 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::Compiler;
+use super::{tool, validator_tool, Compiler};
 use crate::reflection::{self, Reflection};
 use std::{
-    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -24,24 +23,6 @@ pub(super) const COMPILER: Compiler = Compiler {
     link,
     reflect,
 };
-
-fn tool(variable: &str, name: &str) -> OsString {
-    std::env::var_os(variable).unwrap_or_else(|| {
-        if let Some(fetches) = std::env::var_os("MOZ_FETCHES_DIR") {
-            let name = if cfg!(windows) {
-                format!("{name}.exe")
-            } else {
-                name.to_owned()
-            };
-            PathBuf::from(fetches)
-                .join("shader-tools/bin")
-                .join(name)
-                .into_os_string()
-        } else {
-            name.into()
-        }
-    })
-}
 
 fn run(command: &mut Command) -> io::Result<String> {
     let output = command
@@ -68,7 +49,7 @@ fn compile(source: &Path, output: &Path) -> io::Result<()> {
         .args(["-V", "-Os", "--target-env", "vulkan1.1", "-o"])
         .arg(output)
         .arg(source))?;
-    run(Command::new(tool("SPIRV_VAL", "spirv-val"))
+    run(Command::new(validator_tool()?)
         .args(["--target-env", "vulkan1.1"])
         .arg(output))?;
     Ok(())
@@ -84,7 +65,7 @@ fn link(sources: &[PathBuf], directory: &Path) -> io::Result<()> {
 }
 
 fn reflect(binary: &Path) -> io::Result<Reflection> {
-    run(Command::new(tool("SPIRV_VAL", "spirv-val"))
+    run(Command::new(validator_tool()?)
         .args(["--target-env", "vulkan1.1"])
         .arg(binary))?;
     Ok(reflection::reflect(&run(Command::new(tool(

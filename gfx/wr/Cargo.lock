@@ -3573,6 +3573,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "spirv 0.4.0+sdk-1.4.341.0",
  "thiserror 2.0.20",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -6444,8 +6445,11 @@ dependencies = [
 name = "webrender_shader_build"
 version = "0.1.0"
 dependencies = [
+ "naga 30.0.0",
  "regex",
  "webrender_build",
+ "wgpu-naga-bridge",
+ "wgpu-types 30.0.0",
 ]
 
 [[package]]

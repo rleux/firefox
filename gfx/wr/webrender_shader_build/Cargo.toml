@@ -6,9 +6,14 @@ license = "MPL-2.0"
 description = "Host-side Vulkan shader compilation for WebRender"
 
 [features]
-default = ["glslang"]
+default = []
 glslang = []
+# Reads Firefox's actual vendored core shader; enabled by its required host-test job.
+gecko-core-shader-tests = ["glslang", "dep:naga", "naga/wgsl-in", "naga/spv-out", "dep:wgpu-naga-bridge", "dep:wgpu-types"]
 
 [dependencies]
 webrender_build = { path = "../webrender_build", features = ["vulkan"] }
 regex = "1.11.1"
+naga = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true }
+wgpu-naga-bridge = { optional = true, git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e" }
+wgpu-types = { optional = true, git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std"] }

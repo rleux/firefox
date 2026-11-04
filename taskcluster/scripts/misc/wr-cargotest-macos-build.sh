@@ -11,6 +11,8 @@ pushd "${GECKO_PATH}/gfx/wr"
 CARGOFLAGS="-vv --frozen --target=${TARGET_TRIPLE}" \
     CARGOTESTFLAGS="--no-run" \
     ci-scripts/macos-debug-tests.sh
+# Gecko fetches current shader tools on the machine that runs these binaries.
+cargo test -vv --frozen --target="${TARGET_TRIPLE}"  -p webrender_shader_build --features glslang --lib --no-run
 # Package up the test binaries
 cd "target/${TARGET_TRIPLE}"
 mkdir cargo-test-binaries

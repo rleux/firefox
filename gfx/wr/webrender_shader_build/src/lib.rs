@@ -421,3 +421,6 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(all(test, feature = "gecko-core-shader-tests"))]
+mod timestamp_normalization_tests;

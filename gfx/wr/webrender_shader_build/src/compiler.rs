@@ -9,6 +9,9 @@ use std::{
 };
 
 #[cfg(feature = "glslang")]
+use std::{ffi::OsString, process::Command, sync::OnceLock};
+
+#[cfg(feature = "glslang")]
 #[path = "glslang.rs"]
 mod glslang;
 
@@ -78,4 +81,59 @@ fn compiler_choice_does_not_silently_fall_back() {
     for invalid in ["", "auto", "unknown"] {
         assert!(Compiler::from_name(invalid).is_err());
     }
+}
+
+#[cfg(feature = "glslang")]
+fn tool(variable: &str, name: &str) -> OsString {
+    std::env::var_os(variable).unwrap_or_else(|| {
+        if let Some(fetches) = std::env::var_os("MOZ_FETCHES_DIR") {
+            let name = if cfg!(windows) {
+                format!("{name}.exe")
+            } else {
+                name.to_owned()
+            };
+            PathBuf::from(fetches)
+                .join("shader-tools/bin")
+                .join(name)
+                .into_os_string()
+        } else {
+            name.into()
+        }
+    })
+}
+
+#[cfg(feature = "glslang")]
+pub(crate) fn validator_tool() -> io::Result<OsString> {
+    static VALIDATOR: OnceLock<Result<OsString, String>> = OnceLock::new();
+    VALIDATOR
+        .get_or_init(|| {
+            let executable = tool("SPIRV_VAL", "spirv-val");
+            let output = Command::new(&executable)
+                .arg("--version")
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Err(format!("{executable:?} --version failed"));
+            }
+            let version = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+            let release = version
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix('v'))
+                .and_then(|number| {
+                    let mut components = number.split('.');
+                    Some((
+                        components.next()?.parse::<u32>().ok()?,
+                        components.next()?.parse::<u32>().ok()?,
+                    ))
+                });
+            // Older validators accept invalid explicit layouts in Function storage.
+            if release.is_none_or(|release| release < (2026, 1)) {
+                return Err(format!(
+                    "SPIRV_VAL must be SPIRV-Tools 2026.1 or newer; got {version}"
+                ));
+            }
+            Ok(executable)
+        })
+        .clone()
+        .map_err(io::Error::other)
 }

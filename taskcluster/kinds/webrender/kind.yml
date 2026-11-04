@@ -67,12 +67,14 @@ tasks:
             toolchain:
                 - linux64-rust
                 - wrench-deps
+                - linux64-shader-tools
         run:
             using: run-task
             command: >-
                 export PATH=$PATH:$MOZ_FETCHES_DIR/rustc/bin:${MOZ_FETCHES_DIR}/wrench-deps/meson &&
                 cd $HOME/checkouts/gecko/gfx/wr &&
                 mv $MOZ_FETCHES_DIR/wrench-deps/{vendor,.cargo} ./ &&
+                cargo test --verbose --frozen -p webrender_shader_build --features gecko-core-shader-tests --lib &&
                 CARGOFLAGS="--verbose --frozen" ci-scripts/linux-debug-tests.sh
         treeherder:
             platform: linux64-qr/debug
@@ -81,6 +83,8 @@ tasks:
         when:
             files-changed:
                 - 'gfx/wr/**'
+                - 'taskcluster/kinds/fetch/toolchains.yml'
+                - 'third_party/rust/wgpu-core/src/timestamp_normalization/**'
 
     wrench-macos-build:
         description: Cross compilation of wrench for macOS on Linux
@@ -187,12 +191,15 @@ tasks:
         dependencies:
             webrender-cargotest-macos-build: webrender-cargotest-macos-build
         fetches:
+            toolchain:
+                - macosx64-shader-tools
             webrender-cargotest-macos-build:
                 - 'cargo-test-binaries.tar.bz2'
         run:
             using: run-task
             cwd: '{checkout}/gfx/wr'
             command: >-
+                export MOZ_FETCHES_DIR="$PWD" &&
                 mv cargo-test-binaries target &&
                 cd target &&
                 for i in debug/deps/*; do $i; done
@@ -202,6 +209,7 @@ tasks:
         when:
             files-changed:
                 - 'gfx/wr/**'
+                - 'taskcluster/kinds/fetch/toolchains.yml'
 
     windows:
         description: Runs WebRender CI tests on a Windows worker

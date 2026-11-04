@@ -132,11 +132,9 @@ fn shift_right_96(x: Uint96, shift: u32) -> Uint96 {
     let carry2 = x.high << inv_shift;
     let carry1 = x.mid << inv_shift;
 
-    var out: Uint96;
-
-    out.high = x.high >> shift;
-    out.mid = (x.mid >> shift) | carry2;
-    out.low = (x.low >> shift) | carry1;
-
-    return out;
+    return Uint96(
+        (x.low >> shift) | carry1,
+        (x.mid >> shift) | carry2,
+        x.high >> shift,
+    );
 }

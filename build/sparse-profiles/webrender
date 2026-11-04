@@ -5,3 +5,5 @@
 path:gfx/wr/
 path:taskcluster/scripts/misc/
 path:xpcom/rust/
+path:third_party/rust/wgpu-core/src/timestamp_normalization/common.wgsl
+path:third_party/rust/wgpu-core/src/timestamp_normalization/timestamp_normalization.wgsl

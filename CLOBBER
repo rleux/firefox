@@ -23,3 +23,4 @@
 # don't change CLOBBER for WebIDL changes any more.
 
 Merge day clobber 2026-11-05
+Bug TBF-wgpu-timestamp - Rebuild vendored wgpu-core and its Rust dependents after fixing its embedded timestamp shader; standalone WR Cargo targets also need a clobber.
