@@ -36,7 +36,11 @@ extern crate core_graphics;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 extern crate foreign_types;
 
+#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+extern crate raw_window_handle;
+
 mod program_cache;
+mod vulkan;
 
 #[allow(non_snake_case)]
 pub mod bindings;

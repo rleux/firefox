@@ -4227,9 +4227,10 @@ impl Renderer {
     /// Reads back the presented frame; used by Gecko's WR bindings.
     /// For backend presentation, request prepare_readback before rendering.
     /// Without a captured frame no pixels are written.
-    pub fn read_pixels_into(&mut self, rect: FramebufferIntRect, format: ImageFormat, output: &mut [u8]) {
-        if !self.device.readback_ready() { return; }
+    pub fn read_pixels_into(&mut self, rect: FramebufferIntRect, format: ImageFormat, output: &mut [u8]) -> bool {
+        if !self.device.readback_ready() { return false; }
         self.device.read_pixels_into(ReadTarget::Default, rect, format, output);
+        self.device.failure().is_none()
     }
 
     pub fn read_pixels_rgba8(&mut self, rect: FramebufferIntRect) -> Vec<u8> {

@@ -128,6 +128,7 @@ RendererOGL::RendererOGL(RefPtr<RenderThread>&& aThread,
   MOZ_ASSERT(mCompositor);
   MOZ_ASSERT(mRenderer);
   MOZ_ASSERT(mBridge);
+  mCompositor->SetRenderer(mRenderer, mWindowId);
   MOZ_COUNT_CTOR(RendererOGL);
 }
 
@@ -145,6 +146,7 @@ RendererOGL::~RendererOGL() {
   } else {
     wr_renderer_delete(mRenderer);
   }
+  mCompositor->SetRenderer(nullptr, mWindowId);
 }
 
 wr::WrExternalImageHandler RendererOGL::GetExternalImageHandler() {
@@ -159,6 +161,9 @@ void RendererOGL::SetFramePublishId(FramePublishId aPublishId) {
 
 void RendererOGL::Update() {
   mCompositor->Update();
+  if (mCompositor->UsesBackendPresentation()) {
+    CheckGraphicsResetStatus(gfx::DeviceResetDetectPlace::WR_BEGIN_FRAME, true);
+  }
   if (mCompositor->MakeCurrent()) {
     const bool updated = wr_renderer_update(mRenderer);
     FlushPipelineInfo();
@@ -172,7 +177,11 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     const Maybe<gfx::IntSize>& aReadbackSize,
     const Maybe<wr::ImageFormat>& aReadbackFormat,
     const Maybe<Range<uint8_t>>& aReadbackBuffer, bool* aNeedsYFlip,
-    const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats) {
+    const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats,
+    bool* aReadbackSuccess) {
+  if (aReadbackSuccess) {
+    *aReadbackSuccess = false;
+  }
   mozilla::widget::WidgetRenderingContext widgetContext;
 
 #if defined(XP_MACOSX)
@@ -262,13 +271,20 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   }
 
   LayoutDeviceIntSize size = mCompositor->GetBufferSize();
+  const auto renderSize = !present && mCompositor->UsesBackendPresentation()
+                              ? LayoutDeviceIntSize()
+                              : size;
   auto bufferAge = mCompositor->GetBufferAge();
 
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
-  bool rendered =
-      wr_renderer_render(mRenderer, size.width, size.height, bufferAge,
-                         aOutStats, &dirtyRects, &didRasterize);
+  WrPresentResult presentResult;
+  const bool readbackReady =
+      !mCompositor->UsesBackendPresentation() ||
+      (present && aReadbackBuffer.isSome() && wr_renderer_prepare_readback(mRenderer));
+  bool rendered = wr_renderer_render(
+      mRenderer, renderSize.width, renderSize.height, bufferAge, aOutStats,
+      &dirtyRects, &didRasterize, &presentResult);
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
@@ -286,6 +302,12 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     return RenderedFrameId();
   }
 
+  if (presentResult == WrPresentResult::Retry ||
+      presentResult == WrPresentResult::SizeMismatch) {
+    mBridge->ScheduleRenderOnCompositorThread(
+        wr::RenderReasons::SKIPPED_COMPOSITE);
+  }
+
   RenderedFrameId frameId;
 
   if (present) {
@@ -295,19 +317,26 @@ RenderedFrameId RendererOGL::UpdateAndRender(
                                /* aForce */ true);
     }
 
-    if (aReadbackBuffer.isSome() && !mThread->IsHandlingDeviceReset()) {
+    if (aReadbackBuffer.isSome() && readbackReady &&
+        !mThread->IsHandlingDeviceReset() &&
+        (!mCompositor->UsesBackendPresentation() ||
+         presentResult == WrPresentResult::Presented)) {
       MOZ_ASSERT(aReadbackSize.isSome());
       MOZ_ASSERT(aReadbackFormat.isSome());
-      if (!mCompositor->MaybeReadback(aReadbackSize.ref(),
-                                      aReadbackFormat.ref(),
-                                      aReadbackBuffer.ref(), aNeedsYFlip)) {
-        wr_renderer_readback(mRenderer, aReadbackSize.ref().width,
-                             aReadbackSize.ref().height, aReadbackFormat.ref(),
-                             &aReadbackBuffer.ref()[0],
-                             aReadbackBuffer.ref().length());
+      bool readbackSuccess =
+          mCompositor->MaybeReadback(aReadbackSize.ref(), aReadbackFormat.ref(),
+                                     aReadbackBuffer.ref(), aNeedsYFlip);
+      if (!readbackSuccess) {
+        readbackSuccess = wr_renderer_readback(
+            mRenderer, aReadbackSize.ref().width, aReadbackSize.ref().height,
+            aReadbackFormat.ref(), &aReadbackBuffer.ref()[0],
+            aReadbackBuffer.ref().length());
         if (aNeedsYFlip != nullptr) {
           *aNeedsYFlip = !mCompositor->SurfaceOriginIsTopLeft();
         }
+      }
+      if (aReadbackSuccess) {
+        *aReadbackSuccess = readbackSuccess;
       }
     }
 
@@ -359,7 +388,6 @@ bool RendererOGL::EnsureAsyncScreenshot() {
   if (mCompositor->SupportAsyncScreenshot()) {
     return true;
   }
-  MOZ_ASSERT_UNREACHABLE("unexpected to be called");
   return false;
 }
 

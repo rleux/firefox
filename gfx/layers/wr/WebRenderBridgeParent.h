@@ -154,7 +154,8 @@ class WebRenderBridgeParent final : public PWebRenderBridgeParent,
       const wr::IdNamespace& aIdNamespace,
       nsTArray<WebRenderParentCommand>&& commands) override;
   mozilla::ipc::IPCResult RecvGetSnapshot(NotNull<PTextureParent*> aTexture,
-                                          bool* aNeedsYFlip) override;
+                                          bool* aNeedsYFlip,
+                                          bool* aSuccess) override;
 
   mozilla::ipc::IPCResult RecvClearCachedResources() override;
   mozilla::ipc::IPCResult RecvInvalidateRenderedFrame() override;

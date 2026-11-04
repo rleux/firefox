@@ -362,11 +362,11 @@ fn vulkan_renderer_never_publishes_snapshots_from_failed_presentations() {
             );
             assert!(size.is_empty());
             let mut pixel = [17; 4];
-            renderer.read_pixels_into(
+            assert!(!renderer.read_pixels_into(
                 FramebufferIntRect::from_size(FramebufferIntSize::new(1, 1)),
                 ImageFormat::RGBA8,
                 &mut pixel,
-            );
+            ));
             assert_eq!(pixel, [17; 4]);
             assert!(renderer.device.failure().is_none());
             assert_eq!(render(&mut renderer), Some(PresentResult::Presented));

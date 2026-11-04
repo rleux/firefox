@@ -61,6 +61,7 @@ pub enum PresentResult {
 }
 
 /// Core submission indices belong to one renderer and reset on recreation.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuSubmissionStatus {
     /// Latest core work, including resource-only and presentation submissions.

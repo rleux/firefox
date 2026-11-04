@@ -269,11 +269,11 @@ fn clear(owner: &Device, image: &Image, color: wgt::Color) -> Arc<core::command:
     pass.end();
     encoder.finish(&Default::default())
 }
-fn presented(window: &X11Window, expected: u64) {
+fn presented(window: &X11Window, size: [u32; 2], expected: u64) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         if window
-            .pixels([64, 48])
+            .pixels(size)
             .iter()
             .all(|&pixel| pixel as u64 == expected)
         {
@@ -327,7 +327,7 @@ fn native_surface_direct_output_discard_resize_and_snapshot() {
     drop(image);
     surface.present().unwrap();
     owner.wait_for(index).unwrap();
-    presented(&window, 0xff0000);
+    presented(&window, [64, 48], 0xff0000);
     let encoder = owner.create_command_encoder("snapshot readback").unwrap();
     let readback = owner
         .encode_readback(
@@ -352,7 +352,7 @@ fn native_surface_direct_output_discard_resize_and_snapshot() {
     drop(image);
     surface.present().unwrap();
     owner.wait_for(index).unwrap();
-    assert!(window.pixels([32, 24]).iter().all(|&p| p == 0x00ff00));
+    presented(&window, [32, 24], 0x00ff00);
     drop(surface);
     drop(owner);
     drop(window);
@@ -468,7 +468,7 @@ fn native_render_device_uses_acquired_output_and_skips_unavailable_window_passes
     backend.end_render_pass(StoreOp::Store).unwrap();
     let index = backend.end_frame().unwrap();
     owner.wait_for(index).unwrap();
-    presented(&window, 0xff0000);
+    presented(&window, [64, 48], 0xff0000);
     backend.begin_frame().unwrap();
     testing::ACQUIRE.with(|s| s.set(Some(wgt::SurfaceStatus::Timeout)));
     backend.begin_render_pass(&desc).unwrap();
@@ -524,7 +524,7 @@ fn native_surface_detached_startup_preserves_no_frame_work_and_rejects_changed_d
     drop(image);
     surface.present().unwrap();
     owner.wait_for(index).unwrap();
-    presented(&window, 0x00ff00);
+    presented(&window, [64, 48], 0x00ff00);
     let unrelated = Rc::new(unsafe { X11Window::new() });
     assert!(surface
         .replace(Some(unrelated.clone()), SurfaceOptions::default())
@@ -539,7 +539,7 @@ fn native_surface_detached_startup_preserves_no_frame_work_and_rejects_changed_d
     drop(image);
     surface.present().unwrap();
     owner.wait_for(index).unwrap();
-    presented(&window, 0xff0000);
+    presented(&window, [64, 48], 0xff0000);
     surface.begin_frame();
     let image = surface.acquire([64, 48]).unwrap().unwrap();
     drop(image);
@@ -580,7 +580,7 @@ fn native_empty_surface_present_includes_core_submission_in_completion() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::yield_now();
     }
-    presented(&window, 0x000000);
+    presented(&window, [64, 48], 0x000000);
     backend.deinit();
     assert!(backend.failure().is_none());
     drop(backend);
