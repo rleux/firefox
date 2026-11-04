@@ -36,6 +36,7 @@
 
 #include "mozilla/ToString.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/layers/KnowsCompositor.h"
 #include "nsPrintfCString.h"
 #if LIBAVCODEC_VERSION_MAJOR >= 57
@@ -1047,8 +1048,7 @@ void FFmpegVideoDecoder<LIBAV_VER>::InitHWDecoderIfAllowed() {
   }
 
 #  ifdef MOZ_WIDGET_GTK
-  if (gfx::gfxVars::UseWebRenderVulkan() &&
-      !gfx::gfxVars::UseSoftwareWebRender()) {
+  if (wr::IsVulkanCompositorRequested()) {
     FFMPEG_LOG("Vulkan native video transport unavailable, using CPU frames");
     return;
   }

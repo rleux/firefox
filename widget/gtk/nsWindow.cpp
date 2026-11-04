@@ -68,6 +68,7 @@
 #include "mozilla/gfx/GPUProcessManager.h"
 #include "mozilla/gfx/HelpersCairo.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/layers/APZBridge.h"
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
@@ -662,8 +663,7 @@ DesktopToLayoutDeviceScale nsWindow::GetDesktopToDeviceScale() const {
 
 static mozilla::widget::VulkanWindowPolicy VulkanWindowPolicyForType(
     bool aIsTopLevel, GdkScreen* aScreen = nullptr) {
-  const bool useVulkan = gfxVars::UseWebRenderVulkan() &&
-                         !gfxVars::UseSoftwareWebRender() && GdkIsX11Display();
+  const bool useVulkan = wr::IsVulkanCompositorRequested();
   bool supportsAlpha = false;
 #ifdef MOZ_X11
   if (useVulkan) {
@@ -690,8 +690,7 @@ mozilla::widget::VulkanWindowPolicy nsWindow::GetVulkanWindowPolicy() const {
 bool nsWindow::RequiresSoftwareWebRender() {
   return GetVulkanWindowPolicy() ==
              mozilla::widget::VulkanWindowPolicy::Software ||
-         (gfxVars::UseWebRenderVulkan() && !gfxVars::UseSoftwareWebRender() &&
-          GdkIsX11Display() && mGdkWindow &&
+         (wr::IsVulkanCompositorRequested() && mGdkWindow &&
           (mVulkanNeedsAlpha || mIsTransparent) && !mHasAlphaVisual);
 }
 

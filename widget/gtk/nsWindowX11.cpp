@@ -18,6 +18,7 @@
 #include "gfxXlibSurface.h"
 #include "mozilla/PodOperations.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "nsWindow.h"
 #include "xpcpublic.h"
@@ -123,7 +124,7 @@ Window nsWindowX11::GetX11Window() {
 // Configure GL visual on X11.
 bool nsWindowX11::ConfigureX11GLVisual() {
   auto* screen = gtk_widget_get_screen(mShell);
-  if (gfxVars::UseWebRenderVulkan() && !gfxVars::UseSoftwareWebRender()) {
+  if (wr::IsVulkanCompositorRequested()) {
     auto* visual = mVulkanNeedsAlpha ? gdk_screen_get_rgba_visual(screen)
                                      : gdk_screen_get_system_visual(screen);
     if (!visual) {

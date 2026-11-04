@@ -2525,14 +2525,22 @@ void gfxPlatform::InitWebRenderConfig() {
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
 
 #if defined(MOZ_WEBRENDER_VULKAN)
-#  if defined(MOZ_WIDGET_ANDROID)
+#  if defined(XP_WIN)
+  // Win32 child/parent HWND destruction is not pinned by CompositorWidget, and
+  // DXGI video CPU mapping currently requires the D3D11 software compositor.
+  gfxVars::SetUseWebRenderVulkan(false);
+#  elif defined(MOZ_WIDGET_ANDROID)
   // SurfaceTexture video images still require the GL compositor.
   gfxVars::SetUseWebRenderVulkan(false);
 #  elif defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  // Share the parent's display fact; producers can run without GDK in RDD/content.
+  gfxVars::SetWebRenderVulkanX11Display(widget::GdkIsX11Display());
   gfxVars::SetUseWebRenderVulkan(
       hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
-      widget::GdkIsX11Display() &&
+      gfxVars::WebRenderVulkanX11Display() &&
       widget::GfxInfo::IsVulkanWebRenderSupported());
+#  else
+  gfxVars::SetUseWebRenderVulkan(false);
 #  endif
 #endif
 

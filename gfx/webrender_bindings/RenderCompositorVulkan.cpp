@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RenderCompositorVulkan.h"
+#include "VulkanCompositorSupport.h"
 
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderThread.h"
@@ -25,9 +26,15 @@
 
 namespace mozilla::wr {
 
+bool IsVulkanCompositorRequested() {
+  return CanUseVulkanCompositor(BuildVulkanCompositorPlatform(),
+                                gfx::gfxVars::WebRenderVulkanX11Display(),
+                                gfx::gfxVars::UseWebRenderVulkan(),
+                                gfx::gfxVars::UseSoftwareWebRender());
+}
+
 bool RenderCompositorVulkan::IsRequested() {
-  return gfx::gfxVars::UseWebRenderVulkan() &&
-         !gfx::gfxVars::UseSoftwareWebRender();
+  return IsVulkanCompositorRequested();
 }
 
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
@@ -135,7 +142,14 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
     return compositor;
   }
 #endif
+#ifdef XP_WIN
+  // shortcut: no HWND retirement lease or DXGI CPU host; keep Gecko disabled
+  // until explicit/parent window destruction and video fallback are supported.
+  aError.AssignLiteral(
+      "RcVulkan(Windows HWND lifetime and DXGI CPU hosts unsupported)");
+#else
   aError.AssignLiteral("RcVulkan(unsupported widget)");
+#endif
   return nullptr;
 }
 
