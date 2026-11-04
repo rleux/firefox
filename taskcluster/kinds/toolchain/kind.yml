@@ -68,6 +68,7 @@ tasks-from:
     - samply.yml
     - sccache.yml
     - searchfox-cli.yml
+    - shader-tools.yml
     - socorro-cli.yml
     - stmo-cli.yml
     - sysroot.yml

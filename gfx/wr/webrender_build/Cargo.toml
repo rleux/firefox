@@ -8,6 +8,7 @@ description = "Code shared between precompilation (build.rs) and the rest of Web
 edition = "2018"
 
 [features]
+vulkan = []
 serialize_program = ["serde"]
 
 [dependencies]

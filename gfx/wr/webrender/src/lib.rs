@@ -208,6 +208,11 @@ pub mod render_api;
 
 pub mod shader_source {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
+
+    #[cfg(feature = "vulkan")]
+    pub mod vulkan {
+        include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
+    }
 }
 
 extern crate bincode;

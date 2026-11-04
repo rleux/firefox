@@ -2,6 +2,39 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 ---
+webrender-glslang:
+    description: glslang 15.1.0 source code
+    fetch:
+        type: static-url
+        url: https://codeload.github.com/KhronosGroup/glslang/tar.gz/1062752a891c95b2bfeed9e356562d88f9df84ac
+        sha256: 46a05bba7675a3ab1912a0908183b9eee8daa06bb8047943bac54a6f0de2cfce
+        size: 3921363
+        artifact-name: webrender-glslang.tar.zst
+        strip-components: 1
+        add-prefix: glslang/
+
+webrender-spirv-tools:
+    description: SPIRV-Tools 2025.1 source code
+    fetch:
+        type: static-url
+        url: https://codeload.github.com/KhronosGroup/SPIRV-Tools/tar.gz/f289d047f49fb60488301ec62bafab85573668cc
+        sha256: 5fbd56baf226a04435656bae408287365102b69a24fa73bab8353c5f44b55615
+        size: 3247136
+        artifact-name: webrender-spirv-tools.tar.zst
+        strip-components: 1
+        add-prefix: spirv-tools/
+
+webrender-spirv-headers:
+    description: SPIR-V headers for SPIRV-Tools 2025.1
+    fetch:
+        type: static-url
+        url: https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/09913f088a1197aba4aefd300a876b2ebbaa3391
+        sha256: 6d4aad5a86d7d5af144747aee1d616f624897d64d842f282aca7777f84244318
+        size: 543533
+        artifact-name: webrender-spirv-headers.tar.zst
+        strip-components: 1
+        add-prefix: spirv-headers/
+
 binutils-2.31.1:
     description: binutils 2.31.1 source code
     fetch:

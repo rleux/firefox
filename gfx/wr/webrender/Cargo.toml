@@ -9,6 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
+vulkan = ["dep:wgpu-core", "dep:webrender_shader_build", "webrender_build/vulkan"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -23,6 +24,7 @@ sw_compositor = ["swgl"]
 debugger = ["hyper", "hyper-util", "http-body-util", "tokio", "serde_json", "url", "sha1", "base64", "libloading", "api/debugger", "capture"]
 
 [build-dependencies]
+webrender_shader_build = { path = "../webrender_shader_build", optional = true }
 build-parallel = "0.1.2"
 glslopt = "0.1.14"
 webrender_build = { version = "0.0.2", path = "../webrender_build" }
@@ -71,3 +73,6 @@ base64 = { optional=true, version="0.22" }
 [dev-dependencies]
 mozangle = "0.5.2"
 rand = "0.4"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dependencies]
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["std", "vulkan"] }
