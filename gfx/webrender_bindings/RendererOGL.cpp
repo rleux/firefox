@@ -200,6 +200,11 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   bool fullRender = false;
   bool needPostRenderCall = false;
   bool beginFrame = !mThread->IsHandlingDeviceReset();
+  if (beginFrame && present && aReadbackBuffer.isNothing() &&
+      !layers::ProfilerScreenshots::IsEnabled() && !mCompositionRecorder &&
+      mCompositor->IsWindowHidden()) {
+    present = false;
+  }
 
   if (beginFrame && present) {
     if (!mCompositor->GetWidget()->PreRender(&widgetContext)) {
@@ -561,6 +566,11 @@ RefPtr<RendererOGL::ScreenPixelsPromise> RendererOGL::RequestScreenPixels(
     RefPtr<layers::AndroidHardwareBuffer> aHardwareBuffer) {
   if (!aHardwareBuffer) {
     return ScreenPixelsPromise::CreateAndReject(NS_ERROR_ILLEGAL_VALUE,
+                                                __func__);
+  }
+  if (!mCompositor->SupportAsyncScreenshot() &&
+      !mCompositor->UseLayerCompositor()) {
+    return ScreenPixelsPromise::CreateAndReject(NS_ERROR_NOT_IMPLEMENTED,
                                                 __func__);
   }
 

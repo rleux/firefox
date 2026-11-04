@@ -96,6 +96,11 @@ UniquePtr<SurfaceFactory> SurfaceFactory::Create(
     GLContext* const pGl, const layers::TextureType consumerType) {
   auto& gl = *pGl;
 
+  if (gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+    return nullptr;
+  }
+
   switch (consumerType) {
     case layers::TextureType::D3D11:
 #ifdef XP_WIN

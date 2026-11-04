@@ -80,6 +80,8 @@
 #elif defined(MOZ_WIDGET_GTK)
 #  include "DMABufFormats.h"
 #  include "gfxPlatformGtk.h"
+#  include "mozilla/GfxInfo.h"
+#  include "mozilla/WidgetUtilsGtk.h"
 #elif defined(ANDROID)
 #  include "gfxAndroidPlatform.h"
 #endif
@@ -2521,6 +2523,18 @@ void gfxPlatform::InitWebRenderConfig() {
       gfxConfig::IsEnabled(Feature::WEBRENDER_OPTIMIZED_SHADERS));
 
   gfxVars::SetUseSoftwareWebRender(!hasHardware);
+
+#if defined(MOZ_WEBRENDER_VULKAN)
+#  if defined(MOZ_WIDGET_ANDROID)
+  // SurfaceTexture video images still require the GL compositor.
+  gfxVars::SetUseWebRenderVulkan(false);
+#  elif defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  gfxVars::SetUseWebRenderVulkan(
+      hasHardware && StaticPrefs::gfx_webrender_vulkan_AtStartup() &&
+      widget::GdkIsX11Display() &&
+      widget::GfxInfo::IsVulkanWebRenderSupported());
+#  endif
+#endif
 
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");

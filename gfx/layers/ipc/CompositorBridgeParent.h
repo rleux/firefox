@@ -201,6 +201,8 @@ class CompositorBridgeParentBase : public PCompositorBridgeParent,
       const LayersId& rootLayerTreeId) = 0;
   virtual mozilla::ipc::IPCResult RecvWillClose() = 0;
   virtual mozilla::ipc::IPCResult RecvPause() = 0;
+  virtual mozilla::ipc::IPCResult RecvNotifyVulkanXWindowChanged(
+      const uint64_t& aOldWindow, const uint64_t& aWindow, bool* aRetired) = 0;
   virtual mozilla::ipc::IPCResult RecvResume() = 0;
   virtual mozilla::ipc::IPCResult RecvResumeAsync() = 0;
   virtual mozilla::ipc::IPCResult RecvNotifyChildCreated(
@@ -266,6 +268,9 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase {
       const LayersId& aRootLayerTreeId) override;
   mozilla::ipc::IPCResult RecvWillClose() override;
   mozilla::ipc::IPCResult RecvPause() override;
+  mozilla::ipc::IPCResult RecvNotifyVulkanXWindowChanged(
+      const uint64_t& aOldWindow, const uint64_t& aWindow,
+      bool* aRetired) override;
   mozilla::ipc::IPCResult RecvResume() override;
   mozilla::ipc::IPCResult RecvResumeAsync() override;
   mozilla::ipc::IPCResult RecvNotifyChildCreated(
@@ -707,6 +712,7 @@ class CompositorBridgeParent final : public CompositorBridgeParentBase {
   TimeDuration mVsyncRate;
 
   bool mPaused;
+  Maybe<bool> mVulkanWindowWasPaused;
   bool mHaveCompositionRecorder;
   bool mIsForcedFirstPaint;
 

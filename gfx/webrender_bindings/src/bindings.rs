@@ -2211,6 +2211,10 @@ pub unsafe extern "C" fn wr_window_new(
         Err(error) => return window_creation_failed(out_err, format!("{:?}", error)),
     };
 
+    let api_info = renderer.get_graphics_api_info();
+    info!("WebRender backend: {:?}, renderer: {}, version: {}, pid: {}",
+          api_info.kind, api_info.renderer, api_info.version, std::process::id());
+
     unsafe {
         *out_max_texture_size = renderer.get_max_texture_size();
     }

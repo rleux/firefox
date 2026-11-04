@@ -34,7 +34,9 @@ GtkCompositorWidget::GtkCompositorWidget(
     : CompositorWidget(aOptions),
       mWidget(std::move(aWindow)),
       mClientSize(LayoutDeviceIntSize(aInitData.InitialClientSize()),
-                  "GtkCompositorWidget::mClientSize") {
+                  "GtkCompositorWidget::mClientSize"),
+      mVulkanXWindow(aInitData.XWindow()),
+      mVulkanNeedsAlpha(aInitData.VulkanNeedsAlpha()) {
 #if defined(MOZ_X11)
   if (GdkIsX11Display()) {
     ConfigureX11Backend((Window)aInitData.XWindow());

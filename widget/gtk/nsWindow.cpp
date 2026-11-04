@@ -19,6 +19,10 @@
 #endif
 #include <dlfcn.h>
 #include <gdk/gdkkeysyms.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include <cerrno>
 
 #include "GLContext.h"
 #include "GLContextProvider.h"
@@ -26,6 +30,7 @@
 #include "GtkCompositorWidget.h"
 #include "InputData.h"
 #include "VsyncSource.h"
+#include "VulkanProcess.h"
 #include "gfx2DGlue.h"
 #include "gfxContext.h"
 #include "gfxImageSurface.h"
@@ -35,6 +40,7 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/Components.h"
 #include "mozilla/GRefPtr.h"
+#include "mozilla/GfxInfo.h"
 #include "mozilla/Likely.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MiscEvents.h"
@@ -66,7 +72,14 @@
 #include "mozilla/layers/APZThreadUtils.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "mozilla/layers/CompositorBridgeParent.h"
+#include "mozilla/layers/CompositorSession.h"
 #include "mozilla/layers/CompositorThread.h"
+#include "mozilla/layers/SynchronousTask.h"
+#include "mozilla/webrender/RenderThread.h"
+#ifdef XP_LINUX
+#  include <poll.h>
+#  include <sys/syscall.h>
+#endif
 #include "mozilla/layers/IAPZCTreeManager.h"
 #include "mozilla/layers/KnowsCompositor.h"
 #include "mozilla/layers/LayersTypes.h"
@@ -418,6 +431,7 @@ nsWindow::nsWindow()
       mWidgetCursorLocked(false),
       mUndecorated(false),
       mHasAlphaVisual(false),
+      mVulkanNeedsAlpha(false),
       mConfiguredClearColor(false),
       mGotNonBlankPaint(false),
       mNeedsToRetryCapturingMouse(false),
@@ -646,7 +660,46 @@ DesktopToLayoutDeviceScale nsWindow::GetDesktopToDeviceScale() const {
   return DesktopToLayoutDeviceScale(FractionalScaleFactor());
 }
 
+static mozilla::widget::VulkanWindowPolicy VulkanWindowPolicyForType(
+    bool aIsTopLevel, GdkScreen* aScreen = nullptr) {
+  const bool useVulkan = gfxVars::UseWebRenderVulkan() &&
+                         !gfxVars::UseSoftwareWebRender() && GdkIsX11Display();
+  bool supportsAlpha = false;
+#ifdef MOZ_X11
+  if (useVulkan) {
+    auto* screen = aScreen ? aScreen : gdk_screen_get_default();
+    if (auto* visual = gdk_screen_get_rgba_visual(screen)) {
+      supportsAlpha = GfxInfo::IsVulkanWebRenderAlphaSupported(
+          GDK_SCREEN_XNUMBER(screen),
+          XVisualIDFromVisual(gdk_x11_visual_get_xvisual(visual)));
+    }
+  }
+#endif
+  return mozilla::widget::SelectVulkanWindowPolicy(
+      useVulkan, supportsAlpha, aIsTopLevel,
+      Preferences::HasUserValue("mozilla.widget.use-argb-visuals") &&
+          Preferences::GetBool("mozilla.widget.use-argb-visuals"));
+}
+
+mozilla::widget::VulkanWindowPolicy nsWindow::GetVulkanWindowPolicy() const {
+  return VulkanWindowPolicyForType(
+      mWindowType == WindowType::TopLevel,
+      mShell ? gtk_widget_get_screen(mShell) : nullptr);
+}
+
+bool nsWindow::RequiresSoftwareWebRender() {
+  return GetVulkanWindowPolicy() ==
+             mozilla::widget::VulkanWindowPolicy::Software ||
+         (gfxVars::UseWebRenderVulkan() && !gfxVars::UseSoftwareWebRender() &&
+          GdkIsX11Display() && mGdkWindow &&
+          (mVulkanNeedsAlpha || mIsTransparent) && !mHasAlphaVisual);
+}
+
 bool nsWindow::WidgetTypeSupportsAcceleration() {
+  if (GetVulkanWindowPolicy() ==
+      mozilla::widget::VulkanWindowPolicy::Software) {
+    return false;
+  }
   if (IsSmallPopup() || mIsDragPopup) {
     return false;
   }
@@ -4121,6 +4174,10 @@ gboolean nsWindow::OnTouchEvent(GdkEventTouch* aEvent) {
 // It's transparent when we're running on composited screens
 // and we can draw main window without system titlebar.
 bool nsWindow::IsToplevelWindowTransparent() {
+  if (VulkanWindowPolicyForType(true) ==
+      mozilla::widget::VulkanWindowPolicy::OpaqueVisual) {
+    return false;
+  }
   static bool transparencyConfigured = false;
 
   if (!transparencyConfigured) {
@@ -4189,8 +4246,55 @@ Window nsWindow::GetX11Window() {
   return (Window) nullptr;
 }
 
+void nsWindow::NotifyVulkanXWindowChanged(uint64_t aWindow) {
+  if (!GdkIsX11Display() || !mCompositorSession || !mCompositorBridgeChild) {
+    return;
+  }
+  RefPtr<CompositorBridgeChild> bridge = mCompositorBridgeChild;
+  RefPtr<CompositorBridgeParent> local =
+      mCompositorSession->GetInProcessBridge();
+  const auto pid = bridge->OtherPid();
+  const uint64_t oldWindow = mGdkWindow ? GetX11Window() : 0;
+  bool retired = false;
+  if (bridge->SendNotifyVulkanXWindowChanged(oldWindow, aWindow, &retired) &&
+      retired) {
+    return;
+  }
+  if (local) {
+    if (!wr::RenderThread::Get()) {
+      return;
+    }
+    SynchronousTask task(
+        "Retire Vulkan native window after local IPC shutdown");
+    nsCOMPtr<nsIThread> thread = CompositorThread();
+    if (thread && NS_SUCCEEDED(thread->Dispatch(NS_NewRunnableFunction(
+                      "Retire Vulkan native window",
+                      [local, oldWindow, aWindow, &retired, &task] {
+                        AutoCompleteTask complete(&task);
+                        local->RecvNotifyVulkanXWindowChanged(
+                            oldWindow, aWindow, &retired);
+                      })))) {
+      task.Wait();
+    }
+  } else if (VulkanProcessHasExited(pid)) {
+    return;
+  }
+  MOZ_RELEASE_ASSERT(retired,
+                     "Cannot destroy a native XID while a live Vulkan surface "
+                     "lease is unretired");
+}
+
+void nsWindow::DestroyCompositor() {
+  // Retire before base shutdown clears the bridge/session, even if WLM is gone.
+  NotifyVulkanXWindowChanged(0);
+  nsIWidget::DestroyCompositor();
+}
+
 void nsWindow::SetGdkWindow(GdkWindow* aGdkWindow) {
   LOG("nsWindow::SetGdkWindow() %p", aGdkWindow);
+  if (mGdkWindow && mGdkWindow != aGdkWindow) {
+    NotifyVulkanXWindowChanged(0);
+  }
   if (!aGdkWindow) {
     if (mGdkWindow) {
       g_object_set_data(G_OBJECT(mGdkWindow), "nsWindow", nullptr);
@@ -4199,6 +4303,11 @@ void nsWindow::SetGdkWindow(GdkWindow* aGdkWindow) {
   } else {
     mGdkWindow = aGdkWindow;
     g_object_set_data(G_OBJECT(mGdkWindow), "nsWindow", this);
+    if (GdkIsX11Display()) {
+      // The renderer's separate X connection must see the newly created XID.
+      gdk_display_sync(gdk_window_get_display(mGdkWindow));
+      NotifyVulkanXWindowChanged(GetX11Window());
+    }
   }
 }
 
@@ -4290,6 +4399,8 @@ nsresult nsWindow::Create(nsIWidget* aParent, const LayoutDeviceIntRect& aRect,
     toplevelNeedsAlphaVisual = IsToplevelWindowTransparent();
   }
 
+  mVulkanNeedsAlpha =
+      mCompositedScreen && (popupNeedsAlphaVisual || toplevelNeedsAlphaVisual);
   bool isGLVisualSet = false;
   mIsAccelerated =
       WidgetTypeSupportsAcceleration() && ComputeShouldAccelerate();
@@ -7269,7 +7380,8 @@ void nsWindow::GetCompositorWidgetInitData(
 #endif
 
   *aInitData = mozilla::widget::GtkCompositorWidgetInitData(
-      GetX11Window(), displayName, GdkIsX11Display(), GetRoundedClientSize());
+      GetX11Window(), displayName, GdkIsX11Display(), mVulkanNeedsAlpha,
+      GetRoundedClientSize());
 }
 
 nsresult nsWindow::SetSystemFont(const nsCString& aFontName) {

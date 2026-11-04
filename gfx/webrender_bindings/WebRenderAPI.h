@@ -327,6 +327,7 @@ class WebRenderAPI final {
   wr::WrIdNamespace GetNamespace();
   const WebRenderCapabilities& GetCapabilities() const { return mCapabilities; }
   layers::SyncHandle GetSyncHandle() const { return mSyncHandle; }
+  bool UsesBackendPresentation() const { return mUsesBackendPresentation; }
 
   void Capture();
 
@@ -365,7 +366,7 @@ class WebRenderAPI final {
  protected:
   WebRenderAPI(wr::DocumentHandle* aHandle, wr::WindowId aId,
                WebRenderCapabilities aCapabilities,
-               layers::SyncHandle aSyncHandle,
+               layers::SyncHandle aSyncHandle, bool aUsesBackendPresentation,
                wr::WebRenderAPI* aRootApi = nullptr,
                wr::WebRenderAPI* aRootDocumentApi = nullptr);
 
@@ -504,6 +505,7 @@ class WebRenderAPI final {
   const WebRenderCapabilities mCapabilities;
   bool mCaptureSequence;
   layers::SyncHandle mSyncHandle;
+  const bool mUsesBackendPresentation;
   bool mRendererDestroyed;
 
   UniquePtr<layers::RemoteTextureInfoList> mPendingRemoteTextureInfoList;

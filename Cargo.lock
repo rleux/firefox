@@ -9859,6 +9859,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wr_startup_probe"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "mozilla-central-workspace-hack",
+ "raw-window-handle",
+ "wgpu-core",
+ "wgpu-hal",
+ "wgpu-types",
+]
+
+[[package]]
 name = "write16"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

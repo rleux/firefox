@@ -38,6 +38,11 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
   }
   mozilla::ipc::IPCResult RecvWillClose() override { return IPC_OK(); }
   mozilla::ipc::IPCResult RecvPause() override { return IPC_OK(); }
+  mozilla::ipc::IPCResult RecvNotifyVulkanXWindowChanged(const uint64_t&,
+                                                         const uint64_t&,
+                                                         bool*) override {
+    return IPC_FAIL(this, "Native windows require a widget compositor");
+  }
   mozilla::ipc::IPCResult RecvResume() override { return IPC_OK(); }
   mozilla::ipc::IPCResult RecvResumeAsync() override { return IPC_OK(); }
   mozilla::ipc::IPCResult RecvNotifyChildCreated(

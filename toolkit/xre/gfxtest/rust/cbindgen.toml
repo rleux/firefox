@@ -1,0 +1,12 @@
+language = "C++"
+include_guard = "mozilla_gfx_wr_startup_probe_ffi_generated_h"
+autogen_warning = "/* DO NOT MODIFY THIS MANUALLY! This file was generated using cbindgen. */"
+namespaces = ["mozilla", "gfx"]
+includes = []
+style = "both"
+
+[parse]
+parse_deps = false
+
+[export]
+item_types = ["structs", "opaque", "functions"]

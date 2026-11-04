@@ -28,6 +28,7 @@
 #include "mozilla/layers/SyncObject.h"
 #include "mozilla/layers/SynchronousTask.h"
 #include "mozilla/layers/WebRenderBridgeParent.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "mozilla/webrender/RenderTextureHost.h"
 #include "mozilla/webrender/RendererOGL.h"
 #include "mozilla/widget/CompositorWidget.h"
@@ -965,6 +966,34 @@ void RenderThread::UpdateAndRender(
                                       std::move(readFence));
 }
 
+bool RenderThread::RetireVulkanXWindow(uint64_t aWindow, bool* aFound) {
+  layers::SynchronousTask task("Retire pending Vulkan window");
+  bool retired = false;
+  bool found = false;
+  RefPtr<RenderThread> self = this;
+  nsCOMPtr<nsIThread> thread = GetRenderThread();
+  if (!thread ||
+      NS_FAILED(thread->Dispatch(NS_NewRunnableFunction(
+          "Retire pending Vulkan window", [self, aWindow, &found, &retired, &task] {
+            layers::AutoCompleteTask complete(&task);
+            for (auto& entry : self->mRenderers) {
+              auto* compositor = entry.second->GetCompositor();
+              const auto* config = compositor->GetVulkanConfig();
+              if (config && config->window.IsXlib() &&
+                  config->window.xlib.window == aWindow) {
+                found = true;
+            entry.second->Pause();
+              }
+            }
+            retired = true;
+          })))) {
+    return false;
+  }
+  task.Wait();
+  if (aFound) { *aFound = found; }
+  return retired;
+}
+
 void RenderThread::Pause(wr::WindowId aWindowId) {
   MOZ_RELEASE_ASSERT(IsInRenderThread());
   LOG("RenderThread::Pause() aWindowId %" PRIx64 "", AsUint64(aWindowId));
@@ -1333,8 +1362,9 @@ void RenderThread::InitDeviceTask() {
 
   const auto start = TimeStamp::Now();
 
-  if (gfx::gfxVars::UseSoftwareWebRender()) {
-    // Ensure we don't instantiate any shared GL context when SW-WR is used.
+  if (gfx::gfxVars::UseSoftwareWebRender() ||
+      RenderCompositorVulkan::IsRequested()) {
+    // Ensure we don't instantiate shared GL for SW-WR or Vulkan.
     return;
   }
 
@@ -1516,7 +1546,8 @@ gl::GLContext* RenderThread::SingletonGL(nsACString& aError) {
     CreateSingletonGL(aError);
     mShaders = nullptr;
   }
-  if (mSingletonGL && mSingletonGLIsForHardwareWebRender && !mShaders) {
+  if (mSingletonGL && mSingletonGLIsForHardwareWebRender && !mShaders &&
+      !RenderCompositorVulkan::IsRequested()) {
     mShaders =
         std::make_unique<WebRenderShaders>(mSingletonGL, mProgramCache.get());
   }
