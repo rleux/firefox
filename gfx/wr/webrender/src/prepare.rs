@@ -784,6 +784,10 @@ fn prepare_prim_for_render(
                         transformed_aa_edges: prim_data.common.transformed_aa_edges,
                     },
                     stretch_size,
+                    gradient_border_can_sample_directly(
+                        &prim_data.stops,
+                        prim_data.extend_mode == ExtendMode::Repeat,
+                    ),
                     quad_clips,
                     quad_transform,
                     frame_context.spatial_tree,
@@ -928,6 +932,10 @@ fn prepare_prim_for_render(
                         transformed_aa_edges: prim_data.common.transformed_aa_edges,
                     },
                     stretch_size,
+                    gradient_border_can_sample_directly(
+                        &prim_data.stops,
+                        prim_data.extend_mode == ExtendMode::Repeat,
+                    ),
                     quad_clips,
                     quad_transform,
                     frame_context.spatial_tree,
@@ -979,6 +987,9 @@ fn prepare_prim_for_render(
                         transformed_aa_edges: prim_data.common.transformed_aa_edges,
                     },
                     stretch_size,
+                    prim_data.params.start_offset == 0.0
+                        && prim_data.params.end_offset == 1.0
+                        && gradient_border_can_sample_directly(&prim_data.stops, true),
                     quad_clips,
                     quad_transform,
                     frame_context.spatial_tree,
@@ -1375,6 +1386,18 @@ fn adjust_mask_scale_for_max_size(device_rect: DeviceIntRect, device_pixel_scale
     } else {
         (device_rect, device_pixel_scale)
     }
+}
+
+fn gradient_border_can_sample_directly(stops: &[GradientStop], repeating: bool) -> bool {
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else {
+        return false;
+    };
+    // Discontinuities need the old source texture's bilinear filtering.
+    (!repeating || first.color == last.color)
+        && stops.iter().all(|stop| stop.offset.is_finite())
+        && stops.windows(2).all(|pair| {
+            pair[0].offset < pair[1].offset || pair[0].color == pair[1].color
+        })
 }
 
 /// Pattern builder for a single fast-path two-stop segment emitted by

@@ -17,7 +17,6 @@ pub(super) struct DrawPipeline {
     pub format: wgt::TextureFormat,
     pub has_depth: bool,
     pub topology: wgt::PrimitiveTopology,
-    pub vertex_stride: u64,
     pub instance_stride: u64,
 }
 
@@ -138,7 +137,6 @@ impl DrawPipeline {
             format,
             has_depth,
             topology,
-            vertex_stride,
             instance_stride: stride,
         }))
     }

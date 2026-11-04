@@ -1,0 +1,14 @@
+---
+root:
+  items:
+    - type: rect
+      bounds: [0, 0, 160, 80]
+      color: white
+    - image: solid-color(0, 255, 0, 255, 32, 32)
+      bounds: [16, 16, 48, 48]
+    - type: border
+      bounds: [96, 16, 48, 48]
+      width: 4
+      border-type: normal
+      style: solid
+      color: red

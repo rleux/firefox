@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{BorderRadius, ClipMode, ColorF, units::*};
+use api::{BorderRadius, ClipMode, ColorF, RepeatMode, units::*};
 use euclid::{SideOffsets2D, Size2D, Transform3D, point2};
 
 use crate::ItemUid;
@@ -538,6 +538,7 @@ pub fn prepare_border_nine_patch(
     pattern_builder: &dyn PatternBuilder,
     desc: &QuadDescriptor,
     stretch_size: LayoutSize,
+    can_sample_directly: bool,
     clips: &QuadClipStack,
     transform: &mut QuadTransformState,
 
@@ -567,7 +568,7 @@ pub fn prepare_border_nine_patch(
     let scales = transform.scale_factors();
     let base_indirect_transform = ScaleOffset::from_scale(scales.into());
 
-    nine_patch.for_each_segment(&desc.pattern_rect, &mut|dst_rect, src_rect, side, _repeat_h, _repeat_v| {
+    nine_patch.for_each_segment(&desc.pattern_rect, &mut|dst_rect, src_rect, side, repeat_h, repeat_v| {
         // First find the sub-rect of the source pattern that this segment is using.
         let min_x = desc.pattern_rect.min.x + stretch_size.width * src_rect.uv0.x;
         let min_y = desc.pattern_rect.min.y + stretch_size.height * src_rect.uv0.y;
@@ -578,15 +579,49 @@ pub fn prepare_border_nine_patch(
             max: point2(max_x, max_y),
         };
 
-        // Rasterize the source pattern into a render task.
+        let segment_desc = QuadDescriptor {
+            pattern_rect: *dst_rect,
+            bounds: desc.bounds.intersection_unchecked(dst_rect),
+            aligned_aa_edges: desc.aligned_aa_edges & side,
+            transformed_aa_edges: desc.transformed_aa_edges & side,
+        };
 
-        // We could get away without the intermediate task in some cases, for example
-        // if the segment does not repeat the pattern. However this is fiddly due to
-        // how the nine-patch's source slicing distorts the local space of the pattern.
-        // Always using an intermediate render task lets us easily handle the additional
-        // stretching effect on the image instead of introducing an additional transform
-        // for the pattern's coordinate space. On the other hand it means that we have
-        // to handle large source patterns and potentially down-scale them.
+        if can_sample_directly
+            && pattern.kind == PatternKind::Gradient
+            && repeat_h == RepeatMode::Stretch
+            && repeat_v == RepeatMode::Stretch
+            && [pattern_rect.width(), pattern_rect.height(), dst_rect.width(), dst_rect.height()]
+                .iter().all(|value| *value > 0.0 && value.is_finite())
+            && [pattern_rect.min, dst_rect.min]
+                .iter().all(|point| point.x.is_finite() && point.y.is_finite())
+        {
+            let sx = pattern_rect.width() / dst_rect.width();
+            let sy = pattern_rect.height() / dst_rect.height();
+            let mapping = [
+                sx,
+                sy,
+                pattern_rect.min.x - dst_rect.min.x * sx,
+                pattern_rect.min.y - dst_rect.min.y * sy,
+            ];
+            if sx > 0.0 && sy > 0.0 && mapping.iter().all(|value| value.is_finite()) {
+                let mut segment_pattern = pattern.clone();
+                // Zero means no mapping; GPU buffer address zero is valid.
+                segment_pattern.shader_input.1 = frame_state.frame_gpu_data.f32.push(&mapping).as_int() + 1;
+                prepare_quad_impl(
+                    strategy,
+                    &segment_pattern,
+                    &segment_desc,
+                    &None,
+                    clips,
+                    transform,
+                    spatial_tree,
+                    targets,
+                    frame_state,
+                    scratch,
+                );
+                return;
+            }
+        }
 
         let mut indirect_transform = base_indirect_transform;
         let mut surface_rect = indirect_transform.map_rect(&pattern_rect);
@@ -623,14 +658,7 @@ pub fn prepare_border_nine_patch(
         prepare_quad_impl(
             strategy,
             &img_pattern,
-            &QuadDescriptor {
-                pattern_rect: *dst_rect,
-                // Each segment covers its own destination rect, within the
-                // primitive's bounds.
-                bounds: desc.bounds.intersection_unchecked(dst_rect),
-                aligned_aa_edges: desc.aligned_aa_edges & side,
-                transformed_aa_edges: desc.transformed_aa_edges & side,
-            },
+            &segment_desc,
             &None,
             clips,
 
@@ -2635,6 +2663,10 @@ pub fn add_to_batch<F>(
         Right = 3,
         Bottom = 4,
         All = 5,
+        LeftTop = 6,
+        LeftBottom = 7,
+        RightTop = 8,
+        RightBottom = 9,
     }
 
     let mut textures = [TextureSource::Invalid; 3];
@@ -2712,11 +2744,17 @@ pub fn add_to_batch<F>(
         // Add instances for the antialisaing. This gives the center part
         // an opportunity to stay in the opaque pass.
         if edge_flags.contains(EdgeMask::LEFT) {
+            if edge_flags.contains(EdgeMask::TOP) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::LeftTop as u8, ..instance }.into());
+            }
             let instance = QuadInstance {
                 part_index: PartIndex::Left as u8,
                 ..instance
             };
             f(aa_batch_key, instance.into());
+            if edge_flags.contains(EdgeMask::BOTTOM) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::LeftBottom as u8, ..instance }.into());
+            }
         }
         if edge_flags.contains(EdgeMask::TOP) {
             let instance = QuadInstance {
@@ -2726,11 +2764,17 @@ pub fn add_to_batch<F>(
             f(aa_batch_key, instance.into());
         }
         if edge_flags.contains(EdgeMask::RIGHT) {
+            if edge_flags.contains(EdgeMask::TOP) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::RightTop as u8, ..instance }.into());
+            }
             let instance = QuadInstance {
                 part_index: PartIndex::Right as u8,
                 ..instance
             };
             f(aa_batch_key, instance.into());
+            if edge_flags.contains(EdgeMask::BOTTOM) {
+                f(aa_batch_key, QuadInstance { part_index: PartIndex::RightBottom as u8, ..instance }.into());
+            }
         }
         if edge_flags.contains(EdgeMask::BOTTOM) {
             let instance = QuadInstance {

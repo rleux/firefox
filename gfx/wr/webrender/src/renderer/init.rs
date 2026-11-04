@@ -378,7 +378,7 @@ pub fn create_webrender_instance(
             dump_shader_source: options.dump_shader_source.take(),
             surface_origin_is_top_left: options.surface_origin_is_top_left,
         },
-    );
+    ).map_err(RendererError::Device)?;
 
     let color_cache_formats = device.preferred_color_formats();
     let swizzle_settings = device.swizzle_settings();
@@ -526,7 +526,8 @@ pub fn create_webrender_instance(
     // instance data can be read from the correct offset within the buffer.
     let use_shared_instance_buffer = options.enable_shared_instance_buffer
         && options.enable_instancing
-        && device.get_capabilities().supports_base_instance;
+        && device.get_capabilities().supports_base_instance
+        && device.api_info().kind != crate::device::GraphicsApi::Vulkan;
 
     let vaos = vertex::RendererVAOs::new(
         &mut device,

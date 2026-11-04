@@ -43,6 +43,8 @@ pub use self::upload::*;
 pub enum GpuBackendConfig {
     /// OpenGL or OpenGL ES.
     Gl(GlBackendConfig),
+    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    Vulkan(wgpu::Options),
 }
 
 /// What the GL backend needs from the embedder.
@@ -102,6 +104,14 @@ pub trait GpuBackend {
     /// Consumes any pending device error and reports whether it was an
     /// out-of-memory condition.
     fn take_out_of_memory_error(&self) -> bool;
+
+    /// A permanent backend error requiring renderer recovery.
+    fn failure(&self) -> Option<&str> { None }
+
+    #[cfg(test)]
+    fn wgpu_test_fail_submit(&mut self) { panic!("Not a Vulkan backend") }
+    #[cfg(test)]
+    fn wgpu_test_lose_device(&self) { panic!("Not a Vulkan backend") }
 
     /// Orders reads of the framebuffer by subsequent advanced blend draws
     /// after preceding writes to the same pixels.
@@ -317,7 +327,7 @@ pub trait GpuBackend {
 
     /// Returns the size and stride in bytes required to upload an area of pixels
     /// of the specified size, to a texture of the specified format.
-    fn required_upload_size_and_stride(&self, size: DeviceIntSize, format: ImageFormat) -> (usize, usize);
+    fn required_upload_size_and_stride(&mut self, size: DeviceIntSize, format: ImageFormat) -> Result<(usize, usize), String>;
 
     /// Allocates `size` bytes of storage for an upload buffer and maps it for
     /// writing. A `persistent` mapping stays valid across flushes, and needs
@@ -452,6 +462,19 @@ pub trait GpuBackend {
 
     fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32);
 
+    /// Draws six-index quads from transient instances, using buffer as scratch storage.
+    /// The scratch buffer's contents after this call are unspecified.
+    fn draw_instanced_batch(
+        &mut self,
+        buffer: &mut Buffer,
+        data: &[u8],
+        instance_count: i32,
+        usage_hint: VertexUsageHint,
+    ) {
+        self.write_buffer(buffer, data, usage_hint);
+        self.draw_indexed_triangles_instanced_u16(6, instance_count);
+    }
+
     fn draw_indexed_triangles_instanced_base_instance_u16(
         &mut self,
         index_count: i32,
@@ -516,16 +539,23 @@ impl DerefMut for Device {
 }
 
 impl Device {
-    pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Device {
+    pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Result<Device, String> {
         let backend: Box<dyn GpuBackend> = match config {
             GpuBackendConfig::Gl(config) => Box::new(GlDevice::new(config, options)),
+            #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+            GpuBackendConfig::Vulkan(config) => {
+                if options.resource_override_path.is_some() || options.dump_shader_source.is_some() {
+                    return Err("Vulkan runtime shader source overrides and dumps are unsupported".into());
+                }
+                Box::new(wgpu::render_device::RenderDevice::new(std::sync::Arc::new(wgpu::Device::new(&config)?))?)
+            }
         };
-        Device {
+        Ok(Device {
             backend,
             pending_state: RenderState::default(),
             #[cfg(debug_assertions)]
             pipeline_bound: false,
-        }
+        })
     }
 
     pub fn begin_frame(&mut self) -> GpuFrameId {
@@ -576,7 +606,7 @@ impl Device {
     fn check_pipeline(&self) {
         #[cfg(debug_assertions)]
         debug_assert!(
-            self.pipeline_bound,
+            self.pipeline_bound || self.backend.failure().is_some(),
             "draw with render state changed since the program was bound"
         );
     }
@@ -599,6 +629,16 @@ impl Device {
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {
         self.check_pipeline();
         self.backend.draw_indexed_triangles_instanced_u16(index_count, instance_count)
+    }
+
+    pub fn draw_instanced_batch<V>(
+        &mut self,
+        buffer: &mut Buffer,
+        data: &[V],
+        usage_hint: VertexUsageHint,
+    ) {
+        self.check_pipeline();
+        self.backend.draw_instanced_batch(buffer, as_bytes(data), data.len() as i32, usage_hint)
     }
 
     pub fn draw_indexed_triangles_instanced_base_instance_u16(

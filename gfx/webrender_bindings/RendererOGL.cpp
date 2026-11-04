@@ -160,8 +160,11 @@ void RendererOGL::SetFramePublishId(FramePublishId aPublishId) {
 void RendererOGL::Update() {
   mCompositor->Update();
   if (mCompositor->MakeCurrent()) {
-    wr_renderer_update(mRenderer);
+    const bool updated = wr_renderer_update(mRenderer);
     FlushPipelineInfo();
+    if (!updated) {
+      RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
+    }
   }
 }
 
@@ -226,7 +229,17 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     return RenderedFrameId();
   }
 
-  wr_renderer_update(mRenderer);
+  if (!wr_renderer_update(mRenderer)) {
+    FlushPipelineInfo();
+    if (present) {
+      mCompositor->CancelFrame();
+    }
+    if (needPostRenderCall) {
+      mCompositor->GetWidget()->PostRender(&widgetContext);
+    }
+    RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
+    return RenderedFrameId();
+  }
 
   // Order the frame after producers that synchronize with the sync object,
   // once the frame's external images are all known.

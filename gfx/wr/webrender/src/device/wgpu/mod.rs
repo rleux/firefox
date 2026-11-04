@@ -9,12 +9,20 @@ use wgpu_hal as hal;
 use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
+mod images;
+mod program_store;
+pub(super) mod render_device;
+mod renderer_properties;
+mod texture_store;
+mod upload_buffers;
+mod vertex_array;
+pub use crate::device::TextureFilter;
 mod bindings;
 mod pipeline;
 mod samplers;
 mod shader;
-mod vertex_layout;
 mod transfer;
+mod vertex_layout;
 
 pub mod shaders {
     include!(concat!(env!("OUT_DIR"), "/vulkan_shaders.rs"));
@@ -244,4 +252,4 @@ fn select_adapter(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

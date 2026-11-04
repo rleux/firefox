@@ -300,6 +300,7 @@ fn native_ordered_partial_uploads_and_readbacks_preserve_neighbors_and_channel_r
                 )
                 .unwrap();
             assert_eq!(source, original);
+            source.fill(0xDD);
             let first = owner
                 .encode_readback(&encoder, &target, 0, rect(0, 0, 7, 5), None)
                 .unwrap();

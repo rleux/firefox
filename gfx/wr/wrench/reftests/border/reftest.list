@@ -58,3 +58,13 @@ fuzzy(1,40) == border-overlap-split.yaml border-overlap-split.png
 # A rounded border under a static downscale that isn't a power of two is
 # rasterized at its exact scale, so it matches the same border drawn at scale 1.
 == border-radius-static-downscale.yaml border-radius-static-downscale-ref.yaml
+
+# These borders fit one 1024x512 picture-cache tile; the main target adds one.
+# Repeated segments additionally use one shared source target.
+== color_targets(2) border-gradient-direct-target.yaml border-gradient-direct-target.yaml
+== color_targets(3) border-gradient-direct-fallback.yaml border-gradient-direct-fallback.yaml
+# Discontinuous sources retain bilinear filtering even without border repetition.
+== color_targets(3) border-gradient-discontinuous-target.yaml border-gradient-discontinuous-target.yaml
+# RGBA8 input/filter/composite rounding uses one LSB across the painted pixels.
+# The 128-pixel two-LSB allowance is empirical; larger errors always fail.
+fuzzy-range(1,180000,2,128) == border-gradient-direct.yaml border-gradient-direct-ref.yaml

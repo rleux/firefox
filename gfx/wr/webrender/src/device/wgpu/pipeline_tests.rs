@@ -132,7 +132,6 @@ fn native_catalog_pipelines_and_bindings_validate_actual_wr_interfaces() {
             pipeline
                 .create_bindings(projection, &textures, &[], &samplers)
                 .unwrap();
-            assert!(pipeline.vertex_stride > 0);
             assert_eq!(
                 pipeline.instance_stride == 0,
                 shader.name.starts_with("debug_")

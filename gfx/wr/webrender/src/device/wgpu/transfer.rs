@@ -8,7 +8,7 @@ use api::{units::DeviceIntRect, ImageFormat};
 use std::convert::TryFrom;
 use std::sync::{mpsc, Arc};
 
-fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
+pub(super) fn texture_format(format: ImageFormat) -> wgt::TextureFormat {
     match format {
         ImageFormat::R8 => wgt::TextureFormat::R8Unorm,
         ImageFormat::RG8 => wgt::TextureFormat::Rg8Unorm,
@@ -224,21 +224,34 @@ impl Device {
             return Err(Failure::validation("Vulkan upload source is too short"));
         }
         let swizzle = conversion(texture.descriptor().format, source_format)?;
-        let mut packed = vec![0; layout.size as usize];
-        for y in 0..size.height as usize {
-            let row = &mut packed[y * layout.pitch as usize..][..row_bytes];
-            row.copy_from_slice(&data[offset + y * stride..][..row_bytes]);
-            if swizzle {
-                for pixel in row.chunks_exact_mut(4) {
-                    pixel.swap(0, 2);
+        let staging = self.create_buffer(&core::resource::BufferDescriptor {
+            label: Some("WR texture upload".into()),
+            size: layout.size,
+            usage: wgt::BufferUsages::MAP_WRITE | wgt::BufferUsages::COPY_SRC,
+            mapped_at_creation: true,
+        })?;
+        {
+            let mapping = staging
+                .get_mapped_range(0, Some(layout.size))
+                .map_err(Failure::from_error)?;
+            let mut output = mapping.write_slice();
+            for y in 0..size.height as usize {
+                let source = &data[offset + y * stride..][..row_bytes];
+                let start = y * layout.pitch as usize;
+                let mut row = output.slice(start..start + row_bytes);
+                if swizzle {
+                    row.write_iter(
+                        source
+                            .chunks_exact(4)
+                            .flat_map(|p| [p[2], p[1], p[0], p[3]]),
+                    );
+                } else {
+                    row.copy_from_slice(source);
                 }
             }
         }
-        let staging = self.create_buffer_with_data(
-            "WR texture upload",
-            &packed,
-            wgt::BufferUsages::COPY_SRC,
-        )?;
+        // MAP_WRITE maps this core buffer directly; unmap flushes without an Init staging copy.
+        staging.unmap();
         encoder.copy_buffer_to_texture(
             &wgt::TexelCopyBufferInfo {
                 buffer: staging,

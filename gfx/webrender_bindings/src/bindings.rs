@@ -638,8 +638,16 @@ pub extern "C" fn wr_renderer_set_external_image_handler(
 }
 
 #[no_mangle]
-pub extern "C" fn wr_renderer_update(renderer: &mut Renderer) {
+pub extern "C" fn wr_renderer_update(renderer: &mut Renderer) -> bool {
     renderer.update();
+    let errors = mem::take(&mut renderer.renderer_errors);
+    if errors.is_empty() { return true; }
+    for error in errors {
+        warn!("Failed to update renderer: {:?}", error);
+        let msg = CString::new(format!("wr_renderer_update: {:?}", error)).unwrap();
+        unsafe { gfx_critical_note(msg.as_ptr()); }
+    }
+    false
 }
 
 #[no_mangle]
@@ -1453,7 +1461,7 @@ fn wr_device_new(gl_context: *mut c_void, pc: Option<&mut WrProgramCache>) -> De
             dump_shader_source: None,
             surface_origin_is_top_left: false,
         },
-    )
+    ).expect("GL device construction is infallible")
 }
 
 extern "C" {

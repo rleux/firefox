@@ -1,0 +1,100 @@
+---
+root:
+  items:
+    - type: stacking-context
+      bounds: [20, 20, 200, 150]
+      items:
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-linear-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+    - type: stacking-context
+      bounds: [20, 200, 200, 150]
+      items:
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-radial-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+    - type: stacking-context
+      bounds: [20, 380, 200, 150]
+      items:
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-conic-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+    - type: stacking-context
+      bounds: [320, 20, 200, 150]
+      transform: rotate(8)
+      transform-origin: [100, 75]
+      items:
+        - type: clip
+          id: 5
+          complex:
+            - rect: [0, 0, 200, 150]
+              radius: 24
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-linear-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+          clip-chain: [5]
+    - type: stacking-context
+      bounds: [320, 200, 200, 150]
+      transform: rotate(8)
+      transform-origin: [100, 75]
+      items:
+        - type: clip
+          id: 5
+          complex:
+            - rect: [0, 0, 200, 150]
+              radius: 24
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-radial-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+          clip-chain: [5]
+    - type: stacking-context
+      bounds: [570, 380, 200, 150]
+      # A 3-4-5 rotation keeps pixel centers away from integer slice/AA joins.
+      transform: rotate(36.86989765)
+      transform-origin: [100, 75]
+      items:
+        - type: clip
+          id: 5
+          complex:
+            - rect: [0, 0, 200, 150]
+              radius: 24
+        - type: border
+          bounds: [0, 0, 200, 150]
+          width: [30, 20, 60, 60]
+          border-type: image
+          image-source: gradient-border-conic-source.png
+          image-width: 100
+          image-height: 100
+          slice: [20, 30, 40, 10]
+          fill: true
+          clip-chain: [5]

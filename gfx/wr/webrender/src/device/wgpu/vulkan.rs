@@ -89,6 +89,7 @@ pub(super) fn open(
         required_features: adapter.features()
             & (wgt::Features::DUAL_SOURCE_BLENDING
                 | wgt::Features::FLOAT32_FILTERABLE
+                | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
                 | wgt::Features::TEXTURE_FORMAT_16BIT_NORM
                 | wgt::Features::TEXTURE_COMPONENT_SWIZZLE
                 | wgt::Features::PASSTHROUGH_SHADERS)

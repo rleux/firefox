@@ -889,6 +889,7 @@ pub enum RendererError {
     MaxTextureSize,
     SoftwareRasterizer,
     OutOfMemory,
+    Device(String),
 }
 
 /// Flatten a shader build failure into the per-line diagnostics the debugger
@@ -1041,12 +1042,13 @@ impl Renderer {
 
                         if self.frame_must_be_drawn(&prev_doc) {
                             prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
-                            self.render_impl(
+                            let result = self.render_impl(
                                 document_id,
                                 &mut prev_doc,
                                 None,
                                 0,
-                            ).ok();
+                            );
+                            if let Err(errors) = result { self.renderer_errors.extend(errors); }
                         }
 
                         Some(prev_doc.frame.allocator_memory)
@@ -1114,12 +1116,13 @@ impl Renderer {
                                 // As this render will not be presented, we must pass None to
                                 // render_impl. This avoids interfering with partial present
                                 // logic, as well as being more efficient.
-                                self.render_impl(
+                                let result = self.render_impl(
                                     doc_id,
                                     &mut doc,
                                     None,
                                     0,
-                                ).ok();
+                                );
+                                if let Err(errors) = result { self.renderer_errors.extend(errors); }
                             }
                         }
                     }
@@ -1148,12 +1151,13 @@ impl Renderer {
                     if let Some(mut prev_doc) = prev_doc {
                         if self.frame_must_be_drawn(&prev_doc) {
                             prev_doc.render_reasons |= RenderReasons::TEXTURE_CACHE_FLUSH;
-                            self.render_impl(
+                            let result = self.render_impl(
                                 document_id,
                                 &mut prev_doc,
                                 None,
                                 0,
-                            ).ok();
+                            );
+                            if let Err(errors) = result { self.renderer_errors.extend(errors); }
                         }
 
                         self.active_documents.insert(document_id, prev_doc);
@@ -1168,12 +1172,13 @@ impl Renderer {
                     if self.debug_flags.contains(DebugFlags::SKIP_RENDERING) {
                         self.apply_pending_resource_updates();
                     } else {
-                        self.render_impl(
+                        let result = self.render_impl(
                             document_id,
                             &mut offscreen_doc,
                             None,
                             0,
-                        ).unwrap();
+                        );
+                        if let Err(errors) = result { self.renderer_errors.extend(errors); }
                     }
                 }
                 ResultMsg::AppendNotificationRequests(mut notifications) => {
@@ -1221,6 +1226,7 @@ impl Renderer {
                 }
             }
         }
+        self.check_device_errors();
     }
 
     fn frame_must_be_drawn(&self, doc: &RenderedDocument) -> bool {
@@ -1643,6 +1649,12 @@ impl Renderer {
                 Ok(RenderResults::default())
             }
         };
+
+        let result = if result.is_ok() {
+            self.check_device_errors();
+            if self.renderer_errors.is_empty() { result }
+            else { Err(mem::take(&mut self.renderer_errors)) }
+        } else { result };
 
         drain_filter(
             &mut self.notifications,
@@ -2321,6 +2333,11 @@ impl Renderer {
         if self.device.take_out_of_memory_error() {
             self.renderer_errors.push(RendererError::OutOfMemory);
         }
+        if let Some(error) = self.device.failure() {
+            if !self.renderer_errors.iter().any(|error| matches!(error, RendererError::Device(_))) {
+                self.renderer_errors.push(RendererError::Device(error.to_owned()));
+            }
+        }
     }
 
     fn bind_textures(&mut self, textures: &BatchTextures) {
@@ -2400,9 +2417,7 @@ impl Renderer {
                 let instances = self.vaos.instance_buffer_mut(vertex_array_kind);
                 if self.enable_instancing {
                     self.device
-                        .write_buffer(instances, chunk, ONE_TIME_USAGE_HINT);
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
+                        .draw_instanced_batch(instances, chunk, ONE_TIME_USAGE_HINT);
                 } else {
                     self.device
                         .write_buffer_repeated(instances, chunk, NonZeroUsize::new(4).unwrap(), ONE_TIME_USAGE_HINT);
@@ -3229,11 +3244,10 @@ impl Renderer {
             None
         };
 
-        // A target with a clear color is fully overwritten by the clear,
-        // so its previous contents need not be loaded.
+        // Cached targets clear only their task rects and must retain the rest of the atlas.
         let color_load = match clear_color {
-            Some(..) => LoadOp::DontCare,
-            None => LoadOp::Load,
+            Some(..) if !require_precise_clear => LoadOp::DontCare,
+            _ => LoadOp::Load,
         };
         let depth_load = clear_depth.map_or(LoadOp::DontCare, LoadOp::Clear);
 
@@ -4883,3 +4897,6 @@ mod tests {
         assert_eq!(tracker.get_damage_rect(3), Some(combined));
     }
 }
+
+#[cfg(all(test, feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+mod vulkan_tests;
