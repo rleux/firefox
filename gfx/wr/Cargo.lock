@@ -6345,6 +6345,7 @@ name = "webrender"
 version = "0.62.0"
 dependencies = [
  "allocator-api2",
+ "ash",
  "base64",
  "bincode",
  "bitflags 2.11.0",
@@ -6386,6 +6387,8 @@ dependencies = [
  "webrender_build",
  "webrender_shader_build",
  "wgpu-core 30.0.0",
+ "wgpu-hal 30.0.0",
+ "wgpu-types 30.0.0",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
@@ -6718,11 +6721,13 @@ source = "git+https://github.com/gfx-rs/wgpu?rev=49325ca0a13bdc0787b1601138096cc
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
+ "js-sys",
  "log",
  "macro_rules_attribute",
  "naga-types",
  "raw-window-handle",
  "static_assertions",
+ "web-sys",
 ]
 
 [[package]]

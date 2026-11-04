@@ -239,6 +239,8 @@ pub use crate::composite::{CompositorInputConfig, CompositorSurfaceUsage, ClipRa
 pub use crate::composite::{CompositorConfig, Compositor, CompositorCapabilities, CompositorSurfaceTransform};
 pub use crate::composite::{NativeSurfaceId, NativeTileId, NativeSurfaceHandle, NativeSurfaceInfo, BufferDamageCompositor};
 pub use crate::composite::{MappableCompositor, MappedTileInfo, SWGLCompositeSurfaceInfo, SwapchainMode, WindowVisibility, WindowProperties};
+#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+pub use crate::device::wgpu;
 pub use crate::device::{UploadMethod, VertexUsageHint, get_unoptimized_shader_source};
 pub use crate::device::{ProgramBinary, ProgramCache, ProgramCacheObserver, ShaderError};
 pub use crate::device::{Device, DeviceOptions, GlBackendConfig, GpuBackendConfig, GraphicsApi, GraphicsApiInfo};

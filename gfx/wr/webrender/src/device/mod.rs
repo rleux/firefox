@@ -12,6 +12,8 @@ mod gl;
 pub mod query;
 mod types;
 mod upload;
+#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+pub mod wgpu;
 
 #[cfg(feature = "capture")]
 use api::{ExternalTextureHandle, ImageDescriptor};

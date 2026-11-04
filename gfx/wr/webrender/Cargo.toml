@@ -9,7 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
-vulkan = ["dep:wgpu-core", "dep:webrender_shader_build", "webrender_build/vulkan"]
+vulkan = ["dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -76,3 +76,7 @@ rand = "0.4"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dependencies]
 wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["std", "vulkan"] }
+
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["vulkan"] }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["std"] }
+ash = { version = "0.38", optional = true }
