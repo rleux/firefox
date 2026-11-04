@@ -67,6 +67,12 @@ size_t SharedPlanarYCbCrImage::SizeOfExcludingThis(
 
 TextureClient* SharedPlanarYCbCrImage::GetTextureClient(
     KnowsCompositor* aKnowsCompositor) {
+  if (!mTextureClient || !mTextureClient->IsValid() ||
+      !mTextureClient->GetAllocator()->IPCOpen() ||
+      (aKnowsCompositor && mTextureClient->GetAllocator() !=
+                               aKnowsCompositor->GetTextureForwarder().get())) {
+    return nullptr;
+  }
   return mTextureClient.get();
 }
 
@@ -116,7 +122,7 @@ nsresult SharedPlanarYCbCrImage::AdoptData(const Data& aData) {
 }
 
 bool SharedPlanarYCbCrImage::IsValid() const {
-  return mTextureClient && mTextureClient->IsValid();
+  return mShmemHolder || (mTextureClient && mTextureClient->IsValid());
 }
 
 nsresult SharedPlanarYCbCrImage::CreateEmptyBuffer(

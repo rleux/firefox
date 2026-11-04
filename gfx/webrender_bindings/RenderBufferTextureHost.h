@@ -18,6 +18,8 @@ class RenderBufferTextureHost final : public RenderTextureHostSWGL {
   // RenderTextureHost
   wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL) override;
   void Unlock() override;
+  wr::WrExternalImage LockExternalBuffer(uint8_t aChannelIndex) override;
+  void UnlockExternalBuffer() override { Unlock(); }
 
   size_t Bytes() override {
     return mSize.width * mSize.height * BytesPerPixel(mFormat);

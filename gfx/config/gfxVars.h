@@ -57,6 +57,7 @@ class MOZ_STACK_CLASS gfxVarsCollectUpdates;
   _(DXNV12Blocked, bool, false)                                    \
   _(DXP010Blocked, bool, false)                                    \
   _(DXP016Blocked, bool, false)                                    \
+  _(UseWebRenderVulkan, bool, false)                               \
   _(UseWebRenderANGLE, bool, false)                                \
   _(UseWebRenderFlipSequentialWin, bool, false)                    \
   _(UseWebRenderDCompWin, bool, false)                             \

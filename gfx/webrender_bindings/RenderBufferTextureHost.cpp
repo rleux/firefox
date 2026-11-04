@@ -113,6 +113,14 @@ wr::WrExternalImage RenderBufferTextureHost::Lock(uint8_t aChannelIndex,
   return RawDataToWrExternalImage(data.mData, data.mBufferSize);
 }
 
+wr::WrExternalImage RenderBufferTextureHost::LockExternalBuffer(
+    uint8_t aChannelIndex) {
+  if (aChannelIndex >= GetPlaneCount()) {
+    return InvalidToWrExternalImage();
+  }
+  return Lock(aChannelIndex, nullptr);
+}
+
 void RenderBufferTextureHost::Unlock() {
   if (mLocked) {
     if (mSurface) {

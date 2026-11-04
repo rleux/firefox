@@ -25,6 +25,8 @@ mod glyphs;
 mod presentation;
 #[path = "vulkan_image_tests.rs"]
 mod images;
+#[path = "vulkan_external_buffer_tests.rs"]
+mod external_buffers;
 
 struct Notice(mpsc::Sender<()>);
 

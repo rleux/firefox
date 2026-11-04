@@ -95,7 +95,9 @@ class CanvasContext final : public nsICanvasRenderingContextInternal,
 
   void GetConfiguration(dom::Nullable<dom::GPUCanvasConfiguration>& aRv);
   RefPtr<Texture> GetCurrentTexture(ErrorResult& aRv);
-  void MaybeQueueSwapChainPresent();
+  // Queue-side writes have no command-buffer submit. Only notify for the
+  // current ordinary texture; shared textures retain their submit contract.
+  void MaybeQueueSwapChainPresent(Texture* aQueueWriteTexture = nullptr);
   Maybe<layers::SurfaceDescriptor> SwapChainPresent();
   void ForceNewFrame();
   void InvalidateCanvasContent();
