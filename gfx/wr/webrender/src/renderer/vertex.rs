@@ -38,6 +38,43 @@ const MAX_TRACKED_UPLOAD_BYTES: usize = MAX_VERTEX_TEXTURE_WIDTH * 16;
 pub mod desc {
     use crate::device::{VertexAttribute, VertexAttributeKind, VertexDescriptor};
 
+    pub const DEBUG_FONT: VertexDescriptor = VertexDescriptor {
+        vertex_attributes: &[
+            VertexAttribute {
+                name: "aPosition",
+                count: 2,
+                kind: VertexAttributeKind::F32,
+            },
+            VertexAttribute {
+                name: "aColor",
+                count: 4,
+                kind: VertexAttributeKind::U8Norm,
+            },
+            VertexAttribute {
+                name: "aColorTexCoord",
+                count: 2,
+                kind: VertexAttributeKind::F32,
+            },
+        ],
+        instance_attributes: &[],
+    };
+
+    pub const DEBUG_COLOR: VertexDescriptor = VertexDescriptor {
+        vertex_attributes: &[
+            VertexAttribute {
+                name: "aPosition",
+                count: 2,
+                kind: VertexAttributeKind::F32,
+            },
+            VertexAttribute {
+                name: "aColor",
+                count: 4,
+                kind: VertexAttributeKind::U8Norm,
+            },
+        ],
+        instance_attributes: &[],
+    };
+
     pub const PRIM_INSTANCES: VertexDescriptor = VertexDescriptor {
         vertex_attributes: &[VertexAttribute::quad_instance_vertex()],
         instance_attributes: &[VertexAttribute {

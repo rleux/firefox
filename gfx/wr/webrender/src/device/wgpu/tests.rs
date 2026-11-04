@@ -407,3 +407,6 @@ fn native_loss_is_observed_before_submission_and_callbacks_still_run() {
     }
     assert_eq!(device.failure().unwrap().kind, ErrorType::DeviceLost);
 }
+
+#[path = "pipeline_tests.rs"]
+mod pipelines;
