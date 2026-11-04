@@ -9,6 +9,8 @@ pub(super) fn open(
     options: &Options,
 ) -> Result<
     (
+        Arc<core::instance::Instance>,
+        Option<surface::WindowSurface>,
         Arc<core::instance::Adapter>,
         Arc<core::device::Device>,
         Arc<core::device::queue::Queue>,
@@ -45,11 +47,22 @@ pub(super) fn open(
     if raw_instance.shared_instance().instance_api_version() < vk::API_VERSION_1_1 {
         return Err("WebRender shaders require a Vulkan 1.1 instance".into());
     }
+    let surface = options
+        .window
+        .as_ref()
+        .map(|window| surface::WindowSurface::new(&instance, window.clone()))
+        .transpose()?;
     let mut adapters = instance.enumerate_adapters(wgt::Backends::VULKAN, false);
     adapters.retain(|adapter| {
         let raw = unsafe { adapter.clone().as_hal::<hal::api::Vulkan>() }.unwrap();
         raw.physical_device_capabilities().properties().api_version >= vk::API_VERSION_1_1
     });
+    if let Some(surface) = &surface {
+        adapters.retain(|adapter| surface.supports_adapter(adapter));
+        if adapters.is_empty() {
+            return Err("No Vulkan adapters can present to the window surface".into());
+        }
+    }
     let info: Vec<_> = adapters
         .iter()
         .map(|adapter| {
@@ -123,7 +136,7 @@ pub(super) fn open(
     let (device, queue) = unsafe { adapter.create_device_and_queue_from_hal(open.into(), &desc) }
         .map_err(|error| format!("Creating core Vulkan device: {error}"))?;
     drop(raw_adapter);
-    Ok((adapter, device, queue))
+    Ok((instance, surface, adapter, device, queue))
 }
 
 pub(super) fn primary_buffer_features(

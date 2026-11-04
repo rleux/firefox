@@ -47,6 +47,9 @@ impl RenderDevice {
         target_rect: FramebufferIntRect,
         filter: TextureFilter,
     ) -> Result<()> {
+        if !self.prepare_default_target(target)? {
+            return Ok(());
+        }
         self.flush_pass(StoreOp::Store)?;
         let source = self.textures.read_target(source)?;
         let (target, _, _) = self.textures.draw_target(target)?;

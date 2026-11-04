@@ -68,6 +68,8 @@ pub(in crate::device) struct RenderDevice {
     quad: Arc<core::resource::Buffer>,
     quad_indices: Arc<core::resource::Buffer>,
     fallback: Arc<Image>,
+    surface: Option<super::surface::Surface>,
+    skipped_pass: bool,
     frame: GpuFrameId,
     inside_frame: bool,
     pub(super) submitted: core::SubmissionIndex,
@@ -94,6 +96,13 @@ fn projection(transform: &Transform3D<f32>) -> [f32; 16] {
 }
 
 impl RenderDevice {
+    pub fn new_windowed(options: &super::Options) -> Result<Self> {
+        let (owner, initial) = Device::new_with_surface(options)?;
+        let mut result = Self::new(Arc::new(owner))?;
+        result.surface =
+            initial.map(|initial| super::surface::Surface::new(&result.owner, initial));
+        Ok(result)
+    }
     pub fn new(owner: Arc<Device>) -> Result<Self> {
         let quad = owner
             .create_buffer_with_data(
@@ -132,6 +141,8 @@ impl RenderDevice {
             quad,
             quad_indices,
             fallback,
+            surface: None,
+            skipped_pass: false,
             frame: GpuFrameId::new(0),
             inside_frame: false,
             submitted: 0,
@@ -194,6 +205,18 @@ impl RenderDevice {
             }
         }
     }
+    pub(super) fn prepare_default_target(&mut self, target: DrawTarget) -> Result<bool> {
+        if let DrawTarget::Default { .. } = target {
+            if let Some(surface) = &mut self.surface {
+                let (size, _) = TextureStore::default_target_viewport(target)?;
+                let output = surface.acquire([size.width as u32, size.height as u32])?;
+                let ready = output.is_some();
+                self.textures.set_output(output);
+                return Ok(ready);
+            }
+        }
+        Ok(true)
+    }
     fn commands(&mut self) -> Result<Arc<core::command::CommandEncoder>> {
         if self.encoder.is_none() {
             self.encoder = Some(
@@ -216,6 +239,9 @@ impl RenderDevice {
         Ok(())
     }
     pub(super) fn submit(&mut self) -> Result<core::SubmissionIndex> {
+        self.submit_inner(false)
+    }
+    fn submit_inner(&mut self, present: bool) -> Result<core::SubmissionIndex> {
         self.flush_pass(StoreOp::Store)?;
         self.poll()?;
         if self.in_flight.len() >= 2 {
@@ -231,10 +257,24 @@ impl RenderDevice {
             .owner
             .submit(commands.as_slice())
             .map_err(|e| e.to_string())?;
+        if present {
+            if let Some(surface) = &mut self.surface {
+                self.textures.set_output(None);
+                surface.present()?;
+            }
+        }
         let completed = self.completed.clone();
-        self.owner.queue.on_submitted_work_done(Box::new(move || {
-            completed.fetch_max(index, Ordering::Release);
-        }));
+        let tail = Arc::new(std::sync::OnceLock::new());
+        let callback_tail = tail.clone();
+        // Presentation and pending writes can add core submissions before this callback.
+        let index = self
+            .owner
+            .queue
+            .on_submitted_work_done(Box::new(move || {
+                completed.fetch_max(*callback_tail.wait(), Ordering::Release);
+            }))
+            .unwrap_or(index);
+        tail.set(index).unwrap();
         self.owner.check().map_err(|e| e.to_string())?;
         self.submitted = index;
         self.in_flight.push_back(index);
@@ -252,22 +292,29 @@ impl RenderDevice {
                 .ok_or("Vulkan frame identifiers exhausted")?,
         );
         self.inside_frame = true;
+        if let Some(surface) = &mut self.surface {
+            surface.begin_frame();
+        }
         self.programs.unbind();
         self.vertex_arrays.unbind();
         self.textures.begin_frame(self.frame);
         Ok(self.frame)
     }
     pub fn end_frame(&mut self) -> Result<core::SubmissionIndex> {
-        if !self.inside_frame || self.pass.is_some() {
+        if !self.inside_frame || self.pass.is_some() || self.skipped_pass {
             return Err("Vulkan frame has unfinished passes".into());
         }
-        let index = self.submit()?;
+        let index = self.submit_inner(true)?;
         self.inside_frame = false;
         Ok(index)
     }
     pub fn begin_render_pass(&mut self, descriptor: &RenderPassDescriptor) -> Result<()> {
-        if !self.inside_frame || self.pass.is_some() {
+        if !self.inside_frame || self.pass.is_some() || self.skipped_pass {
             return Err("Invalid Vulkan render-pass nesting".into());
+        }
+        if !self.prepare_default_target(descriptor.target)? {
+            self.skipped_pass = true;
+            return Ok(());
         }
         let (color, depth, viewport) = self.textures.draw_target(descriptor.target)?;
         if matches!(descriptor.depth_load, LoadOp::Clear(_)) && depth.is_none() {
@@ -290,6 +337,9 @@ impl RenderDevice {
         Ok(())
     }
     pub fn end_render_pass(&mut self, depth_store: StoreOp) -> Result<()> {
+        if std::mem::take(&mut self.skipped_pass) {
+            return Ok(());
+        }
         if self.pass.is_none() {
             return Err("No Vulkan render pass is active".into());
         }
@@ -525,6 +575,9 @@ impl RenderDevice {
         depth: Option<f32>,
         rect: Option<FramebufferIntRect>,
     ) -> Result<()> {
+        if self.skipped_pass {
+            return Ok(());
+        }
         let mut pass = self.pass.take().ok_or("No Vulkan render pass is active")?;
         let rect = rect.map(|r| r.cast_unit()).unwrap_or(pass.bounds);
         if let Some(draw) = self.clear_draw(&pass, rect, color, depth)? {
@@ -543,6 +596,9 @@ impl RenderDevice {
         topology: wgt::PrimitiveTopology,
         instance_data: Option<(&Buffer, &[u8])>,
     ) -> Result<()> {
+        if self.skipped_pass {
+            return Ok(());
+        }
         let pass = self
             .pass
             .as_ref()

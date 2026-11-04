@@ -9,7 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
-vulkan = ["dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
+vulkan = ["dep:raw-window-handle", "dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:webrender_shader_build", "webrender_build/vulkan"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -30,6 +30,7 @@ glslopt = "0.1.14"
 webrender_build = { version = "0.0.2", path = "../webrender_build" }
 
 [dependencies]
+raw-window-handle = { version = "0.6.2", optional = true }
 bincode = "1.0"
 bitflags = { version = "2", features = ["serde"] }
 byteorder = "1.0"
