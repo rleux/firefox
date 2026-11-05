@@ -284,7 +284,8 @@ fn vulkan_renderer_foreign_gl_reuses_only_after_complete() {
             pending += 1;
             assert!(
                 Instant::now() < deadline,
-                "renderer remained pending cycle={cycle}"
+                "renderer remained pending cycle={}",
+                cycle
             );
             assert!(!renderer.active_documents[&document].frame.has_been_rendered);
             assert_eq!(result.present_result, Some(crate::PresentResult::Retry));
@@ -315,10 +316,65 @@ fn vulkan_renderer_foreign_gl_reuses_only_after_complete() {
             expected[3] = 255;
             assert!(
                 pixel.iter().zip(expected).all(|(&a, b)| a.abs_diff(b) <= 1),
-                "cycle={cycle} pixel={index} actual={pixel:?} expected={expected:?}"
+                "cycle={} pixel={} actual={:?} expected={:?}",
+                cycle,
+                index,
+                pixel,
+                expected
             );
         }
         eprintln!("WR_GL_PIXELS PASS cycle={cycle} pixels=306 normal=153 opaque=153 native={identities:?}");
+        #[cfg(feature = "capture")]
+        {
+            assert_eq!(image.descriptor().usage, crate::wgpu::TextureUses::RESOURCE);
+            while !unsafe {
+                registry.acquire_foreign(image, ready.borrow().as_ref().unwrap().as_fd())
+            }
+            .unwrap()
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "capture acquisition stayed pending"
+                );
+                registry.flush_idle().unwrap();
+                renderer.gpu_submission_status().unwrap();
+                std::thread::yield_now();
+            }
+            let _pending_core_write =
+                crate::wgpu::native_test::queue_capture_write(registry.device());
+            for format in [ImageFormat::RGBA8, ImageFormat::BGRA8] {
+                let descriptor = ImageDescriptor::new(17, 9, format, ImageDescriptorFlags::empty());
+                for (channel, handle) in handles.unwrap().iter().copied().enumerate() {
+                    let captured = renderer.device.read_external_texture(
+                        handle,
+                        ImageBufferKind::Texture2D,
+                        &descriptor,
+                    );
+                    let mut expected = Vec::with_capacity(17 * 9 * 4);
+                    for y in 0..9 {
+                        for x in 0..17 {
+                            let mut pixel = foreign_pixel(x, y, cycle);
+                            if channel == 1 {
+                                pixel[3] = 255;
+                            }
+                            if format == ImageFormat::BGRA8 {
+                                pixel.swap(0, 2);
+                            }
+                            expected.extend_from_slice(&pixel);
+                        }
+                    }
+                    assert_eq!(
+                        captured, expected,
+                        "capture cycle={cycle} format={format:?} channel={channel}"
+                    );
+                }
+            }
+            assert_eq!(image.descriptor().usage, crate::wgpu::TextureUses::RESOURCE);
+            assert_eq!(image.test_native_identities(), identities);
+            *receipt.borrow_mut() = Some(registry.release(image).unwrap());
+            registry.flush_idle().unwrap();
+            eprintln!("WR_GL_CAPTURE PASS cycle={cycle} pixels=612 source=RESOURCE formats=RGBA8,BGRA8 views=normal,opaque");
+        }
         let returned = receipt.borrow().as_ref().unwrap().clone();
         loop {
             match returned.status() {
@@ -328,7 +384,8 @@ fn vulkan_renderer_foreign_gl_reuses_only_after_complete() {
             }
             assert!(
                 Instant::now() < deadline,
-                "GL return remained pending cycle={cycle}"
+                "GL return remained pending cycle={}",
+                cycle
             );
             registry.flush_idle().unwrap();
             renderer.gpu_submission_status().unwrap();

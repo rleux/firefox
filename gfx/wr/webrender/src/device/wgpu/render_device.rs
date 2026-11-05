@@ -985,14 +985,6 @@ impl RenderDevice {
             .as_ref()
             .ok_or("Native images unavailable")?;
         let image = native.image(id)?;
-        if !image
-            .raw
-            .descriptor()
-            .usage
-            .contains(wgt::TextureUsages::COPY_SRC)
-        {
-            return Err("Native capture requires admitted COPY_SRC usage".into());
-        }
         let opaque = native.is_opaque(id)?;
         if image.raw.descriptor().size.width != descriptor.size.width as u32
             || image.raw.descriptor().size.height != descriptor.size.height as u32
@@ -1008,13 +1000,43 @@ impl RenderDevice {
             })
             .and_then(|area| area.checked_mul(4))
             .ok_or("Native capture length overflow")?;
+        let rect = DeviceIntRect::from_size(descriptor.size);
+        let restore_sampling = image
+            .raw
+            .descriptor()
+            .usage
+            .contains(wgt::TextureUsages::COPY_SRC);
+        let image = if restore_sampling {
+            image
+        } else {
+            self.flush_pass(StoreOp::Store)?;
+            self.collect_native_commands()?;
+            let scratch = Image::new(
+                &self.owner,
+                descriptor.size.width as u32,
+                descriptor.size.height as u32,
+                wgt::TextureFormat::Rgba8Unorm,
+                TextureFilter::Nearest,
+                true,
+            )?;
+            self.blit_level(
+                image,
+                0,
+                scratch.clone(),
+                0,
+                rect,
+                rect,
+                TextureFilter::Nearest,
+            )?;
+            scratch
+        };
         let mut pixels = vec![0; length];
         self.capture_image(
             image,
-            DeviceIntRect::from_size(descriptor.size),
+            rect,
             descriptor.format,
             &mut pixels,
-            true,
+            restore_sampling,
         )?;
         if opaque {
             for pixel in pixels.chunks_exact_mut(4) {

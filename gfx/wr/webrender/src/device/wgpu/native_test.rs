@@ -11,6 +11,21 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "capture")]
+pub(crate) fn queue_capture_write(owner: &Device) -> Arc<core::resource::Buffer> {
+    let buffer = owner
+        .create_buffer(&core::resource::BufferDescriptor {
+            label: Some("Native capture pending write".into()),
+            size: 4,
+            usage: wgt::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+        .unwrap();
+    owner.queue.write_buffer(buffer.clone(), 0, &[1, 2, 3, 4]);
+    owner.check().unwrap();
+    buffer
+}
+
 pub(crate) struct Producer {
     owner: Arc<Device>,
     image: vk::Image,
