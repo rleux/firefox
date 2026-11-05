@@ -7,6 +7,7 @@
 
 #include "GLContextTypes.h"
 #include "GLTypes.h"
+#include "RenderTextureHost.h"
 #include "Units.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
@@ -80,6 +81,16 @@ class RenderCompositor {
   virtual bool Resume() = 0;
   // Called when WR rendering is skipped
   virtual void Update() {}
+  virtual WrExternalImage LockExternalImage(RenderTextureHost*, uint8_t);
+  virtual bool CanReadbackNativeImage(RenderTextureHost*, bool) const {
+    return false;
+  }
+  virtual bool ReadbackNativeImage(RenderTextureHost*, uint8_t*, size_t,
+                                   bool aOpaque = false) {
+    return false;
+  }
+  virtual void UnlockExternalImage(RenderTextureHost*);
+  virtual void AfterRender(bool) {}
 
   virtual const WrVulkanConfig* GetVulkanConfig() const { return nullptr; }
   virtual bool UsesBackendPresentation() const { return false; }

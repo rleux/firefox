@@ -458,3 +458,13 @@ bool RenderCompositor::CaptureScreenPixelsFromGL(
 #endif
 
 }  // namespace mozilla::wr
+
+namespace mozilla::wr {
+WrExternalImage RenderCompositor::LockExternalImage(RenderTextureHost* aHost,
+                                                    uint8_t aChannel) {
+  return aHost->LockExternalBuffer(aChannel);
+}
+void RenderCompositor::UnlockExternalImage(RenderTextureHost* aHost) {
+  aHost->UnlockExternalBuffer();
+}
+}  // namespace mozilla::wr

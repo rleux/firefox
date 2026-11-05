@@ -12,7 +12,10 @@ mod gl;
 pub mod query;
 mod types;
 mod upload;
-#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+#[cfg(all(
+    feature = "vulkan",
+    any(target_os = "linux", target_os = "windows", target_os = "android")
+))]
 pub mod wgpu;
 
 #[cfg(feature = "capture")]
@@ -43,7 +46,10 @@ pub use self::upload::*;
 pub enum GpuBackendConfig {
     /// OpenGL or OpenGL ES.
     Gl(GlBackendConfig),
-    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
     Vulkan(wgpu::Options),
 }
 
@@ -129,29 +135,48 @@ pub trait GpuBackend {
     fn take_out_of_memory_error(&self) -> bool;
 
     /// A permanent backend error requiring renderer recovery.
-    fn failure(&self) -> Option<&str> { None }
+    fn failure(&self) -> Option<&str> {
+        None
+    }
 
-    fn present_result(&self) -> Option<PresentResult> { None }
+    fn present_result(&self) -> Option<PresentResult> {
+        None
+    }
 
     /// Polls completion without submitting work, including after a failed frame.
-    fn gpu_submission_status(&mut self) -> Result<Option<GpuSubmissionStatus>, String> { Ok(None) }
+    fn gpu_submission_status(&mut self) -> Result<Option<GpuSubmissionStatus>, String> {
+        Ok(None)
+    }
 
-    fn set_surface_paused(&mut self, _paused: bool) -> Result<(), String> { Ok(()) }
+    fn set_surface_paused(&mut self, _paused: bool) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Request a snapshot of the next GPU frame when supported.
     /// Failed GPU frame attempts consume the request.
     fn prepare_readback(&mut self) -> Result<bool, String> { Ok(true) }
     fn readback_ready(&self) -> bool { true }
 
-    #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
-    fn set_wgpu_surface(&mut self, _window: Option<Rc<dyn wgpu::SurfaceWindow>>, _options: wgpu::SurfaceOptions) -> Result<(), String> {
+    #[cfg(all(
+        feature = "vulkan",
+        any(target_os = "linux", target_os = "windows", target_os = "android")
+    ))]
+    fn set_wgpu_surface(
+        &mut self,
+        _window: Option<Rc<dyn wgpu::SurfaceWindow>>,
+        _options: wgpu::SurfaceOptions,
+    ) -> Result<(), String> {
         Err("This backend does not manage a Vulkan surface".into())
     }
 
     #[cfg(test)]
-    fn wgpu_test_fail_submit(&mut self) { panic!("Not a Vulkan backend") }
+    fn wgpu_test_fail_submit(&mut self) {
+        panic!("Not a Vulkan backend")
+    }
     #[cfg(test)]
-    fn wgpu_test_lose_device(&self) { panic!("Not a Vulkan backend") }
+    fn wgpu_test_lose_device(&self) {
+        panic!("Not a Vulkan backend")
+    }
 
     /// Orders reads of the framebuffer by subsequent advanced blend draws
     /// after preceding writes to the same pixels.
@@ -251,11 +276,7 @@ pub trait GpuBackend {
     /// Notifies the device that a render target is about to be reused.
     ///
     /// This method adds or removes a depth target as necessary.
-    fn reuse_render_target(
-        &mut self,
-        texture: &mut Texture,
-        rt_info: RenderTargetInfo,
-    );
+    fn reuse_render_target(&mut self, texture: &mut Texture, rt_info: RenderTargetInfo);
 
     /// Perform a blit between src_target and dest_target.
     /// This will overwrite self.bound_read_fbo and self.bound_draw_fbo.
@@ -331,19 +352,11 @@ pub trait GpuBackend {
         features: &[&'static str],
     ) -> (String, String);
 
-    fn set_uniforms(
-        &self,
-        program: &Program,
-        transform: &Transform3D<f32>,
-    );
+    fn set_uniforms(&self, program: &Program, transform: &Transform3D<f32>);
 
     /// Sets the uTextureSize uniform. Most shaders do not require this to be called
     /// as they use the textureSize GLSL function instead.
-    fn set_shader_texture_size(
-        &self,
-        program: &Program,
-        texture_size: DeviceSize,
-    );
+    fn set_shader_texture_size(&self, program: &Program, texture_size: DeviceSize);
 
     fn create_transfer_buffer_with_size(&mut self, size: usize) -> TransferBuffer;
 
@@ -355,7 +368,10 @@ pub trait GpuBackend {
         pbo: &TransferBuffer,
     );
 
-    fn map_transfer_buffer<'a>(&'a mut self, pbo: &'a TransferBuffer) -> Option<MappedTransferBuffer<'a>>;
+    fn map_transfer_buffer<'a>(
+        &'a mut self,
+        pbo: &'a TransferBuffer,
+    ) -> Option<MappedTransferBuffer<'a>>;
 
     fn unmap_transfer_buffer(&mut self);
 
@@ -367,7 +383,11 @@ pub trait GpuBackend {
 
     /// Returns the size and stride in bytes required to upload an area of pixels
     /// of the specified size, to a texture of the specified format.
-    fn required_upload_size_and_stride(&mut self, size: DeviceIntSize, format: ImageFormat) -> Result<(usize, usize), String>;
+    fn required_upload_size_and_stride(
+        &mut self,
+        size: DeviceIntSize,
+        format: ImageFormat,
+    ) -> Result<(usize, usize), String>;
 
     /// Allocates `size` bytes of storage for an upload buffer and maps it for
     /// writing. A `persistent` mapping stays valid across flushes, and needs
@@ -527,16 +547,19 @@ pub trait GpuBackend {
     fn deinit(&mut self);
 
     fn end_frame(&mut self);
+    fn finish_resource_work(&mut self) {
+        self.end_frame();
+    }
+    fn flush_external_images(&mut self) {}
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    fn wgpu_external_textures(&self) -> Option<Rc<wgpu::ExternalTextureRegistry>> {
+        None
+    }
 
     /// Clears `rect` of the current render pass target. Whole-target clears
     /// are the pass's load ops instead. Clears are independent of the bound
     /// pipeline's write masks and of the scissor.
-    fn clear_rect(
-        &mut self,
-        rect: FramebufferIntRect,
-        color: Option<[f32; 4]>,
-        depth: Option<f32>,
-    );
+    fn clear_rect(&mut self, rect: FramebufferIntRect, color: Option<[f32; 4]>, depth: Option<f32>);
 
     /// Restricts subsequent draws in the current render pass to `rect`, or
     /// removes the restriction. Dynamic state that lasts until the pass ends.
@@ -582,10 +605,16 @@ impl Device {
     pub fn new(config: GpuBackendConfig, options: DeviceOptions) -> Result<Device, String> {
         let backend: Box<dyn GpuBackend> = match config {
             GpuBackendConfig::Gl(config) => Box::new(GlDevice::new(config, options)),
-            #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows", target_os = "android")))]
+            #[cfg(all(
+                feature = "vulkan",
+                any(target_os = "linux", target_os = "windows", target_os = "android")
+            ))]
             GpuBackendConfig::Vulkan(config) => {
-                if options.resource_override_path.is_some() || options.dump_shader_source.is_some() {
-                    return Err("Vulkan runtime shader source overrides and dumps are unsupported".into());
+                if options.resource_override_path.is_some() || options.dump_shader_source.is_some()
+                {
+                    return Err(
+                        "Vulkan runtime shader source overrides and dumps are unsupported".into(),
+                    );
                 }
                 Box::new(wgpu::render_device::RenderDevice::new_windowed(&config)?)
             }
@@ -658,7 +687,8 @@ impl Device {
 
     pub fn draw_nonindexed_lines(&mut self, first_vertex: i32, vertex_count: i32) {
         self.check_pipeline();
-        self.backend.draw_nonindexed_lines(first_vertex, vertex_count)
+        self.backend
+            .draw_nonindexed_lines(first_vertex, vertex_count)
     }
 
     pub fn draw_indexed_triangles(&mut self, index_count: i32) {
@@ -668,7 +698,8 @@ impl Device {
 
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {
         self.check_pipeline();
-        self.backend.draw_indexed_triangles_instanced_u16(index_count, instance_count)
+        self.backend
+            .draw_indexed_triangles_instanced_u16(index_count, instance_count)
     }
 
     pub fn draw_instanced_batch<V>(
@@ -688,7 +719,12 @@ impl Device {
         base_instance: u32,
     ) {
         self.check_pipeline();
-        self.backend.draw_indexed_triangles_instanced_base_instance_u16(index_count, instance_count, base_instance)
+        self.backend
+            .draw_indexed_triangles_instanced_base_instance_u16(
+                index_count,
+                instance_count,
+                base_instance,
+            )
     }
 
     /// Create a shader program and link it immediately.
@@ -700,7 +736,8 @@ impl Device {
         samplers: &[(&'static str, TextureSlot)],
     ) -> Result<Program, ShaderError> {
         let mut program = self.create_program(base_filename, features)?;
-        self.backend.link_program(&mut program, descriptor, samplers)?;
+        self.backend
+            .link_program(&mut program, descriptor, samplers)?;
         Ok(program)
     }
 
@@ -754,11 +791,18 @@ impl Device {
     where
         S: Into<TextureSlot>,
     {
-        self.backend.bind_external_texture(slot.into(), external_texture)
+        self.backend
+            .bind_external_texture(slot.into(), external_texture)
     }
 
-    pub fn write_buffer<V>(&mut self, buffer: &mut Buffer, data: &[V], usage_hint: VertexUsageHint) {
-        self.backend.write_buffer(buffer, as_bytes(data), usage_hint)
+    pub fn write_buffer<V>(
+        &mut self,
+        buffer: &mut Buffer,
+        data: &[V],
+        usage_hint: VertexUsageHint,
+    ) {
+        self.backend
+            .write_buffer(buffer, as_bytes(data), usage_hint)
     }
 
     /// Writes `data` with each element repeated `repeat` times in a row.
@@ -769,24 +813,35 @@ impl Device {
         repeat: NonZeroUsize,
         usage_hint: VertexUsageHint,
     ) {
-        self.backend.write_buffer_repeated(buffer, as_bytes(data), mem::size_of::<V>(), repeat, usage_hint)
+        self.backend.write_buffer_repeated(
+            buffer,
+            as_bytes(data),
+            mem::size_of::<V>(),
+            repeat,
+            usage_hint,
+        )
     }
 
     /// Writes `data` into `buffer` at the given byte offset using an unsynchronized mapping, i.e.
     /// without waiting for in-flight draws to complete. The caller must guarantee the written range
     /// does not overlap data still being read by those draws.
     pub fn write_buffer_unsynchronized<V>(&mut self, buffer: &Buffer, offset: usize, data: &[V]) {
-        self.backend.write_buffer_unsynchronized(buffer, offset, as_bytes(data))
+        self.backend
+            .write_buffer_unsynchronized(buffer, offset, as_bytes(data))
     }
 
     /// Performs an immediate (non-PBO) upload of the whole texture.
     pub fn upload_texture_immediate<T: Texel>(&mut self, texture: &Texture, pixels: &[T]) {
-        self.backend.upload_texture_immediate(texture, as_bytes(pixels))
+        self.backend
+            .upload_texture_immediate(texture, as_bytes(pixels))
     }
 
     /// Returns a `TextureUploader` which can be used to upload texture data.
     /// Once uploads have been performed the uploader must be flushed with `TextureUploader::flush()`.
-    pub fn upload_texture<'a>(&mut self, pbo_pool: &'a mut UploadBufferPool) -> TextureUploader<'a> {
+    pub fn upload_texture<'a>(
+        &mut self,
+        pbo_pool: &'a mut UploadBufferPool,
+    ) -> TextureUploader<'a> {
         TextureUploader::new(self, pbo_pool)
     }
 }

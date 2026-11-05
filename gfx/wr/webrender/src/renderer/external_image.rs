@@ -17,13 +17,15 @@ pub(super) fn update_deferred_resolves(
     device: &mut Device,
     deferred_resolves: &[DeferredResolve],
     gpu_buffer: &mut GpuBufferF,
-) {
+) -> bool {
     if deferred_resolves.is_empty() {
-        return;
+        return true;
     }
 
     let handler = external_image_handler.expect("Found external image, but no handler set!");
 
+    let mut ready = true;
+    let mut resolved_uvs = Vec::new();
     for (i, deferred_resolve) in deferred_resolves.iter().enumerate() {
         gpu_profiler.place_marker("deferred resolve");
         let props = &deferred_resolve.image_properties;
@@ -31,7 +33,11 @@ pub(super) fn update_deferred_resolves(
             .external_image
             .expect("BUG: Deferred resolves must be external images!");
 
-        let image = handler.lock(ext_image.id, ext_image.channel_index, deferred_resolve.is_composited);
+        let image = handler.lock(
+            ext_image.id,
+            ext_image.channel_index,
+            deferred_resolve.is_composited,
+        );
         let texture_target = match ext_image.image_type {
             ExternalImageType::TextureHandle(target) => target,
             ExternalImageType::Buffer => {
@@ -42,21 +48,27 @@ pub(super) fn update_deferred_resolves(
         device.reset_state();
 
         let texture = match image.source {
-            ExternalImageSource::NativeTexture(texture_id) => {
+            ExternalImageSource::NativeTexture(texture_id) => ExternalTexture::new(
+                texture_id,
+                texture_target,
+                image.uv,
+                deferred_resolve.rendering,
+            ),
+            ExternalImageSource::Invalid => {
+                warn!("Invalid ext-image");
+                debug!(
+                    "For ext_id:{:?}, channel:{}.",
+                    ext_image.id, ext_image.channel_index
+                );
                 ExternalTexture::new(
-                    texture_id,
+                    api::ExternalTextureHandle(0),
                     texture_target,
                     image.uv,
                     deferred_resolve.rendering,
                 )
             }
-            ExternalImageSource::Invalid => {
-                warn!("Invalid ext-image");
-                debug!(
-                    "For ext_id:{:?}, channel:{}.",
-                    ext_image.id,
-                    ext_image.channel_index
-                );
+            ExternalImageSource::Pending => {
+                ready = false;
                 ExternalTexture::new(
                     api::ExternalTextureHandle(0),
                     texture_target,
@@ -71,11 +83,17 @@ pub(super) fn update_deferred_resolves(
 
         external_images.insert(DeferredResolveIndex(i as u32), texture);
 
-        let addr = gpu_buffer.resolve_handle(deferred_resolve.handle);
-        let index = addr.as_u32() as usize;
-        gpu_buffer.data[index] = image.uv.to_array().into();
-        gpu_buffer.data[index + 1] = [0f32; 4].into();
+        resolved_uvs.push((deferred_resolve.handle, image.uv));
     }
+    device.flush_external_images();
+    if ready {
+        for (handle, uv) in resolved_uvs {
+            let index = gpu_buffer.resolve_handle(handle).as_u32() as usize;
+            gpu_buffer.data[index] = uv.to_array().into();
+            gpu_buffer.data[index + 1] = [0f32; 4].into();
+        }
+    }
+    ready
 }
 
 #[inline]
@@ -83,6 +101,7 @@ pub(super) fn unlock_external_images(
     external_image_handler: Option<&mut Box<dyn ExternalImageHandler>>,
     external_images: &mut FastHashMap<DeferredResolveIndex, ExternalTexture>,
     deferred_resolves: &[DeferredResolve],
+    device: &mut Device,
 ) {
     if !external_images.is_empty() {
         let handler = external_image_handler.expect("Found external image, but no handler set!");
@@ -94,4 +113,5 @@ pub(super) fn unlock_external_images(
             handler.unlock(ext_image.id, ext_image.channel_index);
         }
     }
+    device.flush_external_images();
 }

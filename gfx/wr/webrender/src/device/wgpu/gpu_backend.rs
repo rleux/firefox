@@ -229,10 +229,28 @@ impl wr::GpuBackend for RenderDevice {
             device.textures.bind(slot, texture)
         });
     }
+    #[cfg(target_os = "linux")]
+    fn wgpu_external_textures(&self) -> Option<Rc<crate::wgpu::ExternalTextureRegistry>> {
+        self.external_images.clone()
+    }
     fn bind_external_texture(&mut self, slot: wr::TextureSlot, external: &wr::ExternalTexture) {
         self.operation(|device| {
             if external.id != 0 {
-                return Err("Vulkan native external images are not admitted".into());
+                #[cfg(target_os = "linux")]
+                {
+                    let image = device
+                        .external_images
+                        .as_ref()
+                        .ok_or("Native images unavailable")?
+                        .image(external.id)?;
+                    return device.textures.bind_external_image(
+                        slot,
+                        image,
+                        external.image_rendering,
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
+                return Err("Vulkan native external images are unavailable".into());
             }
             if external.target != ImageBufferKind::Texture2D {
                 return Err("Vulkan external textures require Texture2D".into());
@@ -610,12 +628,25 @@ impl wr::GpuBackend for RenderDevice {
     #[cfg(feature = "capture")]
     fn read_external_texture(
         &mut self,
-        _: ExternalTextureHandle,
-        _: ImageBufferKind,
-        _: &ImageDescriptor,
+        handle: ExternalTextureHandle,
+        kind: ImageBufferKind,
+        descriptor: &ImageDescriptor,
     ) -> Vec<u8> {
-        self.unsupported("external capture");
-        Vec::new()
+        #[cfg(target_os = "linux")]
+        return self
+            .operation(|device| {
+                if kind != ImageBufferKind::Texture2D {
+                    return Err("Native capture requires a 2D texture".into());
+                }
+                device.capture_external(handle, descriptor)
+            })
+            .unwrap_or_default();
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (handle, kind, descriptor);
+            self.unsupported("external capture");
+            Vec::new()
+        }
     }
     fn read_pixels_into(
         &mut self,
@@ -779,15 +810,33 @@ impl wr::GpuBackend for RenderDevice {
         self.draw_quads(indices, instances, base);
     }
     fn deinit(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.close();
+        }
         self.pass = None;
         self.skipped_pass = false;
         if self.failure.get().is_none() {
-            let result = self
-                .submit()
-                .and_then(|index| self.owner.wait_for(index).map_err(|e| e.to_string()));
+            let result = self.submit().and_then(|index| {
+                #[cfg(target_os = "linux")]
+                if self.surface.is_none()
+                    && self
+                        .external_images
+                        .as_ref()
+                        .is_some_and(|native| native.pending_work())
+                {
+                    return Ok(());
+                }
+                self.owner.wait_for(index).map_err(|e| e.to_string())
+            });
             self.record_result(result);
         }
         self.encoder = None;
+        self.ordered_commands.clear();
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.retire();
+        }
         self.textures.set_output(None);
         self.surface.take();
         self.blit_pipelines.clear();
@@ -797,7 +846,26 @@ impl wr::GpuBackend for RenderDevice {
         self.textures.reset_bindings();
     }
     fn end_frame(&mut self) {
+        #[cfg(target_os = "linux")]
+        if self
+            .external_images
+            .as_ref()
+            .is_some_and(|native| !native.is_attached())
+        {
+            self.inside_frame = false;
+            return;
+        }
         self.operation(RenderDevice::end_frame);
+    }
+    fn finish_resource_work(&mut self) {
+        self.operation(RenderDevice::finish_resource_work);
+    }
+    fn flush_external_images(&mut self) {
+        self.operation(|device| {
+            device.collect_native_commands()?;
+            device.textures.clear_external_bindings();
+            Ok(())
+        });
     }
     fn clear_rect(
         &mut self,

@@ -284,6 +284,13 @@ impl TextureStore {
         Ok(())
     }
 
+    pub fn clear_external_bindings(&mut self) {
+        for binding in &mut self.bound {
+            if matches!(binding, Some(Binding::External { .. })) {
+                *binding = None;
+            }
+        }
+    }
     pub fn reset_bindings(&mut self) {
         self.bound.fill_with(|| None);
     }

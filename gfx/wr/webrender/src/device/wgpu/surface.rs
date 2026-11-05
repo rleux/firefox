@@ -349,6 +349,8 @@ impl Surface {
         }
     }
     pub fn present(&mut self) -> Result<(), String> {
+        let owner = self.owner.clone();
+        let _queue_access = owner.queue_access();
         if self.acquired.take().is_none() {
             return Ok(());
         }

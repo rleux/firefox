@@ -72,6 +72,7 @@ class MacIOSurfaceTextureHostOGL;
 class ShmemTextureHost;
 class SurfaceTextureHost;
 class TextureHostOGL;
+class VulkanTextureHost;
 class TextureReadLock;
 class TextureSourceOGL;
 class TextureSourceD3D11;
@@ -369,6 +370,7 @@ enum class TextureHostType : int8_t {
   AndroidHardwareBuffer,
   EGLImage,
   GLTexture,
+  Vulkan,
   Last
 };
 
@@ -613,6 +615,7 @@ class TextureHost : public AtomicRefCountedWithFinalize<TextureHost> {
   TextureReadLock* GetReadLock() { return mReadLock; }
 
   virtual BufferTextureHost* AsBufferTextureHost() { return nullptr; }
+  virtual VulkanTextureHost* AsVulkanTextureHost() { return nullptr; }
   virtual ShmemTextureHost* AsShmemTextureHost() { return nullptr; }
   virtual MacIOSurfaceTextureHostOGL* AsMacIOSurfaceTextureHost() {
     return nullptr;

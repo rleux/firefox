@@ -18,11 +18,13 @@
 #include "mozilla/Hal.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MozPromise.h"
+#include "mozilla/Span.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/VsyncDispatcher.h"
 #include "mozilla/gfx/Point.h"
 #include "mozilla/layers/CompositionRecorder.h"
 #include "mozilla/layers/SynchronousTask.h"
+#include "mozilla/webgpu/FrontBufferSnapshot.h"
 #include "mozilla/webrender/WebRenderTypes.h"
 #include "mozilla/webrender/webrender_ffi.h"
 #include "nsISupportsImpl.h"
@@ -42,10 +44,12 @@ namespace wr {
 
 typedef MozPromise<MemoryReport, bool, true> MemoryReportPromise;
 
+class RenderCompositor;
 class RendererOGL;
 class RenderTextureHost;
 class RenderTextureHostUsageInfo;
 class RenderThread;
+class VulkanImageRetirement;
 
 /// A rayon thread pool that is shared by all WebRender instances within a
 /// process.
@@ -161,6 +165,12 @@ class RenderThread final {
  public:
   /// Can be called from any thread.
   static RenderThread* Get();
+  VulkanImageRetirement& NativeImages();
+  static bool ReadbackNativeImage(Span<RenderCompositor*> aCompositors,
+                                  RenderTextureHost* aHost, uint8_t* aOutput,
+                                  size_t aLength, bool aOpaque);
+  webgpu::FrontBufferSnapshot SnapshotNativeImage(const wr::ExternalImageId&,
+                                                  gfx::IntSize, bool aOpaque);
 
   /// Can only be called from the main thread.
   static void Start(uint32_t aNamespace);
@@ -586,6 +596,7 @@ class RenderThread final {
 #endif
 
   // Set from MainThread, read from either MainThread or RenderThread
+  UniquePtr<VulkanImageRetirement> mNativeImages;
   bool mHasShutdown;
 
   // Only accessed from the RenderThread

@@ -403,6 +403,7 @@ impl<'a> From<&'a WrImageDescriptor> for ImageDescriptor {
 #[repr(u32)]
 #[allow(dead_code)]
 enum WrExternalImageType {
+    Pending,
     RawData,
     NativeTexture,
     Invalid,
@@ -455,6 +456,7 @@ impl ExternalImageHandler for WrExternalImageHandler {
                     ExternalImageSource::RawData(unsafe { make_slice(image.buff, image.size) })
                 },
                 WrExternalImageType::Invalid => ExternalImageSource::Invalid,
+                WrExternalImageType::Pending => ExternalImageSource::Pending,
             },
         }
     }
@@ -638,15 +640,39 @@ pub extern "C" fn wr_renderer_set_external_image_handler(
     renderer.set_external_image_handler(Box::new(*external_image_handler));
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WrRendererUpdateStatus {
+    Ready,
+    Blocked,
+    RenderOffscreen,
+    RenderPresent,
+}
+
 #[no_mangle]
-pub extern "C" fn wr_renderer_update(renderer: &mut Renderer) -> bool {
-    renderer.update();
+pub extern "C" fn wr_renderer_update(
+    renderer: &mut Renderer,
+    status: &mut WrRendererUpdateStatus,
+) -> bool {
+    *status = if renderer.update() {
+        WrRendererUpdateStatus::Blocked
+    } else {
+        match renderer.pending_native_document_present() {
+            Some(true) => WrRendererUpdateStatus::RenderPresent,
+            Some(false) => WrRendererUpdateStatus::RenderOffscreen,
+            None => WrRendererUpdateStatus::Ready,
+        }
+    };
     let errors = mem::take(&mut renderer.renderer_errors);
-    if errors.is_empty() { return true; }
+    if errors.is_empty() {
+        return true;
+    }
     for error in errors {
         warn!("Failed to update renderer: {:?}", error);
         let msg = CString::new(format!("wr_renderer_update: {:?}", error)).unwrap();
-        unsafe { gfx_critical_note(msg.as_ptr()); }
+        unsafe {
+            gfx_critical_note(msg.as_ptr());
+        }
     }
     false
 }
@@ -735,10 +761,14 @@ pub extern "C" fn wr_renderer_render(
     out_dirty_rects: &mut ThinVec<DeviceIntRect>,
     out_did_rasterize: &mut bool,
     out_present_result: &mut WrPresentResult,
+    out_native_images_pending: &mut bool,
 ) -> bool {
+    *out_native_images_pending = false;
     *out_present_result = WrPresentResult::NotAttempted;
     match renderer.render(DeviceIntSize::new(width, height), buffer_age) {
         Ok(results) => {
+            *out_native_images_pending = results.external_images_pending
+                || renderer.pending_native_document_present().is_some();
             *out_stats = results.stats;
             out_dirty_rects.extend(results.dirty_rects);
             *out_did_rasterize = results.did_rasterize_any_tile;
@@ -1543,7 +1573,8 @@ fn wr_device_new(gl_context: *mut c_void, pc: Option<&mut WrProgramCache>) -> De
             dump_shader_source: None,
             surface_origin_is_top_left: false,
         },
-    ).expect("GL device construction is infallible")
+    )
+    .expect("GL device construction is infallible")
 }
 
 extern "C" {
@@ -2212,8 +2243,13 @@ pub unsafe extern "C" fn wr_window_new(
     };
 
     let api_info = renderer.get_graphics_api_info();
-    info!("WebRender backend: {:?}, renderer: {}, version: {}, pid: {}",
-          api_info.kind, api_info.renderer, api_info.version, std::process::id());
+    info!(
+        "WebRender backend: {:?}, renderer: {}, version: {}, pid: {}",
+        api_info.kind,
+        api_info.renderer,
+        api_info.version,
+        std::process::id()
+    );
 
     unsafe {
         *out_max_texture_size = renderer.get_max_texture_size();

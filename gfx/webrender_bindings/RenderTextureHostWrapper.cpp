@@ -61,6 +61,39 @@ void RenderTextureHostWrapper::UnlockExternalBuffer() {
   }
 }
 
+wr::WrExternalImage RenderTextureHostWrapper::LockVulkan(
+    uint8_t aChannelIndex, WrVulkanExternalImages* aImages) {
+  return mTextureHost ? mTextureHost->LockVulkan(aChannelIndex, aImages)
+                      : InvalidToWrExternalImage();
+}
+
+uint64_t RenderTextureHostWrapper::VulkanPublicationId() const {
+  return mTextureHost ? mTextureHost->VulkanPublicationId() : 0;
+}
+
+bool RenderTextureHostWrapper::CanReadbackVulkan(
+    WrVulkanExternalImages* aImages, bool aAllowMigration) const {
+  return mTextureHost &&
+         mTextureHost->CanReadbackVulkan(aImages, aAllowMigration);
+}
+
+bool RenderTextureHostWrapper::ReadbackVulkan(uint8_t* aOutput,
+                                              size_t aLength) {
+  return mTextureHost && mTextureHost->ReadbackVulkan(aOutput, aLength);
+}
+
+Maybe<VulkanImageRelease> RenderTextureHostWrapper::UnlockVulkan(
+    WrVulkanExternalImages* aImages) {
+  return mTextureHost ? mTextureHost->UnlockVulkan(aImages) : Nothing();
+}
+
+void RenderTextureHostWrapper::NotifyVulkanRelease(
+    uint64_t aValue, WrVulkanReleaseStatus aStatus) {
+  if (mTextureHost) {
+    mTextureHost->NotifyVulkanRelease(aValue, aStatus);
+  }
+}
+
 wr::WrExternalImage RenderTextureHostWrapper::LockSWGL(
     uint8_t aChannelIndex, void* aContext, RenderCompositor* aCompositor) {
   if (!mTextureHost) {
@@ -269,10 +302,7 @@ size_t RenderTextureHostWrapper::GetPlaneCount() const {
 }
 
 gfx::SurfaceFormat RenderTextureHostWrapper::GetFormat() const {
-  if (RenderTextureHostSWGL* swglHost = EnsureRenderTextureHostSWGL()) {
-    return swglHost->GetFormat();
-  }
-  return gfx::SurfaceFormat::UNKNOWN;
+  return mTextureHost ? mTextureHost->GetFormat() : gfx::SurfaceFormat::UNKNOWN;
 }
 
 gfx::ColorDepth RenderTextureHostWrapper::GetColorDepth() const {

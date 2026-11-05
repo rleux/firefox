@@ -4,13 +4,17 @@
 
 #include "RenderThread.h"
 
+#include <memory>
+
 #include "GLContext.h"
 #include "GeckoProfiler.h"
 #include "GfxInfoBase.h"
 #include "OGLShaderProgram.h"
+#include "VulkanImageRetirement.h"
 #include "base/task.h"
 #include "gfxPlatform.h"
 #include "mozilla/BackgroundHangMonitor.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/Components.h"
 #include "mozilla/PerfStats.h"
 #include "mozilla/StaticPtr.h"
@@ -143,6 +147,81 @@ void RenderThread::DestroyRenderBackendPool() {
 
 // static
 RenderThread* RenderThread::Get() { return sRenderThread; }
+// static
+bool RenderThread::ReadbackNativeImage(Span<RenderCompositor*> aCompositors,
+                                       RenderTextureHost* aHost,
+                                       uint8_t* aOutput, size_t aLength,
+                                       bool aOpaque) {
+  MOZ_ASSERT(IsInRenderThread());
+  // Prefer the publication's current import registry. Only consider a
+  // compatible replacement when its original renderer has disappeared.
+  for (bool allowMigration : {false, true}) {
+    for (auto* compositor : aCompositors) {
+      if (compositor->CanReadbackNativeImage(aHost, allowMigration)) {
+        return compositor->ReadbackNativeImage(aHost, aOutput, aLength,
+                                               aOpaque);
+      }
+    }
+  }
+  return false;
+}
+
+webgpu::FrontBufferSnapshot RenderThread::SnapshotNativeImage(
+    const wr::ExternalImageId& aId, gfx::IntSize aSize, bool aOpaque) {
+  const auto length = CheckedInt<size_t>(aSize.width) * aSize.height * 4;
+  if (!length.isValid() || aSize.width <= 0 || aSize.height <= 0 ||
+      HasShutdown()) {
+    return {};
+  }
+  auto handle = ipc::shared_memory::Create(length.value());
+  auto mapping = handle.Map();
+  if (!handle || !mapping) {
+    return {};
+  }
+  bool copied = false;
+  RefPtr<RenderThread> self = this;
+  auto snapshot = [self, aId, aOpaque, &mapping, &copied] {
+    auto* host = self->GetRenderTexture(aId);
+    if (!host) {
+      return;
+    }
+    nsTArray<RenderCompositor*> compositors;
+    for (auto& renderer : self->mRenderers) {
+      compositors.AppendElement(renderer.second->GetCompositor());
+    }
+    copied = ReadbackNativeImage(
+        Span<RenderCompositor*>(compositors.Elements(), compositors.Length()),
+        host, mapping.DataAs<uint8_t>(), mapping.Size(), aOpaque);
+  };
+  if (IsInRenderThread()) {
+    snapshot();
+  } else {
+    layers::SynchronousTask task("Snapshot native WebGPU canvas");
+    nsCOMPtr<nsIThread> thread = GetRenderThread();
+    if (!thread || NS_FAILED(thread->Dispatch(NS_NewRunnableFunction(
+                       "Snapshot native WebGPU canvas",
+                       [snapshot = std::move(snapshot), &task] {
+                         layers::AutoCompleteTask complete(&task);
+                         snapshot();
+                       })))) {
+      return {};
+    }
+    task.Wait();
+  }
+  if (!copied) {
+    return {};
+  }
+  return {std::move(handle), uint32_t(aSize.width), uint32_t(aSize.height),
+          size_t(aSize.width) * 4};
+}
+
+VulkanImageRetirement& RenderThread::NativeImages() {
+  MOZ_ASSERT(IsInRenderThread());
+  if (!mNativeImages) {
+    mNativeImages = std::make_unique<VulkanImageRetirement>();
+  }
+  return *mNativeImages;
+}
 
 // static
 void RenderThread::Start(uint32_t aNamespace) {
@@ -272,6 +351,9 @@ extern void ClearAllBlobImageResources();
 void RenderThread::ShutDownTask() {
   MOZ_RELEASE_ASSERT(IsInRenderThread());
   LOG("RenderThread::ShutDownTask()");
+  if (mNativeImages) {
+    mNativeImages->BeginShutdown();
+  }
 
   {
     // Clear RenderTextureHosts
@@ -280,6 +362,11 @@ void RenderThread::ShutDownTask() {
     mRenderTextures.clear();
     mSyncObjectNeededRenderTextures.clear();
     mRenderTextureOps.clear();
+  }
+
+  if (mNativeImages) {
+    mNativeImages->FinishShutdown();
+    mNativeImages.reset();
   }
 
   // These must be destroyed before the thread pools as they hold a reference to
@@ -899,9 +986,26 @@ void RenderThread::UpdateAndRender(
       markerName.c_str(), geckoprofiler::category::GRAPHICS,
       Some(renderer->GetCompositorBridge()->GetInnerWindowId()));
 
-  bool render = aParams.render;
-  if (renderer->IsPaused()) {
-    render = false;
+  const bool paused = renderer->IsPaused();
+  bool render = aParams.render && !paused;
+  auto frameParams = aParams;
+  Maybe<WrRendererUpdateStatus> updated;
+  if (!render || renderer->NativeImagesPending()) {
+    updated = renderer->Update();
+    const auto status = updated.valueOr(WrRendererUpdateStatus::Blocked);
+    const bool pendingDocument =
+        status == WrRendererUpdateStatus::RenderOffscreen ||
+        status == WrRendererUpdateStatus::RenderPresent;
+    render = updated.isSome() && !paused &&
+             status != WrRendererUpdateStatus::Blocked &&
+             (aParams.render || pendingDocument);
+    if (pendingDocument) {
+      // A no-op backend notification cannot retire an unrendered native
+      // document. Keep an offscreen retry offscreen, and preserve an earlier
+      // presentation request without promoting an unrelated offscreen frame.
+      frameParams.present = status == WrRendererUpdateStatus::RenderPresent ||
+                            (aParams.render && aParams.present);
+    }
   }
   LOG("RenderThread::UpdateAndRender() aWindowId %" PRIx64 " aRender %d",
       AsUint64(aWindowId), render);
@@ -913,16 +1017,22 @@ void RenderThread::UpdateAndRender(
   wr::RenderedFrameId latestFrameId;
   if (render) {
     latestFrameId = renderer->UpdateAndRender(
-        aReadbackSize, aReadbackFormat, aReadbackBuffer, aNeedsYFlip, aParams,
-        aStats, aReadbackSuccess);
+        aReadbackSize, aReadbackFormat, aReadbackBuffer, aNeedsYFlip, frameParams,
+        aStats, aReadbackSuccess, updated);
   } else {
-    renderer->Update();
+    renderer->FlushPipelineInfo();
   }
   // Check graphics reset status even when rendering is skipped.
   renderer->CheckGraphicsResetStatus(
       gfx::DeviceResetDetectPlace::WR_POST_UPDATE,
       /* aForce */ false);
 
+  // Native Pending consumed the notifier but did not render or retire its
+  // epochs. The RendererOGL retry is untracked; HandleFrameOneDoc still
+  // balances its count.
+  if (renderer->NativeImagesPending()) {
+    return;
+  }
   TimeStamp end = TimeStamp::Now();
   RefPtr<const WebRenderPipelineInfo> info = renderer->GetLastPipelineInfo();
 
@@ -972,25 +1082,27 @@ bool RenderThread::RetireVulkanXWindow(uint64_t aWindow, bool* aFound) {
   bool found = false;
   RefPtr<RenderThread> self = this;
   nsCOMPtr<nsIThread> thread = GetRenderThread();
-  if (!thread ||
-      NS_FAILED(thread->Dispatch(NS_NewRunnableFunction(
-          "Retire pending Vulkan window", [self, aWindow, &found, &retired, &task] {
-            layers::AutoCompleteTask complete(&task);
-            for (auto& entry : self->mRenderers) {
-              auto* compositor = entry.second->GetCompositor();
-              const auto* config = compositor->GetVulkanConfig();
-              if (config && config->window.IsXlib() &&
-                  config->window.xlib.window == aWindow) {
-                found = true;
-            entry.second->Pause();
-              }
-            }
-            retired = true;
-          })))) {
+  if (!thread || NS_FAILED(thread->Dispatch(NS_NewRunnableFunction(
+                     "Retire pending Vulkan window",
+                     [self, aWindow, &found, &retired, &task] {
+                       layers::AutoCompleteTask complete(&task);
+                       for (auto& entry : self->mRenderers) {
+                         auto* compositor = entry.second->GetCompositor();
+                         const auto* config = compositor->GetVulkanConfig();
+                         if (config && config->window.IsXlib() &&
+                             config->window.xlib.window == aWindow) {
+                           found = true;
+                           entry.second->Pause();
+                         }
+                       }
+                       retired = true;
+                     })))) {
     return false;
   }
   task.Wait();
-  if (aFound) { *aFound = found; }
+  if (aFound) {
+    *aFound = found;
+  }
   return retired;
 }
 

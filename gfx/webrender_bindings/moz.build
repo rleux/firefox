@@ -23,7 +23,11 @@ EXPORTS.mozilla.webrender += [
     "RenderTextureHostSWGL.h",
     "RenderTextureHostWrapper.h",
     "RenderThread.h",
+    "RenderVulkanDMABufTextureHost.h",
     "VulkanCompositorSupport.h",
+    "VulkanImageIPC.h",
+    "VulkanImageRetirement.h",
+    "VulkanImageTypes.h",
     "webrender_ffi.h",
     "WebRenderAPI.h",
     "WebRenderTypes.h",
@@ -53,6 +57,8 @@ UNIFIED_SOURCES += [
 
 SOURCES += [
     "RenderCompositorVulkan.cpp",
+    "VulkanImageIPC.cpp",
+    "VulkanImageRetirement.cpp",
 ]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("cocoa", "uikit"):
@@ -103,6 +109,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     ]
     SOURCES += [
         "RenderDMABUFTextureHost.cpp",
+        "RenderVulkanDMABufTextureHost.cpp",
     ]
     if CONFIG["MOZ_X11"]:
         EXPORTS.mozilla.webrender += ["X11WindowVisibility.h"]

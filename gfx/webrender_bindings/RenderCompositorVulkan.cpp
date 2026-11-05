@@ -3,11 +3,18 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RenderCompositorVulkan.h"
-#include "VulkanCompositorSupport.h"
 
+#include <inttypes.h>
+
+#include "VulkanCompositorSupport.h"
+#include "VulkanImageIPC.h"
+#include "VulkanImageRetirement.h"
+#include "mozilla/AutoRestore.h"
+#include "mozilla/Logging.h"
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
+#include "prthread.h"
 
 #ifdef MOZ_WIDGET_ANDROID
 #  include <android/native_window.h>
@@ -205,6 +212,84 @@ void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
   mCompletionTimer.Stop();
   mRenderer = aRenderer;
   mWindowId = aWindowId;
+  mImageCapabilities.reset();
+  mExternalImages.reset(aRenderer ? wr_vulkan_external_images_new(aRenderer)
+                                  : nullptr);
+  mImageCapabilities = VulkanImageCapabilities::Register(mExternalImages.get());
+  RenderThread::Get()->NativeImages().Schedule();
+}
+
+bool RenderCompositorVulkan::CanReadbackNativeImage(
+    RenderTextureHost* aHost, bool aAllowMigration) const {
+  MOZ_ASSERT(RenderThread::IsInRenderThread());
+  return mExternalImages && !mFailed &&
+         aHost->CanReadbackVulkan(mExternalImages.get(), aAllowMigration);
+}
+
+bool RenderCompositorVulkan::ReadbackNativeImage(RenderTextureHost* aHost,
+                                                 uint8_t* aOutput,
+                                                 size_t aLength, bool aOpaque) {
+  MOZ_ASSERT(RenderThread::IsInRenderThread());
+  // Preflight is read-only: probing an unrelated renderer must not import,
+  // switch ownership or permanently fail a host that is still displayed.
+  if (!CanReadbackNativeImage(aHost, true)) {
+    return false;
+  }
+  AutoRestore<bool> snapshotScope(mReadingNativeSnapshot);
+  mReadingNativeSnapshot = true;
+  RefPtr<RenderTextureHost> retained = aHost;
+  const auto deadline = TimeStamp::Now() + TimeDuration::FromSeconds(5);
+  while (TimeStamp::Now() < deadline) {
+    const auto image = LockExternalImage(aHost, 0);
+    const bool ready = image.image_type == WrExternalImageType::NativeTexture;
+    const bool pending = image.image_type == WrExternalImageType::Pending;
+    const bool copied = ready && aHost->ReadbackVulkan(aOutput, aLength);
+    if (copied && aOpaque) {
+      // Match opaque CPU presentation without changing the producer's alpha.
+      for (size_t i = 3; i < aLength; i += 4) {
+        aOutput[i] = 255;
+      }
+    }
+    UnlockExternalImage(aHost);
+    if (wr_vulkan_process_native_work(mExternalImages.get())) {
+      RenderThread::Get()->NativeImages().Schedule();
+    }
+    RenderThread::Get()->NativeImages().Poll();
+    if (ready || !pending) {
+      return copied;
+    }
+    PR_Sleep(PR_MillisecondsToInterval(1));
+  }
+  return false;
+}
+
+WrExternalImage RenderCompositorVulkan::LockExternalImage(
+    RenderTextureHost* aHost, uint8_t aChannel) {
+  auto image = aHost->LockVulkan(aChannel, mExternalImages.get());
+  if (!mReadingNativeSnapshot &&
+      image.image_type == WrExternalImageType::NativeTexture &&
+      aHost->VulkanPublicationId()) {
+    static LazyLogModule logger("WebGPU");
+    MOZ_LOG(
+        logger, LogLevel::Info,
+        ("WebGPU compositor native acquired publication=%" PRIu64 " channel=%u",
+         aHost->VulkanPublicationId(), unsigned(aChannel)));
+  }
+  return image;
+}
+void RenderCompositorVulkan::UnlockExternalImage(RenderTextureHost* aHost) {
+  if (auto release = aHost->UnlockVulkan(mExternalImages.get())) {
+    RenderThread::Get()->NativeImages().Add(
+        std::move(release.ref()),
+        [host = RefPtr<RenderTextureHost>(aHost)](
+            uint64_t value, WrVulkanReleaseStatus status) {
+          host->NotifyVulkanRelease(value, status);
+        });
+  }
+}
+void RenderCompositorVulkan::AfterRender(bool) {
+  wr_vulkan_process_native_work(mExternalImages.get());
+  RenderThread::Get()->NativeImages().Schedule();
 }
 
 bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {

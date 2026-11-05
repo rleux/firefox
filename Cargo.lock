@@ -3004,6 +3004,7 @@ dependencies = [
  "mp4parse-gtest",
  "nsstring-gtest",
  "swgl",
+ "webrender-bindings-gtest",
  "xpcom-gtest",
 ]
 
@@ -9303,6 +9304,10 @@ dependencies = [
  "wr_malloc_size_of",
  "zeitstempel",
 ]
+
+[[package]]
+name = "webrender-bindings-gtest"
+version = "0.1.0"
 
 [[package]]
 name = "webrender_api"

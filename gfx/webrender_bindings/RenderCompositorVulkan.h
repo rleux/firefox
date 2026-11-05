@@ -15,6 +15,7 @@
 #endif
 
 namespace mozilla::wr {
+class VulkanImageCapabilities;
 
 #if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
 class VulkanX11Display;
@@ -119,6 +120,12 @@ class RenderCompositorVulkan final : public RenderCompositor {
   bool IsWindowHidden() override;
   bool SetSurface(const WrVulkanConfig* aConfig);
   void SetRenderer(Renderer* aRenderer, WindowId aWindowId) override;
+  WrExternalImage LockExternalImage(RenderTextureHost*, uint8_t) override;
+  bool CanReadbackNativeImage(RenderTextureHost*, bool) const override;
+  bool ReadbackNativeImage(RenderTextureHost*, uint8_t*, size_t,
+                           bool aOpaque = false) override;
+  void UnlockExternalImage(RenderTextureHost*) override;
+  void AfterRender(bool) override;
   bool BeginFrame() override;
   RenderedFrameId EndFrame(const nsTArray<DeviceIntRect>& aDirtyRects) override;
   RenderedFrameId UpdateFrameId() override;
@@ -144,6 +151,13 @@ class RenderCompositorVulkan final : public RenderCompositor {
   void WakeUp();
 
   Maybe<OwnedVulkanConfig> mConfig;
+  struct ContextDeleter {
+    void operator()(WrVulkanExternalImages* aImages) {
+      wr_vulkan_external_images_delete(aImages);
+    }
+  };
+  UniquePtr<WrVulkanExternalImages, ContextDeleter> mExternalImages;
+  UniquePtr<VulkanImageCapabilities> mImageCapabilities;
   VulkanFrameTracker mFrames;
   // RendererOGL clears this borrowed pointer immediately after Renderer
   // deletion.
@@ -152,6 +166,7 @@ class RenderCompositorVulkan final : public RenderCompositor {
   base::RepeatingTimer<RenderCompositorVulkan> mCompletionTimer;
   bool mPaused = false;
   bool mFailed = false;
+  bool mReadingNativeSnapshot = false;
   bool mValidation = false;
   bool mVsync = true;
   bool mTransparent = false;

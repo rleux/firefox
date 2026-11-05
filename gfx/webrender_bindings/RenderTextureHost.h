@@ -8,7 +8,9 @@
 #include "GLConsts.h"
 #include "GLTypes.h"
 #include "mozilla/Atomics.h"
+#include "mozilla/Maybe.h"
 #include "mozilla/RefPtr.h"
+#include "mozilla/UniquePtr.h"
 #include "mozilla/gfx/2D.h"
 #include "mozilla/layers/LayersSurfaces.h"
 #include "mozilla/layers/OverlayInfo.h"
@@ -42,6 +44,25 @@ class RenderTextureHostSWGL;
 class RenderTextureHostWrapper;
 class RenderDMABUFTextureHost;
 class RenderWaylandTextureHost;
+
+class VulkanImageRelease {
+ public:
+  VulkanImageRelease(WrVulkanRelease* aReceipt, uint64_t aValue)
+      : mReceipt(aReceipt), mValue(aValue) {}
+  uint64_t GetValue() const { return mValue; }
+  WrVulkanReleaseStatus GetStatus() const {
+    return wr_vulkan_release_status(mReceipt.get());
+  }
+
+ private:
+  struct Deleter {
+    void operator()(WrVulkanRelease* aReceipt) {
+      wr_vulkan_release_delete(aReceipt);
+    }
+  };
+  UniquePtr<WrVulkanRelease, Deleter> mReceipt;
+  uint64_t mValue;
+};
 
 void ActivateBindAndTexParameteri(gl::GLContext* aGL, GLenum aActiveTexture,
                                   GLenum aBindTarget, GLuint aBindTexture);
@@ -95,6 +116,18 @@ class RenderTextureHost {
   // Returned CPU bytes remain valid until UnlockExternalBuffer().
   virtual wr::WrExternalImage LockExternalBuffer(uint8_t aChannelIndex);
   virtual void UnlockExternalBuffer() {}
+  virtual wr::WrExternalImage LockVulkan(uint8_t aChannelIndex,
+                                         WrVulkanExternalImages*);
+  virtual uint64_t VulkanPublicationId() const { return 0; }
+  // Read-only snapshot routing: false forbids importing into another registry.
+  virtual bool CanReadbackVulkan(WrVulkanExternalImages*, bool) const {
+    return false;
+  }
+  virtual bool ReadbackVulkan(uint8_t*, size_t) { return false; }
+  virtual Maybe<VulkanImageRelease> UnlockVulkan(WrVulkanExternalImages*);
+  virtual void NotifyVulkanRelease(uint64_t, WrVulkanReleaseStatus) {
+    MOZ_ASSERT_UNREACHABLE("Unexpected native return");
+  }
 
   virtual wr::WrExternalImage LockSWGL(uint8_t aChannelIndex, void* aContext,
                                        RenderCompositor* aCompositor);

@@ -642,6 +642,11 @@ static inline wr::WrExternalImage NativeTextureToWrExternalImage(
                              0};
 }
 
+static inline wr::WrExternalImage PendingToWrExternalImage() {
+  return wr::WrExternalImage{
+      wr::WrExternalImageType::Pending, 0, 0, 0, 0, 0, nullptr, 0};
+}
+
 static inline wr::WrExternalImage InvalidToWrExternalImage() {
   return wr::WrExternalImage{
       wr::WrExternalImageType::Invalid, 0, 0, 0, 0, 0, nullptr, 0};

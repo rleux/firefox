@@ -175,3 +175,15 @@ RefPtr<RenderTextureHostUsageInfo> RenderTextureHost::GetTextureHostUsageInfo(
 
 }  // namespace wr
 }  // namespace mozilla
+
+namespace mozilla::wr {
+WrExternalImage RenderTextureHost::LockVulkan(uint8_t aChannel,
+                                              WrVulkanExternalImages*) {
+  return LockExternalBuffer(aChannel);
+}
+Maybe<VulkanImageRelease> RenderTextureHost::UnlockVulkan(
+    WrVulkanExternalImages*) {
+  UnlockExternalBuffer();
+  return Nothing();
+}
+}  // namespace mozilla::wr

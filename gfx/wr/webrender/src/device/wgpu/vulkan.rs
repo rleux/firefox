@@ -211,3 +211,19 @@ fn external_extensions(
         }
     }))
 }
+
+#[cfg(target_os = "linux")]
+#[path = "vulkan/native.rs"]
+mod native;
+#[cfg(target_os = "linux")]
+pub(super) use native::NativeCache;
+#[cfg(target_os = "linux")]
+#[path = "vulkan/dmabuf.rs"]
+mod dmabuf;
+#[cfg(target_os = "linux")]
+pub use dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
+#[cfg(target_os = "linux")]
+#[path = "vulkan/timeline.rs"]
+pub(super) mod timeline;
+#[cfg(target_os = "linux")]
+pub use timeline::{SharedTimeline, TimelineHandle};

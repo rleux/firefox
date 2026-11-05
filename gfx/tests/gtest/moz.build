@@ -48,6 +48,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk" and CONFIG["MOZ_X11"]:
     LOCAL_INCLUDES += ["/widget", "/widget/gtk"]
     CXXFLAGS += CONFIG["MOZ_GTK3_CFLAGS"]
 
+if CONFIG["MOZ_WEBRENDER_VULKAN"] and CONFIG["OS_TARGET"] == "Linux":
+    SOURCES += ["TestVulkanNativeImages.cpp"]
+
 if CONFIG["OS_TARGET"] != "Android":
     UNIFIED_SOURCES += [
         "TestRect.cpp",

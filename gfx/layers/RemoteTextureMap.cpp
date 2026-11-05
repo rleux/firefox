@@ -20,6 +20,7 @@
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/RemoteTextureHostWrapper.h"
 #include "mozilla/layers/TextureClientSharedSurface.h"
+#include "mozilla/layers/VulkanTextureHost.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webrender/RenderThread.h"
@@ -228,6 +229,26 @@ void RemoteTextureOwnerClient::PushTexture(
   RemoteTextureMap::Get()->PushTexture(
       aTextureId, aOwnerId, mForPid, std::move(textureData), textureHost,
       SharedResourceWrapper::SharedTexture(aSharedTexture));
+}
+
+bool RemoteTextureOwnerClient::PushVulkanTexture(
+    const RemoteTextureId aTextureId, const RemoteTextureOwnerId aOwnerId,
+    const VulkanImagePublication& aPublication,
+    std::function<void(VulkanImageReturnMessage&&)>&& aReturn, bool aOpaque) {
+  if (!IsRegistered(aOwnerId) ||
+      aPublication.publicationId() != aTextureId.mId) {
+    return false;
+  }
+  RefPtr<TextureHost> host = VulkanTextureHost::Create(
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT |
+          (aOpaque ? TextureFlags::IS_OPAQUE : TextureFlags::NO_FLAGS),
+      aPublication, std::move(aReturn));
+  if (!host) {
+    return false;
+  }
+  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
+                                       host, nullptr);
+  return true;
 }
 
 void RemoteTextureOwnerClient::PushDummyTexture(
@@ -555,7 +576,8 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
       // during memcpy.
       textureHostRef = textureHost;
       sharedTexture = holder->mResourceWrapper->mSharedTexture;
-    } else if (textureHost->AsBufferTextureHost()) {
+    } else if (textureHost->AsBufferTextureHost() ||
+               textureHost->AsVulkanTextureHost()) {
       // Increment compositable ref to prevent that TextureDataHolder is removed
       // during memcpy.
       textureHostRef = textureHost;
@@ -571,7 +593,9 @@ webgpu::FrontBufferSnapshot RemoteTextureMap::GetLatestBufferSnapshot(
 
   webgpu::FrontBufferSnapshot snapshot;
 
-  if (sharedTexture) {
+  if (auto* native = textureHostRef->AsVulkanTextureHost()) {
+    snapshot = native->GetSnapshot();
+  } else if (sharedTexture) {
     snapshot = sharedTexture->GetSnapshot();
   } else if (auto* bufferTextureHost = textureHostRef->AsBufferTextureHost()) {
     const auto src_size = bufferTextureHost->GetSize();

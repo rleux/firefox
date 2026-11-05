@@ -16,17 +16,17 @@ use std::sync::{atomic::Ordering, mpsc};
 mod blends;
 #[path = "vulkan_clip_tests.rs"]
 mod clips;
+#[path = "vulkan_external_buffer_tests.rs"]
+mod external_buffers;
 #[path = "vulkan_filter_tests.rs"]
 mod filters;
 #[path = "vulkan_glyph_tests.rs"]
 mod glyphs;
-#[cfg(all(target_os="linux",feature="debugger"))]
-#[path = "vulkan_presentation_tests.rs"]
-mod presentation;
 #[path = "vulkan_image_tests.rs"]
 mod images;
-#[path = "vulkan_external_buffer_tests.rs"]
-mod external_buffers;
+#[cfg(all(target_os = "linux", feature = "debugger"))]
+#[path = "vulkan_presentation_tests.rs"]
+mod presentation;
 
 struct Notice(mpsc::Sender<()>);
 
@@ -234,3 +234,7 @@ fn vulkan_idle_completion_poll_errors_are_ready_for_update_recovery() {
     renderer.device.delete_fence(fence);
     renderer.deinit();
 }
+
+#[cfg(target_os = "linux")]
+#[path = "vulkan_native_image_tests.rs"]
+mod native_images;

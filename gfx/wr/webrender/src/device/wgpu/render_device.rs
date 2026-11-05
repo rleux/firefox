@@ -58,6 +58,9 @@ pub(in crate::device) struct RenderDevice {
     vertex_arrays: VertexArrayStore,
     uploads: UploadBuffers,
     encoder: Option<Arc<core::command::CommandEncoder>>,
+    ordered_commands: Vec<Arc<core::command::CommandBuffer>>,
+    #[cfg(target_os = "linux")]
+    external_images: Option<std::rc::Rc<super::ExternalTextureRegistry>>,
     pass: Option<Pass>,
     samplers: Samplers,
     blit_pipelines: crate::internal_types::FastHashMap<wgt::TextureFormat, Arc<DrawPipeline>>,
@@ -136,6 +139,9 @@ impl RenderDevice {
             vertex_arrays: VertexArrayStore::default(),
             uploads: UploadBuffers::default(),
             encoder: None,
+            ordered_commands: Vec::new(),
+            #[cfg(target_os = "linux")]
+            external_images: super::ExternalTextureRegistry::new(&owner).ok(),
             pass: None,
             samplers,
             blit_pipelines: Default::default(),
@@ -205,6 +211,12 @@ impl RenderDevice {
                 let _ = self.failure.set(error);
                 self.pass = None;
                 self.encoder = None;
+                self.ordered_commands.clear();
+                #[cfg(target_os = "linux")]
+                if let Some(native) = &self.external_images {
+                    native.abort();
+                    native.end_frame();
+                }
                 self.inside_frame = false;
                 self.capture_pending = false;
                 self.capture_this_frame = false;
@@ -252,8 +264,27 @@ impl RenderDevice {
         }
         Ok(self.encoder.as_ref().unwrap().clone())
     }
+    fn collect_native_commands(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            let commands = native.take_commands();
+            if !commands.is_empty() {
+                self.flush_pass(StoreOp::Store)?;
+                if let Some(encoder) = self.encoder.take() {
+                    self.ordered_commands
+                        .push(encoder.finish(&wgt::CommandBufferDescriptor::default()));
+                }
+                self.ordered_commands.extend(commands);
+            }
+        }
+        Ok(())
+    }
     pub(super) fn poll(&mut self) -> Result<()> {
         self.owner.poll().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.poll()?;
+        }
         while self
             .in_flight
             .front()
@@ -269,19 +300,31 @@ impl RenderDevice {
     fn submit_inner(&mut self, present: bool) -> Result<core::SubmissionIndex> {
         self.flush_pass(StoreOp::Store)?;
         self.poll()?;
-        if self.in_flight.len() >= 2 {
+        #[cfg(target_os = "linux")]
+        let retiring = self
+            .external_images
+            .as_ref()
+            .is_some_and(|native| !native.is_attached());
+        #[cfg(not(target_os = "linux"))]
+        let retiring = false;
+        if !retiring && self.in_flight.len() >= 2 {
             let index = self.in_flight.pop_front().unwrap();
             self.owner.wait_for(index).map_err(|e| e.to_string())?;
             self.completed.fetch_max(index, Ordering::Release);
         }
-        let commands = self
-            .encoder
-            .take()
-            .map(|encoder| encoder.finish(&wgt::CommandBufferDescriptor::default()));
-        let index = self
-            .owner
-            .submit(commands.as_slice())
-            .map_err(|e| e.to_string())?;
+        self.collect_native_commands()?;
+        let mut commands = std::mem::take(&mut self.ordered_commands);
+        if let Some(encoder) = self.encoder.take() {
+            commands.push(encoder.finish(&wgt::CommandBufferDescriptor::default()));
+        }
+        #[cfg(target_os = "linux")]
+        let index = if let Some(native) = &self.external_images {
+            native.submit(&commands)?
+        } else {
+            self.owner.submit(&commands).map_err(|e| e.to_string())?
+        };
+        #[cfg(not(target_os = "linux"))]
+        let index = self.owner.submit(&commands).map_err(|e| e.to_string())?;
         if present {
             if let Some(surface) = &mut self.surface {
                 if surface.has_output() {
@@ -293,6 +336,8 @@ impl RenderDevice {
         let completed = self.completed.clone();
         let tail = Arc::new(std::sync::OnceLock::new());
         let callback_tail = tail.clone();
+        let queue_owner = self.owner.clone();
+        let queue_access = queue_owner.queue_access();
         // Presentation and pending writes can add core submissions before this callback.
         let index = self
             .owner
@@ -302,6 +347,7 @@ impl RenderDevice {
             }))
             .unwrap_or(index);
         tail.set(index).unwrap();
+        drop(queue_access);
         self.owner.check().map_err(|e| e.to_string())?;
         self.submitted = index;
         self.in_flight.push_back(index);
@@ -320,6 +366,10 @@ impl RenderDevice {
         );
         self.inside_frame = true;
         self.capture_this_frame = std::mem::take(&mut self.capture_pending);
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.begin_frame();
+        }
         if let Some(surface) = &mut self.surface {
             surface.begin_frame();
         }
@@ -350,6 +400,39 @@ impl RenderDevice {
                 .set_output(if presented { snapshot } else { None });
         }
         self.inside_frame = false;
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.end_frame();
+        }
+        Ok(index)
+    }
+    pub fn finish_resource_work(&mut self) -> Result<core::SubmissionIndex> {
+        if !self.inside_frame || self.skipped_pass {
+            return Err("Invalid Vulkan resource-only frame finish".into());
+        }
+        self.collect_native_commands()?;
+        #[cfg(target_os = "linux")]
+        let native_work = self
+            .external_images
+            .as_ref()
+            .is_some_and(|native| native.recording_work());
+        #[cfg(not(target_os = "linux"))]
+        let native_work = false;
+        let index = if self.encoder.is_some() || !self.ordered_commands.is_empty() || native_work {
+            self.submit_inner(false)?
+        } else {
+            self.poll()?;
+            self.submitted
+        };
+        self.textures.set_output(None);
+        if let Some(surface) = &mut self.surface {
+            surface.discard()?;
+        }
+        self.inside_frame = false;
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.external_images {
+            native.end_frame();
+        }
         Ok(index)
     }
     pub fn begin_render_pass(&mut self, descriptor: &RenderPassDescriptor) -> Result<()> {
@@ -890,6 +973,56 @@ impl RenderDevice {
         }
         Ok(())
     }
+    #[cfg(all(feature = "capture", target_os = "linux"))]
+    pub(super) fn capture_external(
+        &mut self,
+        handle: api::ExternalTextureHandle,
+        descriptor: &api::ImageDescriptor,
+    ) -> Result<Vec<u8>> {
+        let id = u32::try_from(handle.0).map_err(|_| "Invalid native texture handle")?;
+        let native = self
+            .external_images
+            .as_ref()
+            .ok_or("Native images unavailable")?;
+        let image = native.image(id)?;
+        if !image
+            .raw
+            .descriptor()
+            .usage
+            .contains(wgt::TextureUsages::COPY_SRC)
+        {
+            return Err("Native capture requires admitted COPY_SRC usage".into());
+        }
+        let opaque = native.is_opaque(id)?;
+        if image.raw.descriptor().size.width != descriptor.size.width as u32
+            || image.raw.descriptor().size.height != descriptor.size.height as u32
+        {
+            return Err("Native capture descriptor does not match allocation".into());
+        }
+        let length = usize::try_from(descriptor.size.width)
+            .ok()
+            .and_then(|w| {
+                usize::try_from(descriptor.size.height)
+                    .ok()
+                    .and_then(|h| w.checked_mul(h))
+            })
+            .and_then(|area| area.checked_mul(4))
+            .ok_or("Native capture length overflow")?;
+        let mut pixels = vec![0; length];
+        self.capture_image(
+            image,
+            DeviceIntRect::from_size(descriptor.size),
+            descriptor.format,
+            &mut pixels,
+            true,
+        )?;
+        if opaque {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel[3] = 255;
+            }
+        }
+        Ok(pixels)
+    }
     pub(super) fn capture_into(
         &mut self,
         image: Arc<Image>,
@@ -897,12 +1030,33 @@ impl RenderDevice {
         format: ImageFormat,
         output: &mut [u8],
     ) -> Result<()> {
+        self.capture_image(image, rect, format, output, false)
+    }
+    fn capture_image(
+        &mut self,
+        image: Arc<Image>,
+        rect: DeviceIntRect,
+        format: ImageFormat,
+        output: &mut [u8],
+        restore_sampling: bool,
+    ) -> Result<()> {
         self.flush_pass(StoreOp::Store)?;
+        self.collect_native_commands()?;
         let encoder = self.commands()?;
         let readback = self
             .owner
             .encode_readback(&encoder, &image.raw, 0, rect, Some(format))
             .map_err(|e| e.to_string())?;
+        if restore_sampling {
+            encoder.transition_resources(
+                std::iter::empty(),
+                std::iter::once(wgt::TextureTransition {
+                    texture: image.raw.clone(),
+                    selector: None,
+                    state: wgt::TextureUses::RESOURCE,
+                }),
+            );
+        }
         let index = self.submit()?;
         readback
             .map(&self.owner, index)

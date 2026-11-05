@@ -16,7 +16,8 @@ use crate::scene_builder_thread::SceneBuilderRequest;
 use crate::composite::{CompositorKind, CompositorConfig, SwapchainMode};
 use super::layer_tree::LayerTree;
 use crate::device::{
-    DeviceOptions, GpuBackendConfig, UploadMethod, UploadBufferPool, VertexUsageHint, Device, ProgramCache, TextureFilter
+    DeviceOptions, GpuBackendConfig, UploadMethod, UploadBufferPool, VertexUsageHint, Device,
+    ProgramCache, TextureFilter,
 };
 use crate::frame_builder::FrameBuilderConfig;
 use glyph_rasterizer::{GlyphRasterThread, SharedFontResources};
@@ -28,8 +29,8 @@ use crate::texture_cache::TextureCacheConfig;
 use crate::renderer::{DEFAULT_PATH_AA_SAMPLES, 
     debug, vertex,
     debug::DebugOverlayState,
-    Renderer, BufferDamageTracker, PipelineInfo, TextureResolver,
-    RendererError, ShaderPrecacheFlags,
+    Renderer, BufferDamageTracker, PipelineInfo, TextureResolver, RendererError,
+    ShaderPrecacheFlags,
     upload::UploadTexturePool,
     shade::{Shaders, SharedShaders},
 };
@@ -41,7 +42,10 @@ use std::{
     cell::RefCell,
     collections::VecDeque,
     rc::Rc,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     num::NonZeroUsize,
     path::PathBuf,
 };
@@ -84,7 +88,12 @@ pub trait SceneBuilderHooks {
     /// This is called after each scene swap occurs. The PipelineInfo contains
     /// the updated epochs and pipelines removed in the new scene compared to
     /// the old scene.
-    fn post_scene_swap(&self, document_id: &Vec<DocumentId>, info: PipelineInfo, schedule_frame: bool);
+    fn post_scene_swap(
+        &self,
+        document_id: &Vec<DocumentId>,
+        info: PipelineInfo,
+        schedule_frame: bool,
+    );
     /// This is called after a resource update operation on the scene builder
     /// thread, in the case where resource updates were applied without a scene
     /// build.
@@ -104,7 +113,13 @@ pub trait SceneBuilderHooks {
     fn deregister(&self);
     /// This is called when the embed policy of `embedder` rejects an iframe
     /// item that references `child`, once per pair and document.
-    fn embed_policy_violation(&self, _document_id: DocumentId, _embedder: PipelineId, _child: PipelineId) {}
+    fn embed_policy_violation(
+        &self,
+        _document_id: DocumentId,
+        _embedder: PipelineId,
+        _child: PipelineId,
+    ) {
+    }
 }
 
 /// Allows callers to hook into the main render_backend loop and provide
@@ -378,18 +393,18 @@ pub fn create_webrender_instance(
             dump_shader_source: options.dump_shader_source.take(),
             surface_origin_is_top_left: options.surface_origin_is_top_left,
         },
-    ).map_err(RendererError::Device)?;
+    )
+    .map_err(RendererError::Device)?;
 
     let color_cache_formats = device.preferred_color_formats();
     let swizzle_settings = device.swizzle_settings();
-    let use_dual_source_blending =
-        device.get_capabilities().supports_dual_source_blending &&
-        options.allow_dual_source_blending;
-    let ext_blend_equation_advanced =
-        options.allow_advanced_blend_equation &&
-        device.get_capabilities().supports_advanced_blend_equation;
-    let ext_blend_equation_advanced_coherent =
-        device.get_capabilities().supports_advanced_blend_equation_coherent;
+    let use_dual_source_blending = device.get_capabilities().supports_dual_source_blending
+        && options.allow_dual_source_blending;
+    let ext_blend_equation_advanced = options.allow_advanced_blend_equation
+        && device.get_capabilities().supports_advanced_blend_equation;
+    let ext_blend_equation_advanced_coherent = device
+        .get_capabilities()
+        .supports_advanced_blend_equation_coherent;
 
     let enable_clear_scissor = options
         .enable_clear_scissor
@@ -414,12 +429,16 @@ pub fn create_webrender_instance(
 
     if options.reject_software_rasterizer {
         let renderer_name_lc = device.get_capabilities().renderer_name.to_lowercase();
-        if renderer_name_lc.contains("llvmpipe") || renderer_name_lc.contains("softpipe") || renderer_name_lc.contains("software rasterizer") {
-        return Err(RendererError::SoftwareRasterizer);
+        if renderer_name_lc.contains("llvmpipe")
+            || renderer_name_lc.contains("softpipe")
+            || renderer_name_lc.contains("software rasterizer")
+        {
+            return Err(RendererError::SoftwareRasterizer);
         }
     }
 
-    let image_tiling_threshold = options.image_tiling_threshold
+    let image_tiling_threshold = options
+        .image_tiling_threshold
         .min(max_internal_texture_size);
 
     device.begin_frame();
@@ -428,7 +447,10 @@ pub fn create_webrender_instance(
         Some(shaders) => Rc::clone(shaders),
         None => {
             let mut shaders = Shaders::new(&mut device, &options)?;
-            if options.precache_flags.intersects(ShaderPrecacheFlags::ASYNC_COMPILE | ShaderPrecacheFlags::FULL_COMPILE) {
+            if options
+                .precache_flags
+                .intersects(ShaderPrecacheFlags::ASYNC_COMPILE | ShaderPrecacheFlags::FULL_COMPILE)
+            {
                 let mut pending_shaders = shaders.precache_all(options.precache_flags);
                 while shaders.resume_precache(&mut device, &mut pending_shaders)? {}
             }
@@ -438,70 +460,9 @@ pub fn create_webrender_instance(
 
     let dither_matrix_texture = if options.enable_dithering {
         let dither_matrix: [u8; 64] = [
-            0,
-            48,
-            12,
-            60,
-            3,
-            51,
-            15,
-            63,
-            32,
-            16,
-            44,
-            28,
-            35,
-            19,
-            47,
-            31,
-            8,
-            56,
-            4,
-            52,
-            11,
-            59,
-            7,
-            55,
-            40,
-            24,
-            36,
-            20,
-            43,
-            27,
-            39,
-            23,
-            2,
-            50,
-            14,
-            62,
-            1,
-            49,
-            13,
-            61,
-            34,
-            18,
-            46,
-            30,
-            33,
-            17,
-            45,
-            29,
-            10,
-            58,
-            6,
-            54,
-            9,
-            57,
-            5,
-            53,
-            42,
-            26,
-            38,
-            22,
-            41,
-            25,
-            37,
-            21,
+            0, 48, 12, 60, 3, 51, 15, 63, 32, 16, 44, 28, 35, 19, 47, 31, 8, 56, 4, 52, 11, 59, 7,
+            55, 40, 24, 36, 20, 43, 27, 39, 23, 2, 50, 14, 62, 1, 49, 13, 61, 34, 18, 46, 30, 33,
+            17, 45, 29, 10, 58, 6, 54, 9, 57, 5, 53, 42, 26, 38, 22, 41, 25, 37, 21,
         ];
 
         let texture = device.create_texture(
@@ -531,15 +492,23 @@ pub fn create_webrender_instance(
 
     let vaos = vertex::RendererVAOs::new(
         &mut device,
-        if options.enable_instancing { None } else { NonZeroUsize::new(max_primitive_instance_count) },
+        if options.enable_instancing {
+            None
+        } else {
+            NonZeroUsize::new(max_primitive_instance_count)
+        },
         use_shared_instance_buffer,
     );
 
-    let texture_upload_buffer_pool = UploadBufferPool::new(&mut device, options.upload_buffer_default_size);
+    let texture_upload_buffer_pool =
+        UploadBufferPool::new(&mut device, options.upload_buffer_default_size);
     let staging_texture_pool = UploadTexturePool::new();
     let texture_resolver = TextureResolver::new(&mut device);
 
-    let is_software = device.get_capabilities().renderer_name.starts_with("Software");
+    let is_software = device
+        .get_capabilities()
+        .renderer_name
+        .starts_with("Software");
 
     device.end_frame();
 
@@ -580,8 +549,12 @@ pub fn create_webrender_instance(
         gpu_supports_fast_clears: options.gpu_supports_fast_clears,
         gpu_supports_advanced_blend: ext_blend_equation_advanced,
         advanced_blend_is_coherent: ext_blend_equation_advanced_coherent,
-        gpu_supports_render_target_partial_update: device.get_capabilities().supports_render_target_partial_update,
-        external_images_require_copy: !device.get_capabilities().supports_external_textures_in_all_shaders,
+        gpu_supports_render_target_partial_update: device
+            .get_capabilities()
+            .supports_render_target_partial_update,
+        external_images_require_copy: !device
+            .get_capabilities()
+            .supports_external_textures_in_all_shaders,
         batch_lookback_count: WebRenderOptions::BATCH_LOOKBACK_COUNT,
         background_color: Some(options.clear_color),
         compositor_kind,
@@ -603,22 +576,19 @@ pub fn create_webrender_instance(
     let enclosing_size_of_op = options.enclosing_size_of_op;
     let make_size_of_ops =
         move || size_of_op.map(|o| MallocSizeOfOps::new(o, enclosing_size_of_op));
-    let workers = options
-        .workers
-        .take()
-        .unwrap_or_else(|| {
-            let worker = ThreadPoolBuilder::new()
-                .thread_name(|idx|{ format!("WRWorker#{}", idx) })
-                .start_handler(move |idx| {
-                    register_thread_with_profiler(format!("WRWorker#{}", idx));
-                    profiler::register_thread(&format!("WRWorker#{}", idx));
-                })
-                .exit_handler(move |_idx| {
-                    profiler::unregister_thread();
-                })
-                .build();
-            Arc::new(worker.unwrap())
-        });
+    let workers = options.workers.take().unwrap_or_else(|| {
+        let worker = ThreadPoolBuilder::new()
+            .thread_name(|idx| format!("WRWorker#{}", idx))
+            .start_handler(move |idx| {
+                register_thread_with_profiler(format!("WRWorker#{}", idx));
+                profiler::register_thread(&format!("WRWorker#{}", idx));
+            })
+            .exit_handler(move |_idx| {
+                profiler::unregister_thread();
+            })
+            .build();
+        Arc::new(worker.unwrap())
+    });
     let sampler = options.sampler;
     let namespace_alloc_by_client = options.namespace_alloc_by_client;
 
@@ -634,7 +604,9 @@ pub fn create_webrender_instance(
         fonts
     } else {
         let font_namespace = if namespace_alloc_by_client {
-            options.shared_font_namespace.expect("Shared font namespace must be allocated by client")
+            options
+                .shared_font_namespace
+                .expect("Shared font namespace must be allocated by client")
         } else {
             RenderBackend::next_namespace_id()
         };
@@ -652,7 +624,9 @@ pub fn create_webrender_instance(
     let supports_r8_texture_upload = device.get_capabilities().supports_r8_texture_upload;
 
     let texture_cache_config = options.texture_cache_config.clone();
-    let mut picture_tile_size = options.picture_tile_size.unwrap_or(crate::tile_cache::TILE_SIZE_DEFAULT);
+    let mut picture_tile_size = options
+        .picture_tile_size
+        .unwrap_or(crate::tile_cache::TILE_SIZE_DEFAULT);
     // Clamp the picture tile size to reasonable values.
     picture_tile_size.width = picture_tile_size.width.max(128).min(4096);
     picture_tile_size.height = picture_tile_size.height.max(128).min(4096);
@@ -663,9 +637,10 @@ pub fn create_webrender_instance(
         TextureFilter::Nearest
     };
 
-    let chunk_pool = options.chunk_pool.take().unwrap_or_else(|| {
-        Arc::new(ChunkPool::new())
-    });
+    let chunk_pool = options
+        .chunk_pool
+        .take()
+        .unwrap_or_else(|| Arc::new(ChunkPool::new()));
 
     let enable_multithreading = options.enable_multithreading;
     let backend_id = next_render_backend_id();
@@ -719,16 +694,18 @@ pub fn create_webrender_instance(
     let scene_tx = assigned.scene_tx;
     let low_priority_scene_tx = assigned.lp_scene_tx;
 
-    api_tx.send(ApiMsg::RegisterWindow(Box::new(WindowRegistration {
-        id: backend_id,
-        result_tx,
-        notifier: backend_notifier,
-        sampler,
-        resource_cache: resource_cache_init,
-        chunk_pool,
-        frame_config: config,
-        debug_flags,
-    }))).expect("send RegisterWindow failed");
+    api_tx
+        .send(ApiMsg::RegisterWindow(Box::new(WindowRegistration {
+            id: backend_id,
+            result_tx,
+            notifier: backend_notifier,
+            sampler,
+            resource_cache: resource_cache_init,
+            chunk_pool,
+            frame_config: config,
+            debug_flags,
+        })))
+        .expect("send RegisterWindow failed");
 
     // Register the per-window `FrameBuilderConfig` with the SB so that scene
     // building for documents owned by this window uses the right config
@@ -755,6 +732,8 @@ pub fn create_webrender_instance(
 
     let mut renderer = Renderer {
         result_rx,
+        update_blocked_on_images: false,
+        pending_external_documents: FastHashMap::default(),
         api_tx: api_tx.clone(),
         backend_id,
         _render_backend_pool: owned_pool.clone(),

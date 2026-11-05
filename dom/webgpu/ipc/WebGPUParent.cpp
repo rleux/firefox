@@ -4,6 +4,7 @@
 
 #include "WebGPUParent.h"
 
+#include <algorithm>
 #include <memory>
 #include <unordered_set>
 
@@ -17,10 +18,13 @@
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/RemoteTextureMap.h"
 #include "mozilla/layers/TextureHost.h"
+#include "mozilla/layers/VulkanImages.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
 #include "mozilla/webgpu/FrontBufferSnapshot.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
+#include "mozilla/webrender/VulkanImageIPC.h"
 
 #if defined(XP_WIN)
 #  include "mozilla/gfx/DeviceManagerDx.h"
@@ -42,6 +46,26 @@ const uint64_t POLL_TIME_MS = 100;
 static mozilla::LazyLogModule sLogger("WebGPU");
 
 namespace ffi {
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+extern bool wgpu_parent_native_canvas_supported(
+    const WGPUCanvasExportInfo* aInfo, bool aOpaque) {
+  wr::WrVulkanDmaBufDescriptor image{};
+  image.fd = aInfo->memory_fd;
+  image.width = aInfo->width;
+  image.height = aInfo->height;
+  image.format = aInfo->bgra ? wr::ImageFormat::BGRA8 : wr::ImageFormat::RGBA8;
+  image.modifier = aInfo->modifier;
+  image.offset = aInfo->offset;
+  image.stride = aInfo->stride;
+  image.copy_src = true;
+  image.copy_dst = true;
+  std::copy(std::begin(aInfo->device_uuid), std::end(aInfo->device_uuid),
+            image.device_uuid);
+  std::copy(std::begin(aInfo->driver_uuid), std::end(aInfo->driver_uuid),
+            image.driver_uuid);
+  return wr::VulkanImageCapabilities::Supports(image, aOpaque);
+}
+#endif
 
 extern bool wgpu_server_use_shared_texture_for_swap_chain(
     WGPUWebGPUParentPtr aParent, WGPUSwapChainId aSwapChainId) {
@@ -404,6 +428,8 @@ class PresentationData {
   WeakPtr<WebGPUParent> mParent;
   bool mUseSharedTextureInSwapChain;
   const bool mIsOpaque;
+  bool mNativePresent = false;
+  uint64_t mNativePublicationId = 0;
   const RawId mDeviceId;
   const RawId mQueueId;
   Maybe<RawId> mLastSubmittedTextureId;
@@ -946,6 +972,10 @@ static void ReadbackPresentCallback(uint8_t* userdata,
         src += src_stride;
         dst += dst_stride;
       }
+      MOZ_LOG(sLogger, LogLevel::Info,
+              ("WebGPU presentation-cpu-copy publication=%" PRIu64
+               " maps=1 copies=1",
+               req->mTextureId.mId));
       req->mRemoteTextureOwner->PushTexture(req->mTextureId, req->mOwnerId,
                                             std::move(textureData));
     } else {
@@ -1054,6 +1084,17 @@ ipc::IPCResult WebGPUParent::GetFrontBufferSnapshot(
   const auto& size = data->mDesc.size();
 
   if (size.width > INT16_MAX || size.height > INT16_MAX) {
+    return IPC_OK();
+  }
+
+  if (data->mNativePresent && mRemoteTextureOwner &&
+      mRemoteTextureOwner->IsRegistered(aOwnerId)) {
+    MOZ_LOG(sLogger, LogLevel::Info,
+            ("WebGPU snapshot path=native publication=%" PRIu64
+             " unsubmitted=%d opaque=%d",
+             data->mNativePublicationId,
+             data->mLastSubmittedTextureId.isNothing(), data->mIsOpaque));
+    aSnapshot = mRemoteTextureOwner->GetLatestBufferSnapshot(aOwnerId);
     return IPC_OK();
   }
 
@@ -1235,6 +1276,60 @@ void WebGPUParent::SwapChainPresent(
     return;
   }
 
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (wr::RenderCompositorVulkan::IsRequested() &&
+      !gfx::gfxVars::UseSoftwareWebRender() &&
+      gfx::gfxVars::AllowWebGPUPresentWithoutReadback() &&
+      data->mWaitingReadbackTexturesForPresent.empty()) {
+    ffi::WGPUCanvasExportInfo info{};
+    auto* raw =
+        ffi::wgpu_canvas_export(mContext.get(), data->mDeviceId, data->mQueueId,
+                                aTextureId, data->mIsOpaque, &info);
+    if (raw) {
+      auto lease = std::shared_ptr<ffi::WGPUCanvasExport>(
+          raw, [](auto* aExport) { ffi::wgpu_canvas_export_delete(aExport); });
+      wr::VulkanUUID device{}, driver{};
+      std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
+                device.begin());
+      std::copy(std::begin(info.driver_uuid), std::end(info.driver_uuid),
+                driver.begin());
+      RefPtr<gfx::FileHandleWrapper> memory =
+          new gfx::FileHandleWrapper(DuplicateFileHandle(info.memory_fd));
+      RefPtr<gfx::FileHandleWrapper> ready =
+          new gfx::FileHandleWrapper(DuplicateFileHandle(info.ready_fd));
+      layers::VulkanTimelineDescriptor timeline(ready, device, driver, 1);
+      layers::VulkanImagePublication publication(
+          aRemoteTextureId.mId, memory, data->mDesc.size(),
+          data->mDesc.format(), info.modifier, info.offset, info.stride, true,
+          true, false, timeline);
+      if (info.width == uint32_t(data->mDesc.size().width) &&
+          info.height == uint32_t(data->mDesc.size().height) &&
+          info.bgra == (data->mDesc.format() == gfx::SurfaceFormat::B8G8R8A8) &&
+          mRemoteTextureOwner->PushVulkanTexture(
+              aRemoteTextureId, aOwnerId, publication,
+              [lease](layers::VulkanImageReturnMessage&& aReturn) {
+                MOZ_LOG(sLogger, LogLevel::Info,
+                        ("WebGPU native canvas returned publication=%" PRIu64
+                         " status=%u (discarded, never reused)",
+                         aReturn.publicationId(), unsigned(aReturn.status())));
+              },
+              data->mIsOpaque)) {
+        data->mNativePresent = true;
+        data->mNativePublicationId = aRemoteTextureId.mId;
+        MOZ_LOG(sLogger, LogLevel::Info,
+                ("WebGPU presentation path=native publication=%" PRIu64
+                 " opaque=%d gpu_copy=1 presentation_cpu_maps=0 "
+                 "presentation_cpu_copies=0 bgra=%d",
+                 aRemoteTextureId.mId, data->mIsOpaque, info.bgra));
+        return;
+      }
+    }
+  }
+#endif
+  data->mNativePresent = false;
+  MOZ_LOG(sLogger, LogLevel::Info,
+          ("WebGPU presentation path=cpu-readback publication=%" PRIu64,
+           aRemoteTextureId.mId));
   RawId bufferId = 0;
   const auto& size = data->mDesc.size();
   const auto bufferSize = data->mBufferSize;

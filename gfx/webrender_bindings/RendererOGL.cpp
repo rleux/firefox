@@ -92,7 +92,7 @@ wr::WrExternalImage wr_renderer_lock_external_image(void* aObj,
   } else if (auto* swgl = renderer->swgl()) {
     return texture->LockSWGL(aChannelIndex, swgl, renderer->GetCompositor());
   } else if (renderer->GetCompositor()->UsesBackendPresentation()) {
-    return texture->LockExternalBuffer(aChannelIndex);
+    return renderer->GetCompositor()->LockExternalImage(texture, aChannelIndex);
   } else {
     gfxCriticalNoteOnce
         << "No GL or SWGL context available to lock ExternalImage for extId:"
@@ -114,7 +114,7 @@ void wr_renderer_unlock_external_image(void* aObj, wr::ExternalImageId aId,
   } else if (renderer->swgl()) {
     texture->UnlockSWGL();
   } else if (renderer->GetCompositor()->UsesBackendPresentation()) {
-    texture->UnlockExternalBuffer();
+    renderer->GetCompositor()->UnlockExternalImage(texture);
   }
 }
 
@@ -163,18 +163,28 @@ void RendererOGL::SetFramePublishId(FramePublishId aPublishId) {
   wr_renderer_set_target_frame_publish_id(mRenderer, aPublishId);
 }
 
-void RendererOGL::Update() {
+Maybe<WrRendererUpdateStatus> RendererOGL::Update() {
+  auto status = WrRendererUpdateStatus::Ready;
+  mNativeImagesPending = false;
   mCompositor->Update();
   if (mCompositor->UsesBackendPresentation()) {
     CheckGraphicsResetStatus(gfx::DeviceResetDetectPlace::WR_BEGIN_FRAME, true);
   }
   if (mCompositor->MakeCurrent()) {
-    const bool updated = wr_renderer_update(mRenderer);
-    FlushPipelineInfo();
+    const bool updated = wr_renderer_update(mRenderer, &status);
+    mNativeImagesPending = status != WrRendererUpdateStatus::Ready;
+    mCompositor->AfterRender(updated);
+    if (mNativeImagesPending) {
+      mBridge->ScheduleRenderOnCompositorThread(
+          wr::RenderReasons::SKIPPED_COMPOSITE);
+    }
     if (!updated) {
       RenderThread::Get()->HandleWebRenderError(WebRenderError::RENDER);
+      return Nothing();
     }
+    return Some(status);
   }
+  return Nothing();
 }
 
 RenderedFrameId RendererOGL::UpdateAndRender(
@@ -182,7 +192,12 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     const Maybe<wr::ImageFormat>& aReadbackFormat,
     const Maybe<Range<uint8_t>>& aReadbackBuffer, bool* aNeedsYFlip,
     const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats,
-    bool* aReadbackSuccess) {
+    bool* aReadbackSuccess, const Maybe<WrRendererUpdateStatus>& aUpdated) {
+  // A no-op notifier can require rendering a document left pending earlier.
+  // Its already-completed update also reconciled replacement/discard and the
+  // original presentation intent; do not update a second time before drawing.
+  auto updateStatus = aUpdated.valueOr(WrRendererUpdateStatus::Ready);
+  mNativeImagesPending = updateStatus != WrRendererUpdateStatus::Ready;
   if (aReadbackSuccess) {
     *aReadbackSuccess = false;
   }
@@ -247,7 +262,8 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     return RenderedFrameId();
   }
 
-  if (!wr_renderer_update(mRenderer)) {
+  if (aUpdated.isNothing() && !wr_renderer_update(mRenderer, &updateStatus)) {
+    mCompositor->AfterRender(false);
     FlushPipelineInfo();
     if (present) {
       mCompositor->CancelFrame();
@@ -259,6 +275,19 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     return RenderedFrameId();
   }
 
+  mNativeImagesPending = updateStatus != WrRendererUpdateStatus::Ready;
+  if (updateStatus == WrRendererUpdateStatus::Blocked) {
+    mCompositor->AfterRender(true);
+    mBridge->ScheduleRenderOnCompositorThread(
+        wr::RenderReasons::SKIPPED_COMPOSITE);
+    if (present) {
+      mCompositor->CancelFrame();
+    }
+    if (needPostRenderCall) {
+      mCompositor->GetWidget()->PostRender(&widgetContext);
+    }
+    return RenderedFrameId();
+  }
   // Order the frame after producers that synchronize with the sync object,
   // once the frame's external images are all known.
   layers::SyncObjectHost* syncObject = mCompositor->GetSyncObject();
@@ -288,12 +317,13 @@ RenderedFrameId RendererOGL::UpdateAndRender(
   nsTArray<DeviceIntRect> dirtyRects;
   bool didRasterize = false;
   WrPresentResult presentResult;
-  const bool readbackReady =
-      !mCompositor->UsesBackendPresentation() ||
-      (present && aReadbackBuffer.isSome() && wr_renderer_prepare_readback(mRenderer));
+  const bool readbackReady = !mCompositor->UsesBackendPresentation() ||
+                             (present && aReadbackBuffer.isSome() &&
+                              wr_renderer_prepare_readback(mRenderer));
   bool rendered = wr_renderer_render(
       mRenderer, renderSize.width, renderSize.height, bufferAge, aOutStats,
-      &dirtyRects, &didRasterize, &presentResult);
+      &dirtyRects, &didRasterize, &presentResult, &mNativeImagesPending);
+  mCompositor->AfterRender(rendered);
   FlushPipelineInfo();
 
   // Track whether any tiles were rasterized for reftest support.
@@ -311,6 +341,17 @@ RenderedFrameId RendererOGL::UpdateAndRender(
     return RenderedFrameId();
   }
 
+  if (mNativeImagesPending) {
+    mBridge->ScheduleRenderOnCompositorThread(
+        wr::RenderReasons::SKIPPED_COMPOSITE);
+    if (present) {
+      mCompositor->CancelFrame();
+    }
+    if (needPostRenderCall) {
+      mCompositor->GetWidget()->PostRender(&widgetContext);
+    }
+    return RenderedFrameId();
+  }
   if (presentResult == WrPresentResult::Retry ||
       presentResult == WrPresentResult::SizeMismatch) {
     mBridge->ScheduleRenderOnCompositorThread(
