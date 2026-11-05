@@ -2601,6 +2601,48 @@ nsDOMWindowUtils::GetLayerManagerType(nsAString& aType) {
 }
 
 NS_IMETHODIMP
+nsDOMWindowUtils::GetWebRenderBackendInfo(Promise** aOutPromise) {
+  NS_ENSURE_ARG_POINTER(aOutPromise);
+  *aOutPromise = nullptr;
+  nsCOMPtr<nsPIDOMWindowOuter> outer = do_QueryReferent(mWindow);
+  if (!outer || outer->Closed()) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  nsCOMPtr<nsPIDOMWindowInner> inner = outer->GetCurrentInnerWindow();
+  if (!inner) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
+  ErrorResult err;
+  RefPtr<Promise> promise = Promise::Create(inner->AsGlobal(), err);
+  if (err.Failed()) {
+    return err.StealNSResult();
+  }
+
+  auto* widget = GetWidget();
+  auto* wr =
+      widget && widget->HasWindowRenderer() ? GetWebRenderBridge() : nullptr;
+  if (!wr || !wr->CanSend()) {
+    promise->MaybeReject(NS_ERROR_NOT_AVAILABLE);
+  } else {
+    wr->SendGetBackendInfo()->Then(
+        GetCurrentSerialEventTarget(), __func__,
+        [promise](const nsCString& aInfo) {
+          if (aInfo.IsEmpty()) {
+            promise->MaybeReject(NS_ERROR_NOT_AVAILABLE);
+          } else {
+            promise->MaybeResolve(NS_ConvertUTF8toUTF16(aInfo));
+          }
+        },
+        [promise](const mozilla::ipc::ResponseRejectReason&) {
+          promise->MaybeReject(NS_ERROR_NOT_AVAILABLE);
+        });
+  }
+  promise.forget(aOutPromise);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsDOMWindowUtils::GetLayerManagerRemote(bool* retval) {
   nsCOMPtr<nsIWidget> widget = GetWidget();
   if (!widget) return NS_ERROR_FAILURE;

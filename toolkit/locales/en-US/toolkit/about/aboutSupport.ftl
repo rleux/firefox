@@ -304,6 +304,7 @@ try-newer-driver = Blocked for your graphics driver version. Try updating your g
 clear-type-parameters = ClearType Parameters
 
 compositing = Compositing
+web-render-backend = WebRender Backend
 support-font-determination = Font Visibility Debug Info
 hardware-h264 = Hardware H264 Decoding
 main-thread-no-omtc = main thread, no OMTC

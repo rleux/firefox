@@ -718,6 +718,12 @@ var snapshotFormatters = {
       compositor = "BasicLayers (" + noOMTCString + ")";
     }
     addRow("features", "compositing", [new Text(compositor)]);
+    if (data.webRenderBackend) {
+      addRow("features", "web-render-backend", [
+        new Text(JSON.stringify(data.webRenderBackend, null, "  ")),
+      ]);
+      delete data.webRenderBackend;
+    }
     addRow("features", "supportFontDetermination", [
       new Text(data.supportFontDetermination),
     ]);
