@@ -97,7 +97,7 @@ UniquePtr<SurfaceFactory> SurfaceFactory::Create(
     GLContext* const pGl, const layers::TextureType consumerType) {
   auto& gl = *pGl;
 
-  if (wr::IsVulkanCompositorRequested()) {
+  if (wr::IsVulkanCompositorRequested() && consumerType != layers::TextureType::DMABUF) {
     return nullptr;
   }
 

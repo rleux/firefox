@@ -238,3 +238,7 @@ fn vulkan_idle_completion_poll_errors_are_ready_for_update_recovery() {
 #[cfg(target_os = "linux")]
 #[path = "vulkan_native_image_tests.rs"]
 mod native_images;
+
+#[cfg(target_os="linux")]
+#[path="vulkan_foreign_image_tests.rs"]
+mod foreign_images;

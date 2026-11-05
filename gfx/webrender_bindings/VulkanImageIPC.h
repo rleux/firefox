@@ -31,11 +31,13 @@ class RenderTextureHost;
 struct WrVulkanExternalImages;
 struct WrVulkanDmaBufDescriptor;
 struct WrVulkanDmaBufCapabilities;
+struct WrVulkanForeignRgbDescriptor;
 
 class VulkanImageCapabilities final {
  public:
   static UniquePtr<VulkanImageCapabilities> Register(WrVulkanExternalImages*);
   static bool Supports(const WrVulkanDmaBufDescriptor&, bool aOpaque = false);
+  static bool SupportsForeignRGB(const WrVulkanForeignRgbDescriptor&, uint64_t, uint64_t);
   ~VulkanImageCapabilities();
 
  private:

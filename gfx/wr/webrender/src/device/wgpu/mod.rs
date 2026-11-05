@@ -50,7 +50,7 @@ pub use external_images::{
 #[cfg(target_os = "linux")]
 pub use vulkan::{
     DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, SharedTimeline,
-    TimelineHandle,
+    TimelineHandle, ForeignRgbLayout, SyncFileWait,
 };
 pub use self::transfer::{PendingReadback, Readback};
 

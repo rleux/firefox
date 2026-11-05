@@ -21,6 +21,27 @@
 #include "nsThreadUtils.h"
 #include "prthread.h"
 
+#include <array>
+#include <cstring>
+#include <vector>
+
+#ifdef MOZ_WIDGET_GTK
+#include "GLContextProvider.h"
+#include "GLScreenBuffer.h"
+#include "MozFramebuffer.h"
+#include "ScopedGLHelpers.h"
+#include "SharedSurfaceDMABUF.h"
+#include "mozilla/ScopeExit.h"
+#include "mozilla/gfx/gfxVars.h"
+#include "mozilla/layers/LayersSurfaces.h"
+#include "mozilla/webrender/RenderDMABUFTextureHost.h"
+
+namespace mozilla {
+void InitSwapChain(gl::GLContext &, gl::SwapChain &, layers::TextureType, bool);
+}
+#endif
+
+
 namespace mozilla::wr {
 class VulkanNativeImageTestAccess {
  public:
@@ -574,4 +595,355 @@ TEST_F(VulkanNativeImages, AbandonedNewBorrowCannotReturnAnOlderReceipt) {
     fixture.native = nullptr;
   });
 }
+#ifdef MOZ_WIDGET_GTK
+extern "C" {
+void *wr_test_foreign_new();
+Renderer *wr_test_foreign_renderer(void *);
+void wr_test_foreign_sample_expected(void *, ExternalTextureHandle, int32_t,
+                                     int32_t, const uint8_t *, size_t);
+void wr_test_foreign_delete(void *);
+void *wr_test_foreign_replace(void *);
+void wr_test_foreign_advance(void *);
+bool wr_test_foreign_old_device_alive(void *);
+}
+
+class VulkanForeignImages : public VulkanNativeImages {
+protected:
+  void SetUp() override {
+    VulkanNativeImages::SetUp();
+    if (IsSkipped() || HasFatalFailure()) {
+      return;
+    }
+    ASSERT_TRUE(NS_IsMainThread());
+    const char *expected = getenv("WR_GL_FOREIGN_EXPECT_NATIVE");
+    ASSERT_TRUE(expected && (!strcmp(expected, "0") || !strcmp(expected, "1")));
+    mExpectNative = !strcmp(expected, "1");
+    mOldVars = {gfx::gfxVars::UseWebRenderVulkan(),
+                gfx::gfxVars::WebRenderVulkanX11Display(),
+                gfx::gfxVars::UseSoftwareWebRender(), gfx::gfxVars::UseDMABuf(),
+                gfx::gfxVars::UseDMABufWebGL()};
+    mRestoreVars = true;
+    gfx::gfxVars::SetUseWebRenderVulkan(true);
+    gfx::gfxVars::SetWebRenderVulkanX11Display(true);
+    gfx::gfxVars::SetUseSoftwareWebRender(false);
+    gfx::gfxVars::SetUseDMABuf(true);
+    gfx::gfxVars::SetUseDMABufWebGL(true);
+    OnRenderThread([&] {
+      mRender = wr_test_foreign_new();
+      ASSERT_TRUE(mRender);
+      WrVulkanConfig config{};
+      config.validation = true;
+      mFixture.compositor =
+          std::make_unique<RenderCompositorVulkan>(nullptr, config);
+      mFixture.compositor->SetRenderer(wr_test_foreign_renderer(mRender),
+                                       WindowId{0});
+    });
+    gl::GLContextCreateDesc desc;
+    desc.flags = gl::CreateContextFlags::PREFER_ES3 |
+                 gl::CreateContextFlags::FORBID_SOFTWARE;
+    nsAutoCString failure;
+    mGL = gl::GLContextProviderEGL::CreateHeadless(desc, &failure);
+    ASSERT_TRUE(mGL) << failure.get();
+    ASSERT_TRUE(mGL->MakeCurrent());
+  }
+
+  void TearDown() override {
+    if (mRender) {
+      OnRenderThread([&] {
+        mFixture.host = nullptr;
+        mFixture.compositor->SetRenderer(nullptr, WindowId{0});
+        mFixture.compositor = nullptr;
+        wr_test_foreign_delete(mRender);
+        mRender = nullptr;
+        RenderThread::Get()->NativeImages().Poll();
+      });
+    }
+    if (mGL) {
+      mGL->MakeCurrent();
+      mProducer = nullptr;
+      mSwapChain = nullptr;
+      mGL = nullptr;
+    }
+    if (mRestoreVars) {
+      gfx::gfxVars::SetUseWebRenderVulkan(mOldVars[0]);
+      gfx::gfxVars::SetWebRenderVulkanX11Display(mOldVars[1]);
+      gfx::gfxVars::SetUseSoftwareWebRender(mOldVars[2]);
+      gfx::gfxVars::SetUseDMABuf(mOldVars[3]);
+      gfx::gfxVars::SetUseDMABufWebGL(mOldVars[4]);
+    }
+    VulkanNativeImages::TearDown();
+  }
+
+  enum class PublicationEnd { Reuse, Migrate, Abandon };
+  void SamplePublication(const std::array<uint8_t, 4>& normal,
+                         const std::array<uint8_t, 4>& opaque,
+                         PublicationEnd end=PublicationEnd::Reuse) {
+    auto descriptor = mProducer->ToSurfaceDescriptor();
+    ASSERT_TRUE(descriptor);
+    const auto &dma = descriptor->get_SurfaceDescriptorDMABuf();
+    ASSERT_TRUE(dma.foreignRGBImageState());
+    ASSERT_EQ(dma.fence().Length(), 1U);
+    ASSERT_GE(dma.fence()[0]->GetHandle(), 0);
+    const uint64_t generation = dma.foreignRGBImageState()->generation();
+    EXPECT_GT(generation, mGeneration);
+    mGeneration = generation;
+    auto *surface = static_cast<gl::SharedSurface_DMABUF *>(mProducer.get());
+    OnRenderThread([&] {
+      RefPtr<DMABufSurface> imported =
+          DMABufSurface::CreateDMABufSurface(*descriptor);
+      ASSERT_TRUE(imported);
+      ASSERT_TRUE(imported->GetForeignRGBDescriptor());
+      RefPtr<RenderTextureHost> host = new RenderDMABUFTextureHost(imported);
+      ExternalImageId id{0x7fff000000000002};
+      RenderThread::Get()->RegisterExternalImage(id, host.forget());
+      mFixture.host = new RenderTextureHostWrapper(id);
+      RenderThread::Get()->UnregisterExternalImage(id);
+    });
+    ASSERT_TRUE(mFixture.host);
+    ASSERT_TRUE(surface->mSurface->IsGlobalRefSet());
+    EXPECT_FALSE(mProducer->IsValid());
+
+    WrExternalImage image{};
+    const auto deadline = TimeStamp::Now() + TimeDuration::FromSeconds(5);
+    do {
+      OnRenderThread([&] {
+        image = mFixture.compositor->LockExternalImage(mFixture.host, 0);
+        if (image.image_type != WrExternalImageType::NativeTexture) {
+          mFixture.compositor->UnlockExternalImage(mFixture.host);
+          mFixture.compositor->AfterRender(false);
+        }
+      });
+      ASSERT_NE(image.image_type, WrExternalImageType::Invalid);
+      if (image.image_type == WrExternalImageType::Pending) {
+        ASSERT_LT(TimeStamp::Now(), deadline);
+        PR_Sleep(PR_MillisecondsToInterval(1));
+      }
+    } while (image.image_type == WrExternalImageType::Pending);
+    ASSERT_EQ(image.image_type, WrExternalImageType::NativeTexture);
+    size_t locks = 1;
+    auto unlock = MakeScopeExit([&] {
+      if (locks) {
+        OnRenderThread([&] {
+          while (locks) {
+            --locks;
+            mFixture.compositor->UnlockExternalImage(mFixture.host);
+          }
+          mFixture.compositor->AfterRender(false);
+        });
+      }
+    });
+    ExpectForeignLocked(surface->mSurface);
+
+    std::vector<uint8_t> expectedNormal, expectedOpaque;
+    for (size_t pixel = 0; pixel < 17 * 9; ++pixel) {
+      expectedNormal.insert(expectedNormal.end(), normal.begin(), normal.end());
+      expectedOpaque.insert(expectedOpaque.end(), opaque.begin(), opaque.end());
+    }
+    OnRenderThread([&] {
+      ++locks;
+      auto opaqueImage=mFixture.compositor->LockExternalImage(mFixture.host,1);
+      EXPECT_EQ(opaqueImage.image_type,WrExternalImageType::NativeTexture);
+      if(opaqueImage.image_type==WrExternalImageType::NativeTexture) {
+        EXPECT_NE(image.handle,opaqueImage.handle);
+        wr_test_foreign_sample_expected(mRender,ExternalTextureHandle{image.handle},17,9,expectedNormal.data(),expectedNormal.size());
+        wr_test_foreign_sample_expected(mRender,ExternalTextureHandle{opaqueImage.handle},17,9,expectedOpaque.data(),expectedOpaque.size());
+      }
+      if(end==PublicationEnd::Abandon){wr_vulkan_shutdown_native_work();}
+      while(locks){--locks;mFixture.compositor->UnlockExternalImage(mFixture.host);}
+      ExpectForeignLocked(surface->mSurface);
+      if(end==PublicationEnd::Migrate) {
+        mFixture.compositor->SetRenderer(nullptr,WindowId{0});
+        mRender=wr_test_foreign_replace(mRender);
+        mFixture.compositor->SetRenderer(wr_test_foreign_renderer(mRender),WindowId{0});
+        wr_test_foreign_advance(mRender);
+        EXPECT_TRUE(wr_test_foreign_old_device_alive(mRender));
+        auto blocked=mFixture.compositor->LockExternalImage(mFixture.host,0);
+        EXPECT_EQ(blocked.image_type,WrExternalImageType::Pending);
+        mFixture.compositor->UnlockExternalImage(mFixture.host);
+        ExpectForeignLocked(surface->mSurface);
+      } else {
+        if(end==PublicationEnd::Abandon) {
+          EXPECT_FALSE(surface->mSurface->ForeignRGBUsable());
+          EXPECT_FALSE(mProducer->IsValid());
+        }
+        mFixture.host=nullptr;
+      }
+      if(end==PublicationEnd::Abandon) {
+        EXPECT_FALSE(surface->mSurface->IsGlobalRefSet());
+        surface->mSurface->UnlockForeignRGB();
+        EXPECT_FALSE(surface->mSurface->ForeignRGBUsable());
+        EXPECT_FALSE(surface->mSurface->TryLockForeignRGB());
+        EXPECT_FALSE(mProducer->IsValid());
+      } else {
+        EXPECT_TRUE(surface->mSurface->IsGlobalRefSet());
+      }
+      mFixture.compositor->AfterRender(false);
+    });
+    if(end==PublicationEnd::Migrate) {
+      WrExternalImage migrated{};
+      const auto migrationDeadline=TimeStamp::Now()+TimeDuration::FromSeconds(5);
+      do {
+        OnRenderThread([&]{
+          migrated=mFixture.compositor->LockExternalImage(mFixture.host,0);
+          if(migrated.image_type==WrExternalImageType::NativeTexture) {
+            ++locks;
+            auto opaqueImage=mFixture.compositor->LockExternalImage(mFixture.host,1);
+            EXPECT_EQ(opaqueImage.image_type,WrExternalImageType::NativeTexture);
+            if(opaqueImage.image_type==WrExternalImageType::NativeTexture) {
+              wr_test_foreign_sample_expected(mRender,ExternalTextureHandle{migrated.handle},17,9,expectedNormal.data(),expectedNormal.size());
+              wr_test_foreign_sample_expected(mRender,ExternalTextureHandle{opaqueImage.handle},17,9,expectedOpaque.data(),expectedOpaque.size());
+            }
+            mFixture.compositor->UnlockExternalImage(mFixture.host);--locks;
+            EXPECT_FALSE(wr_test_foreign_old_device_alive(mRender));
+          }
+          mFixture.compositor->UnlockExternalImage(mFixture.host);
+          if(migrated.image_type==WrExternalImageType::NativeTexture){mFixture.host=nullptr;}
+          mFixture.compositor->AfterRender(false);
+        });
+        ASSERT_NE(migrated.image_type,WrExternalImageType::Invalid);
+        if(migrated.image_type==WrExternalImageType::Pending){ASSERT_LT(TimeStamp::Now(),migrationDeadline);PR_Sleep(PR_MillisecondsToInterval(1));}
+      } while(migrated.image_type==WrExternalImageType::Pending);
+    }
+    const auto returnDeadline = TimeStamp::Now() + TimeDuration::FromSeconds(5);
+    while (surface->mSurface->IsGlobalRefSet() &&
+           TimeStamp::Now() < returnDeadline) {
+      PR_Sleep(PR_MillisecondsToInterval(1));
+    }
+    EXPECT_FALSE(surface->mSurface->IsGlobalRefSet());
+    if(end==PublicationEnd::Abandon) {
+      EXPECT_FALSE(surface->mSurface->ForeignRGBUsable());EXPECT_FALSE(surface->mSurface->TryLockForeignRGB());EXPECT_FALSE(mProducer->IsValid());
+      return;
+    }
+    ASSERT_TRUE(surface->mSurface->ForeignRGBUsable());
+    ASSERT_TRUE(surface->mSurface->TryLockForeignRGB());
+    surface->mSurface->UnlockForeignRGB();
+    ASSERT_TRUE(mProducer->IsValid());
+  }
+
+  static void ExpectForeignLocked(DMABufSurface *surface) {
+    const bool acquired = surface->TryLockForeignRGB();
+    EXPECT_FALSE(acquired);
+    if (acquired) {
+      surface->UnlockForeignRGB();
+    }
+  }
+
+  bool mExpectNative = false;
+  bool mRestoreVars = false;
+  std::array<bool, 5> mOldVars{};
+  Fixture mFixture;
+  void *mRender = nullptr;
+  RefPtr<gl::GLContext> mGL;
+  UniquePtr<gl::SwapChain> mSwapChain;
+  UniquePtr<gl::SharedSurface> mProducer;
+  uint64_t mGeneration = 0;
+};
+
+TEST_F(VulkanForeignImages, FactoryInitializationAndCompletedProducerReuse) {
+  mSwapChain = std::make_unique<gl::SwapChain>();
+  InitSwapChain(*mGL, *mSwapChain, layers::TextureType::DMABUF, true);
+  ASSERT_TRUE(mSwapChain->mFactory);
+  if (!mExpectNative) {
+    EXPECT_EQ(mSwapChain->mFactory->GetConsumerType(),
+              layers::TextureType::Unknown);
+    EXPECT_EQ(gl::SurfaceFactory_DMABUF::Create(*mGL), nullptr);
+    auto basic = mSwapChain->mFactory->CreateShared(gfx::IntSize(17, 9),
+                                                    gfx::ColorSpace2::SRGB);
+    ASSERT_TRUE(basic);
+    EXPECT_EQ(basic->mDesc.type, gl::SharedSurfaceType::Basic);
+    return;
+  }
+  ASSERT_EQ(mSwapChain->mFactory->GetConsumerType(),
+            layers::TextureType::DMABUF);
+  {
+    gl::ScopedGLState scissor(mGL, LOCAL_GL_SCISSOR_TEST, true);
+    mGL->fScissor(1, 2, 1, 1);
+    mGL->fColorMask(false, false, false, false);
+    mGL->fClearColor(.25f, .5f, .75f, 1.f);
+    Maybe<gl::ScopedGLState> discard;
+    if (mGL->IsSupported(gl::GLFeature::transform_feedback2)) {
+      discard.emplace(mGL, LOCAL_GL_RASTERIZER_DISCARD, true);
+    }
+    mProducer = mSwapChain->mFactory->CreateShared(gfx::IntSize(17, 9),
+                                                   gfx::ColorSpace2::SRGB);
+    ASSERT_TRUE(mProducer);
+    EXPECT_TRUE(mGL->fIsEnabled(LOCAL_GL_SCISSOR_TEST));
+    realGLboolean mask[4];
+    GLfloat clear[4];
+    GLint box[4];
+    mGL->fGetBooleanv(LOCAL_GL_COLOR_WRITEMASK, mask);
+    mGL->fGetFloatv(LOCAL_GL_COLOR_CLEAR_VALUE, clear);
+    mGL->fGetIntegerv(LOCAL_GL_SCISSOR_BOX, box);
+    EXPECT_EQ(
+        (std::array<realGLboolean, 4>{mask[0], mask[1], mask[2], mask[3]}),
+        (std::array<realGLboolean, 4>{false, false, false, false}));
+    EXPECT_EQ((std::array<GLfloat, 4>{clear[0], clear[1], clear[2], clear[3]}),
+              (std::array<GLfloat, 4>{.25f, .5f, .75f, 1.f}));
+    EXPECT_EQ((std::array<GLint, 4>{box[0], box[1], box[2], box[3]}),
+              (std::array<GLint, 4>{1, 2, 1, 1}));
+    if (discard) {
+      EXPECT_TRUE(mGL->fIsEnabled(LOCAL_GL_RASTERIZER_DISCARD));
+    }
+  }
+  mGL->fColorMask(true, true, true, true);
+  ASSERT_EQ(mProducer->mDesc.type, gl::SharedSurfaceType::EGLSurfaceDMABUF);
+  EXPECT_FALSE(mProducer->ToSurfaceDescriptor());
+  Maybe<layers::SurfaceDescriptor> previous;
+  for (size_t cycle = 0; cycle < 3; ++cycle) {
+    ASSERT_TRUE(mProducer->IsValid());
+    ASSERT_TRUE(mProducer->BeginWrite());
+    EXPECT_FALSE(mProducer->ToSurfaceDescriptor());
+    if (previous) {
+      OnRenderThread([&] {
+        RefPtr<DMABufSurface> stale=DMABufSurface::CreateDMABufSurface(*previous);
+        EXPECT_FALSE(stale);
+      });
+    }
+    if (cycle) {
+      gl::ScopedBindFramebuffer bind(mGL, mProducer->mFb->mFB);
+      mGL->fClearColor(64.f / 255, 32.f / 255, 16.f / 255, 128.f / 255);
+      mGL->fClear(LOCAL_GL_COLOR_BUFFER_BIT);
+    }
+    mProducer->EndWrite();
+    if (previous) {
+      OnRenderThread([&] {
+        RefPtr<DMABufSurface> stale=DMABufSurface::CreateDMABufSurface(*previous);
+        EXPECT_FALSE(stale);
+      });
+    }
+    previous = mProducer->ToSurfaceDescriptor();
+    ASSERT_TRUE(previous);
+    if (cycle) {
+      SamplePublication({191, 32, 16, 255}, {64, 32, 16, 255});
+    } else {
+      SamplePublication({255, 0, 0, 255}, {0, 0, 0, 255});
+    }
+    ASSERT_FALSE(HasFatalFailure());
+    ASSERT_TRUE(mGL->MakeCurrent());
+    ASSERT_TRUE(mProducer->BeginRead());
+    mProducer->EndRead();
+  }
+  EXPECT_EQ(mGL->fGetError(), GLenum(LOCAL_GL_NO_ERROR));
+}
+
+TEST_F(VulkanForeignImages, OldDeviceMigrationWaitsForComplete) {
+  mSwapChain=std::make_unique<gl::SwapChain>();InitSwapChain(*mGL,*mSwapChain,layers::TextureType::DMABUF,true);
+  if(!mExpectNative){EXPECT_EQ(mSwapChain->mFactory->GetConsumerType(),layers::TextureType::Unknown);return;}
+  ASSERT_EQ(mSwapChain->mFactory->GetConsumerType(),layers::TextureType::DMABUF);
+  mProducer=mSwapChain->mFactory->CreateShared(gfx::IntSize(17,9),gfx::ColorSpace2::SRGB);ASSERT_TRUE(mProducer);
+  ASSERT_TRUE(mProducer->BeginWrite());
+  {gl::ScopedBindFramebuffer bind(mGL,mProducer->mFb->mFB);mGL->fClearColor(64.f/255,32.f/255,16.f/255,128.f/255);mGL->fClear(LOCAL_GL_COLOR_BUFFER_BIT);}
+  mProducer->EndWrite();SamplePublication({191,32,16,255},{64,32,16,255},PublicationEnd::Migrate);
+}
+TEST_F(VulkanForeignImages, AbandonedBorrowNeverReopensProducer) {
+  mSwapChain=std::make_unique<gl::SwapChain>();InitSwapChain(*mGL,*mSwapChain,layers::TextureType::DMABUF,true);
+  if(!mExpectNative){EXPECT_EQ(mSwapChain->mFactory->GetConsumerType(),layers::TextureType::Unknown);return;}
+  ASSERT_EQ(mSwapChain->mFactory->GetConsumerType(),layers::TextureType::DMABUF);
+  mProducer=mSwapChain->mFactory->CreateShared(gfx::IntSize(17,9),gfx::ColorSpace2::SRGB);ASSERT_TRUE(mProducer);
+  ASSERT_TRUE(mProducer->BeginWrite());
+  {gl::ScopedBindFramebuffer bind(mGL,mProducer->mFb->mFB);mGL->fClearColor(64.f/255,32.f/255,16.f/255,128.f/255);mGL->fClear(LOCAL_GL_COLOR_BUFFER_BIT);}
+  mProducer->EndWrite();SamplePublication({191,32,16,255},{64,32,16,255},PublicationEnd::Abandon);
+}
+#endif
+
 }  // namespace mozilla::wr

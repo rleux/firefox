@@ -76,6 +76,13 @@ bool VulkanImageCapabilities::Supports(const WrVulkanDmaBufDescriptor& aImage,
   return true;
 }
 
+bool VulkanImageCapabilities::SupportsForeignRGB(const WrVulkanForeignRgbDescriptor& image,uint64_t major,uint64_t minor) {
+  StaticMutexAutoLock lock(sCapabilitiesMutex);
+  if(!sCapabilities || sCapabilities->IsEmpty()){return false;}
+  for(const auto* caps:*sCapabilities){if(!caps->mCapabilities || !wr_vulkan_dmabuf_capabilities_supports_foreign_rgb(caps->mCapabilities.get(),&image,major,minor)){return false;}}
+  return true;
+}
+
 static bool ValidHandle(gfx::FileHandleWrapper* aHandle) {
   return aHandle && FileHandleIsValid(aHandle->GetHandle());
 }

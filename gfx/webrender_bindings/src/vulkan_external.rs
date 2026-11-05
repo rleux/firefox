@@ -367,6 +367,81 @@ pub unsafe extern "C" fn wr_vulkan_release_delete(object: *mut WrVulkanRelease) 
     }
 }
 
+
+#[repr(C)]
+#[derive(Clone,Copy)]
+pub struct WrVulkanForeignRgbDescriptor {
+    pub fd:i32,pub render_node_fd:i32,pub width:u32,pub height:u32,pub fourcc:u32,
+    pub modifier:u64,pub offset:u64,pub stride:u64,
+}
+pub struct WrVulkanForeignRgbImage {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    image:ImportedImage,
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_foreign_rgb(caps:&WrVulkanDmaBufCapabilities,descriptor:&WrVulkanForeignRgbDescriptor,drm_major:u64,drm_minor:u64)->bool {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return foreign_layout(descriptor).map(|layout|caps.capabilities.supports_foreign_rgb([drm_major,drm_minor],layout)).unwrap_or(false);
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=(caps,descriptor,drm_major,drm_minor);false}
+}
+/// The borrowed descriptor names a fully initialized unprotected allocation on the
+/// declared render node. Its aliases stay immutable until the Complete return.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_import(images:&WrVulkanExternalImages,descriptor:&WrVulkanForeignRgbDescriptor)->*mut WrVulkanForeignRgbImage {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return boxed(import_foreign_image(images,descriptor).map(|image|WrVulkanForeignRgbImage{image}));
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=(images,descriptor);ptr::null_mut()}
+}
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_delete(image:*mut WrVulkanForeignRgbImage){if !image.is_null(){drop(Box::from_raw(image));}}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_matches_context(image:&WrVulkanForeignRgbImage,images:&WrVulkanExternalImages)->bool {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return Rc::ptr_eq(&image.image.registry,&images.registry);
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=(image,images);false}
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_has_access(image:&WrVulkanForeignRgbImage)->bool {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return image.image.raw.has_access();
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=image;false}
+}
+/// ready_fd is a genuine EGL SYNC_FD covering complete producer initialization.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_acquire(image:&WrVulkanForeignRgbImage,ready_fd:i32,output:&mut ExternalTextureHandle)->WrVulkanAcquireStatus {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return match fd(&ready_fd).and_then(|ready|image.image.registry.acquire_foreign(&image.image.raw,ready)) {
+        Ok(true)=>{*output=image.image.handle;WrVulkanAcquireStatus::Ready},
+        Ok(false)=>WrVulkanAcquireStatus::Pending,
+        Err(error)=>{log::error!("Foreign image acquire: {}",error);WrVulkanAcquireStatus::Failed},
+    };
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=(image,ready_fd,output);WrVulkanAcquireStatus::Failed}
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_opaque_view(image:&WrVulkanForeignRgbImage,output:&mut ExternalTextureHandle)->bool {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    if let Some(handle)=checked(image.image.opaque()){*output=handle;return true;}
+    let _=(image,output);false
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_release(image:&WrVulkanForeignRgbImage)->*mut WrVulkanRelease {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    return boxed(image.image.registry.release(&image.image.raw).map(|receipt|{let _=image.image.registry.flush_idle();WrVulkanRelease{receipt}}));
+    #[cfg(not(all(feature="vulkan",target_os="linux")))]
+    {let _=image;ptr::null_mut()}
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_foreign_rgb_last_release(image:&WrVulkanForeignRgbImage)->*mut WrVulkanRelease {
+    #[cfg(all(feature="vulkan",target_os="linux"))]
+    if let Some(receipt)=image.image.raw.last_release(){return Box::into_raw(Box::new(WrVulkanRelease{receipt}));}
+    let _=image;ptr::null_mut()
+}
+
 #[cfg(all(feature = "vulkan", target_os = "linux"))]
 mod enabled {
     use super::*;
@@ -379,7 +454,7 @@ mod enabled {
     pub(super) fn boxed<T>(value: Result<T, String>) -> *mut T {
         checked(value).map_or(ptr::null_mut(), |value| Box::into_raw(Box::new(value)))
     }
-    unsafe fn fd(value: &i32) -> Result<BorrowedFd<'_>, String> {
+    pub(super) unsafe fn fd(value: &i32) -> Result<BorrowedFd<'_>, String> {
         if *value < 0 {
             Err("Missing native FD".into())
         } else {
@@ -465,4 +540,11 @@ mod enabled {
             opaque: Cell::new(None),
         })
     }
+    pub(super) fn foreign_layout(d:&WrVulkanForeignRgbDescriptor)->Result<ForeignRgbLayout,String>{ForeignRgbLayout::new([d.width,d.height],d.fourcc,d.modifier,d.stride,d.offset)}
+    pub(super) unsafe fn import_foreign_image(images:&WrVulkanExternalImages,d:&WrVulkanForeignRgbDescriptor)->Result<ImportedImage,String>{
+        let allocation=images.registry.device().import_foreign_rgb(fd(&d.fd)?,fd(&d.render_node_fd)?,foreign_layout(d)?)?;
+        let raw=images.registry.import_foreign(allocation)?;let handle=images.registry.register(&raw,false)?;
+        Ok(ImportedImage{registry:images.registry.clone(),raw,handle,opaque:Cell::new(None)})
+    }
+
 }

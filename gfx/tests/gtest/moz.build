@@ -115,3 +115,5 @@ SOURCE_HEADERS += [
     "TextureHelper.h",
     "YCbCrTestHelpers.h",
 ]
+
+LOCAL_INCLUDES += ["/gfx/gl"]

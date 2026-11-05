@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{wgt, Device};
+use super::{wgt, Device, ForeignRgbLayout};
 use ash::vk;
 use std::sync::Arc;
 
@@ -26,11 +26,16 @@ pub struct DmaBufCapabilities {
     opaque: bool,
     device_uuid: [u8; 16],
     driver_uuid: [u8; 16],
+    foreign_drm_node: Option<[u64;2]>,
     formats: std::sync::Arc<[DmaBufFormat]>,
 }
 
 impl DmaBufCapabilities {
     pub fn supports_opaque(&self) -> bool { self.opaque }
+    pub fn supports_foreign_rgb(&self,node:[u64;2],layout:ForeignRgbLayout)->bool {
+        self.foreign_drm_node==Some(node)&&self.formats.iter().any(|format|format.format==layout.format()&&format.usage==wgt::TextureUses::RESOURCE&&format.modifier==0&&format.supports_extent(layout.size()))
+    }
+
     /// Match immutable device/format limits; import still validates the allocation.
     pub fn supports(&self, image: &DmaBufImageDescriptor) -> bool {
         self.device_uuid == image.device_uuid
@@ -140,6 +145,7 @@ impl Device {
             opaque: self.features().contains(wgt::Features::TEXTURE_COMPONENT_SWIZZLE),
             device_uuid: [0; 16],
             driver_uuid: [0; 16],
+            foreign_drm_node: self.foreign_rgb_drm_node(),
             formats: std::sync::Arc::from([]),
         };
         if !self.supports_dma_buf() {

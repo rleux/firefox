@@ -326,11 +326,12 @@ impl RenderNotifier for Notice {
         let _ = self.0.send(());
     }
 }
-struct RenderFixture {
+pub struct RenderFixture {
     renderer: Option<webrender::Renderer>,
     api: RenderApi,
     document: DocumentId,
     ready: mpsc::Receiver<()>,
+    old_device:Option<std::sync::Weak<Device>>,
 }
 impl RenderFixture {
     fn new() -> Self {
@@ -355,6 +356,7 @@ impl RenderFixture {
             api,
             document,
             ready,
+            old_device:None,
         }
     }
     fn sample(&mut self, handle: ExternalTextureHandle) {
@@ -541,4 +543,80 @@ pub extern "C" fn wr_test_native_open_ready(fixture: &mut Fixture) {
         raw.wait_for_fences(&[fence], true, 5_000_000_000).unwrap();
         raw.destroy_fence(fence, None);
     }
+}
+
+impl RenderFixture {
+    fn sample_expected(&mut self, handle:ExternalTextureHandle, size:DeviceIntSize, expected:&[u8]) {
+        struct Handler(ExternalTextureHandle,DeviceIntSize);
+        impl ExternalImageHandler for Handler {
+            fn lock(&mut self,_:ExternalImageId,_:u8,_:bool)->ExternalImage<'_>{ExternalImage{uv:TexelRect::new(0.,0.,self.1.width as f32,self.1.height as f32),source:ExternalImageSource::NativeTexture(self.0)}}
+            fn unlock(&mut self,_:ExternalImageId,_:u8){}
+        }
+        self.renderer.as_mut().unwrap().set_external_image_handler(Box::new(Handler(handle,size)));
+        let pipeline=PipelineId(0,0);let key=self.api.generate_image_key();let mut transaction=Transaction::new();
+        transaction.set_document_view(DeviceIntRect::from_size(size));
+        transaction.add_image(key,ImageDescriptor::new(size.width,size.height,ImageFormat::RGBA8,ImageDescriptorFlags::empty()),ImageData::External(ExternalImageData{id:ExternalImageId(1),channel_index:0,image_type:ExternalImageType::TextureHandle(ImageBufferKind::Texture2D),normalized_uvs:false}),None);
+        let mut builder=DisplayListBuilder::new(pipeline);builder.begin(60.);let rect=LayoutRect::from_size(LayoutSize::new(size.width as f32,size.height as f32));let common=CommonItemProperties::new(rect,SpaceAndClipInfo::root_scroll(pipeline));builder.push_rect(&common,rect,ColorF::new(1.,0.,0.,1.));builder.push_image(&common,rect,ImageRendering::Pixelated,AlphaType::PremultipliedAlpha,key,ColorF::WHITE);
+        transaction.set_root_pipeline(pipeline);transaction.set_display_list(Epoch(0),self.api.get_namespace_id(),builder.end());transaction.generate_frame(1,true,false,RenderReasons::TESTING);self.api.send_transaction(self.document,transaction);self.ready.recv_timeout(Duration::from_secs(15)).unwrap();
+        let renderer=self.renderer.as_mut().unwrap();renderer.update();assert!(!renderer.render(size,0).unwrap().external_images_pending);
+        let pixels=renderer.read_pixels_rgba8(FramebufferIntRect::from_size(size.cast_unit()));assert_eq!(pixels.len(),expected.len());
+        for(index,(actual,expected))in pixels.chunks_exact(4).zip(expected.chunks_exact(4)).enumerate(){assert_eq!(actual[3],expected[3],"alpha pixel={}",index);assert!(actual[..3].iter().zip(&expected[..3]).all(|(&a,&b)|a.abs_diff(b)<=1),"pixel={} actual={:?} expected={:?}",index,actual,expected);}
+    }
+}
+
+
+
+
+#[no_mangle]
+pub extern "C" fn wr_test_foreign_new() -> *mut RenderFixture {
+    Box::into_raw(Box::new(RenderFixture::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn wr_test_foreign_renderer(
+    fixture: &mut RenderFixture,
+) -> *mut webrender::Renderer {
+    fixture.renderer.as_mut().unwrap()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_foreign_sample_expected(
+    fixture: &mut RenderFixture,
+    handle: ExternalTextureHandle,
+    width: i32,
+    height: i32,
+    expected: *const u8,
+    length: usize,
+) {
+    fixture.sample_expected(
+        handle,
+        DeviceIntSize::new(width, height),
+        std::slice::from_raw_parts(expected, length),
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_foreign_delete(fixture: *mut RenderFixture) {
+    drop(Box::from_raw(fixture));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wr_test_foreign_replace(fixture:*mut RenderFixture)->*mut RenderFixture {
+    let old=Box::from_raw(fixture);
+    let weak=Arc::downgrade(old.renderer.as_ref().unwrap().wgpu_external_textures().unwrap().device());
+    drop(old);
+    let mut replacement=RenderFixture::new();replacement.old_device=Some(weak);
+    Box::into_raw(Box::new(replacement))
+}
+#[no_mangle]
+pub extern "C" fn wr_test_foreign_advance(fixture:&RenderFixture) {
+    let registry=fixture.renderer.as_ref().unwrap().wgpu_external_textures().unwrap();
+    for _ in 0..10 {
+        let encoder=registry.device().create_command_encoder("replacement independent work").unwrap();
+        registry.device().submit(&[encoder.finish(&Default::default())]).unwrap();registry.device().poll().unwrap();
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_test_foreign_old_device_alive(fixture:&RenderFixture)->bool {
+    fixture.old_device.as_ref().is_some_and(|device|device.upgrade().is_some())
 }

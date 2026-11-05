@@ -46,6 +46,7 @@
 #include "mozilla/dom/WebGLContextEvent.h"
 #include "mozilla/gfx/Swizzle.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/glean/DomCanvasMetrics.h"
 #include "mozilla/layers/BufferTexture.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
@@ -1207,8 +1208,21 @@ bool WebGLContext::PresentIntoXR(gl::SwapChain& swapChain,
 // Initialize a swap chain's surface factory given the desired surface type.
 void InitSwapChain(gl::GLContext& gl, gl::SwapChain& swapChain,
                    const layers::TextureType consumerType, bool useAsync) {
+  auto type = consumerType;
+  if (wr::IsVulkanCompositorRequested()) {
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+      if (type != layers::TextureType::DMABUF) {
+        type = layers::TextureType::Unknown;
+      }
+#else
+      type = layers::TextureType::Unknown;
+#endif
+    }
+  if (wr::IsVulkanCompositorRequested() && type == layers::TextureType::Unknown && swapChain.mFactory && swapChain.mFactory->GetConsumerType() != type) {
+    swapChain.ClearPool();swapChain.mFactory=nullptr;
+  }
   if (!swapChain.mFactory) {
-    auto typedFactory = gl::SurfaceFactory::Create(&gl, consumerType);
+    auto typedFactory = gl::SurfaceFactory::Create(&gl, type);
     if (typedFactory) {
       swapChain.mFactory = std::move(typedFactory);
     }
@@ -1294,7 +1308,11 @@ bool WebGLContext::CopyToSwapChain(
   bool useAsync = options.remoteTextureOwnerId.IsValid() &&
                   options.remoteTextureId.IsValid();
 
-  InitSwapChain(*gl, srcFb->mSwapChain, consumerType, useAsync);
+  auto type = consumerType;
+  if (!useAsync && wr::IsVulkanCompositorRequested()) {
+    type = layers::TextureType::Unknown;
+  }
+  InitSwapChain(*gl, srcFb->mSwapChain, type, useAsync);
 
   // If we're using async present and if there is no way to serialize surfaces,
   // then a readback is required to do the copy. In this case, there's no reason
@@ -1534,7 +1552,9 @@ Maybe<uvec2> WebGLContext::FrontBufferSnapshotInto(
 
   // -
 
-  front->BeginRead();
+  if (!front->BeginRead()) {
+    return {};
+  }
   auto reset = MakeScopeExit([&] { front->EndRead(); });
 
   // -
@@ -1708,6 +1728,9 @@ WebGLContext::GetBackBufferSnapshotSharedSurface(layers::TextureType texType,
     return nullptr;
   }
 
+  if (wr::IsVulkanCompositorRequested()) {
+    texType = layers::TextureType::Unknown;
+  }
   InitSwapChain(*gl, mSnapshotSwapChain, texType, true);
 
   {

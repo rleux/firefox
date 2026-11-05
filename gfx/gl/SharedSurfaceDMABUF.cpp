@@ -6,12 +6,61 @@
 
 #include "GLContextEGL.h"
 #include "MozFramebuffer.h"
+#include "ScopedGLHelpers.h"
 #include "gfxPlatform.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/layers/LayersSurfaces.h"  // for SurfaceDescriptor, etc
 #include "mozilla/widget/DMABufDevice.h"
+#include "mozilla/widget/DMABufFormats.h"
+#ifdef XP_LINUX
+#  include "mozilla/webrender/VulkanImageIPC.h"
+#  include "mozilla/webrender/WebRenderTypes.h"
+#endif
 
 namespace mozilla::gl {
+
+static bool UseForeignRGB() {
+#ifdef XP_LINUX
+  return wr::IsVulkanCompositorRequested();
+#else
+  return false;
+#endif
+}
+
+#ifdef XP_LINUX
+static bool SupportsForeignRGB(GLContext* aGL, const gfx::IntSize& aSize) {
+  const auto& egl = GLContextEGL::Cast(aGL)->mEgl;
+  if (!egl->IsExtensionSupported(EGLExtension::KHR_fence_sync) ||
+      !egl->IsExtensionSupported(EGLExtension::ANDROID_native_fence_sync) ||
+      aSize.IsEmpty()) {
+    return false;
+  }
+  if (!egl->IsExtensionSupported(EGLExtension::EXT_image_dma_buf_import_modifiers)) {return false;}
+  EGLint count=0;
+  if(!egl->mLib->fQueryDmaBufModifiersEXT(egl->mDisplay,GBM_FORMAT_ARGB8888,0,nullptr,nullptr,&count) || count<=0 || count>4096){return false;}
+  nsTArray<uint64_t> modifiers;nsTArray<EGLBoolean> external;
+  modifiers.SetLength(count);external.SetLength(count);
+  const auto capacity=count;
+  if(!egl->mLib->fQueryDmaBufModifiersEXT(egl->mDisplay,GBM_FORMAT_ARGB8888,capacity,modifiers.Elements(),external.Elements(),&count) || count<0 || count>capacity){return false;}
+  bool renderableLinear=false;
+  for(EGLint i=0;i<count;++i){renderableLinear|=modifiers[i]==0 && !external[i];}
+  if(!renderableLinear){return false;}
+  widget::DMABufDeviceLock device;
+  uint64_t drmMajor, drmMinor;
+  if (!device.GetDRMDeviceId(drmMajor, drmMinor)) {
+    return false;
+  }
+  wr::WrVulkanForeignRgbDescriptor image{};
+  image.fd = -1;
+  image.width = aSize.width;
+  image.height = aSize.height;
+  image.fourcc = GBM_FORMAT_ARGB8888;
+  image.stride = uint64_t(aSize.width) * 4;
+  return wr::VulkanImageCapabilities::SupportsForeignRGB(image, drmMajor,
+                                                         drmMinor);
+}
+#endif
 
 /*static*/
 UniquePtr<SharedSurface_DMABUF> SharedSurface_DMABUF::Create(
@@ -21,8 +70,21 @@ UniquePtr<SharedSurface_DMABUF> SharedSurface_DMABUF::Create(
 
   const auto flags = static_cast<DMABufSurfaceFlags>(
       DMABUF_SCANOUT | DMABUF_TEXTURE | DMABUF_USE_MODIFIERS | DMABUF_ALPHA);
-  surface = DMABufSurfaceRGBA::CreateDMABufSurface(desc.gl, desc.size.width,
-                                                   desc.size.height, flags);
+  const bool foreign = UseForeignRGB();
+  RefPtr<widget::DRMFormat> format;
+#ifdef XP_LINUX
+  if (foreign) {
+    if (!SupportsForeignRGB(desc.gl, desc.size)) {
+      return nullptr;
+    }
+    format = new widget::DRMFormat(GBM_FORMAT_ARGB8888, uint64_t(0));
+  }
+#endif
+  surface = DMABufSurfaceRGBA::CreateDMABufSurface(
+      desc.gl, desc.size.width, desc.size.height, flags, format);
+  if (surface && foreign && !surface->EnableForeignRGB()) {
+    return nullptr;
+  }
   if (!surface || !surface->CreateTextures(desc.gl)) {
     return nullptr;
   }
@@ -32,6 +94,24 @@ UniquePtr<SharedSurface_DMABUF> SharedSurface_DMABUF::Create(
   fb = MozFramebuffer::CreateForBacking(desc.gl, desc.size, 0, false, false,
                                         LOCAL_GL_TEXTURE_2D, tex);
   if (!fb) return nullptr;
+  if (foreign) {
+    GLContext::LocalErrorScope errors(*desc.gl);
+    {
+      ScopedBindFramebuffer bind(desc.gl,fb->mFB);
+      ScopedGLState scissor(desc.gl,LOCAL_GL_SCISSOR_TEST,false);
+      Maybe<ScopedGLState> discard;
+      if(desc.gl->IsSupported(GLFeature::transform_feedback2)) {discard.emplace(desc.gl,LOCAL_GL_RASTERIZER_DISCARD,false);}
+      realGLboolean mask[4];GLfloat color[4];
+      desc.gl->fGetBooleanv(LOCAL_GL_COLOR_WRITEMASK,mask);
+      desc.gl->fGetFloatv(LOCAL_GL_COLOR_CLEAR_VALUE,color);
+      const bool indexed=desc.gl->IsSupported(GLFeature::draw_buffers_indexed);
+      if(indexed){desc.gl->fColorMaski(0,true,true,true,true);}else{desc.gl->fColorMask(true,true,true,true);}
+      desc.gl->fClearColor(0,0,0,0);desc.gl->fClear(LOCAL_GL_COLOR_BUFFER_BIT);
+      desc.gl->fClearColor(color[0],color[1],color[2],color[3]);
+      if(indexed){desc.gl->fColorMaski(0,mask[0],mask[1],mask[2],mask[3]);}else{desc.gl->fColorMask(mask[0],mask[1],mask[2],mask[3]);}
+    }
+    if(errors.GetError()!=LOCAL_GL_NO_ERROR || desc.gl->IsContextLost()){return nullptr;}
+  }
 
   return AsUnique(new SharedSurface_DMABUF(desc, std::move(fb), surface));
 }
@@ -64,6 +144,11 @@ UniquePtr<SurfaceFactory_DMABUF> SurfaceFactory_DMABUF::Create(GLContext& gl) {
   if (!widget::DMABufDevice::IsDMABufWebGLEnabled()) {
     return nullptr;
   }
+#ifdef XP_LINUX
+  if (UseForeignRGB() && !SupportsForeignRGB(&gl, gfx::IntSize(1, 1))) {
+    return nullptr;
+  }
+#endif
 
   auto dmabufFactory = std::make_unique<SurfaceFactory_DMABUF>(gl);
   if (dmabufFactory->CanCreateSurface(gl)) {
@@ -72,7 +157,7 @@ UniquePtr<SurfaceFactory_DMABUF> SurfaceFactory_DMABUF::Create(GLContext& gl) {
 
   LOGDMABUF(
       ("SurfaceFactory_DMABUF::Create() failed, fallback to SW buffers.\n"));
-  widget::DMABufDevice::DisableDMABufWebGL();
+  if (!UseForeignRGB()) {widget::DMABufDevice::DisableDMABufWebGL();}
   return nullptr;
 }
 
@@ -84,6 +169,7 @@ bool SurfaceFactory_DMABUF::CanCreateSurface(GLContext& gl) {
         "SurfaceFactory_DMABUF::CanCreateSurface() failed to create surface."));
     return false;
   }
+  if (UseForeignRGB()) {if(!test->BeginWrite()){return false;}test->EndWrite();}
   auto desc = test->ToSurfaceDescriptor();
   if (!desc) {
     LOGDMABUF(

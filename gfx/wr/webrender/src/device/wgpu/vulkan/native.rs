@@ -19,6 +19,8 @@ pub(in crate::device::wgpu) struct NativeCache {
         Mutex<HashMap<wgt::TextureFormat, Arc<[vk::DrmFormatModifierPropertiesEXT]>>>,
     pub(super) properties: OnceLock<([u8; 16], [u8; 16], u64)>,
     pub(super) device_lost: std::sync::atomic::AtomicBool,
+    pub(super) sync_file: OnceLock<bool>,
+    pub(super) drm_node: OnceLock<Option<[u64;2]>>,
     semaphore_fd: OnceLock<ash::khr::external_semaphore_fd::Device>,
 }
 

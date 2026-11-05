@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{core, hal, wgt, Device, DmaBufImage, SharedTimeline};
+use super::{core, hal, wgt, Device, DmaBufImage, SharedTimeline, SyncFileWait};
 use super::images::Image;
 use super::native_access::{NativeAccess, NativeReturn, Prepare, ReturnKind, ReturnStatus};
 use super::native_submit::{NativeSignal, NativeWait};
@@ -18,6 +18,7 @@ use std::{
 
 pub struct NativeImage {
     allocation: Arc<DmaBufImage>,
+    family: u32,
     access: RefCell<NativeAccess>,
     raw: OnceCell<Arc<core::resource::Texture>>,
     normal: OnceCell<Arc<Image>>,
@@ -39,6 +40,7 @@ struct ReturnRecord {
     owner: Arc<Device>,
     timeline: Rc<SharedTimeline>,
     state: RefCell<NativeReturn>,
+    core_done: OnceCell<Arc<std::sync::atomic::AtomicBool>>,
     value: u64,
 }
 
@@ -51,7 +53,9 @@ impl PendingExternalRelease {
     pub fn status(&self) -> ExternalReleaseStatus {
         let _ = self.0.owner.poll();
         let healthy = self.0.owner.failure().is_none();
-        let value = self.0.timeline.current_value().map_err(|_| ());
+        let value = self.0.timeline.current_value().map(|value| {
+            if self.0.core_done.get().is_some_and(|done|done.load(std::sync::atomic::Ordering::Acquire)) {value}else{0}
+        }).map_err(|_| ());
         match self.0.state.borrow_mut().status(healthy, value) {
             ReturnStatus::Pending => ExternalReleaseStatus::Pending,
             ReturnStatus::Submitted(value) => ExternalReleaseStatus::Submitted(value),
@@ -62,6 +66,10 @@ impl PendingExternalRelease {
 }
 
 impl NativeImage {
+    #[cfg(test)]
+    pub(crate) fn test_native_identities(&self)->(usize,Option<usize>) {
+        (Arc::as_ptr(&self.allocation) as usize,self.raw.get().map(|raw|Arc::as_ptr(raw) as usize))
+    }
     pub fn has_access(&self) -> bool {
         self.access.borrow().has_access()
     }
@@ -173,6 +181,7 @@ struct InFlight {
     core_done: Arc<std::sync::atomic::AtomicBool>,
     operations: Vec<Operation>,
     _waits: Vec<(Rc<SharedTimeline>, u64)>,
+    _binary_waits: Vec<Arc<SyncFileWait>>,
     _signals: Vec<(Rc<SharedTimeline>, u64)>,
     _retirement: Rc<SharedTimeline>,
 }
@@ -189,6 +198,7 @@ pub struct ExternalTextureRegistry {
     operations: RefCell<Vec<Operation>>,
     commands: RefCell<Vec<Arc<core::command::CommandBuffer>>>,
     waits: RefCell<Vec<(Rc<SharedTimeline>, u64)>>,
+    binary_waits: RefCell<Vec<Arc<SyncFileWait>>>,
     signals: RefCell<Vec<(Rc<SharedTimeline>, u64)>>,
     retirement: Rc<SharedTimeline>,
     next_point: Cell<u64>,
@@ -279,6 +289,7 @@ impl ExternalTextureRegistry {
             operations: RefCell::new(Vec::new()),
             commands: RefCell::new(Vec::new()),
             waits: RefCell::new(Vec::new()),
+            binary_waits: RefCell::new(Vec::new()),
             signals: RefCell::new(Vec::new()),
             retirement: SharedTimeline::new(owner)?,
             next_point: Cell::new(0),
@@ -327,12 +338,19 @@ impl ExternalTextureRegistry {
     pub(super) fn end_frame(&self) {
         self.frame_active.set(false);
     }
-    pub fn import(&self, allocation: Arc<DmaBufImage>) -> Result<Rc<NativeImage>, String> {
+    pub fn import(&self, allocation:Arc<DmaBufImage>)->Result<Rc<NativeImage>,String> {
+        self.import_with_family(allocation,vk::QUEUE_FAMILY_EXTERNAL)
+    }
+    pub fn import_foreign(&self, allocation:Arc<DmaBufImage>)->Result<Rc<NativeImage>,String> {
+        self.import_with_family(allocation,vk::QUEUE_FAMILY_FOREIGN_EXT)
+    }
+    fn import_with_family(&self, allocation: Arc<DmaBufImage>, family:u32) -> Result<Rc<NativeImage>, String> {
         if !Arc::ptr_eq(&self.owner, &allocation.owner) {
             return Err("Native allocation belongs to another device".into());
         }
         Ok(Rc::new(NativeImage {
             allocation,
+            family,
             access: RefCell::new(unsafe { NativeAccess::initialized_publication() }),
             raw: OnceCell::new(),
             normal: OnceCell::new(),
@@ -408,6 +426,7 @@ impl ExternalTextureRegistry {
             return Err("Native renderer is retired".into());
         }
         self.poll()?;
+        if image.family!=vk::QUEUE_FAMILY_EXTERNAL {return Err("Expected Vulkan EXTERNAL image".into());}
         if !Arc::ptr_eq(&self.owner, &ready.owner) {
             return Err("Native ready timeline must belong to this device".into());
         }
@@ -417,19 +436,7 @@ impl ExternalTextureRegistry {
         if ready.current_value()? < value {
             return Ok(false);
         }
-        let mut action = image
-            .access
-            .borrow_mut()
-            .prepare(self.batch.get())
-            .map_err(str::to_owned)?;
-        if action == Prepare::WrapInitialized {
-            image.wrap()?;
-            action = image
-                .access
-                .borrow_mut()
-                .prepare(self.batch.get())
-                .map_err(str::to_owned)?;
-        }
+        let action=self.prepare_image(image)?;
         match action {
             Prepare::RecordFirstAcquire | Prepare::RecordAcquire => {
                 let initial = action == Prepare::RecordFirstAcquire;
@@ -448,6 +455,46 @@ impl ExternalTextureRegistry {
             Prepare::WrapInitialized => unreachable!(),
         }
     }
+    fn prepare_image(&self,image:&Rc<NativeImage>)->Result<Prepare,String> {
+        if !Arc::ptr_eq(&self.owner,&image.allocation.owner) {return Err("Native image belongs to another device".into());}
+        let mut action = image
+            .access
+            .borrow_mut()
+            .prepare(self.batch.get())
+            .map_err(str::to_owned)?;
+        if action == Prepare::WrapInitialized {
+            image.wrap()?;
+            action = image
+                .access
+                .borrow_mut()
+                .prepare(self.batch.get())
+                .map_err(str::to_owned)?;
+        }
+        Ok(action)
+    }
+    /// Ready must be a genuine fence covering fully initialized immutable producer pixels.
+    pub unsafe fn acquire_foreign(&self,image:&Rc<NativeImage>,ready:std::os::fd::BorrowedFd<'_>)->Result<bool,String> {
+        if !self.attached.get(){return Err("Native renderer is retired".into());}
+        self.poll()?;
+        if image.family!=vk::QUEUE_FAMILY_FOREIGN_EXT{return Err("Expected GL FOREIGN image".into());}
+        if !SyncFileWait::ready(ready)?{return Ok(false);}
+        let action=self.prepare_image(image)?;
+        match action {
+            Prepare::RecordFirstAcquire|Prepare::RecordAcquire=>{
+                let result=(||{
+                    let wait=unsafe{SyncFileWait::import(&self.owner,ready)}?;
+                    let commands=self.barrier(image,true)?;
+                    self.commands.borrow_mut().push(commands);
+                    self.binary_waits.borrow_mut().push(wait);
+                    self.operations.borrow_mut().push(Operation{image:image.clone(),initial:action==Prepare::RecordFirstAcquire,release:None});
+                    Ok(action!=Prepare::RecordFirstAcquire)
+                })();
+                if result.is_err(){image.access.borrow_mut().abandon();}
+                result
+            },
+            Prepare::Pending=>Ok(false),Prepare::Ready=>Ok(true),Prepare::WrapInitialized=>unreachable!(),
+        }
+    }
     pub fn release(&self, image: &Rc<NativeImage>) -> Result<PendingExternalRelease, String> {
         image
             .access
@@ -464,9 +511,10 @@ impl ExternalTextureRegistry {
             owner: self.owner.clone(),
             timeline: image.released.clone(),
             state: RefCell::new(
-                NativeReturn::recording(ReturnKind::Vulkan, value).map_err(str::to_owned)?,
+                NativeReturn::recording(if image.family==vk::QUEUE_FAMILY_FOREIGN_EXT{ReturnKind::Foreign}else{ReturnKind::Vulkan}, value).map_err(str::to_owned)?,
             ),
             value,
+            core_done: OnceCell::new(),
         }));
         let commands = self.barrier(image, false)?;
         self.commands.borrow_mut().push(commands);
@@ -502,7 +550,7 @@ impl ExternalTextureRegistry {
         let general = vk::ImageLayout::GENERAL;
         let sampled = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         let ignored = vk::QUEUE_FAMILY_IGNORED;
-        let external = vk::QUEUE_FAMILY_EXTERNAL;
+        let external = image.family;
         let read = vk::AccessFlags::SHADER_READ;
         let empty = vk::AccessFlags::empty();
         let barriers = if acquire {
@@ -580,6 +628,7 @@ impl ExternalTextureRegistry {
         }
         let operations = std::mem::take(&mut *self.operations.borrow_mut());
         let waits = std::mem::take(&mut *self.waits.borrow_mut());
+        let binary_waits=std::mem::take(&mut *self.binary_waits.borrow_mut());
         let mut signals = std::mem::take(&mut *self.signals.borrow_mut());
         let outcome = unsafe {
             self.owner.submit_native(
@@ -590,6 +639,7 @@ impl ExternalTextureRegistry {
                         semaphore: timeline.semaphore,
                         value: Some(*value),
                     })
+                    .chain(binary_waits.iter().map(|wait|NativeWait{semaphore:wait.semaphore,value:None}))
                     .collect::<Vec<_>>(),
                 &signals
                     .iter()
@@ -606,6 +656,7 @@ impl ExternalTextureRegistry {
         };
         self.batch.set(next_batch);
         self.next_point.set(point);
+        let core_done=outcome.core_done.clone();
         let submitted_index = outcome.result.as_ref().ok().copied();
         let mut result = outcome.result.map_err(|error| error.to_string());
         let mut unique = HashMap::new();
@@ -632,6 +683,7 @@ impl ExternalTextureRegistry {
                             .borrow_mut()
                             .submitted()
                             .map_err(str::to_owned)?;
+                        let _=receipt.core_done.set(core_done.clone());
                     }
                 }
                 Ok(())
@@ -659,6 +711,7 @@ impl ExternalTextureRegistry {
                 core_done: outcome.core_done,
                 operations,
                 _waits: waits,
+                _binary_waits: binary_waits,
                 _signals: signals,
                 _retirement: self.retirement.clone(),
             });
@@ -773,6 +826,7 @@ impl ExternalTextureRegistry {
         self.operations.borrow_mut().clear();
         self.commands.borrow_mut().clear();
         self.waits.borrow_mut().clear();
+        self.binary_waits.borrow_mut().clear();
         self.signals.borrow_mut().clear();
     }
     pub(super) fn close(&self) {

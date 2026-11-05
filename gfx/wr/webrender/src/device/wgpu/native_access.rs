@@ -179,7 +179,6 @@ impl NativeAccess {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReturnKind {
     Vulkan,
-    #[cfg(test)]
     Foreign,
 }
 

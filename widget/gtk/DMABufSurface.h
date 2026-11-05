@@ -43,6 +43,7 @@ struct WGPUDMABufInfo;
 }
 }  // namespace webgpu
 namespace widget {
+class DMABufAccess;
 class DMABufDeviceLock;
 }  // namespace widget
 }  // namespace mozilla
@@ -100,9 +101,21 @@ class DMABufSurface : public BufferSurface {
       mozilla::layers::Image::BuildSdbFlags aFlags,
       const std::function<mozilla::layers::MemoryOrShmem(uint32_t)>& aAllocate);
 
+  bool EnableForeignRGB();
+  bool IsForeignRGB() const { return mForeignRGB; }
+  bool ForeignRGBUsable() const;
+  bool BeginForeignWrite();
+  bool TryLockForeignRGB();
+  bool LockForeignRGB();
+  void UnlockForeignRGB(bool aAbandon = false);
+  const mozilla::layers::SurfaceDescriptorDMABuf* GetForeignRGBDescriptor()
+      const {
+    return mForeignRGBDescriptor.get();
+  }
+
   void FenceSet();
-  void FenceWait(mozilla::gl::GLContext* aGLContext = nullptr);
-  static void FenceWaitFd(RefPtr<mozilla::gl::GLContext> aGL,
+  bool FenceWait(mozilla::gl::GLContext* aGLContext = nullptr);
+  static bool FenceWaitFd(RefPtr<mozilla::gl::GLContext> aGL,
                           RefPtr<mozilla::gfx::FileHandleWrapper> aSyncFd);
 
   void MaybeSemaphoreWait(GLuint aGlTexture);
@@ -209,6 +222,15 @@ class DMABufSurface : public BufferSurface {
   RefPtr<mozilla::gfx::FileHandleWrapper> mSyncFd;
   RefPtr<mozilla::gfx::FileHandleWrapper> mSemaphoreFd;
   bool mSemaphoreFdIsSyncFd = false;
+  RefPtr<mozilla::gfx::FileHandleWrapper> mForeignRenderNode;
+  bool mForeignRGB = false;
+  bool mForeignRGBStale = false;
+  uint64_t mForeignRGBGeneration = 0;
+#ifdef XP_LINUX
+  mozilla::UniquePtr<mozilla::widget::DMABufAccess> mForeignAccess;
+#endif
+  mozilla::UniquePtr<mozilla::layers::SurfaceDescriptorDMABuf>
+      mForeignRGBDescriptor;
 
   // Inter process properties, used to share DMABuf among various processes
   // like RDD/Main.

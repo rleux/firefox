@@ -6,6 +6,9 @@
 
 #include "DMABufDevice.h"
 #include "DMABufFormats.h"
+#ifdef XP_LINUX
+#  include "DMABufAccess.h"
+#endif
 
 #ifdef MOZ_WAYLAND
 #  include "nsWaylandDisplay.h"
@@ -31,6 +34,12 @@
 #  include <sys/ioccom.h>
 #endif
 #include <sys/ioctl.h>
+#ifdef XP_LINUX
+struct NativeSyncFileInfo {
+  char name[32];int32_t status;uint32_t flags,numFences,pad;uint64_t fenceInfo;
+};
+static_assert(sizeof(NativeSyncFileInfo)==56);
+#endif
 #ifdef MOZ_LOGGING
 #  include "gfxUtils.h"
 #endif
@@ -483,6 +492,13 @@ bool DMABufSurface::ReleaseDMABuf() {
     }
   }
   mBufferPlaneCount = 0;
+  mForeignRGBDescriptor = nullptr;
+#ifdef XP_LINUX
+  mForeignAccess = nullptr;
+#endif
+  mForeignRGB = false;
+  mForeignRGBGeneration = 0;
+  mForeignRGBStale = false;
 
   return released;
 }
@@ -521,16 +537,105 @@ already_AddRefed<DMABufSurface> DMABufSurface::CreateDMABufSurface(
   return surf.forget();
 }
 
+bool DMABufSurface::EnableForeignRGB() {
+#ifdef XP_LINUX
+  if (!GetAsDMABufSurfaceRGBA() || mBufferPlaneCount != 1) {
+    return false;
+  }
+  if (mForeignRGB) {
+    return ForeignRGBUsable();
+  }
+  SurfaceDescriptor descriptor;
+  if (!Serialize(descriptor) ||
+      descriptor.get_SurfaceDescriptorDMABuf().modifier()[0] != 0) {
+    return false;
+  }
+  auto access = widget::DMABufAccess::Create();
+  if (!access) {
+    return false;
+  }
+  if (!mGlobalRefCountFd) {
+    GlobalRefCountCreate();
+  }
+  if (!mGlobalRefCountFd) {
+    return false;
+  }
+  widget::DMABufDeviceLock device;
+  auto renderNode=device.CloneDRMDeviceFD();
+  if(!renderNode){return false;}
+  mForeignRenderNode=new gfx::FileHandleWrapper(std::move(renderNode));
+  mForeignAccess = std::move(access);
+  mForeignRGB = true;
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::ForeignRGBUsable() const {
+#ifdef XP_LINUX
+  return !mForeignRGB || (!mForeignRGBStale && mForeignAccess && mForeignAccess->IsUsable());
+#else
+  return !mForeignRGB;
+#endif
+}
+
+bool DMABufSurface::BeginForeignWrite() {
+#ifdef XP_LINUX
+  MutexAutoLock lock(mSurfaceLock);
+  if (!mForeignRGB) { return true; }
+  if (mForeignRGBDescriptor || mForeignRGBStale || !mForeignAccess ||
+      !mForeignAccess->TryBeginWrite()) { return false; }
+  if (mGlobalRefCountFd) {
+    pollfd refs{mGlobalRefCountFd,POLLIN,0};
+    if (poll(&refs,1,0)!=0) { mForeignAccess->CancelWrite(); return false; }
+  }
+  mSyncFd = nullptr;
+  return true;
+#else
+  return !mForeignRGB;
+#endif
+}
+
+bool DMABufSurface::TryLockForeignRGB() {
+#ifdef XP_LINUX
+  if (!mForeignAccess || mForeignRGBStale) { return false; }
+  const auto result = mForeignAccess->TryLock(mForeignRGBGeneration);
+  if (result == widget::DMABufAccess::LockResult::Stale) { mForeignRGBStale = true; }
+  return result == widget::DMABufAccess::LockResult::Acquired;
+#else
+  return false;
+#endif
+}
+
+bool DMABufSurface::LockForeignRGB() {
+#ifdef XP_LINUX
+  if (!mForeignAccess || mForeignRGBStale) { return false; }
+  const auto result = mForeignAccess->WaitLock(mForeignRGBGeneration,5000);
+  if (result == widget::DMABufAccess::LockResult::Stale) { mForeignRGBStale = true; }
+  return result == widget::DMABufAccess::LockResult::Acquired;
+#else
+  return false;
+#endif
+}
+
+void DMABufSurface::UnlockForeignRGB(bool aAbandon) {
+#ifdef XP_LINUX
+  if (mForeignAccess) { mForeignAccess->Unlock(aAbandon); }
+  if (aAbandon) { mForeignRGBStale = true; }
+#endif
+}
+
 void DMABufSurface::FenceSet() {
   MutexAutoLock lock(mSurfaceLock);
+  mSyncFd = nullptr;
 
-  if (!mGL) {
+  if (!mGL || !mGL->MakeCurrent()) {
     gfxCriticalNoteOnce
         << "DMABufSurface::FenceSet() failed: missing GL context";
+    if (mForeignRGB) { UnlockForeignRGB(true); }
     return;
   }
-
-  mGL->MakeCurrent();
 
   const auto& gle = gl::GLContextEGL::Cast(mGL);
   const auto& egl = gle->mEgl;
@@ -541,58 +646,54 @@ void DMABufSurface::FenceSet() {
       egl->IsExtensionSupported(EGLExtension::ANDROID_native_fence_sync)) {
     if (EGLSyncKHR sync =
             egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, nullptr)) {
-      auto rawFd = egl->fDupNativeFenceFDANDROID(sync);
-      mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
-      egl->fDestroySync(sync);
       mGL->fFlush();
-      return;
+      auto rawFd = egl->fDupNativeFenceFDANDROID(sync);
+      egl->fDestroySync(sync);
+      if (rawFd >= 0) {
+        mSyncFd = new gfx::FileHandleWrapper(UniqueFileHandle(rawFd));
+#ifdef XP_LINUX
+        if (mForeignRGB && !mForeignAccess->Publish(mForeignRGBGeneration)) {
+          mSyncFd = nullptr;
+          UnlockForeignRGB(true);
+        }
+#endif
+        return;
+      }
     }
   }
 
+  if (mForeignRGB) { UnlockForeignRGB(true); return; }
   mGL->fFinish();
 }
 
 /* static */
-void DMABufSurface::FenceWaitFd(RefPtr<gl::GLContext> aGL,
-                                RefPtr<gfx::FileHandleWrapper> aSyncFd) {
-  const auto& gle = gl::GLContextEGL::Cast(aGL);
-  const auto& egl = gle->mEgl;
-  auto syncFd = aSyncFd->ClonePlatformHandle();
-
-  const EGLint attribs[] = {LOCAL_EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
-                            syncFd.get(), LOCAL_EGL_NONE};
-  EGLSync sync =
-      egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
-  if (!sync) {
-    gfxCriticalNoteOnce << "CreateSync failed";
-    int rawFd = syncFd.get();
-    if (rawFd >= 0) {
-      // CreateSync failed, so we cannot use eglClientWaitSync; poll(POLLIN)
-      // waits for the sync_file fd to become readable when the fence signals.
-      constexpr int kSyncPollTimeoutMs = 100;
-      struct pollfd pfd = {rawFd, POLLIN, 0};
-      int ret = poll(&pfd, 1, kSyncPollTimeoutMs);
-      if (!(ret == 1 && (pfd.revents & POLLIN))) {
-        gfxCriticalNoteOnce << "poll failed: " << ret;
-      }
-    }
-    return;
+bool DMABufSurface::FenceWaitFd(RefPtr<gl::GLContext> aGL,
+                                  RefPtr<gfx::FileHandleWrapper> aSyncFd) {
+  const auto& egl=gl::GLContextEGL::Cast(aGL)->mEgl;
+  auto fd=aSyncFd->ClonePlatformHandle();if(!fd){return false;}
+  const EGLint attrs[]={LOCAL_EGL_SYNC_NATIVE_FENCE_FD_ANDROID,fd.get(),LOCAL_EGL_NONE};
+  EGLSync sync=egl->fCreateSyncKHR(LOCAL_EGL_SYNC_NATIVE_FENCE_ANDROID,attrs);
+  bool completed=false;
+  if(sync) {
+    (void)fd.release();
+    const auto status=egl->fClientWaitSync(sync,0,LOCAL_EGL_FOREVER);
+    egl->fDestroySync(sync);
+    completed=status==LOCAL_EGL_CONDITION_SATISFIED;
+  } else {
+    pollfd pollFd{fd.get(),POLLIN,0};
+    const auto result=poll(&pollFd,1,100);
+    completed=result==1 && (pollFd.revents&POLLIN) && !(pollFd.revents&(POLLERR|POLLNVAL));
   }
-
-  // syncFd is owned by GLFence so clear local reference to avoid double.
-  (void)syncFd.release();
-
-  egl->fClientWaitSync(sync, 0, LOCAL_EGL_FOREVER);
-  egl->fDestroySync(sync);
+  return completed;
 }
 
-void DMABufSurface::FenceWait(mozilla::gl::GLContext* aGLContext) {
+bool DMABufSurface::FenceWait(mozilla::gl::GLContext* aGLContext) {
   RefPtr<gl::GLContext> gl;
   RefPtr<gfx::FileHandleWrapper> syncFd;
   {
     MutexAutoLock lock(mSurfaceLock);
     if (!mSyncFd) {
-      return;
+      return !mForeignRGB;
     }
     gl = mGL;
     // eglCreateSyncKHR() can use any GL context to sync and wait to finish.
@@ -602,13 +703,24 @@ void DMABufSurface::FenceWait(mozilla::gl::GLContext* aGLContext) {
     if (!gl) {
       gfxCriticalNoteOnce
           << "DMABufSurface::FenceWait() failed: missing GL context";
-      return;
+      return false;
     }
-    syncFd = mSyncFd.forget();
+    if (mForeignRGB) {
+      syncFd = mSyncFd;
+    } else {
+      syncFd = mSyncFd.forget();
+    }
   }
 
   LOGDMABUF("DMABufSurface::FenceWait() UID %d", mUID);
-  FenceWaitFd(std::move(gl), std::move(syncFd));
+  const bool completed=FenceWaitFd(std::move(gl),syncFd);
+#ifdef XP_LINUX
+  if(completed && mForeignRGB) {
+    NativeSyncFileInfo info{};
+    return ioctl(syncFd->GetHandle(),_IOWR('>',4,NativeSyncFileInfo),&info)==0 && info.status>0;
+  }
+#endif
+  return completed;
 }
 
 void DMABufSurface::SetSemaphoreFd(int aDuppedRawFd, bool aIsSyncFd) {
@@ -1147,6 +1259,43 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
     return false;
   }
 
+  if (desc.foreignRGBImageState()) {
+#ifdef XP_LINUX
+    if (mBufferPlaneCount != 1 || desc.width().Length() != 1 ||
+        desc.height().Length() != 1 || desc.modifier().Length() != 1 ||
+        desc.strides().Length() != 1 || desc.offsets().Length() != 1 ||
+        desc.modifier()[0] != 0 || !desc.width()[0] || !desc.height()[0] ||
+        desc.width()[0] > INT32_MAX || desc.height()[0] > INT32_MAX ||
+        desc.strides()[0] > INT32_MAX ||
+        uint64_t(desc.strides()[0]) < uint64_t(desc.width()[0]) * 4 ||
+        desc.strides()[0] % 4 || desc.offsets()[0] % 4 ||
+        desc.fence().Length() != 1 || desc.fence()[0]->GetHandle() < 0 ||
+        !desc.foreignRGBImageState()->generation() ||
+        !FileHandleIsValid(desc.foreignRGBImageState()->renderNode()->GetHandle()) ||
+        desc.refCount().Length() != 1 || desc.semaphoreFd() ||
+        (desc.fourccFormat() != GBM_FORMAT_ARGB8888 &&
+         desc.fourccFormat() != GBM_FORMAT_ABGR8888)) {
+      return false;
+    }
+    auto access =
+        widget::DMABufAccess::Import(desc.foreignRGBImageState()->accessLock());
+    if (!access || !access->IsUsable()) {
+      return false;
+    }
+    const auto generation=desc.foreignRGBImageState()->generation();
+    const auto result=access->TryLock(generation);
+    if(result==widget::DMABufAccess::LockResult::Acquired){access->Unlock();}
+    else if(result!=widget::DMABufAccess::LockResult::Busy){return false;}
+    mForeignRGBGeneration=generation;
+    mForeignAccess = std::move(access);
+    mForeignRenderNode = desc.foreignRGBImageState()->renderNode();
+    mForeignRGB = true;
+    mForeignRGBDescriptor = std::make_unique<SurfaceDescriptorDMABuf>(desc);
+#else
+    return false;
+#endif
+  }
+
   mFOURCCFormat = desc.fourccFormat();
   mWidth[0] = desc.width()[0];
   mHeight[0] = desc.height()[0];
@@ -1179,7 +1328,11 @@ bool DMABufSurfaceRGBA::ImportSurfaceDescriptor(
   }
 
   if (desc.refCount().Length() > 0) {
-    GlobalRefCountImport(desc.refCount()[0].ClonePlatformHandle().release());
+    auto reference = desc.refCount()[0].ClonePlatformHandle();
+    if (desc.foreignRGBImageState() && !reference) {
+      return false;
+    }
+    GlobalRefCountImport(reference.release());
   }
 
   LOGDMABUF("  imported size %d x %d format %x planes %d", mWidth[0],
@@ -1195,6 +1348,15 @@ bool DMABufSurfaceRGBA::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceRGBA::Serialize(
     mozilla::layers::SurfaceDescriptor& aOutDescriptor) {
+  if (mForeignRGBDescriptor) {
+    aOutDescriptor = *mForeignRGBDescriptor;
+    return ForeignRGBUsable();
+  }
+  if (mForeignRGB &&
+      (!ForeignRGBUsable() || !mForeignRGBGeneration || !mForeignRenderNode ||
+       !mSyncFd || mSyncFd->GetHandle() < 0)) {
+    return false;
+  }
   AutoTArray<uint32_t, BUFFER_SURFACE_PLANES> width;
   AutoTArray<uint32_t, BUFFER_SURFACE_PLANES> height;
   AutoTArray<NotNull<RefPtr<gfx::FileHandleWrapper>>, BUFFER_SURFACE_PLANES>
@@ -1232,7 +1394,16 @@ bool DMABufSurfaceRGBA::Serialize(
       height, width, height, tmp, strides, offsets, GetYUVColorSpace(),
       mColorRange, mColorPrimaries, mTransferFunction, 0, fenceFDs, mUID,
       mCanRecycle ? getpid() : 0, refCountFDs,
-      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata);
+      /* semaphoreFd */ nullptr, /* semaphoreFdIsSyncFd */ false, mHDRMetadata,
+      Nothing());
+#ifdef XP_LINUX
+  if (mForeignRGBGeneration) {
+    aOutDescriptor.get_SurfaceDescriptorDMABuf().foreignRGBImageState() =
+        Some(layers::ForeignRGBImageState(
+            mForeignRGBGeneration,
+            WrapNotNull(RefPtr{mForeignAccess->Handle()}),WrapNotNull(mForeignRenderNode)));
+  }
+#endif
   return true;
 }
 
@@ -1970,6 +2141,9 @@ bool DMABufSurfaceYUV::Create(const SurfaceDescriptor& aDesc) {
 
 bool DMABufSurfaceYUV::ImportSurfaceDescriptor(
     const SurfaceDescriptorDMABuf& aDesc) {
+  if (aDesc.foreignRGBImageState()) {
+    return false;
+  }
   mBufferPlaneCount = aDesc.fds().Length();
   MOZ_RELEASE_ASSERT(mBufferPlaneCount <= BUFFER_SURFACE_PLANES);
   if (mBufferPlaneCount <= 0 ||
@@ -2071,7 +2245,7 @@ bool DMABufSurfaceYUV::Serialize(
       height, widthBytes, heightBytes, format, strides, offsets,
       GetYUVColorSpace(), mColorRange, mColorPrimaries, mTransferFunction,
       mWPChromaLocation, fenceFDs, mUID, mCanRecycle ? getpid() : 0,
-      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata);
+      refCountFDs, mSemaphoreFd, mSemaphoreFdIsSyncFd, mHDRMetadata, Nothing());
   return true;
 }
 

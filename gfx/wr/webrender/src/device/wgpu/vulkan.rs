@@ -227,3 +227,10 @@ pub use dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescr
 pub(super) mod timeline;
 #[cfg(target_os = "linux")]
 pub use timeline::{SharedTimeline, TimelineHandle};
+
+#[cfg(target_os="linux")]
+mod sync_file;
+#[cfg(target_os="linux")]
+mod foreign_rgb;
+#[cfg(target_os="linux")]
+pub use self::{sync_file::SyncFileWait,foreign_rgb::ForeignRgbLayout};
