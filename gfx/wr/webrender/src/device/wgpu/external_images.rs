@@ -210,6 +210,11 @@ pub struct ExternalTextureRegistry {
 
 thread_local! {static RETIRED:RefCell<Vec<Rc<ExternalTextureRegistry>>>=const{RefCell::new(Vec::new())};}
 thread_local! {static ACTIVE:RefCell<Vec<Weak<ExternalTextureRegistry>>>=const{RefCell::new(Vec::new())};}
+thread_local! {static NATIVE_PROGRESS:Cell<bool>=const{Cell::new(false)};}
+
+pub fn take_native_image_progress() -> bool {
+    NATIVE_PROGRESS.with(|progress| progress.replace(false))
+}
 
 pub fn poll_retired_native_images() -> bool {
     let live = ACTIVE.with(|active| {
@@ -766,12 +771,15 @@ impl ExternalTextureRegistry {
             let batch = in_flight.pop_front().unwrap();
             if polled.is_ok() {
                 for operation in batch.operations {
-                    if operation.initial && batch.submission != 0 {
-                        operation
+                    if operation.initial
+                        && batch.submission != 0
+                        && operation
                             .image
                             .access
                             .borrow_mut()
-                            .observe_initial_completion(batch.submission);
+                            .observe_initial_completion(batch.submission)
+                    {
+                        NATIVE_PROGRESS.with(|progress| progress.set(true));
                     }
                 }
             }

@@ -45,7 +45,7 @@ mod vulkan;
 #[cfg(target_os = "linux")]
 pub use external_images::{
     ExternalTextureRegistry, NativeImage, PendingExternalRelease, ExternalReleaseStatus,
-    poll_retired_native_images, shutdown_native_images,
+    poll_retired_native_images, shutdown_native_images, take_native_image_progress,
 };
 #[cfg(target_os = "linux")]
 pub use vulkan::{

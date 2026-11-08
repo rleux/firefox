@@ -166,6 +166,7 @@ class RenderThread final {
   /// Can be called from any thread.
   static RenderThread* Get();
   VulkanImageRetirement& NativeImages();
+  void WakePendingNativeImages();
   static bool ReadbackNativeImage(Span<RenderCompositor*> aCompositors,
                                   RenderTextureHost* aHost, uint8_t* aOutput,
                                   size_t aLength, bool aOpaque);

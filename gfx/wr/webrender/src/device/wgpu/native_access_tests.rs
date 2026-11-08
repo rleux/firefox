@@ -25,9 +25,10 @@ fn first_acquire_needs_successful_submission_and_completion_before_wrap() {
     assert!(!access.may_sample(1));
     access.submitted(1, 9).unwrap();
     assert_eq!(access.prepare(2), Ok(Prepare::Pending));
-    access.observe_initial_completion(8);
+    assert!(!access.observe_initial_completion(8));
     assert!(access.wrapped().is_err());
-    access.observe_initial_completion(9);
+    assert!(access.observe_initial_completion(9));
+    assert!(!access.observe_initial_completion(9));
     assert_eq!(access.prepare(2), Ok(Prepare::WrapInitialized));
     access.wrapped().unwrap();
     assert_eq!(access.prepare(2), Ok(Prepare::Ready));
@@ -88,7 +89,7 @@ fn first_acquire_cleanup_does_not_wrap_an_externally_returned_image() {
     access.submitted(1, 4).unwrap();
     access.release(2).unwrap();
     access.submitted(2, 5).unwrap();
-    access.observe_initial_completion(5);
+    assert!(!access.observe_initial_completion(5));
     assert!(access.wrapped().is_err());
     assert_eq!(access.prepare(3), Ok(Prepare::RecordFirstAcquire));
 }
@@ -106,7 +107,7 @@ fn failed_initial_acquire_cannot_wrap_after_a_work_done_callback() {
     access.prepare(1).unwrap();
     access.submitted(1, 4).unwrap();
     access.abandon();
-    access.observe_initial_completion(u64::MAX);
+    assert!(!access.observe_initial_completion(u64::MAX));
     assert!(access.wrapped().is_err());
     assert!(access.prepare(2).is_err());
 }

@@ -571,6 +571,20 @@ void RenderThread::UpdateActiveRendererCount() {
   sActiveRendererCount = num_active;
 }
 
+void RenderThread::WakePendingNativeImages() {
+  MOZ_ASSERT(IsInRenderThread());
+  if (mHasShutdown || mHandlingDeviceReset) {
+    return;
+  }
+  for (const auto& [windowId, renderer] : mRenderers) {
+    if (renderer->NativeImagesPending() && !renderer->IsPaused() &&
+        !IsDestroyed(windowId)) {
+      // Queue a no-op retry; the pending document retains its rendering intent.
+      WrNotifierEvent_WakeUp(windowId, false);
+    }
+  }
+}
+
 void RenderThread::WrNotifierEvent_WakeUp(WrWindowId aWindowId,
                                           bool aCompositeNeeded) {
   auto windows = mWindowInfos.Lock();

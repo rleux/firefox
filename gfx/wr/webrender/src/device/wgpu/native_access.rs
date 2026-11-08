@@ -95,10 +95,13 @@ impl NativeAccess {
     }
 
     /// Call only after a successful device poll supplies the completed submission.
-    pub(super) fn observe_initial_completion(&mut self, completed: u64) {
+    /// Returns true once when initial ownership acquisition completes.
+    pub(super) fn observe_initial_completion(&mut self, completed: u64) -> bool {
         if self.first_acquire.is_some_and(|index| index <= completed) {
             self.first_acquire = None;
+            return !self.abandoned;
         }
+        false
     }
 
     /// Call after create_texture_from_hal(RESOURCE, cleared=true) succeeds while the

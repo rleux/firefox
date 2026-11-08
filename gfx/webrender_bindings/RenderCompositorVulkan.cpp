@@ -251,7 +251,7 @@ bool RenderCompositorVulkan::ReadbackNativeImage(RenderTextureHost* aHost,
       }
     }
     UnlockExternalImage(aHost);
-    if (wr_vulkan_process_native_work(mExternalImages.get())) {
+    if (wr_vulkan_process_native_work(mExternalImages.get(), nullptr)) {
       RenderThread::Get()->NativeImages().Schedule();
     }
     RenderThread::Get()->NativeImages().Poll();
@@ -288,7 +288,7 @@ void RenderCompositorVulkan::UnlockExternalImage(RenderTextureHost* aHost) {
   }
 }
 void RenderCompositorVulkan::AfterRender(bool) {
-  wr_vulkan_process_native_work(mExternalImages.get());
+  wr_vulkan_process_native_work(mExternalImages.get(), nullptr);
   RenderThread::Get()->NativeImages().Schedule();
 }
 

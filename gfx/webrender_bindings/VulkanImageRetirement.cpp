@@ -30,7 +30,9 @@ void VulkanImageRetirement::Schedule() {
 }
 void VulkanImageRetirement::Poll() {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
-  const bool nativePending = wr_vulkan_process_native_work(nullptr);
+  bool nativeProgress = false;
+  const bool nativePending =
+      wr_vulkan_process_native_work(nullptr, &nativeProgress);
   size_t remaining = mPending.size();
   while (remaining--) {
     auto entry = std::move(mPending.front());
@@ -48,6 +50,9 @@ void VulkanImageRetirement::Poll() {
     mCallbacks.pop_front();
     callback();
   }
+  if (nativeProgress && !mShuttingDown) {
+    RenderThread::Get()->WakePendingNativeImages();
+  }
   if (!nativePending && mPending.empty() && mCallbacks.empty()) {
     mTimer.Stop();
   }
@@ -60,7 +65,7 @@ void VulkanImageRetirement::BeginShutdown() {
 void VulkanImageRetirement::FinishShutdown() {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
   BeginShutdown();
-  wr_vulkan_process_native_work(nullptr);
+  wr_vulkan_process_native_work(nullptr, nullptr);
   wr_vulkan_shutdown_native_work();
   while (!mPending.empty()) {
     auto entry = std::move(mPending.front());

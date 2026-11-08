@@ -89,7 +89,10 @@ pub unsafe extern "C" fn wr_vulkan_external_images_delete(object: *mut WrVulkanE
     }
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_process_native_work(images: Option<&WrVulkanExternalImages>) -> bool {
+pub extern "C" fn wr_vulkan_process_native_work(
+    images: Option<&WrVulkanExternalImages>,
+    progress: Option<&mut bool>,
+) -> bool {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     {
         let mut pending = webrender::wgpu::poll_retired_native_images();
@@ -98,11 +101,17 @@ pub extern "C" fn wr_vulkan_process_native_work(images: Option<&WrVulkanExternal
             let _ = images.registry.poll();
             pending |= images.registry.pending_work();
         }
+        if let Some(progress) = progress {
+            *progress = webrender::wgpu::take_native_image_progress();
+        }
         return pending;
     }
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
         let _ = images;
+        if let Some(progress) = progress {
+            *progress = false;
+        }
         false
     }
 }

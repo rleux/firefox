@@ -561,7 +561,7 @@ TEST_F(VulkanNativeImages, AbandonedNewBorrowCannotReturnAnOlderReceipt) {
     const auto deadline = TimeStamp::Now() + TimeDuration::FromSeconds(5);
     while (wr_vulkan_dmabuf_acquire(image, ready, 1, &handle) ==
            WrVulkanAcquireStatus::Pending) {
-      wr_vulkan_process_native_work(context);
+      wr_vulkan_process_native_work(context, nullptr);
       ASSERT_LT(TimeStamp::Now(), deadline);
     }
     auto* older = wr_vulkan_dmabuf_release(image);
@@ -571,7 +571,7 @@ TEST_F(VulkanNativeImages, AbandonedNewBorrowCannotReturnAnOlderReceipt) {
               WrVulkanReleaseStatus::Submitted);
     EXPECT_EQ(wr_vulkan_dmabuf_acquire(image, ready, 1, &handle),
               WrVulkanAcquireStatus::Ready);
-    wr_vulkan_process_native_work(context);
+    wr_vulkan_process_native_work(context, nullptr);
     wr_vulkan_shutdown_native_work();
     EXPECT_EQ(wr_vulkan_release_status(older),
               WrVulkanReleaseStatus::Submitted);

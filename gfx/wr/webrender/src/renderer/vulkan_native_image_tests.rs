@@ -57,6 +57,53 @@ impl ExternalImageHandler for NativeHandler {
 
 #[test]
 #[ignore = "Requires native Vulkan DMA-BUF, external timelines and modern synchronization validation"]
+fn vulkan_native_initial_completion_progress_survives_queue_drain() {
+    let (mut renderer, _, _) = renderer();
+    let registry = renderer.wgpu_external_textures().unwrap();
+    let producer = Producer::new();
+    producer.publish(1, [0, 0, 255, 255], None);
+    let (image, ready) = producer.import(&registry);
+    let _ = crate::wgpu::take_native_image_progress();
+    assert!(!unsafe { registry.acquire(&image, &ready, 2) }.unwrap());
+    assert!(!registry.pending_work());
+    assert!(!crate::wgpu::take_native_image_progress());
+
+    assert!(!unsafe { registry.acquire(&image, &ready, 1) }.unwrap());
+    registry.flush_idle().unwrap();
+    let core_observation = registry.test_defer_core_completion();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !registry.test_native_signals_complete() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    registry.poll().unwrap();
+    assert!(registry.pending_work());
+    assert!(!crate::wgpu::take_native_image_progress());
+
+    core_observation.store(true, std::sync::atomic::Ordering::Release);
+    registry.poll().unwrap();
+    assert!(!registry.pending_work());
+    assert!(!crate::wgpu::poll_retired_native_images());
+    assert!(crate::wgpu::take_native_image_progress());
+    registry.poll().unwrap();
+    assert!(!crate::wgpu::take_native_image_progress());
+    assert!(unsafe { registry.acquire(&image, &ready, 1) }.unwrap());
+    assert!(image.test_native_identities().1.is_some());
+    registry.release(&image).unwrap();
+    registry.flush_idle().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while registry.pending_work() {
+        registry.poll().unwrap();
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(!crate::wgpu::take_native_image_progress());
+    renderer.deinit();
+    assert_eq!(ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires native Vulkan DMA-BUF, external timelines and modern synchronization validation"]
 fn vulkan_renderer_drop_retires_a_pending_first_import_on_its_old_device() {
     let (mut old, mut api, rx) = renderer();
     let registry = old.wgpu_external_textures().unwrap();
