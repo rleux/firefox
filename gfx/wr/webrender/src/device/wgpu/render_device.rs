@@ -38,6 +38,13 @@ struct Draw {
     depth: std::ops::Range<f32>,
 }
 
+struct DrawBindings {
+    pipeline: Arc<DrawPipeline>,
+    projection: Option<Arc<core::resource::Buffer>>,
+    textures: Vec<(Arc<core::resource::TextureView>, TextureFilter)>,
+    raw: Arc<core::binding_model::BindGroup>,
+}
+
 struct Pass {
     color: Arc<Image>,
     depth: Option<Arc<Image>>,
@@ -63,6 +70,7 @@ pub(in crate::device) struct RenderDevice {
     external_images: Option<std::rc::Rc<super::ExternalTextureRegistry>>,
     pass: Option<Pass>,
     samplers: Samplers,
+    last_bindings: Option<DrawBindings>,
     blit_pipelines: crate::internal_types::FastHashMap<wgt::TextureFormat, Arc<DrawPipeline>>,
     clear_pipelines: crate::internal_types::FastHashMap<
         (wgt::TextureFormat, bool, bool, bool),
@@ -144,6 +152,7 @@ impl RenderDevice {
             external_images: super::ExternalTextureRegistry::new(&owner).ok(),
             pass: None,
             samplers,
+            last_bindings: None,
             blit_pipelines: Default::default(),
             clear_pipelines: Default::default(),
             quad,
@@ -210,6 +219,7 @@ impl RenderDevice {
                 }
                 let _ = self.failure.set(error);
                 self.pass = None;
+                self.last_bindings = None;
                 self.encoder = None;
                 self.ordered_commands.clear();
                 #[cfg(target_os = "linux")]
@@ -797,9 +807,33 @@ impl RenderDevice {
         } else {
             None
         };
-        let bindings = pipeline
-            .create_bindings(uniform, &textures, &[], &self.samplers)
-            .map_err(|e| e.to_string())?;
+        let bindings = if let Some(cached) = self.last_bindings.as_ref().filter(|cached| {
+            Arc::ptr_eq(&cached.pipeline, &pipeline)
+                && match (&cached.projection, &uniform) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && cached.textures.len() == textures.len()
+                && cached
+                    .textures
+                    .iter()
+                    .zip(&textures)
+                    .all(|((a, af), (b, bf))| Arc::ptr_eq(a, b) && af == bf)
+        }) {
+            cached.raw.clone()
+        } else {
+            let raw = pipeline
+                .create_bindings(uniform.clone(), &textures, &[], &self.samplers)
+                .map_err(|e| e.to_string())?;
+            self.last_bindings = Some(DrawBindings {
+                pipeline: pipeline.clone(),
+                projection: uniform,
+                textures,
+                raw: raw.clone(),
+            });
+            raw
+        };
         let array = self
             .vertex_arrays
             .bound

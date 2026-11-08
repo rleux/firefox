@@ -251,6 +251,8 @@ fn check_streamed_instances(primary_mapping: Option<bool>) {
     assert_eq!(instances.size, 64);
     let draws = &native.pass.as_ref().unwrap().pending;
     assert_eq!(draws.len(), 3);
+    assert!(Arc::ptr_eq(&draws[0].bindings, &draws[1].bindings));
+    assert!(!Arc::ptr_eq(&draws[1].bindings, &draws[2].bindings));
     for draw in draws {
         let buffer = draw.instances.as_ref().unwrap();
         assert_eq!(buffer.size(), 32);
@@ -367,6 +369,228 @@ fn native_backend_orders_texture_uploads_between_draws() {
     device.delete_buffer(instances);
     device.delete_texture(source);
     device.deinit();
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}
+
+#[test]
+#[ignore = "Requires Vulkan and the Khronos validation layer"]
+fn native_backend_caches_only_identical_draw_bindings_across_frames() {
+    let owner = Arc::new(device());
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let mut native = RenderDevice::new(owner.clone()).unwrap();
+    let size = DeviceIntSize::new(8, 1);
+    let mut program = GpuBackend::create_program(&mut native, "cs_scale", &["TEXTURE_2D"]).unwrap();
+    GpuBackend::link_program(
+        &mut native,
+        &mut program,
+        &desc::SCALE,
+        &[("sColor0", TextureSlot(0))],
+    )
+    .unwrap();
+    let vertices = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let mut instances = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let array = GpuBackend::create_vertex_array(
+        &mut native,
+        &desc::SCALE,
+        &vertices,
+        Some(&instances),
+        None,
+        1,
+    );
+    let source = super::super::images::Image::new(
+        &owner,
+        2,
+        1,
+        wgt::TextureFormat::Rgba8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let encoder = native.commands().unwrap();
+    owner
+        .upload_texture(
+            &encoder,
+            &source.raw,
+            0,
+            bounds(&source),
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    let transform = Transform3D::ortho(0., 8., 0., 1., -1., 1.);
+    let mut readbacks = Vec::new();
+    let mut previous = None;
+    for frame in 0..3 {
+        native.begin_frame().unwrap();
+        GpuBackend::bind_vertex_array(&mut native, &array);
+        native.begin_render_pass(&pass(size)).unwrap();
+        assert!(GpuBackend::bind_pipeline(
+            &mut native,
+            &program,
+            &RenderState {
+                blend_mode: if frame % 2 == 0 {
+                    BlendMode::None
+                } else {
+                    BlendMode::PremultipliedAlpha
+                },
+                ..RenderState::default()
+            }
+        ));
+        GpuBackend::set_uniforms(&native, &program, &transform);
+        for x in 0..8 {
+            let replacement = if x == 3 {
+                let image = super::super::images::Image::new(
+                    &owner,
+                    2,
+                    1,
+                    wgt::TextureFormat::Rgba8Unorm,
+                    TextureFilter::Nearest,
+                    false,
+                )
+                .unwrap();
+                native.flush_pass(StoreOp::Store).unwrap();
+                let encoder = native.commands().unwrap();
+                owner
+                    .upload_texture(
+                        &encoder,
+                        &image.raw,
+                        0,
+                        bounds(&image),
+                        &[0, 0, 255, 255].repeat(2),
+                        None,
+                        0,
+                        None,
+                    )
+                    .unwrap();
+                Some(image)
+            } else {
+                None
+            };
+            native
+                .textures
+                .bind_external_image(
+                    TextureSlot(0),
+                    replacement.unwrap_or_else(|| source.clone()),
+                    if x == 2 {
+                        api::ImageRendering::Auto
+                    } else {
+                        api::ImageRendering::Pixelated
+                    },
+                )
+                .unwrap();
+            if x == 5 {
+                GpuBackend::set_uniforms(
+                    &native,
+                    &program,
+                    &Transform3D::ortho(-1., 7., 0., 1., -1., 1.),
+                );
+            } else if x == 6 {
+                GpuBackend::set_uniforms(&native, &program, &transform);
+            } else if x == 7 {
+                assert!(GpuBackend::bind_pipeline(
+                    &mut native,
+                    &program,
+                    &RenderState {
+                        blend_mode: if frame % 2 == 0 {
+                            BlendMode::PremultipliedAlpha
+                        } else {
+                            BlendMode::None
+                        },
+                        ..RenderState::default()
+                    }
+                ));
+            }
+            let left = if x == 5 { 4. } else { x as f32 };
+            GpuBackend::draw_instanced_batch(
+                &mut native,
+                &mut instances,
+                crate::device::as_bytes(&[left, 0., left + 1., 1., 0.375f32, 0.5, 0.375, 0.5, 0.]),
+                1,
+                VertexUsageHint::Stream,
+            );
+            let current = native
+                .pass
+                .as_ref()
+                .unwrap()
+                .pending
+                .last()
+                .unwrap()
+                .bindings
+                .clone();
+            if let Some(old) = previous.replace(current.clone()) {
+                assert_eq!(
+                    Arc::ptr_eq(&old, &current),
+                    x == 1 || (x == 0 && frame > 0),
+                    "frame {frame}, draw {x}"
+                );
+            }
+        }
+        native.end_render_pass(StoreOp::Store).unwrap();
+        let encoder = native.commands().unwrap();
+        let readback = owner
+            .encode_readback(
+                &encoder,
+                &native.textures.output().unwrap().raw,
+                0,
+                DeviceIntRect::from_size(size),
+                Some(ImageFormat::RGBA8),
+            )
+            .unwrap();
+        let index = native.end_frame().unwrap();
+        readbacks.push(readback.map(&owner, index).unwrap());
+    }
+    for mut readback in readbacks {
+        let actual = readback.wait(&owner).unwrap();
+        let expected = [
+            255u8, 0, 0, 255, 255, 0, 0, 255, 191, 64, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 255,
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (*actual as i16 - expected as i16).abs() <= 1,
+                "{:?} versus {:?}",
+                actual,
+                expected
+            );
+        }
+    }
+    native.begin_frame().unwrap();
+    GpuBackend::bind_vertex_array(&mut native, &array);
+    native.begin_render_pass(&pass(size)).unwrap();
+    assert!(GpuBackend::bind_pipeline(
+        &mut native,
+        &program,
+        &RenderState::default()
+    ));
+    native
+        .textures
+        .bind_external_image(TextureSlot(0), source, api::ImageRendering::Pixelated)
+        .unwrap();
+    GpuBackend::draw_instanced_batch(
+        &mut native,
+        &mut instances,
+        crate::device::as_bytes(&[0f32, 0., 8., 1., 0., 0., 1., 1., 0.]),
+        1,
+        VertexUsageHint::Stream,
+    );
+    let retained = Arc::downgrade(&native.last_bindings.as_ref().unwrap().raw);
+    drop(previous);
+    assert!(native
+        .record_result::<()>(Err("aborted frame".into()))
+        .is_none());
+    assert!(native.last_bindings.is_none());
+    assert!(native.pass.is_none());
+    assert!(!native.inside_frame);
+    owner.wait_for(native.submitted).unwrap();
+    owner.poll().unwrap();
+    assert!(retained.upgrade().is_none());
+    GpuBackend::delete_program(&mut native, program);
+    GpuBackend::delete_vertex_array(&mut native, array);
+    GpuBackend::delete_buffer(&mut native, vertices);
+    GpuBackend::delete_buffer(&mut native, instances);
+    GpuBackend::deinit(&mut native);
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
 }
 

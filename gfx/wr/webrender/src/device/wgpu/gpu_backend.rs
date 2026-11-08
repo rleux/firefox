@@ -815,6 +815,7 @@ impl wr::GpuBackend for RenderDevice {
             native.close();
         }
         self.pass = None;
+        self.last_bindings = None;
         self.skipped_pass = false;
         if self.failure.get().is_none() {
             let result = self.submit().and_then(|index| {
