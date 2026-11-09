@@ -28,7 +28,7 @@ struct Draw {
     pipeline: Arc<DrawPipeline>,
     bindings: Arc<core::binding_model::BindGroup>,
     vertices: Arc<core::resource::Buffer>,
-    instances: Option<Arc<core::resource::Buffer>>,
+    instances: Option<InstanceSlice>,
     indices: Option<(Arc<core::resource::Buffer>, wgt::IndexFormat)>,
     first: u32,
     count: u32,
@@ -36,6 +36,99 @@ struct Draw {
     scissor: DeviceIntRect,
     viewport: DeviceIntRect,
     depth: std::ops::Range<f32>,
+}
+
+struct InstanceSlice {
+    buffer: Arc<core::resource::Buffer>,
+    offset: u64,
+    size: u64,
+}
+
+#[derive(Default)]
+// Pages stay mapped only while their draws are pending; sealed bytes are never reused.
+struct InstanceArena {
+    pages: Vec<Arc<core::resource::Buffer>>,
+    used: u64,
+    next_size: u64,
+    #[cfg(test)]
+    page_size: Option<u64>,
+}
+
+impl InstanceArena {
+    const PAGE_SIZE: u64 = 16 * 1024;
+
+    fn append(&mut self, owner: &Device, data: &[u8]) -> Result<InstanceSlice> {
+        owner.check().map_err(|e| e.to_string())?;
+        let size = u64::try_from(data.len()).map_err(|e| e.to_string())?;
+        let mapped_size = size
+            .checked_add(wgt::COPY_BUFFER_ALIGNMENT - 1)
+            .map(|n| n / wgt::COPY_BUFFER_ALIGNMENT * wgt::COPY_BUFFER_ALIGNMENT)
+            .filter(|n| *n != 0 && *n <= owner.limits().max_buffer_size && *n <= isize::MAX as u64)
+            .ok_or("Vulkan instance upload exceeds limits")?;
+        let offset = self
+            .used
+            .checked_add(wgt::MAP_ALIGNMENT - 1)
+            .map(|n| n / wgt::MAP_ALIGNMENT * wgt::MAP_ALIGNMENT)
+            .ok_or("Vulkan instance offset overflow")?;
+        let fits = self.pages.last().is_some_and(|page| {
+            offset
+                .checked_add(mapped_size)
+                .is_some_and(|end| end <= page.size())
+        });
+        let offset = if fits {
+            offset
+        } else {
+            let capacity = mapped_size.max(self.next_size.min(owner.limits().max_buffer_size));
+            let usage = if owner
+                .features()
+                .contains(wgt::Features::MAPPABLE_PRIMARY_BUFFERS)
+            {
+                wgt::BufferUsages::VERTEX | wgt::BufferUsages::MAP_WRITE
+            } else {
+                wgt::BufferUsages::VERTEX
+            };
+            let buffer = owner
+                .create_buffer(&core::resource::BufferDescriptor {
+                    label: Some("WR instance page".into()),
+                    size: capacity,
+                    usage,
+                    mapped_at_creation: true,
+                })
+                .map_err(|e| e.to_string())?;
+            self.pages.push(buffer);
+            #[cfg(test)]
+            let page_size = self.page_size.unwrap_or(Self::PAGE_SIZE);
+            #[cfg(not(test))]
+            let page_size = Self::PAGE_SIZE;
+            self.next_size = capacity.min(page_size).saturating_mul(2).min(page_size);
+            0
+        };
+        let buffer = self.pages.last().unwrap();
+        {
+            let mapping = buffer
+                .get_mapped_range(offset, Some(mapped_size))
+                .map_err(|e| e.to_string())?;
+            mapping
+                .write_slice()
+                .slice(..data.len())
+                .copy_from_slice(data);
+        }
+        self.used = offset + mapped_size;
+        Ok(InstanceSlice {
+            buffer: buffer.clone(),
+            offset,
+            size,
+        })
+    }
+
+    fn seal(&mut self, owner: &Device) -> Result<()> {
+        for page in self.pages.drain(..) {
+            page.unmap();
+        }
+        self.used = 0;
+        self.next_size = 0;
+        owner.check().map_err(|e| e.to_string())
+    }
 }
 
 struct DrawBindings {
@@ -55,6 +148,7 @@ struct Pass {
     scissor: Option<DeviceIntRect>,
     started: bool,
     pending: Vec<Draw>,
+    instances: InstanceArena,
 }
 
 pub(in crate::device) struct RenderDevice {
@@ -470,6 +564,7 @@ impl RenderDevice {
             scissor: None,
             started: false,
             pending: Vec::new(),
+            instances: InstanceArena::default(),
         });
         Ok(())
     }
@@ -523,6 +618,7 @@ impl RenderDevice {
                 pass.pending.insert(0, clear);
             }
         }
+        pass.instances.seal(&self.owner)?;
         let encoder = self.commands()?;
         let mut native = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
             label: Some("WR render pass".into()),
@@ -594,7 +690,12 @@ impl RenderDevice {
             );
             native.set_vertex_buffer(0, Some(draw.vertices), 0, None);
             if let Some(instances) = draw.instances {
-                native.set_vertex_buffer(1, Some(instances), 0, None);
+                native.set_vertex_buffer(
+                    1,
+                    Some(instances.buffer),
+                    instances.offset,
+                    Some(instances.size),
+                );
             }
             if let Some((indices, format)) = draw.indices {
                 native.set_index_buffer(indices, format, 0, None);
@@ -696,7 +797,11 @@ impl RenderDevice {
             pipeline,
             bindings,
             vertices: self.quad.clone(),
-            instances: Some(instances),
+            instances: Some(InstanceSlice {
+                buffer: instances,
+                offset: 0,
+                size: 32,
+            }),
             indices: Some((self.quad_indices.clone(), wgt::IndexFormat::Uint16)),
             first: 0,
             count: 6,
@@ -753,6 +858,7 @@ impl RenderDevice {
         else {
             return Ok(());
         };
+        let viewport = pass.viewport;
         let pipeline = self
             .programs
             .pipeline(
@@ -834,10 +940,10 @@ impl RenderDevice {
             });
             raw
         };
-        let array = self
-            .vertex_arrays
+        let vertex_arrays = &self.vertex_arrays;
+        let array = vertex_arrays
             .bound
-            .and_then(|id| self.vertex_arrays.arrays.get(&id))
+            .and_then(|id| vertex_arrays.arrays.get(&id))
             .ok_or("No Vulkan vertex array is bound")?;
         let actual = super::vertex_layout::vertex_layouts(&array.descriptor, pipeline.shader)?;
         let expected = super::vertex_layout::vertex_layouts(
@@ -857,7 +963,7 @@ impl RenderDevice {
             }
             let data = array
                 .instances
-                .and_then(|id| self.vertex_arrays.buffers.get(&id))
+                .and_then(|id| vertex_arrays.buffers.get(&id))
                 .ok_or("Missing Vulkan instance buffer")?;
             let start = u64::from(base)
                 .checked_mul(pipeline.instance_stride)
@@ -882,9 +988,11 @@ impl RenderDevice {
                 )
                 .ok_or("Vulkan draw exceeds instance data")?;
             let instance_buffer = self
-                .owner
-                .create_buffer_with_data("WR instance snapshot", bytes, wgt::BufferUsages::VERTEX)
-                .map_err(|e| e.to_string())?;
+                .pass
+                .as_mut()
+                .unwrap()
+                .instances
+                .append(&self.owner, bytes)?;
             (
                 self.quad.clone(),
                 Some(instance_buffer),
@@ -912,7 +1020,7 @@ impl RenderDevice {
             let indices = if let Some(format) = index_format {
                 let bytes = &array
                     .indices
-                    .and_then(|id| self.vertex_arrays.buffers.get(&id))
+                    .and_then(|id| vertex_arrays.buffers.get(&id))
                     .ok_or("Missing Vulkan indices")?
                     .bytes;
                 Some((
@@ -940,7 +1048,7 @@ impl RenderDevice {
             count: count as u32,
             instance_count: instances as u32,
             scissor,
-            viewport: pass.viewport,
+            viewport,
             depth: 0.0..1.0,
         };
         self.pass.as_mut().unwrap().pending.push(draw);
@@ -1131,3 +1239,7 @@ mod backend;
 #[cfg(test)]
 #[path = "render_device_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "instance_tests.rs"]
+mod instance_tests;

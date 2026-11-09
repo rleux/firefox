@@ -192,13 +192,19 @@ fn check_streamed_instances(primary_mapping: Option<bool>) {
     assert!(first_projection.get_mapped_range(0, Some(64)).is_err());
     data.copy_from_slice(&[2., 0., 4., 2., 0., 1., 0., 1.]);
     GpuBackend::set_uniforms(&native, &program, &first_transform);
-    GpuBackend::draw_instanced_batch(
-        &mut native,
-        &mut instances,
-        crate::device::as_bytes(&data),
-        1,
-        VertexUsageHint::Stream,
-    );
+    let mut based = [vec![f32::NAN; 8], data.clone()].concat();
+    native
+        .draw(
+            0,
+            6,
+            1,
+            1,
+            Some(wgt::IndexFormat::Uint16),
+            wgt::PrimitiveTopology::TriangleList,
+            Some((&instances, crate::device::as_bytes(&based))),
+        )
+        .unwrap();
+    based.fill(f32::NAN);
     let repeated_projection = native
         .programs
         .state(&program)
@@ -253,26 +259,35 @@ fn check_streamed_instances(primary_mapping: Option<bool>) {
     assert_eq!(draws.len(), 3);
     assert!(Arc::ptr_eq(&draws[0].bindings, &draws[1].bindings));
     assert!(!Arc::ptr_eq(&draws[1].bindings, &draws[2].bindings));
-    for draw in draws {
-        let buffer = draw.instances.as_ref().unwrap();
-        assert_eq!(buffer.size(), 32);
-        assert_eq!(buffer.usage(), wgt::BufferUsages::VERTEX | mapping);
-        assert!(buffer.get_mapped_range(0, Some(32)).is_err());
+    for (index, draw) in draws.iter().enumerate() {
+        let slice = draw.instances.as_ref().unwrap();
+        assert_eq!(slice.size, 32);
+        assert_eq!(slice.buffer.usage(), wgt::BufferUsages::VERTEX | mapping);
+        assert_eq!(slice.offset, if index == 2 { 32 } else { 0 });
+        assert!(slice
+            .buffer
+            .get_mapped_range(slice.offset, Some(32))
+            .is_ok());
     }
     assert!(!Arc::ptr_eq(
-        draws[0].instances.as_ref().unwrap(),
-        draws[1].instances.as_ref().unwrap()
+        &draws[0].instances.as_ref().unwrap().buffer,
+        &draws[1].instances.as_ref().unwrap().buffer
     ));
-    assert!(!Arc::ptr_eq(
-        draws[1].instances.as_ref().unwrap(),
-        draws[2].instances.as_ref().unwrap()
+    assert!(Arc::ptr_eq(
+        &draws[1].instances.as_ref().unwrap().buffer,
+        &draws[2].instances.as_ref().unwrap().buffer
     ));
+    let pages = native.pass.as_ref().unwrap().instances.pages.clone();
+    assert_eq!(pages.iter().map(|page| page.size()).sum::<u64>(), 96);
     assert_eq!(native.submitted, 0);
     GpuBackend::delete_program(&mut native, program);
     GpuBackend::delete_vertex_array(&mut native, array);
     GpuBackend::delete_buffer(&mut native, vertices);
     GpuBackend::delete_buffer(&mut native, instances);
     native.end_render_pass(StoreOp::Store).unwrap();
+    for page in pages {
+        assert!(page.get_mapped_range(0, Some(page.size())).is_err());
+    }
     native.end_frame().unwrap();
     let mut device = wr::Device {
         backend: Box::new(native),
@@ -576,12 +591,14 @@ fn native_backend_caches_only_identical_draw_bindings_across_frames() {
         VertexUsageHint::Stream,
     );
     let retained = Arc::downgrade(&native.last_bindings.as_ref().unwrap().raw);
+    let abandoned_page = Arc::downgrade(&native.pass.as_ref().unwrap().instances.pages[0]);
     drop(previous);
     assert!(native
         .record_result::<()>(Err("aborted frame".into()))
         .is_none());
     assert!(native.last_bindings.is_none());
     assert!(native.pass.is_none());
+    assert!(abandoned_page.upgrade().is_none());
     assert!(!native.inside_frame);
     owner.wait_for(native.submitted).unwrap();
     owner.poll().unwrap();

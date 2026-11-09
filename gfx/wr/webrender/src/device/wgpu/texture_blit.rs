@@ -201,7 +201,11 @@ impl RenderDevice {
             pipeline,
             bindings,
             vertices: self.quad.clone(),
-            instances: Some(instances),
+            instances: Some(InstanceSlice {
+                buffer: instances,
+                offset: 0,
+                size: 36,
+            }),
             indices: Some((self.quad_indices.clone(), wgt::IndexFormat::Uint16)),
             first: 0,
             count: 6,
@@ -226,6 +230,7 @@ impl RenderDevice {
                 depth_load: LoadOp::Load,
             },
             pending: vec![draw],
+            instances: InstanceArena::default(),
         });
         let result = self.flush_pass(StoreOp::Store);
         self.pass = previous;
