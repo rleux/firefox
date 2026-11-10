@@ -85,10 +85,48 @@ from releasing replacement content. Logs distinguish the startup request,
 successful sharing, admission failure, and native presentations with zero or one
 GPU copies.
 
-Validation for this change uses targeted Cargo checks, including test targets.
-It does not establish Vulkan-driver correctness, browser pixel results, recovery
-behavior or performance. Those require GTK/X11 hardware runs and compositor
-readback before enabling the preference by default.
+Targeted Cargo checks cover the Gecko bindings, the WebGPU test target and
+both WR Vulkan feature selections. Seven ignored native sharing tests pass on
+NVIDIA RTX 5060 Ti / 615.71.09 and Lavapipe with Khronos synchronization
+validation: independent errors/destruction, native-owner lifetime, concurrent
+queue writes/readbacks, adapter policy, failed-context admission and renderer
+teardown. No VUID or SYNC-HAZARD messages were observed.
+
+The root-workspace `wgpu-native-canvas-tests` package includes the production
+canvas module when its `native-vulkan` feature is selected; ordinary workspace
+checks do not enable WR's Vulkan shader build for this fixture. Four
+descriptor/retirement tests and its ignored native-admission
+fallback test pass on NVIDIA, checking untouched RGBA, rendered RGBA and BGRA
+channel order. Run its direct publication test explicitly on a Vulkan DMA-BUF
+and external-timeline capable adapter; it checks timeline values, consumer
+readback and retirement. The NVIDIA driver on this host does not advertise
+`VK_EXT_external_memory_dma_buf`, so it cannot establish positive direct-target
+publication or its copy savings.
+
+The opt-in Marionette `test_vulkan_webgpu_canvas.py` fixture requires the startup
+preference and GPU-process Vulkan WR. It covers canvas resize/reconfiguration,
+logical device destruction, validation isolation, worker OffscreenCanvas and
+startup selection after a preference change and GPU-process restart. All four
+checks pass on NVIDIA with the shared context active. The recovery check
+observes a replacement GPU PID and renders with a newly requested WebGPU device.
+
+That recovery test exposed a Vulkan X11 teardown race. The process-exit helper
+now supports older build sysroots that lack the pidfd syscall definition and
+allows a bounded exit wait after IPC failure. It still requires acknowledged
+surface retirement or confirmed process exit before releasing an XID. The
+process-exit gtest passes standalone, including with the missing-definition
+sysroot case simulated; it rejects a live process and leaves reaping to the host.
+
+Canvas2D snapshots in the fixture check content semantics. Separate headful Xvfb
+compositor readbacks on NVIDIA pass 36 exact interior samples with sharing on and
+36 with sharing off, covering RGBA red/green/blue and untouched transparent
+canvases on white. Both browsers exit normally; no VUID or SYNC-HAZARD messages
+are observed. This is native Vulkan composition to an X11 test surface, not
+physical display scanout. The admitted canvas path here remains CPU readback.
+
+Physical device loss, positive direct-target publication, broad WebGPU
+conformance and performance remain required before enabling the preference by
+default.
 
 ## Native-window safety
 

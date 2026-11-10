@@ -190,6 +190,10 @@ skip-if = [
 
 ["test_typing.py"]
 
+["test_vulkan_webgpu_canvas.py"]
+skip-if = ["!manage_instance"]
+run-if = ["os == 'linux'"]
+
 ["test_visibility.py"]
 
 ["test_wait.py"]

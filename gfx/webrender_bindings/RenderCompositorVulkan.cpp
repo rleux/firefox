@@ -88,7 +88,8 @@ static Maybe<OwnedVulkanConfig> AcquireX11Surface(
       aValidation,
       aVsync,
       gtk->VulkanNeedsAlpha(),
-      XRE_IsGPUProcess() && gfxVars::WebRenderVulkanSharedWebGPURequested()};
+      XRE_IsGPUProcess() &&
+          gfx::gfxVars::WebRenderVulkanSharedWebGPURequested()};
   return Some(OwnedVulkanConfig(config));
 }
 #endif

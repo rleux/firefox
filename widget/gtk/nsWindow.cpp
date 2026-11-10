@@ -4275,7 +4275,7 @@ void nsWindow::NotifyVulkanXWindowChanged(uint64_t aWindow) {
                       })))) {
       task.Wait();
     }
-  } else if (VulkanProcessHasExited(pid)) {
+  } else if (VulkanProcessHasExited(pid, 1000)) {
     return;
   }
   MOZ_RELEASE_ASSERT(retired,

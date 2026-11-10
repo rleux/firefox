@@ -12,11 +12,16 @@
 #ifdef XP_LINUX
 #  include <poll.h>
 #  include <sys/syscall.h>
+// Build sysroots can predate pidfd_open while the running kernel supports it.
+#  if !defined(SYS_pidfd_open) && (defined(__x86_64__) || defined(__i386__) || \
+                                   defined(__aarch64__) || defined(__arm__))
+#    define SYS_pidfd_open 434
+#  endif
 #endif
 #include "mozilla/ScopeExit.h"
 
 namespace mozilla::widget {
-inline bool VulkanProcessHasExited(pid_t aPid) {
+inline bool VulkanProcessHasExited(pid_t aPid, int aTimeoutMs = 0) {
   if (aPid <= 0 || aPid == getpid()) {
     return false;
   }
@@ -27,7 +32,7 @@ inline bool VulkanProcessHasExited(pid_t aPid) {
     pollfd state{fd, POLLIN, 0};
     // Poll observes exit (including zombies) without consuming the host's
     // reaper.
-    return poll(&state, 1, 0) > 0 && (state.revents & POLLIN);
+    return poll(&state, 1, aTimeoutMs) > 0 && (state.revents & POLLIN);
   }
   if (errno == ESRCH) {
     return true;
