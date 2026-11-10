@@ -61,10 +61,11 @@ context. A fallback-adapter request is not replaced with the compositor adapter.
 Closing a renderer or destroying a WebGPU device does not invalidate other
 clients; an unexpected device loss stops shared-context admission.
 
-Canvas allocations have separate shared ownership from publication receipts.
-Each receipt records its expected native timeline value. Retirement requires both
-that value and core completion; an earlier initialization signal cannot retire a
-later presentation submission.
+A bounded direct-target allocator can create and initialize exportable canvas
+images before content access. It uses the existing six-allocation/256 MiB budget,
+holds native and core completion receipts, and supports one-shot publication
+without a presentation image copy. Texture creation is not connected to this
+allocator until compositor integration.
 
 ## Native-window safety
 

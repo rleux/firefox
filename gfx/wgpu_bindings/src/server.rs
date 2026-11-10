@@ -304,6 +304,10 @@ pub struct Global {
     global: wgpu_core_remote::global::Global,
     #[cfg(target_os = "linux")]
     pub(crate) shared: Option<Arc<wgpu_shared::NativeContext>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) direct_targets: Mutex<HashMap<id::TextureId, Arc<crate::canvas::Allocation>>>,
+    #[cfg(target_os = "linux")]
+    canvas_queues: Mutex<HashMap<SwapChainId, id::QueueId>>,
 
     /// Swap chain texture descriptors.
     ///
@@ -408,6 +412,10 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr, share_requested: bool)
         global,
         #[cfg(target_os = "linux")]
         shared,
+        #[cfg(target_os = "linux")]
+        direct_targets: Mutex::new(HashMap::new()),
+        #[cfg(target_os = "linux")]
+        canvas_queues: Mutex::new(HashMap::new()),
         swap_chain_configs: Mutex::new(HashMap::new()),
     };
     Box::into_raw(Box::new(global))
@@ -3154,6 +3162,14 @@ unsafe fn process_message(
                 .unwrap()
                 .insert(SwapChainId(remote_texture_owner_id.0), sanitized_desc);
 
+            #[cfg(target_os = "linux")]
+            if res.is_none() {
+                global
+                    .canvas_queues
+                    .lock()
+                    .unwrap()
+                    .insert(SwapChainId(remote_texture_owner_id.0), queue_id);
+            }
             if let Some(err) = res {
                 // This is a validation error from the device timeline
                 // steps of `GPUCanvasContext.configure`.
@@ -3199,6 +3215,12 @@ unsafe fn process_message(
                 .lock()
                 .unwrap()
                 .remove(&SwapChainId(remote_texture_owner_id.0));
+            #[cfg(target_os = "linux")]
+            global
+                .canvas_queues
+                .lock()
+                .unwrap()
+                .remove(&SwapChainId(remote_texture_owner_id.0));
             wgpu_parent_swap_chain_drop(global.owner, remote_texture_owner_id, txn_type, txn_id);
         }
 
@@ -3207,6 +3229,8 @@ unsafe fn process_message(
             global.buffer_destroy(id);
         }
         Message::DestroyTexture(id) => {
+            #[cfg(target_os = "linux")]
+            global.direct_targets.lock().unwrap().remove(&id);
             wgpu_server_remove_shared_texture(global.owner, id);
             global.texture_destroy(id);
         }
@@ -3267,6 +3291,8 @@ unsafe fn process_message(
             global.render_pipeline_remove(id);
         }
         Message::DropTexture(id) => {
+            #[cfg(target_os = "linux")]
+            global.direct_targets.lock().unwrap().remove(&id);
             wgpu_server_remove_shared_texture(global.owner, id);
             global.texture_remove(id);
         }
