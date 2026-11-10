@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "WebGPUParent.h"
+#include "nsXULAppAPI.h"
 
 #include <algorithm>
 #include <memory>
@@ -481,7 +482,10 @@ class PresentationData {
 };
 
 WebGPUParent::WebGPUParent(const dom::ContentParentId& aContentId)
-    : mContentId(aContentId), mContext(ffi::wgpu_server_new(this)) {
+    : mContentId(aContentId),
+      mContext(ffi::wgpu_server_new(
+          this, XRE_IsGPUProcess() && gfx::gfxVars::UseWebRenderVulkan() &&
+                    gfx::gfxVars::WebRenderVulkanSharedWebGPURequested())) {
   mTimer.Start(base::TimeDelta::FromMilliseconds(POLL_TIME_MS), this,
                &WebGPUParent::MaintainDevices);
 }

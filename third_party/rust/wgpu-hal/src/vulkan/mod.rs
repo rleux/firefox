@@ -222,7 +222,7 @@ impl fmt::Debug for InstanceShared {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Instance {
     shared: Arc<InstanceShared>,
 }
@@ -608,6 +608,8 @@ struct DeviceShared {
     queue_flags: vk::QueueFlags,
     queue_index: u32,
     raw_queue: vk::Queue,
+    queue_sync: Arc<Mutex<()>>,
+    limits: wgt::Limits,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
@@ -1633,6 +1635,7 @@ impl crate::Queue for Queue {
         }
 
         profiling::scope!("vkQueueSubmit");
+        let _queue_guard = self.device.queue_sync.lock();
         unsafe {
             self.device
                 .raw
@@ -1657,6 +1660,7 @@ impl crate::Queue for Queue {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
+        let _queue_guard = self.device.queue_sync.lock();
         unsafe { self.device.raw.queue_wait_idle(self.raw) }
             .map_err(map_host_device_oom_and_lost_err)
     }

@@ -6392,6 +6392,7 @@ dependencies = [
  "wgpu-core 30.0.0",
  "wgpu-hal 30.0.0",
  "wgpu-types 30.0.0",
+ "wgpu_shared",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
@@ -6734,6 +6735,15 @@ dependencies = [
  "raw-window-handle",
  "static_assertions",
  "web-sys",
+]
+
+[[package]]
+name = "wgpu_shared"
+version = "0.1.0"
+dependencies = [
+ "wgpu-core 30.0.0",
+ "wgpu-hal 30.0.0",
+ "wgpu-types 30.0.0",
 ]
 
 [[package]]

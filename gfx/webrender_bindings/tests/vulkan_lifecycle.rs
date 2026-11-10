@@ -91,6 +91,7 @@ mod native {
             validation: true,
             vsync: true,
             transparent: false,
+            shared_webgpu: false,
         }
     }
     struct Notice;

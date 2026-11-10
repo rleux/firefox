@@ -14,6 +14,7 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
+#include "nsXULAppAPI.h"
 #include "prthread.h"
 
 #ifdef MOZ_WIDGET_ANDROID
@@ -86,7 +87,8 @@ static Maybe<OwnedVulkanConfig> AcquireX11Surface(
        [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->Release(); }},
       aValidation,
       aVsync,
-      gtk->VulkanNeedsAlpha()};
+      gtk->VulkanNeedsAlpha(),
+      XRE_IsGPUProcess() && gfxVars::WebRenderVulkanSharedWebGPURequested()};
   return Some(OwnedVulkanConfig(config));
 }
 #endif
@@ -116,7 +118,8 @@ static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
       {},
       aValidation,
       aVsync,
-      aTransparent};
+      aTransparent,
+      false};
   return Some(OwnedVulkanConfig(config));
 }
 #endif
@@ -126,7 +129,7 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
 #ifdef MOZ_WIDGET_ANDROID
   if (aWidget && aWidget->AsAndroid()) {
     WrVulkanConfig config{
-        WrWindowHandle::Android(nullptr), {}, {}, false, true, false};
+        WrWindowHandle::Android(nullptr), {}, {}, false, true, false, false};
     return std::make_unique<RenderCompositorVulkan>(aWidget, config);
   }
 #endif

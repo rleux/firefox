@@ -1,0 +1,11 @@
+[package]
+name = "wgpu_shared"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std", "vulkan"] }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["vulkan"] }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std"] }

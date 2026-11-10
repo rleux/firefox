@@ -302,6 +302,8 @@ impl Drop for WebGPUParentWeakPtr {
 pub struct Global {
     owner: WebGPUParentPtr,
     global: wgpu_core_remote::global::Global,
+    #[cfg(target_os = "linux")]
+    pub(crate) shared: Option<Arc<wgpu_shared::NativeContext>>,
 
     /// Swap chain texture descriptors.
     ///
@@ -319,7 +321,7 @@ impl std::ops::Deref for Global {
 }
 
 #[no_mangle]
-pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
+pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr, share_requested: bool) -> *mut Global {
     log::info!("Initializing WGPU server");
     let backends_pref = static_prefs::pref!("dom.webgpu.wgpu-backend").to_string();
     let backends = if backends_pref.is_empty() {
@@ -351,34 +353,61 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr) -> *mut Global {
         dxc_path: "dxcompiler.dll".into(),
     };
 
-    let global = wgpu_core_remote::global::Global::new(
-        "wgpu",
-        wgt::InstanceDescriptor {
-            backends,
-            flags: instance_flags,
-            backend_options: wgt::BackendOptions {
-                gl: wgt::GlBackendOptions {
-                    gles_minor_version: wgt::Gles3MinorVersion::Automatic,
-                    fence_behavior: wgt::GlFenceBehavior::Normal,
-                    debug_fns: wgt::GlDebugFns::Auto,
-                },
-                dx12: wgt::Dx12BackendOptions {
-                    shader_compiler: dx12_shader_compiler,
-                    ..Default::default()
-                },
-                noop: wgt::NoopBackendOptions::default(),
+    let descriptor = wgt::InstanceDescriptor {
+        backends,
+        flags: instance_flags,
+        backend_options: wgt::BackendOptions {
+            gl: wgt::GlBackendOptions {
+                gles_minor_version: wgt::Gles3MinorVersion::Automatic,
+                fence_behavior: wgt::GlFenceBehavior::Normal,
+                debug_fns: wgt::GlDebugFns::Auto,
             },
-            memory_budget_thresholds: wgt::MemoryBudgetThresholds {
-                for_resource_creation: Some(95),
-                for_device_loss: Some(99),
+            dx12: wgt::Dx12BackendOptions {
+                shader_compiler: dx12_shader_compiler,
+                ..Default::default()
             },
-            display: None,
+            noop: wgt::NoopBackendOptions::default(),
         },
-        Some(build_telemetry_struct()),
+        memory_budget_thresholds: wgt::MemoryBudgetThresholds {
+            for_resource_creation: Some(95),
+            for_device_loss: Some(99),
+        },
+        display: None,
+    };
+    // shortcut: actors created before WR use independent devices; bootstrap earlier to share them.
+    #[cfg(target_os = "linux")]
+    let shared = if share_requested && descriptor.backends.contains(wgt::Backends::VULKAN) {
+        wgpu_shared::NativeContext::active()
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    log::info!(
+        "WebGPU shared Vulkan requested={} active={}",
+        share_requested,
+        shared.is_some()
     );
+    #[cfg(target_os = "linux")]
+    let global = match shared.as_ref() {
+        Some(context) => wgpu_core_remote::global::Global::from_instance(
+            context.instance_with_policy(descriptor, Some(build_telemetry_struct())),
+        ),
+        None => wgpu_core_remote::global::Global::new(
+            "wgpu",
+            descriptor,
+            Some(build_telemetry_struct()),
+        ),
+    };
+    #[cfg(not(target_os = "linux"))]
+    let global = {
+        let _ = share_requested;
+        wgpu_core_remote::global::Global::new("wgpu", descriptor, Some(build_telemetry_struct()))
+    };
     let global = Global {
         owner,
         global,
+        #[cfg(target_os = "linux")]
+        shared,
         swap_chain_configs: Mutex::new(HashMap::new()),
     };
     Box::into_raw(Box::new(global))
@@ -607,6 +636,37 @@ fn adapter_request_device(
     }
 
     #[cfg(target_os = "linux")]
+    if let Some(context) = &global.shared {
+        let adapter = global.resolve_adapter_id(self_id);
+        if context.matches_adapter(&adapter) {
+            let descriptor = wgt::DeviceDescriptor {
+                label: desc.label.clone(),
+                required_features: wgt::Features::from_internal_flags(
+                    wgt::FeaturesWGPU::empty(),
+                    desc.required_features,
+                )
+                .union(additional_features),
+                required_limits: desc.required_limits.clone(),
+                default_queue: desc.default_queue.clone(),
+                experimental_features: wgt::ExperimentalFeatures::disabled(),
+                memory_hints: wgt::MemoryHints::MemoryUsage,
+                trace: trace.clone(),
+            };
+            match context.open(&adapter, &descriptor) {
+                Ok((device, queue)) => {
+                    global.import_device(device, new_device_id);
+                    global.import_queue(queue, new_queue_id);
+                    return Ok(());
+                }
+                Err(error) => log::warn!(
+                    "Shared Vulkan device admission failed: {}; using independent WebGPU device",
+                    error
+                ),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     {
         let adapter = global.resolve_adapter_id(self_id);
         let hal_adapter = unsafe { adapter.as_hal::<wgc::api::Vulkan>() }
@@ -807,9 +867,20 @@ fn set_device_lost_handler(global: &Global, device_id: id::DeviceId) {
     })
     .detach();
 
+    #[cfg(target_os = "linux")]
+    let shared = global
+        .shared
+        .clone()
+        .filter(|context| context.matches_device(&global.resolve_device_id(device_id)));
     global.device_set_device_lost_closure(
         device_id,
         Box::new(move |reason, message| {
+            #[cfg(target_os = "linux")]
+            if reason == wgt::DeviceLostReason::Unknown {
+                if let Some(context) = shared {
+                    context.mark_failed();
+                }
+            }
             // Sending fails only if the receiving task is already gone.
             let _ = device_lost_sender.send((reason, message));
         }),

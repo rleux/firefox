@@ -40,6 +40,27 @@ the request and propagates it in `WebRenderVulkanSharedWebGPURequested`; GPU-pro
 replacement inherits that browser-session request. Preference changes require a
 browser restart. Requested sharing does not imply successful native admission.
 
+The Gecko Vulkan build enables WR's internal `shared-webgpu` Cargo feature.
+Ordinary standalone `vulkan` builds retain their independent device path and do
+not require the shared HAL API. Runtime selection still uses the startup request.
+
+`wgpu_shared::NativeContext` retains one native device and queue with separate
+core devices for WR renderers and WebGPU clients. Core device identities, feature
+and limit validation, resource trackers, error scopes and callbacks remain
+separate. A WebGPU core instance is built with the existing custom-HAL instance
+builder, preserving strict WebGPU compliance, timestamp normalization and limit
+bucketing. Native features are admitted at initial native-device creation; WR
+shader passthrough is not exposed to content. Native queue submission, presentation
+and idle waits serialize across aliases. The HAL alias retains the original
+native owner until its own resources retire.
+
+The first compatible WR surface establishes the native context. WebGPU actors
+created before that context, incompatible backend or adapter requests, and failed
+admissions use independent devices. Existing devices never change their native
+context. A fallback-adapter request is not replaced with the compositor adapter.
+Closing a renderer or destroying a WebGPU device does not invalidate other
+clients; an unexpected device loss stops shared-context admission.
+
 
 ## Native-window safety
 
