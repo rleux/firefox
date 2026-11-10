@@ -68,6 +68,7 @@ pub struct CanvasExportInfo {
     pub width: u32,
     pub height: u32,
     pub bgra: bool,
+    pub ready_value: u64,
     pub modifier: u64,
     pub offset: u64,
     pub stride: u64,
@@ -78,20 +79,31 @@ extern "C" {
     fn wgpu_parent_native_canvas_supported(info: &CanvasExportInfo, opaque: bool) -> bool;
 }
 
-struct Export {
+pub(crate) struct Allocation {
     device: Arc<wgc::device::Device>,
-    source: Arc<wgc::resource::Texture>,
     image: vk::Image,
     memory: vk::DeviceMemory,
     ready: vk::Semaphore,
     memory_fd: Option<OwnedFd>,
     ready_fd: Option<OwnedFd>,
     info: CanvasExportInfo,
-    submitted: bool,
-    done: Arc<AtomicBool>,
     _permit: Permit,
 }
-impl Drop for Export {
+
+struct Export {
+    allocation: Arc<Allocation>,
+    source: Arc<wgc::resource::Texture>,
+    submitted: bool,
+    done: Arc<AtomicBool>,
+    signal_value: u64,
+}
+impl std::ops::Deref for Export {
+    type Target = Allocation;
+    fn deref(&self) -> &Allocation {
+        &self.allocation
+    }
+}
+impl Drop for Allocation {
     fn drop(&mut self) {
         let hal = unsafe { self.device.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
         unsafe {
@@ -107,9 +119,13 @@ impl Drop for Export {
 // Native completion and core completion are distinct, including on logical loss.
 // Do not retain the core queue: Global drops it on CanvasRenderThread, where its
 // destructor drains callbacks before that thread and its local tasks shut down.
-fn completion(native: Result<u64, vk::Result>, core_done: bool) -> bool {
+fn completion_at(native: Result<u64, vk::Result>, core_done: bool, expected: u64) -> bool {
     native == Err(vk::Result::ERROR_DEVICE_LOST)
-        || (native.is_ok_and(|value| value >= 1) && core_done)
+        || (native.is_ok_and(|value| value >= expected) && core_done)
+}
+#[cfg(test)]
+fn completion(native: Result<u64, vk::Result>, core_done: bool) -> bool {
+    completion_at(native, core_done, 1)
 }
 fn retired(export: &Export) -> bool {
     if !export.submitted {
@@ -130,7 +146,11 @@ fn retired(export: &Export) -> bool {
             hal.raw_device().get_semaphore_counter_value(export.ready)
         }
     };
-    completion(result, export.done.load(Ordering::Acquire))
+    completion_at(
+        result,
+        export.done.load(Ordering::Acquire),
+        export.signal_value,
+    )
 }
 fn retire(export: Box<Export>) {
     if retired(&export) {
@@ -194,15 +214,32 @@ fn allocate(
     opaque: bool,
 ) -> Option<Box<Export>> {
     use wgc::resource::ParentDevice;
-    let permit = Permit::new()?;
     let source = global.resolve_texture_id(texture_id);
     let device = global.resolve_device_id(device_id);
     let queue = global.resolve_queue_id(queue_id);
-    if source.same_device(&device).is_err()
-        || queue.same_device(&device).is_err()
-        || device.check_is_valid().is_err()
-        || !descriptor_supported(source.descriptor())
-    {
+    if source.same_device(&device).is_err() || queue.same_device(&device).is_err() {
+        return None;
+    }
+    let allocation: Arc<Allocation> = Arc::from(allocate_image(&device, source.descriptor(), opaque)?);
+    if !unsafe { wgpu_parent_native_canvas_supported(&allocation.info, opaque) } {
+        return None;
+    }
+    Some(Box::new(Export {
+        allocation,
+        source,
+        submitted: false,
+        done: Arc::new(AtomicBool::new(false)),
+        signal_value: 1,
+    }))
+}
+
+fn allocate_image(
+    device: &Arc<wgc::device::Device>,
+    desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
+    opaque: bool,
+) -> Option<Box<Allocation>> {
+    let permit = Permit::new()?;
+    if device.check_is_valid().is_err() || !descriptor_supported(desc) {
         return None;
     }
     let hal = unsafe { device.clone().as_hal::<wgc::api::Vulkan>() }?;
@@ -245,7 +282,6 @@ fn allocate(
     {
         return None;
     }
-    let desc = source.descriptor();
     let format = if desc.format == wgt::TextureFormat::Bgra8Unorm {
         vk::Format::B8G8R8A8_UNORM
     } else {
@@ -289,9 +325,8 @@ fn allocate(
         | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
         | vk::FormatFeatureFlags::TRANSFER_SRC
         | vk::FormatFeatureFlags::TRANSFER_DST;
-    let mut export = Box::new(Export {
+    let mut export = Box::new(Allocation {
         device: device.clone(),
-        source: source.clone(),
         image: vk::Image::null(),
         memory: vk::DeviceMemory::null(),
         ready: vk::Semaphore::null(),
@@ -307,8 +342,6 @@ fn allocate(
             driver_uuid: ids.driver_uuid,
             ..Default::default()
         },
-        submitted: false,
-        done: Arc::new(AtomicBool::new(false)),
         _permit: permit,
     });
     for entry in entries.iter().filter(|entry| {
@@ -522,7 +555,7 @@ fn allocate(
 }
 
 fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) -> bool {
-    let device = &export.device;
+    let device = export.device.clone();
     if device.check_is_valid().is_err() {
         return false;
     }
@@ -607,6 +640,7 @@ fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) 
                             depth: 1,
                         })],
                 );
+
                 raw.cmd_pipeline_barrier(
                     command,
                     vk::PipelineStageFlags::TRANSFER,
@@ -648,7 +682,7 @@ fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) 
         device.push_error_scope(filter);
     }
     let queue = unsafe { producer_queue.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
-    queue.add_signal_semaphore(export.ready, Some(1));
+    queue.add_signal_semaphore(export.ready, Some(export.signal_value));
     let index = producer_queue.submit(&commands);
     export.submitted = !queue.remove_signal_semaphore(export.ready);
     valid = export.submitted && index.is_some() && device.check_is_valid().is_ok();
@@ -685,6 +719,7 @@ pub extern "C" fn wgpu_canvas_export(
         return ptr::null_mut();
     }
     *output = export.info;
+    output.ready_value = export.signal_value;
     Box::into_raw(Box::new(CanvasExport {
         export: Some(export),
     }))
@@ -720,6 +755,15 @@ mod tests {
         assert_eq!(BYTES.load(Ordering::Acquire), 0);
         assert_eq!(EXPORTS.load(Ordering::Acquire), before);
     }
+    #[test]
+    fn direct_target_waits_for_publication_not_initialization() {
+        assert!(!completion_at(Ok(0), true, 2));
+        assert!(!completion_at(Ok(1), true, 2));
+        assert!(!completion_at(Ok(2), false, 2));
+        assert!(completion_at(Ok(2), true, 2));
+        assert!(completion_at(Err(vk::Result::ERROR_DEVICE_LOST), false, 2));
+    }
+
     #[test]
     fn native_completion_and_core_retirement_are_both_required() {
         assert!(!completion(Ok(0), true));

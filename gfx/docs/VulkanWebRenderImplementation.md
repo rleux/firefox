@@ -61,6 +61,10 @@ context. A fallback-adapter request is not replaced with the compositor adapter.
 Closing a renderer or destroying a WebGPU device does not invalidate other
 clients; an unexpected device loss stops shared-context admission.
 
+Canvas allocations have separate shared ownership from publication receipts.
+Each receipt records its expected native timeline value. Retirement requires both
+that value and core completion; an earlier initialization signal cannot retire a
+later presentation submission.
 
 ## Native-window safety
 

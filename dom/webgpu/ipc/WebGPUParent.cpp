@@ -1301,7 +1301,8 @@ void WebGPUParent::SwapChainPresent(
           new gfx::FileHandleWrapper(DuplicateFileHandle(info.memory_fd));
       RefPtr<gfx::FileHandleWrapper> ready =
           new gfx::FileHandleWrapper(DuplicateFileHandle(info.ready_fd));
-      layers::VulkanTimelineDescriptor timeline(ready, device, driver, 1);
+      layers::VulkanTimelineDescriptor timeline(ready, device, driver,
+                                                info.ready_value);
       layers::VulkanImagePublication publication(
           aRemoteTextureId.mId, memory, data->mDesc.size(),
           data->mDesc.format(), info.modifier, info.offset, info.stride, true,
