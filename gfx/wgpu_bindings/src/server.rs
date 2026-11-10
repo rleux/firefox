@@ -2547,6 +2547,20 @@ impl Global {
                     };
                 }
 
+                #[cfg(target_os = "linux")]
+                if let Some(swap_chain_id) = swap_chain_id {
+                    let queue_id = self
+                        .canvas_queues
+                        .lock()
+                        .unwrap()
+                        .get(&swap_chain_id)
+                        .copied();
+                    if let Some(queue_id) = queue_id {
+                        if crate::canvas::create_target(self, device_id, queue_id, id, &desc) {
+                            return;
+                        }
+                    }
+                }
                 self.device_create_texture(device_id, &desc, id);
             }
             DeviceAction::CreateExternalTexture(id, desc) => {

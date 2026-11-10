@@ -293,7 +293,9 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::SwapChainPresent() {
   mLastRemoteTextureId = Some(layers::RemoteTextureId::GetNext());
   mChild->SwapChainPresent(mCurrentTexture->GetId(), *mLastRemoteTextureId,
                            *mRemoteTextureOwnerId);
-  if (mUseSharedTextureInSwapChain) {
+  if (mUseSharedTextureInSwapChain ||
+      (gfx::gfxVars::UseWebRenderVulkan() &&
+       gfx::gfxVars::WebRenderVulkanSharedWebGPURequested())) {
     mCurrentTexture->Destroy();
     mNewTextureRequested = true;
   }

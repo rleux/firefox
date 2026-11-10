@@ -61,11 +61,34 @@ context. A fallback-adapter request is not replaced with the compositor adapter.
 Closing a renderer or destroying a WebGPU device does not invalidate other
 clients; an unexpected device loss stops shared-context admission.
 
-A bounded direct-target allocator can create and initialize exportable canvas
-images before content access. It uses the existing six-allocation/256 MiB budget,
-holds native and core completion receipts, and supports one-shot publication
-without a presentation image copy. Texture creation is not connected to this
-allocator until compositor integration.
+Eligible canvases render directly into an exportable native allocation. An
+initialization submission clears every pixel before content access and signals
+timeline value one. Presentation seals the source, initializes any required
+producer state through core, transitions COPY_SRC to GENERAL/EXTERNAL, and signals
+value two. It does not copy pixels into an intermediate presentation image.
+The existing Vulkan publication, import, snapshot and WR retirement protocol
+carries the allocation; no new cross-device core tracker API is introduced.
+
+The direct path initially admits single-layer, single-sample RGBA8/BGRA8 unorm
+targets without alternate view formats or storage usage. Unsupported descriptors,
+allocation pressure and failed capability admission retain existing copy/export
+or readback behavior. Direct targets expire after presentation. Once ownership
+has been released, a failed publication must not read the source through the
+producer fallback; it publishes a dummy frame instead.
+
+Allocations are one-shot and share the existing six-allocation/256 MiB budget.
+They are not recycled. Both native timeline completion and core completion are
+required before producer retirement, independently of the consumer publication
+lease. Initialization completion cannot satisfy the presentation dependency.
+The existing publication IDs and retained allocation leases keep late returns
+from releasing replacement content. Logs distinguish the startup request,
+successful sharing, admission failure, and native presentations with zero or one
+GPU copies.
+
+Validation for this change uses targeted Cargo checks, including test targets.
+It does not establish Vulkan-driver correctness, browser pixel results, recovery
+behavior or performance. Those require GTK/X11 hardware runs and compositor
+readback before enabling the preference by default.
 
 ## Native-window safety
 

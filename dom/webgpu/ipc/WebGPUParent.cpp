@@ -1292,6 +1292,11 @@ void WebGPUParent::SwapChainPresent(
     if (raw) {
       auto lease = std::shared_ptr<ffi::WGPUCanvasExport>(
           raw, [](auto* aExport) { ffi::wgpu_canvas_export_delete(aExport); });
+      if (info.direct && (info.memory_fd < 0 || info.ready_fd < 0)) {
+        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+        data->mNativePresent = false;
+        return;
+      }
       wr::VulkanUUID device{}, driver{};
       std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
                 device.begin());
@@ -1307,7 +1312,8 @@ void WebGPUParent::SwapChainPresent(
           aRemoteTextureId.mId, memory, data->mDesc.size(),
           data->mDesc.format(), info.modifier, info.offset, info.stride, true,
           true, false, timeline);
-      if (info.width == uint32_t(data->mDesc.size().width) &&
+      if (info.memory_fd >= 0 && info.ready_fd >= 0 &&
+          info.width == uint32_t(data->mDesc.size().width) &&
           info.height == uint32_t(data->mDesc.size().height) &&
           info.bgra == (data->mDesc.format() == gfx::SurfaceFormat::B8G8R8A8) &&
           mRemoteTextureOwner->PushVulkanTexture(
@@ -1321,11 +1327,18 @@ void WebGPUParent::SwapChainPresent(
               data->mIsOpaque)) {
         data->mNativePresent = true;
         data->mNativePublicationId = aRemoteTextureId.mId;
-        MOZ_LOG(sLogger, LogLevel::Info,
-                ("WebGPU presentation path=native publication=%" PRIu64
-                 " opaque=%d gpu_copy=1 presentation_cpu_maps=0 "
-                 "presentation_cpu_copies=0 bgra=%d",
-                 aRemoteTextureId.mId, data->mIsOpaque, info.bgra));
+        MOZ_LOG(
+            sLogger, LogLevel::Info,
+            ("WebGPU presentation path=native publication=%" PRIu64
+             " opaque=%d gpu_copy=%d presentation_cpu_maps=0 "
+             "presentation_cpu_copies=0 bgra=%d",
+             aRemoteTextureId.mId, data->mIsOpaque, !info.direct, info.bgra));
+        return;
+      }
+      if (info.direct) {
+        // Ownership was sealed; this source cannot enter the readback fallback.
+        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+        data->mNativePresent = false;
         return;
       }
     }
