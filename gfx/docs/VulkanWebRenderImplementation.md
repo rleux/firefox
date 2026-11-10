@@ -32,6 +32,15 @@ Do not rebuild the old
 HAL per-mip tracker or submission keep-lists around core. Raw native work for
 interoperability has separate explicit safety obligations.
 
+## Shared WebGPU native device and canvas targets
+
+The default-off startup preference `gfx.webrender.vulkan.shared-webgpu` requests
+sharing when Vulkan WR is selected in the GTK/X11 GPU process. The parent latches
+the request and propagates it in `WebRenderVulkanSharedWebGPURequested`; GPU-process
+replacement inherits that browser-session request. Preference changes require a
+browser restart. Requested sharing does not imply successful native admission.
+
+
 ## Native-window safety
 
 `SurfaceWindow` is an unsafe trait. Its owner must keep the exact native window

@@ -2544,6 +2544,11 @@ void gfxPlatform::InitWebRenderConfig() {
 #  endif
 #endif
 
+#if defined(MOZ_WEBRENDER_VULKAN)
+  gfxVars::SetWebRenderVulkanSharedWebGPURequested(
+      StaticPrefs::gfx_webrender_vulkan_shared_webgpu_AtStartup());
+#endif
+
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,
                                              "gfx.swap-interval");
 
