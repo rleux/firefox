@@ -1929,6 +1929,21 @@ impl Texture {
     }
 
     pub fn destroy(self: &Arc<Self>) {
+        if let Some(texture) = self.destroy_inner() {
+            self.schedule_destruction(queue::TempResource::DestroyedTexture(texture));
+        }
+    }
+
+    /// Invalidates this texture and its aliases while retaining its native allocation.
+    /// The producer queue independently retains the allocation until its work retires.
+    /// This does not initialize the contents or perform a usage transition.
+    pub fn destroy_and_retain(self: &Arc<Self>) -> Option<Arc<DestroyedTexture>> {
+        let retained = Arc::new(self.destroy_inner()?);
+        self.schedule_destruction(queue::TempResource::RetainedTexture(retained.clone()));
+        Some(retained)
+    }
+
+    fn destroy_inner(self: &Arc<Self>) -> Option<DestroyedTexture> {
         profiling::scope!("Texture::destroy");
         api_log!("Texture::destroy {:?}", Arc::as_ptr(self));
 
@@ -1942,18 +1957,18 @@ impl Texture {
         let device = &self.device;
 
         let ResourceState::Valid(state) = &self.state else {
-            return;
+            return None;
         };
 
-        let temp = {
+        let texture = {
             let raw = match state.inner.snatch(&mut device.snatchable_lock.write()) {
                 Some(TextureInner::Native { raw }) => raw,
                 Some(TextureInner::Surface { .. }) => {
-                    return;
+                    return None;
                 }
                 None => {
                     // Per spec, it is valid to call `destroy` multiple times.
-                    return;
+                    return None;
                 }
             };
 
@@ -1967,17 +1982,20 @@ impl Texture {
                 mem::take(&mut *guard)
             };
 
-            queue::TempResource::DestroyedTexture(DestroyedTexture {
+            DestroyedTexture {
                 raw: ManuallyDrop::new(raw),
                 views,
                 clear_mode: mem::replace(&mut *self.clear_mode.write(), TextureClearMode::None),
                 bind_groups,
                 device: Arc::clone(&self.device),
                 label: self.label().to_owned(),
-            })
+            }
         };
+        Some(texture)
+    }
 
-        let Some(queue) = device.get_queue() else {
+    fn schedule_destruction(self: &Arc<Self>, temp: queue::TempResource) {
+        let Some(queue) = self.device.get_queue() else {
             return;
         };
 
@@ -2438,6 +2456,22 @@ pub struct DestroyedTexture {
 impl DestroyedTexture {
     pub fn label(&self) -> &dyn fmt::Debug {
         &self.label
+    }
+
+    /// Borrows the retained allocation without holding a device-wide snatch lock.
+    ///
+    /// # Safety
+    ///
+    /// The allocation must not be manually destroyed. Before using it on another
+    /// core device, the caller must serialize all producer writes and submissions
+    /// through destruction, initialize every exposed subresource, transition it
+    /// to the consumer's declared initial state, and await successful producer
+    /// completion. Both core devices must share the same native device. Every
+    /// consumer wrapper must retain this keeper until its GPU work retires.
+    /// No external access may overlap outstanding producer work or change the
+    /// allocation while any consumer can use it. Abandon handoff on device loss.
+    pub unsafe fn as_hal<A: hal::Api>(&self) -> Option<&A::Texture> {
+        self.raw.as_ref().as_any().downcast_ref()
     }
 }
 

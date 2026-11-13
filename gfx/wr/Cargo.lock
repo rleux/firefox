@@ -6741,6 +6741,7 @@ dependencies = [
 name = "wgpu_shared"
 version = "0.1.0"
 dependencies = [
+ "log",
  "wgpu-core 30.0.0",
  "wgpu-hal 30.0.0",
  "wgpu-types 30.0.0",

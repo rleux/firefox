@@ -9,3 +9,7 @@ publish = false
 wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std", "vulkan"] }
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["vulkan"] }
 wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", default-features = false, features = ["wgsl", "counters"] }
+log = "0.4"

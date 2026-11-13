@@ -264,6 +264,22 @@ impl Global {
             .err()
     }
 
+    /// Creates a trusted presentation texture while preserving public usage permissions.
+    pub fn device_create_texture_with_internal_sampling(
+        &self,
+        device_id: DeviceId,
+        desc: &TextureDescriptor,
+        id_in: id::TextureId,
+    ) -> Result<Arc<resource::Texture>, resource::CreateTextureError> {
+        let mut hub = self.hub.borrow_mut();
+        let texture = hub
+            .devices
+            .get(device_id)
+            .create_texture_with_internal_sampling(desc)?;
+        hub.textures.assign(id_in, texture.clone());
+        Ok(texture)
+    }
+
     /// # Safety
     ///
     /// - `hal_texture` must be created from `device_id` corresponding raw handle.

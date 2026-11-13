@@ -330,6 +330,7 @@ pub enum TempResource {
     ScratchBuffer(ScratchBuffer),
     DestroyedBuffer(DestroyedBuffer),
     DestroyedTexture(DestroyedTexture),
+    RetainedTexture(Arc<DestroyedTexture>),
     DestroyedQuerySet(DestroyedQuerySet),
 }
 
