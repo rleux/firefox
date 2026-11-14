@@ -10,13 +10,13 @@ use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
 mod surface;
-#[cfg(all(test, target_os = "linux", feature = "debugger"))]
-pub(crate) use surface::tests::x11::{X11Display, X11Window};
-#[cfg(test)]
-pub(crate) use surface::testing as surface_testing;
-pub use surface::{SurfaceOptions, SurfaceWindow};
 use raw_window_handle::HasDisplayHandle;
 use std::rc::Rc;
+#[cfg(test)]
+pub(crate) use surface::testing as surface_testing;
+#[cfg(all(test, target_os = "linux", feature = "debugger"))]
+pub(crate) use surface::tests::x11::{X11Display, X11Window};
+pub use surface::{SurfaceOptions, SurfaceWindow};
 mod images;
 mod program_store;
 pub(super) mod render_device;
@@ -37,22 +37,29 @@ pub mod shaders {
 }
 #[cfg(target_os = "linux")]
 mod external_images;
+#[cfg(all(target_os = "linux", feature = "shared-webgpu"))]
+mod shared_images;
+#[cfg(all(target_os = "linux", feature = "shared-webgpu"))]
+pub use shared_images::SharedImage;
+#[cfg(feature = "shared-webgpu")]
+pub use wgpu_shared::canvas::CanvasPublication;
 #[cfg(target_os = "linux")]
 mod native_access;
 #[cfg(target_os = "linux")]
 mod native_submit;
 mod vulkan;
+pub use self::transfer::{PendingReadback, Readback};
 #[cfg(target_os = "linux")]
 pub use external_images::{
-    ExternalTextureRegistry, NativeImage, PendingExternalRelease, ExternalReleaseStatus,
-    poll_retired_native_images, shutdown_native_images, take_native_image_progress,
+    native_retirement_pending, poll_retired_native_images, shutdown_native_images,
+    take_native_image_progress, ExternalReleaseStatus, ExternalTextureRegistry, NativeImage,
+    PendingExternalRelease,
 };
 #[cfg(target_os = "linux")]
 pub use vulkan::{
-    DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, SharedTimeline,
-    TimelineHandle, ForeignRgbLayout, SyncFileWait,
+    DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, ForeignRgbLayout,
+    SharedTimeline, SyncFileWait, TimelineHandle,
 };
-pub use self::transfer::{PendingReadback, Readback};
 
 #[derive(Clone, Default)]
 pub struct Options {

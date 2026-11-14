@@ -71,6 +71,10 @@ uint64_t RenderTextureHostWrapper::VulkanPublicationId() const {
   return mTextureHost ? mTextureHost->VulkanPublicationId() : 0;
 }
 
+uint64_t RenderTextureHostWrapper::VulkanOwnerId() const {
+  return mTextureHost ? mTextureHost->VulkanOwnerId() : 0;
+}
+
 bool RenderTextureHostWrapper::CanReadbackVulkan(
     WrVulkanExternalImages* aImages, bool aAllowMigration) const {
   return mTextureHost &&

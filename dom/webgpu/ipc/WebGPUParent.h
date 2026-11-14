@@ -169,6 +169,7 @@ class WebGPUParent final : public PWebGPUParent, public SupportsWeakPtr {
  private:
   virtual ~WebGPUParent();
   void MaintainDevices();
+  void MaintainSharedCanvases();
 
   /* Return a `MappedRangeGuard` for the `aSize` bytes at offset
    * `aStart` within `aBufferId`, or `Nothing` on failure.
@@ -183,6 +184,8 @@ class WebGPUParent final : public PWebGPUParent, public SupportsWeakPtr {
 
   UniquePtr<ffi::WGPUGlobal> mContext;
   base::RepeatingTimer<WebGPUParent> mTimer;
+  base::RepeatingTimer<WebGPUParent> mSharedCanvasTimer;
+  uint32_t mSharedCanvasPolls = 0;
 
   /// Associated presentation data for each swapchain.
   std::unordered_map<layers::RemoteTextureOwnerId, RefPtr<PresentationData>,

@@ -460,8 +460,8 @@ class PresentationData {
   PresentationData(WebGPUParent* aParent, bool aUseSharedTextureInSwapChain,
                    RawId aDeviceId, RawId aQueueId,
                    const layers::RGBDescriptor& aDesc, bool aIsOpaque,
-                   uint32_t aBufferStride,
-                   size_t aBufferSize, const nsTArray<RawId>& aBufferIds)
+                   uint32_t aBufferStride, size_t aBufferSize,
+                   const nsTArray<RawId>& aBufferIds)
       : mParent(aParent),
         mUseSharedTextureInSwapChain(aUseSharedTextureInSwapChain),
         mIsOpaque(aIsOpaque),
@@ -494,6 +494,23 @@ WebGPUParent::~WebGPUParent() = default;
 
 void WebGPUParent::MaintainDevices() {
   ffi::wgpu_server_poll_all_devices(mContext.get(), false);
+}
+
+void WebGPUParent::MaintainSharedCanvases() {
+#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
+  if (!ffi::wgpu_canvas_shared_poll(mContext.get())) {
+    mSharedCanvasTimer.Stop();
+    mSharedCanvasPolls = 0;
+  } else if (mSharedCanvasPolls < 30) {
+    ++mSharedCanvasPolls;
+    if (mSharedCanvasPolls == 16 || mSharedCanvasPolls == 30) {
+      mSharedCanvasTimer.Stop();
+      mSharedCanvasTimer.Start(base::TimeDelta::FromMilliseconds(
+                                   mSharedCanvasPolls == 16 ? 16 : 100),
+                               this, &WebGPUParent::MaintainSharedCanvases);
+    }
+  }
+#endif
 }
 
 void WebGPUParent::PostAdapterRequestDevice(RawId aDeviceId) {
@@ -835,8 +852,8 @@ void WebGPUParent::DeviceCreateSwapChain(
   mRemoteTextureOwner->RegisterTextureOwner(aOwnerId);
 
   auto data = MakeRefPtr<PresentationData>(
-      this, aUseSharedTextureInSwapChain, aDeviceId, aQueueId, storageDesc, isOpaque,
-      bufferStride, bufferSize.value(), aBufferIds);
+      this, aUseSharedTextureInSwapChain, aDeviceId, aQueueId, storageDesc,
+      isOpaque, bufferStride, bufferSize.value(), aBufferIds);
   if (!mPresentationDataMap.emplace(aOwnerId, data).second) {
     NS_ERROR("External image is already registered as WebGPU canvas!");
   }
@@ -1285,6 +1302,36 @@ void WebGPUParent::SwapChainPresent(
       !gfx::gfxVars::UseSoftwareWebRender() &&
       gfx::gfxVars::AllowWebGPUPresentWithoutReadback() &&
       data->mWaitingReadbackTexturesForPresent.empty()) {
+    if (void* raw = ffi::wgpu_canvas_shared_export(
+            mContext.get(), data->mDeviceId, data->mQueueId, aTextureId,
+            aOwnerId.mId, aRemoteTextureId.mId)) {
+      auto lease = std::shared_ptr<void>(
+          raw, [](void* aLease) { ffi::wgpu_canvas_shared_delete(aLease); });
+      if (mSharedCanvasPolls >= 16) {
+        mSharedCanvasTimer.Stop();
+      }
+      mSharedCanvasPolls = 0;
+      if (!mSharedCanvasTimer.IsRunning()) {
+        mSharedCanvasTimer.Start(base::TimeDelta::FromMilliseconds(2), this,
+                                 &WebGPUParent::MaintainSharedCanvases);
+      }
+      MaintainSharedCanvases();
+      if (mRemoteTextureOwner->PushSharedVulkanTexture(
+              aRemoteTextureId, aOwnerId, lease, data->mDesc.size(),
+              data->mDesc.format(), data->mIsOpaque)) {
+        data->mNativePresent = true;
+        data->mNativePublicationId = aRemoteTextureId.mId;
+        MOZ_LOG(sLogger, LogLevel::Info,
+                ("WebGPU presentation path=shared-image publication=%" PRIu64
+                 " owner=%" PRIu64 " opaque=%d gpu_copy=0 fd_transport=0 "
+                 "presentation_cpu_maps=0 presentation_cpu_copies=0",
+                 aRemoteTextureId.mId, aOwnerId.mId, data->mIsOpaque));
+      } else {
+        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
+        data->mNativePresent = false;
+      }
+      return;
+    }
     ffi::WGPUCanvasExportInfo info{};
     auto* raw =
         ffi::wgpu_canvas_export(mContext.get(), data->mDeviceId, data->mQueueId,
@@ -1292,11 +1339,6 @@ void WebGPUParent::SwapChainPresent(
     if (raw) {
       auto lease = std::shared_ptr<ffi::WGPUCanvasExport>(
           raw, [](auto* aExport) { ffi::wgpu_canvas_export_delete(aExport); });
-      if (info.direct && (info.memory_fd < 0 || info.ready_fd < 0)) {
-        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
-        data->mNativePresent = false;
-        return;
-      }
       wr::VulkanUUID device{}, driver{};
       std::copy(std::begin(info.device_uuid), std::end(info.device_uuid),
                 device.begin());
@@ -1327,18 +1369,11 @@ void WebGPUParent::SwapChainPresent(
               data->mIsOpaque)) {
         data->mNativePresent = true;
         data->mNativePublicationId = aRemoteTextureId.mId;
-        MOZ_LOG(
-            sLogger, LogLevel::Info,
-            ("WebGPU presentation path=native publication=%" PRIu64
-             " opaque=%d gpu_copy=%d presentation_cpu_maps=0 "
-             "presentation_cpu_copies=0 bgra=%d",
-             aRemoteTextureId.mId, data->mIsOpaque, !info.direct, info.bgra));
-        return;
-      }
-      if (info.direct) {
-        // Ownership was sealed; this source cannot enter the readback fallback.
-        mRemoteTextureOwner->PushDummyTexture(aRemoteTextureId, aOwnerId);
-        data->mNativePresent = false;
+        MOZ_LOG(sLogger, LogLevel::Info,
+                ("WebGPU presentation path=native publication=%" PRIu64
+                 " opaque=%d gpu_copy=%d presentation_cpu_maps=0 "
+                 "presentation_cpu_copies=0 bgra=%d",
+                 aRemoteTextureId.mId, data->mIsOpaque, true, info.bgra));
         return;
       }
     }
@@ -1480,6 +1515,7 @@ void WebGPUParent::SwapChainDrop(const layers::RemoteTextureOwnerId& aOwnerId,
 
 void WebGPUParent::ActorDestroy(ActorDestroyReason aWhy) {
   mTimer.Stop();
+  mSharedCanvasTimer.Stop();
   mPresentationDataMap.clear();
   if (mRemoteTextureOwner) {
     mRemoteTextureOwner->UnregisterAllTextureOwners();

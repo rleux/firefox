@@ -274,10 +274,11 @@ WrExternalImage RenderCompositorVulkan::LockExternalImage(
       image.image_type == WrExternalImageType::NativeTexture &&
       aHost->VulkanPublicationId()) {
     static LazyLogModule logger("WebGPU");
-    MOZ_LOG(
-        logger, LogLevel::Info,
-        ("WebGPU compositor native acquired publication=%" PRIu64 " channel=%u",
-         aHost->VulkanPublicationId(), unsigned(aChannel)));
+    MOZ_LOG(logger, LogLevel::Info,
+            ("WebGPU compositor native acquired publication=%" PRIu64
+             " owner=%" PRIu64 " channel=%u",
+             aHost->VulkanPublicationId(), aHost->VulkanOwnerId(),
+             unsigned(aChannel)));
   }
   return image;
 }

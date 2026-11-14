@@ -21,6 +21,7 @@
 #include "mozilla/layers/RemoteTextureHostWrapper.h"
 #include "mozilla/layers/TextureClientSharedSurface.h"
 #include "mozilla/layers/VulkanTextureHost.h"
+#include "nsXULAppAPI.h"
 #include "mozilla/layers/WebRenderTextureHost.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webrender/RenderThread.h"
@@ -243,6 +244,25 @@ bool RemoteTextureOwnerClient::PushVulkanTexture(
       TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT |
           (aOpaque ? TextureFlags::IS_OPAQUE : TextureFlags::NO_FLAGS),
       aPublication, std::move(aReturn));
+  if (!host) {
+    return false;
+  }
+  RemoteTextureMap::Get()->PushTexture(aTextureId, aOwnerId, mForPid, nullptr,
+                                       host, nullptr);
+  return true;
+}
+
+bool RemoteTextureOwnerClient::PushSharedVulkanTexture(
+    RemoteTextureId aTextureId, RemoteTextureOwnerId aOwnerId,
+    const std::shared_ptr<void>& aLease, const gfx::IntSize& aSize,
+    gfx::SurfaceFormat aFormat, bool aOpaque) {
+  if (!XRE_IsGPUProcess() || !IsRegistered(aOwnerId) || !aLease) {
+    return false;
+  }
+  RefPtr<TextureHost> host = VulkanTextureHost::CreateShared(
+      TextureFlags::REMOTE_TEXTURE | TextureFlags::DEALLOCATE_CLIENT |
+          (aOpaque ? TextureFlags::IS_OPAQUE : TextureFlags::NO_FLAGS),
+      aLease, aOwnerId.mId, aTextureId.mId, aSize, aFormat);
   if (!host) {
     return false;
   }

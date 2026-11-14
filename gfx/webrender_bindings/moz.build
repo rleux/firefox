@@ -24,6 +24,7 @@ EXPORTS.mozilla.webrender += [
     "RenderTextureHostWrapper.h",
     "RenderThread.h",
     "RenderVulkanDMABufTextureHost.h",
+    "RenderVulkanSharedTextureHost.h",
     "VulkanCompositorSupport.h",
     "VulkanImageIPC.h",
     "VulkanImageRetirement.h",
@@ -110,6 +111,7 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
     SOURCES += [
         "RenderDMABUFTextureHost.cpp",
         "RenderVulkanDMABufTextureHost.cpp",
+        "RenderVulkanSharedTextureHost.cpp",
     ]
     if CONFIG["MOZ_X11"]:
         EXPORTS.mozilla.webrender += ["X11WindowVisibility.h"]

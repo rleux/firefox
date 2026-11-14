@@ -119,6 +119,7 @@ class RenderTextureHost {
   virtual wr::WrExternalImage LockVulkan(uint8_t aChannelIndex,
                                          WrVulkanExternalImages*);
   virtual uint64_t VulkanPublicationId() const { return 0; }
+  virtual uint64_t VulkanOwnerId() const { return 0; }
   // Read-only snapshot routing: false forbids importing into another registry.
   virtual bool CanReadbackVulkan(WrVulkanExternalImages*, bool) const {
     return false;

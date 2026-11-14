@@ -68,7 +68,6 @@ pub struct CanvasExportInfo {
     pub width: u32,
     pub height: u32,
     pub bgra: bool,
-    pub direct: bool,
     pub ready_value: u64,
     pub modifier: u64,
     pub offset: u64,
@@ -96,7 +95,6 @@ struct Export {
     source: Arc<wgc::resource::Texture>,
     submitted: bool,
     done: Arc<AtomicBool>,
-    direct: bool,
     signal_value: u64,
 }
 impl std::ops::Deref for Export {
@@ -222,12 +220,8 @@ fn allocate(
     if source.same_device(&device).is_err() || queue.same_device(&device).is_err() {
         return None;
     }
-    let direct = global.direct_targets.lock().unwrap().remove(&texture_id);
-    let is_direct = direct.is_some();
-    let allocation = match direct {
-        Some(allocation) => allocation,
-        None => Arc::from(allocate_image(&device, source.descriptor(), opaque, false)?),
-    };
+    let allocation: Arc<Allocation> =
+        Arc::from(allocate_image(&device, source.descriptor(), opaque)?);
     if !unsafe { wgpu_parent_native_canvas_supported(&allocation.info, opaque) } {
         return None;
     }
@@ -236,8 +230,7 @@ fn allocate(
         source,
         submitted: false,
         done: Arc::new(AtomicBool::new(false)),
-        direct: is_direct,
-        signal_value: if is_direct { 2 } else { 1 },
+        signal_value: 1,
     }))
 }
 
@@ -245,7 +238,6 @@ fn allocate_image(
     device: &Arc<wgc::device::Device>,
     desc: &wgt::TextureDescriptor<String, Vec<wgt::TextureFormat>>,
     opaque: bool,
-    direct: bool,
 ) -> Option<Box<Allocation>> {
     let permit = Permit::new()?;
     if device.check_is_valid().is_err() || !descriptor_supported(desc) {
@@ -329,21 +321,11 @@ fn allocate_image(
     entries.truncate(modifiers.drm_format_modifier_count as usize);
     let usage = vk::ImageUsageFlags::SAMPLED
         | vk::ImageUsageFlags::TRANSFER_SRC
-        | vk::ImageUsageFlags::TRANSFER_DST
-        | if direct {
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-        } else {
-            vk::ImageUsageFlags::empty()
-        };
+        | vk::ImageUsageFlags::TRANSFER_DST;
     let required = vk::FormatFeatureFlags::SAMPLED_IMAGE
         | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
         | vk::FormatFeatureFlags::TRANSFER_SRC
-        | vk::FormatFeatureFlags::TRANSFER_DST
-        | if direct {
-            vk::FormatFeatureFlags::COLOR_ATTACHMENT
-        } else {
-            vk::FormatFeatureFlags::empty()
-        };
+        | vk::FormatFeatureFlags::TRANSFER_DST;
     let mut export = Box::new(Allocation {
         device: device.clone(),
         image: vk::Image::null(),
@@ -573,11 +555,17 @@ fn allocate_image(
     None
 }
 
+pub(crate) struct SharedTarget {
+    pub(crate) owner: u64,
+    source: Arc<wgc::resource::Texture>,
+}
+
 pub(crate) fn create_target(
     global: &Global,
     device_id: id::DeviceId,
     queue_id: id::QueueId,
     texture_id: id::TextureId,
+    owner: u64,
     desc: &wgpu_core_remote_types::TextureDescriptor,
 ) -> bool {
     use wgc::resource::ParentDevice;
@@ -585,164 +573,91 @@ pub(crate) fn create_target(
         return false;
     };
     let device = global.resolve_device_id(device_id);
-    let producer_queue = global.resolve_queue_id(queue_id);
+    let queue = global.resolve_queue_id(queue_id);
     let owned = desc.map_label(|_| String::new());
-    let allowed = wgt::TextureUsages::RENDER_ATTACHMENT
-        | wgt::TextureUsages::COPY_SRC
-        | wgt::TextureUsages::COPY_DST
-        | wgt::TextureUsages::TEXTURE_BINDING;
-    if !context.matches_device(&device)
-        || producer_queue.same_device(&device).is_err()
-        || !descriptor_supported(&owned)
-        || !desc.view_formats.is_empty()
-        || !allowed.contains(desc.usage)
-        || device.validate_texture_descriptor(desc).is_err()
+    if !context.is_valid()
+        || !context.matches_device(&device)
+        || queue.same_device(&device).is_err()
+        || !wgpu_shared::canvas::descriptor_supported(&owned)
+        || !context
+            .device
+            .features()
+            .contains(wgt::Features::TEXTURE_COMPONENT_SWIZZLE)
     {
         return false;
     }
-    let Some(allocation) = allocate_image(&device, &owned, false, true) else {
+    let Ok(source) =
+        global.device_create_texture_with_internal_sampling(device_id, desc, texture_id)
+    else {
         return false;
     };
-    if !unsafe { wgpu_parent_native_canvas_supported(&allocation.info, true) } {
-        return false;
-    }
-    let allocation: Arc<Allocation> = Arc::from(allocation);
-    let retained = allocation.clone();
-    let hal = unsafe { device.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
-    let raw_texture = unsafe {
-        hal.texture_from_raw(
-            allocation.image,
-            &wgh::TextureDescriptor {
-                label: Some("Shared WebGPU canvas target"),
-                size: desc.size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgt::TextureDimension::D2,
-                format: desc.format,
-                usage: wgt::TextureUses::COLOR_TARGET
-                    | wgt::TextureUses::COPY_SRC
-                    | wgt::TextureUses::COPY_DST
-                    | wgt::TextureUses::RESOURCE,
-                memory_flags: wgh::MemoryFlags::empty(),
-                view_formats: Vec::new(),
-            },
-            Some(Box::new(move || drop(retained))),
-            wgh::vulkan::TextureMemory::External,
-        )
+    global
+        .shared_targets
+        .lock()
+        .unwrap()
+        .insert(texture_id, SharedTarget { owner, source });
+    true
+}
+
+/// Returns a trusted GPU-process-only Arc token; it must never be sent through IPC.
+#[no_mangle]
+pub extern "C" fn wgpu_canvas_shared_export(
+    global: &Global,
+    device_id: id::DeviceId,
+    queue_id: id::QueueId,
+    texture_id: id::TextureId,
+    owner: u64,
+    publication: u64,
+) -> *mut std::ffi::c_void {
+    use wgc::resource::ParentDevice;
+    let Some(context) = &global.shared else {
+        return ptr::null_mut();
     };
-    // The initialization submission precedes all content access on this core queue.
-    let (_, error) = unsafe {
-        global.create_texture_from_hal(
-            Box::new(raw_texture),
-            device_id,
-            desc,
-            wgt::TextureUses::COPY_DST,
-            texture_id,
-            true,
-        )
+    let device = global.resolve_device_id(device_id);
+    let queue = global.resolve_queue_id(queue_id);
+    let mut targets = global.shared_targets.lock().unwrap();
+    let Some(target) = targets.get(&texture_id) else {
+        return ptr::null_mut();
     };
-    if let Some(error) = error {
-        global.device_handle_error(device_id, error, None, "Shared canvas import");
-        return true;
+    if target.owner != owner || target.source.same_device(&device).is_err() {
+        return ptr::null_mut();
     }
-    let source = global.resolve_texture_id(texture_id);
-    let mut init = Box::new(Export {
-        allocation: allocation.clone(),
-        source,
-        submitted: false,
-        done: Arc::new(AtomicBool::new(false)),
-        direct: true,
-        signal_value: 1,
-    });
-    for filter in [
-        ErrorFilter::Validation,
-        ErrorFilter::OutOfMemory,
-        ErrorFilter::Internal,
-    ] {
-        device.push_error_scope(filter);
-    }
-    let encoder = device.create_command_encoder(&wgt::CommandEncoderDescriptor {
-        label: Some("Initialize shared canvas allocation".into()),
-    });
-    let mut encoded = false;
-    unsafe {
-        encoder.as_hal_mut::<wgc::api::Vulkan, _, _>(|encoder| {
-            let Some(encoder) = encoder else {
-                return;
-            };
-            let range = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
-                .layer_count(1);
-            let raw = hal.raw_device();
-            let command = encoder.raw_handle();
-            raw.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[vk::ImageMemoryBarrier::default()
-                    .image(allocation.image)
-                    .subresource_range(range)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)],
-            );
-            raw.cmd_clear_color_image(
-                command,
-                allocation.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue { float32: [0.0; 4] },
-                &[range],
-            );
-            encoded = true;
-        });
-    }
-    let commands = [encoder.finish(&Default::default())];
-    let queue = unsafe { producer_queue.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
-    let mut valid = encoded;
-    for _ in 0..3 {
-        valid &= device.pop_error_scope().is_ok_and(|error| error.is_none());
-    }
-    if valid {
-        for filter in [
-            ErrorFilter::Validation,
-            ErrorFilter::OutOfMemory,
-            ErrorFilter::Internal,
-        ] {
-            device.push_error_scope(filter);
-        }
-        queue.add_signal_semaphore(allocation.ready, Some(1));
-        let index = producer_queue.submit(&commands);
-        init.submitted = !queue.remove_signal_semaphore(allocation.ready);
-        valid = init.submitted && index.is_some() && device.is_valid();
-        for _ in 0..3 {
-            valid &= device.pop_error_scope().is_ok_and(|error| error.is_none());
-        }
-    }
-    if !valid {
-        init.source.destroy();
-        global.texture_remove(texture_id);
-    }
-    if init.submitted {
-        let done = init.done.clone();
-        producer_queue.on_submitted_work_done(Box::new(move || {
-            done.store(true, Ordering::Release);
-            retire(init);
-        }));
-    }
-    if valid {
-        global
-            .direct_targets
+    let identity = {
+        let device = unsafe { device.clone().as_hal::<wgc::api::Vulkan>() }.unwrap();
+        let image = unsafe { target.source.clone().as_hal::<wgc::api::Vulkan>() };
+        let Some(image) = image else {
+            return ptr::null_mut();
+        };
+        (device.raw_device().handle(), unsafe { image.raw_handle() })
+    };
+    let Some(lease) = (unsafe {
+        wgpu_shared::canvas::CanvasPublication::seal(
+            context,
+            &target.source,
+            &queue,
+            owner,
+            publication,
+        )
+    }) else {
+        return ptr::null_mut();
+    };
+    targets.remove(&texture_id);
+    global
+        .shared_pending
             .lock()
             .unwrap()
-            .insert(texture_id, allocation);
+        .push(Arc::downgrade(&lease));
+    log::info!("WebGPU shared canvas producer publication={} owner={} generation={} nonce={} device={:?} image={:?} gpu_copy=0 fd_transport=0",
+        publication, owner, lease.generation(), lease.nonce(), identity.0, identity.1);
+    Box::into_raw(Box::new(lease)).cast()
+}
+
+/// The pointer is owned by the caller and was returned by wgpu_canvas_shared_export.
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_canvas_shared_delete(lease: *mut std::ffi::c_void) {
+    if !lease.is_null() {
+        drop(unsafe { Box::from_raw(lease.cast::<Arc<wgpu_shared::canvas::CanvasPublication>>()) });
     }
-    valid
 }
 
 fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) -> bool {
@@ -797,7 +712,7 @@ fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) 
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .level_count(1)
                     .layer_count(1);
-                if !export.direct {
+                {
                     raw.cmd_pipeline_barrier(
                         command,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -843,19 +758,11 @@ fn submit(export: &mut Export, producer_queue: &Arc<wgc::device::queue::Queue>) 
                     &[vk::ImageMemoryBarrier::default()
                         .image(export.image)
                         .subresource_range(range)
-                        .old_layout(if export.direct {
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL
-                        } else {
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL
-                        })
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                         .new_layout(vk::ImageLayout::GENERAL)
                         .src_queue_family_index(hal.queue_family_index())
                         .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
-                        .src_access_mask(if export.direct {
-                            vk::AccessFlags::TRANSFER_READ
-                        } else {
-                            vk::AccessFlags::TRANSFER_WRITE
-                        })],
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)],
                 );
                 encoded = true;
             });
@@ -915,25 +822,11 @@ pub extern "C" fn wgpu_canvas_export(
         log::warn!(
             "WebGPU native canvas texture={texture_id:?}: export submission failed; CPU fallback"
         );
-        if !export.direct || !export.submitted {
             retire(export);
             return ptr::null_mut();
         }
         *output = export.info;
-        output.direct = true;
-        output.memory_fd = -1;
-        output.ready_fd = -1;
-        export.source.destroy();
-        return Box::into_raw(Box::new(CanvasExport {
-            export: Some(export),
-        }));
-    }
-    *output = export.info;
-    output.direct = export.direct;
     output.ready_value = export.signal_value;
-    if export.direct {
-        export.source.destroy();
-    }
     Box::into_raw(Box::new(CanvasExport {
         export: Some(export),
     }))
@@ -970,15 +863,6 @@ mod tests {
         assert_eq!(EXPORTS.load(Ordering::Acquire), before);
     }
     #[test]
-    fn direct_target_waits_for_publication_not_initialization() {
-        assert!(!completion_at(Ok(0), true, 2));
-        assert!(!completion_at(Ok(1), true, 2));
-        assert!(!completion_at(Ok(2), false, 2));
-        assert!(completion_at(Ok(2), true, 2));
-        assert!(completion_at(Err(vk::Result::ERROR_DEVICE_LOST), false, 2));
-    }
-
-    #[test]
     fn native_completion_and_core_retirement_are_both_required() {
         assert!(!completion(Ok(0), true));
         assert!(!completion(Ok(1), false));
@@ -1009,4 +893,20 @@ mod tests {
         desc.usage = wgt::TextureUsages::COPY_SRC;
         assert!(!descriptor_supported(&desc));
     }
+}
+
+#[no_mangle]
+pub extern "C" fn wgpu_canvas_shared_poll(global: &Global) -> bool {
+    let pending = std::mem::take(&mut *global.shared_pending.lock().unwrap());
+    let pending = pending
+        .into_iter()
+        .filter(|lease| {
+            lease
+                .upgrade()
+                .is_some_and(|lease| unsafe { lease.poll_producer_on_owner_thread() })
+        })
+        .collect::<Vec<_>>();
+    let mut all_pending = global.shared_pending.lock().unwrap();
+    all_pending.extend(pending);
+    !all_pending.is_empty()
 }

@@ -73,8 +73,171 @@ pub struct WrVulkanRelease {
     receipt: PendingExternalRelease,
 }
 
+pub struct WrVulkanSharedImage {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    registry: Rc<ExternalTextureRegistry>,
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    image: Rc<webrender::wgpu::SharedImage>,
+    normal: ExternalTextureHandle,
+    opaque: ExternalTextureHandle,
+}
+impl Drop for WrVulkanSharedImage {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "vulkan", target_os = "linux"))]
+        {
+            let _ = self.registry.unregister(self.normal);
+            let _ = self.registry.unregister(self.opaque);
+        }
+    }
+}
+
+/// token is a live GPU-process Arc<CanvasPublication> created by wgpu_canvas_shared_export.
 #[no_mangle]
-pub extern "C" fn wr_vulkan_external_images_new(renderer: &Renderer) -> *mut WrVulkanExternalImages {
+pub unsafe extern "C" fn wr_vulkan_shared_image_supported(
+    images: &WrVulkanExternalImages,
+    token: *const std::ffi::c_void,
+    owner: u64,
+    publication: u64,
+) -> bool {
+    if token.is_null() {
+        return false;
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        let lease = unsafe { &*token.cast::<std::sync::Arc<webrender::wgpu::CanvasPublication>>() };
+        return images.registry.supports_shared(lease, owner, publication);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (images, token, owner, publication);
+        false
+    }
+}
+
+/// The trusted in-process token stays live for this call; owner and publication are route identities.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_new(
+    images: &WrVulkanExternalImages,
+    token: *const std::ffi::c_void,
+    owner: u64,
+    publication: u64,
+) -> *mut WrVulkanSharedImage {
+    if token.is_null() {
+        return ptr::null_mut();
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        let lease = unsafe { &*token.cast::<std::sync::Arc<webrender::wgpu::CanvasPublication>>() };
+        let result = (|| {
+            let image = images
+                .registry
+                .import_shared(lease.clone(), owner, publication)?;
+            let normal = images.registry.register_shared(&image, false)?;
+            let opaque = match images.registry.register_shared(&image, true) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = images.registry.unregister(normal);
+                    return Err(error);
+                }
+            };
+            Ok(WrVulkanSharedImage {
+                registry: images.registry.clone(),
+                image,
+                normal,
+                opaque,
+            })
+        })();
+        return boxed(result);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (images, token, owner, publication);
+        ptr::null_mut()
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_delete(image: *mut WrVulkanSharedImage) {
+    if !image.is_null() {
+        drop(unsafe { Box::from_raw(image) });
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_shared_image_matches_context(
+    image: &WrVulkanSharedImage,
+    images: &WrVulkanExternalImages,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return Rc::ptr_eq(&image.registry, &images.registry);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, images);
+        false
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_shared_image_acquire(
+    image: &WrVulkanSharedImage,
+    channel: u8,
+    output: &mut ExternalTextureHandle,
+) -> WrVulkanAcquireStatus {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        if channel > 1 || !image.registry.is_attached() {
+            return WrVulkanAcquireStatus::Failed;
+        }
+        return match image.image.prepare() {
+            Ok(true) => {
+                *output = if channel == 0 {
+                    image.normal
+                } else {
+                    image.opaque
+                };
+                WrVulkanAcquireStatus::Ready
+            }
+            Ok(false) => WrVulkanAcquireStatus::Pending,
+            Err(error) => {
+                log::warn!("Shared canvas acquire: {error}");
+                WrVulkanAcquireStatus::Failed
+            }
+        };
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, channel, output);
+        WrVulkanAcquireStatus::Failed
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_readback(
+    image: &WrVulkanSharedImage,
+    output: *mut u8,
+    length: usize,
+) -> bool {
+    if output.is_null() {
+        return false;
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return image
+            .registry
+            .readback_shared(&image.image, unsafe {
+                std::slice::from_raw_parts_mut(output, length)
+            })
+            .is_ok();
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, output, length);
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wr_vulkan_external_images_new(
+    renderer: &Renderer,
+) -> *mut WrVulkanExternalImages {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     if let Some(registry) = renderer.wgpu_external_textures() {
         return Box::into_raw(Box::new(WrVulkanExternalImages { registry }));
@@ -112,6 +275,18 @@ pub extern "C" fn wr_vulkan_process_native_work(
         if let Some(progress) = progress {
             *progress = false;
         }
+        false
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_native_retirement_pending(work_id: &mut u64) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return webrender::wgpu::native_retirement_pending(work_id);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        *work_id = 0;
         false
     }
 }
@@ -154,14 +329,20 @@ pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports(
     }
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_opaque(caps: &WrVulkanDmaBufCapabilities) -> bool {
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_opaque(
+    caps: &WrVulkanDmaBufCapabilities,
+) -> bool {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     return caps.capabilities.supports_opaque();
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     { let _ = caps; false }
 }
 #[no_mangle]
-pub unsafe extern "C" fn wr_vulkan_dmabuf_readback(image: &WrVulkanDmaBufImage, output: *mut u8, length: usize) -> bool {
+pub unsafe extern "C" fn wr_vulkan_dmabuf_readback(
+    image: &WrVulkanDmaBufImage,
+    output: *mut u8,
+    length: usize,
+) -> bool {
     if output.is_null() { return false; }
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     return image.image.registry.readback(&image.image.raw, unsafe { std::slice::from_raw_parts_mut(output, length) }).is_ok();
@@ -169,7 +350,9 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_readback(image: &WrVulkanDmaBufImage, 
     { let _ = (image, output, length); false }
 }
 #[no_mangle]
-pub unsafe extern "C" fn wr_vulkan_dmabuf_capabilities_delete(object: *mut WrVulkanDmaBufCapabilities) {
+pub unsafe extern "C" fn wr_vulkan_dmabuf_capabilities_delete(
+    object: *mut WrVulkanDmaBufCapabilities,
+) {
     if !object.is_null() {
         drop(Box::from_raw(object));
     }
@@ -177,7 +360,9 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_capabilities_delete(object: *mut WrVul
 #[no_mangle]
 pub extern "C" fn wr_vulkan_timeline_new(images: &WrVulkanExternalImages) -> *mut WrVulkanTimeline {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    return boxed(SharedTimeline::new(images.registry.device()).map(|timeline| WrVulkanTimeline { timeline }));
+    return boxed(
+        SharedTimeline::new(images.registry.device()).map(|timeline| WrVulkanTimeline { timeline }),
+    );
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
         let _ = images;
@@ -190,7 +375,9 @@ pub unsafe extern "C" fn wr_vulkan_timeline_import(
     descriptor: &WrVulkanTimelineDescriptor,
 ) -> *mut WrVulkanTimeline {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
-    return boxed(import_timeline(images, descriptor).map(|timeline| WrVulkanTimeline { timeline }));
+    return boxed(
+        import_timeline(images, descriptor).map(|timeline| WrVulkanTimeline { timeline }),
+    );
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
         let _ = (images, descriptor);
@@ -270,12 +457,12 @@ pub unsafe extern "C" fn wr_vulkan_dmabuf_acquire(
         Ok(true) => {
             *output = image.image.handle;
             WrVulkanAcquireStatus::Ready
-        },
+        }
         Ok(false) => WrVulkanAcquireStatus::Pending,
         Err(error) => {
             log::error!("Native image acquire: {}", error);
             WrVulkanAcquireStatus::Failed
-        },
+        }
     };
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
@@ -330,7 +517,8 @@ pub extern "C" fn wr_vulkan_dmabuf_release(image: &WrVulkanDmaBufImage) -> *mut 
     return boxed(image.image.registry.release(&image.image.raw).map(|receipt| {
         let _ = image.image.registry.flush_idle();
         WrVulkanRelease { receipt }
-    }));
+            }),
+    );
     #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
     {
         let _ = image;
@@ -338,7 +526,9 @@ pub extern "C" fn wr_vulkan_dmabuf_release(image: &WrVulkanDmaBufImage) -> *mut 
     }
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_dmabuf_last_release(image: &WrVulkanDmaBufImage) -> *mut WrVulkanRelease {
+pub extern "C" fn wr_vulkan_dmabuf_last_release(
+    image: &WrVulkanDmaBufImage,
+) -> *mut WrVulkanRelease {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     if let Some(receipt) = image.image.raw.last_release() {
         return Box::into_raw(Box::new(WrVulkanRelease { receipt }));
@@ -356,7 +546,9 @@ pub extern "C" fn wr_vulkan_release_value(receipt: Option<&WrVulkanRelease>) -> 
     0
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_release_status(receipt: Option<&WrVulkanRelease>) -> WrVulkanReleaseStatus {
+pub extern "C" fn wr_vulkan_release_status(
+    receipt: Option<&WrVulkanRelease>,
+) -> WrVulkanReleaseStatus {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     if let Some(receipt) = receipt {
         return match receipt.receipt.status() {
@@ -388,25 +580,43 @@ pub struct WrVulkanForeignRgbImage {
     image:ImportedImage,
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_foreign_rgb(caps:&WrVulkanDmaBufCapabilities,descriptor:&WrVulkanForeignRgbDescriptor,drm_major:u64,drm_minor:u64)->bool {
+pub extern "C" fn wr_vulkan_dmabuf_capabilities_supports_foreign_rgb(
+    caps: &WrVulkanDmaBufCapabilities,
+    descriptor: &WrVulkanForeignRgbDescriptor,
+    drm_major: u64,
+    drm_minor: u64,
+) -> bool {
     #[cfg(all(feature="vulkan",target_os="linux"))]
-    return foreign_layout(descriptor).map(|layout|caps.capabilities.supports_foreign_rgb([drm_major,drm_minor],layout)).unwrap_or(false);
+    return foreign_layout(descriptor)
+        .map(|layout| {
+            caps.capabilities
+                .supports_foreign_rgb([drm_major, drm_minor], layout)
+        })
+        .unwrap_or(false);
     #[cfg(not(all(feature="vulkan",target_os="linux")))]
     {let _=(caps,descriptor,drm_major,drm_minor);false}
 }
 /// The borrowed descriptor names a fully initialized unprotected allocation on the
 /// declared render node. Its aliases stay immutable until the Complete return.
 #[no_mangle]
-pub unsafe extern "C" fn wr_vulkan_foreign_rgb_import(images:&WrVulkanExternalImages,descriptor:&WrVulkanForeignRgbDescriptor)->*mut WrVulkanForeignRgbImage {
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_import(
+    images: &WrVulkanExternalImages,
+    descriptor: &WrVulkanForeignRgbDescriptor,
+) -> *mut WrVulkanForeignRgbImage {
     #[cfg(all(feature="vulkan",target_os="linux"))]
-    return boxed(import_foreign_image(images,descriptor).map(|image|WrVulkanForeignRgbImage{image}));
+    return boxed(
+        import_foreign_image(images, descriptor).map(|image| WrVulkanForeignRgbImage { image }),
+    );
     #[cfg(not(all(feature="vulkan",target_os="linux")))]
     {let _=(images,descriptor);ptr::null_mut()}
 }
 #[no_mangle]
 pub unsafe extern "C" fn wr_vulkan_foreign_rgb_delete(image:*mut WrVulkanForeignRgbImage){if !image.is_null(){drop(Box::from_raw(image));}}
 #[no_mangle]
-pub extern "C" fn wr_vulkan_foreign_rgb_matches_context(image:&WrVulkanForeignRgbImage,images:&WrVulkanExternalImages)->bool {
+pub extern "C" fn wr_vulkan_foreign_rgb_matches_context(
+    image: &WrVulkanForeignRgbImage,
+    images: &WrVulkanExternalImages,
+) -> bool {
     #[cfg(all(feature="vulkan",target_os="linux"))]
     return Rc::ptr_eq(&image.image.registry,&images.registry);
     #[cfg(not(all(feature="vulkan",target_os="linux")))]
@@ -421,31 +631,62 @@ pub extern "C" fn wr_vulkan_foreign_rgb_has_access(image:&WrVulkanForeignRgbImag
 }
 /// ready_fd is a genuine EGL SYNC_FD covering complete producer initialization.
 #[no_mangle]
-pub unsafe extern "C" fn wr_vulkan_foreign_rgb_acquire(image:&WrVulkanForeignRgbImage,ready_fd:i32,output:&mut ExternalTextureHandle)->WrVulkanAcquireStatus {
+pub unsafe extern "C" fn wr_vulkan_foreign_rgb_acquire(
+    image: &WrVulkanForeignRgbImage,
+    ready_fd: i32,
+    output: &mut ExternalTextureHandle,
+) -> WrVulkanAcquireStatus {
     #[cfg(all(feature="vulkan",target_os="linux"))]
-    return match fd(&ready_fd).and_then(|ready|image.image.registry.acquire_foreign(&image.image.raw,ready)) {
-        Ok(true)=>{*output=image.image.handle;WrVulkanAcquireStatus::Ready},
+    return match fd(&ready_fd).and_then(|ready| {
+        image
+            .image
+            .registry
+            .acquire_foreign(&image.image.raw, ready)
+    }) {
+        Ok(true) => {
+            *output = image.image.handle;
+            WrVulkanAcquireStatus::Ready
+        }
         Ok(false)=>WrVulkanAcquireStatus::Pending,
-        Err(error)=>{log::error!("Foreign image acquire: {}",error);WrVulkanAcquireStatus::Failed},
+        Err(error) => {
+            log::error!("Foreign image acquire: {}", error);
+            WrVulkanAcquireStatus::Failed
+        }
     };
     #[cfg(not(all(feature="vulkan",target_os="linux")))]
     {let _=(image,ready_fd,output);WrVulkanAcquireStatus::Failed}
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_foreign_rgb_opaque_view(image:&WrVulkanForeignRgbImage,output:&mut ExternalTextureHandle)->bool {
+pub extern "C" fn wr_vulkan_foreign_rgb_opaque_view(
+    image: &WrVulkanForeignRgbImage,
+    output: &mut ExternalTextureHandle,
+) -> bool {
     #[cfg(all(feature="vulkan",target_os="linux"))]
     if let Some(handle)=checked(image.image.opaque()){*output=handle;return true;}
     let _=(image,output);false
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_foreign_rgb_release(image:&WrVulkanForeignRgbImage)->*mut WrVulkanRelease {
+pub extern "C" fn wr_vulkan_foreign_rgb_release(
+    image: &WrVulkanForeignRgbImage,
+) -> *mut WrVulkanRelease {
     #[cfg(all(feature="vulkan",target_os="linux"))]
-    return boxed(image.image.registry.release(&image.image.raw).map(|receipt|{let _=image.image.registry.flush_idle();WrVulkanRelease{receipt}}));
+    return boxed(
+        image
+            .image
+            .registry
+            .release(&image.image.raw)
+            .map(|receipt| {
+                let _ = image.image.registry.flush_idle();
+                WrVulkanRelease { receipt }
+            }),
+    );
     #[cfg(not(all(feature="vulkan",target_os="linux")))]
     {let _=image;ptr::null_mut()}
 }
 #[no_mangle]
-pub extern "C" fn wr_vulkan_foreign_rgb_last_release(image:&WrVulkanForeignRgbImage)->*mut WrVulkanRelease {
+pub extern "C" fn wr_vulkan_foreign_rgb_last_release(
+    image: &WrVulkanForeignRgbImage,
+) -> *mut WrVulkanRelease {
     #[cfg(all(feature="vulkan",target_os="linux"))]
     if let Some(receipt)=image.image.raw.last_release(){return Box::into_raw(Box::new(WrVulkanRelease{receipt}));}
     let _=image;ptr::null_mut()
@@ -505,7 +746,9 @@ mod enabled {
             Ok(handle)
         }
     }
-    pub(super) fn image_descriptor(d: &WrVulkanDmaBufDescriptor) -> Result<DmaBufImageDescriptor, String> {
+    pub(super) fn image_descriptor(
+        d: &WrVulkanDmaBufDescriptor,
+    ) -> Result<DmaBufImageDescriptor, String> {
         let format = match d.format {
             ImageFormat::RGBA8 => webrender::wgpu::TextureFormat::Rgba8Unorm,
             ImageFormat::BGRA8 => webrender::wgpu::TextureFormat::Bgra8Unorm,
@@ -549,11 +792,33 @@ mod enabled {
             opaque: Cell::new(None),
         })
     }
-    pub(super) fn foreign_layout(d:&WrVulkanForeignRgbDescriptor)->Result<ForeignRgbLayout,String>{ForeignRgbLayout::new([d.width,d.height],d.fourcc,d.modifier,d.stride,d.offset)}
-    pub(super) unsafe fn import_foreign_image(images:&WrVulkanExternalImages,d:&WrVulkanForeignRgbDescriptor)->Result<ImportedImage,String>{
-        let allocation=images.registry.device().import_foreign_rgb(fd(&d.fd)?,fd(&d.render_node_fd)?,foreign_layout(d)?)?;
+    pub(super) fn foreign_layout(
+        d: &WrVulkanForeignRgbDescriptor,
+    ) -> Result<ForeignRgbLayout, String> {
+        ForeignRgbLayout::new(
+            [d.width, d.height],
+            d.fourcc,
+            d.modifier,
+            d.stride,
+            d.offset,
+        )
+    }
+    pub(super) unsafe fn import_foreign_image(
+        images: &WrVulkanExternalImages,
+        d: &WrVulkanForeignRgbDescriptor,
+    ) -> Result<ImportedImage, String> {
+        let allocation = images.registry.device().import_foreign_rgb(
+            fd(&d.fd)?,
+            fd(&d.render_node_fd)?,
+            foreign_layout(d)?,
+        )?;
         let raw=images.registry.import_foreign(allocation)?;let handle=images.registry.register(&raw,false)?;
-        Ok(ImportedImage{registry:images.registry.clone(),raw,handle,opaque:Cell::new(None)})
+        Ok(ImportedImage {
+            registry: images.registry.clone(),
+            raw,
+            handle,
+            opaque: Cell::new(None),
+        })
     }
 
 }

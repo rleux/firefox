@@ -37,6 +37,7 @@ pub struct SharedTimeline {
     pub(in crate::device::wgpu) semaphore: vk::Semaphore,
     last_signal: Option<Cell<u64>>,
     max_difference: u64,
+    exportable: bool,
 }
 pub(in crate::device::wgpu) fn properties(owner: &Device) -> ([u8; 16], [u8; 16], u64) {
     *owner.native_cache.properties.get_or_init(|| {
@@ -71,9 +72,9 @@ impl Drop for SharedTimeline {
     }
 }
 impl SharedTimeline {
-    fn create(owner: &Arc<Device>, producer: bool) -> Result<Rc<Self>, String> {
+    fn create(owner: &Arc<Device>, producer: bool, exportable: bool) -> Result<Rc<Self>, String> {
         owner.check().map_err(|e| e.to_string())?;
-        if !owner.supports_dma_buf() {
+        if exportable && !owner.supports_dma_buf() {
             return Err("External timelines unavailable".into());
         }
         let mut ty =
@@ -81,7 +82,7 @@ impl SharedTimeline {
         let mut export = vk::ExportSemaphoreCreateInfo::default()
             .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
         let mut info = vk::SemaphoreCreateInfo::default().push_next(&mut ty);
-        if producer {
+        if exportable && producer {
             info = info.push_next(&mut export);
         }
         let semaphore = unsafe {
@@ -96,14 +97,18 @@ impl SharedTimeline {
             semaphore,
             last_signal: producer.then(|| Cell::new(0)),
             max_difference: properties(owner).2,
+            exportable,
         }))
     }
     pub fn new(owner: &Arc<Device>) -> Result<Rc<Self>, String> {
-        Self::create(owner, true)
+        Self::create(owner, true, true)
+    }
+    pub(in crate::device::wgpu) fn local(owner: &Arc<Device>) -> Result<Rc<Self>, String> {
+        Self::create(owner, true, false)
     }
     pub fn export(&self) -> Result<TimelineHandle, String> {
         self.owner.check().map_err(|e| e.to_string())?;
-        if self.last_signal.is_none() {
+        if !self.exportable || self.last_signal.is_none() {
             return Err("Imported timeline cannot export".into());
         }
         let fd = unsafe {
@@ -126,7 +131,7 @@ impl SharedTimeline {
         if (device, driver) != (handle.device_uuid, handle.driver_uuid) {
             return Err("Timeline identity mismatch".into());
         }
-        let result = Self::create(owner, false)?;
+        let result = Self::create(owner, false, true)?;
         let fd = handle.fd.try_clone().map_err(|e| e.to_string())?;
         unsafe {
             owner.external_semaphore_fd().import_semaphore_fd(

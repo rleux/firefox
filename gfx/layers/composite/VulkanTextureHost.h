@@ -6,6 +6,7 @@
 #define MOZILLA_GFX_VULKANTEXTUREHOST_H
 
 #include <functional>
+#include <memory>
 
 #include "mozilla/layers/TextureHost.h"
 #include "mozilla/layers/VulkanImages.h"
@@ -20,6 +21,10 @@ class VulkanTextureHost final : public TextureHost {
   static already_AddRefed<VulkanTextureHost> Create(
       TextureFlags aFlags, const VulkanImagePublication& aPublication,
       std::function<void(VulkanImageReturnMessage&&)>&& aReturn);
+
+  static already_AddRefed<VulkanTextureHost> CreateShared(
+      TextureFlags, std::shared_ptr<void>, uint64_t aOwner,
+      uint64_t aPublication, const gfx::IntSize&, gfx::SurfaceFormat);
 
   VulkanTextureHost* AsVulkanTextureHost() override { return this; }
   webgpu::FrontBufferSnapshot GetSnapshot();
@@ -40,6 +45,7 @@ class VulkanTextureHost final : public TextureHost {
 
  private:
   VulkanTextureHost(TextureFlags, const VulkanImagePublication&);
+  VulkanTextureHost(TextureFlags, const gfx::IntSize&, gfx::SurfaceFormat);
   ~VulkanTextureHost() override = default;
   const gfx::IntSize mSize;
   const gfx::SurfaceFormat mFormat;

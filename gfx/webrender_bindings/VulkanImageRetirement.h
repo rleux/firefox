@@ -31,6 +31,9 @@ class VulkanImageRetirement final {
   std::deque<std::function<void()>> mCallbacks;
   base::RepeatingTimer<VulkanImageRetirement> mTimer;
   bool mShuttingDown = false;
+  uint32_t mSharedPolls = 0;
+  uint32_t mPollDelayMs = 2;
+  uint64_t mWorkId = 0;
 };
 }  // namespace mozilla::wr
 #endif
