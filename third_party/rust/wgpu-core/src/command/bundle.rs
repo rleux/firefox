@@ -85,6 +85,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{convert::Infallible, mem, num::NonZeroU32, ops::Range, str};
+use wgpu_sync::atomic::AtomicBool;
 
 use arrayvec::ArrayVec;
 use thiserror::Error;
@@ -595,6 +596,7 @@ impl RenderBundleEncoder {
             is_depth_read_only: self.is_depth_read_only,
             is_stencil_read_only: self.is_stencil_read_only,
             device: device.clone(),
+            buffer_init_complete: AtomicBool::new(buffer_memory_init_actions.is_empty()),
             buffer_memory_init_actions,
             texture_memory_init_actions,
             label: desc.label.to_string(),
@@ -1434,6 +1436,7 @@ pub struct RenderBundle {
     pub(super) is_stencil_read_only: bool,
     pub(crate) device: Arc<Device>,
     pub(super) buffer_memory_init_actions: Vec<BufferInitTrackerAction>,
+    pub(super) buffer_init_complete: AtomicBool,
     pub(super) texture_memory_init_actions: Vec<TextureInitTrackerAction>,
     /// The `label` from the descriptor used to create the resource.
     label: String,
@@ -1486,6 +1489,7 @@ impl RenderBundle {
             is_depth_read_only: false,
             is_stencil_read_only: false,
             buffer_memory_init_actions: Vec::new(),
+            buffer_init_complete: AtomicBool::new(true),
             texture_memory_init_actions: Vec::new(),
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(device.tracker_indices.bundles.clone()),

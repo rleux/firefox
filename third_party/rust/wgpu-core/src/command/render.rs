@@ -1,5 +1,6 @@
 use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 use core::{convert::Infallible, fmt, num::NonZeroU32, ops::Range, str};
+use wgpu_sync::atomic::Ordering;
 use smallvec::SmallVec;
 
 use arrayvec::ArrayVec;
@@ -3549,18 +3550,20 @@ fn execute_bundle(
         );
     }
 
-    state.pass.base.buffer_memory_init_actions.extend(
-        bundle
-            .buffer_memory_init_actions
-            .iter()
-            .filter_map(|action| {
-                action
-                    .buffer
-                    .initialization_status
-                    .read()
-                    .check_action(action)
+    if !bundle.buffer_init_complete.load(Ordering::Acquire) {
+        let mut complete = true;
+        state.pass.base.buffer_memory_init_actions.extend(
+            bundle.buffer_memory_init_actions.iter().filter_map(|action| {
+                let pending = action.buffer.initialization_status.read().check_action(action);
+                complete &= pending.is_none();
+                pending
             }),
-    );
+        );
+        if complete {
+            // Buffer initialization is monotonic; texture discards remain checked below.
+            bundle.buffer_init_complete.store(true, Ordering::Release);
+        }
+    }
     for action in bundle.texture_memory_init_actions.iter() {
         state.pass.pending_discard_init_fixups.extend(
             state
