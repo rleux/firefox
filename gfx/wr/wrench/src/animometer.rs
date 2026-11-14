@@ -222,20 +222,7 @@ impl Scene {
         for (index, chunk) in data.chunks(14 * 1024 * 1024).enumerate() {
             queue.write_buffer(uniforms.clone(), (index * 14 * 1024 * 1024) as u64, chunk);
         }
-        let texture = device.create_texture(&core::resource::TextureDescriptor {
-            label: None,
-            size: wgt::Extent3d {
-                width: SIDE,
-                height: SIDE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgt::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgt::TextureUsages::RENDER_ATTACHMENT | wgt::TextureUsages::COPY_SRC,
-            view_formats: vec![],
-        });
+        let texture = Self::target(&device);
         let view = texture.create_view(&Default::default());
         let start = Instant::now();
         let mut recorder =
@@ -290,12 +277,35 @@ impl Scene {
             .map_err(|e| format!("{e:?}"))
     }
 
-    fn frame(&self, time: f32, inline: bool) -> Result<Value, String> {
+    fn target(device: &Arc<core::device::Device>) -> Arc<core::resource::Texture> {
+        device.create_texture(&core::resource::TextureDescriptor {
+            label: None,
+            size: wgt::Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgt::TextureUsages::RENDER_ATTACHMENT | wgt::TextureUsages::COPY_SRC,
+            view_formats: vec![],
+        })
+    }
+
+    fn frame(&mut self, time: f32, inline: bool, transient: bool) -> Result<Value, String> {
         let start = Instant::now();
         self.queue
             .write_buffer(self.uniforms.clone(), self.time_offset, &time.to_le_bytes());
         let update_ns = start.elapsed().as_nanos() as u64;
         let start = Instant::now();
+        if transient {
+            // Canvas publication retires the previous target on the same device.
+            self.texture.destroy();
+            self.texture = Self::target(&self.device);
+            self.view = self.texture.create_view(&Default::default());
+        }
         let encoder = self.device.create_command_encoder(&Default::default());
         let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
             color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
@@ -400,12 +410,12 @@ impl Scene {
         Ok(pixels)
     }
 
-    fn check(&self) -> Result<Value, String> {
+    fn check(&mut self, transient: bool) -> Result<Value, String> {
         let mut hashes = Vec::new();
         for time in [0.25, 1.25] {
-            self.frame(time, false)?;
+            self.frame(time, false, transient)?;
             let bundled = self.pixels()?;
-            self.frame(time, true)?;
+            self.frame(time, true, transient)?;
             let inline = self.pixels()?;
             if bundled != inline {
                 return Err("Bundle and inline pixels differ".into());
@@ -434,28 +444,29 @@ pub fn run(args: &clap::ArgMatches) -> Result<(), String> {
     let triangles = number("triangles", "100000")?;
     let iterations = number("iterations", "30")?;
     let warmup = number("warmup", "5")?;
-    if triangles == 0 || triangles > 200000 || iterations == 0 || warmup == 0 {
-        return Err("Require 1..200000 triangles and positive iterations/warmup".into());
+    if triangles == 0 || triangles > 200000 || iterations == 0 {
+        return Err("Require 1..200000 triangles and positive iterations".into());
     }
     let setup = Instant::now();
-    let scene = Scene::new(
+    let mut scene = Scene::new(
         triangles,
         args.is_present("dynamic_offsets"),
         args.is_present("validation"),
     )?;
     let setup_ns = setup.elapsed().as_nanos() as u64;
+    let transient = args.is_present("transient_target");
     let correctness = if args.is_present("check") {
-        scene.check()?
+        scene.check(transient)?
     } else {
         Value::Null
     };
     let inline = args.is_present("inline");
     for i in 0..warmup {
-        scene.frame(i as f32 / 60., inline)?;
+        scene.frame(i as f32 / 60., inline, transient)?;
     }
     let mut samples = Vec::new();
     for i in 0..iterations {
-        samples.push(scene.frame((i + warmup) as f32 / 60., inline)?);
+        samples.push(scene.frame((i + warmup) as f32 / 60., inline, transient)?);
     }
     let mut sorted = samples
         .iter()
@@ -463,7 +474,7 @@ pub fn run(args: &clap::ArgMatches) -> Result<(), String> {
         .collect::<Vec<_>>();
     sorted.sort_unstable();
     let report = json!({"benchmark": "animometer", "triangles": triangles,
-        "render_bundles": !inline, "dynamic_offsets": scene.dynamic, "uniform_stride": scene.stride,
+        "render_bundles": !inline, "transient_target": transient, "dynamic_offsets": scene.dynamic, "uniform_stride": scene.stride,
         "target_size": [SIDE, SIDE], "adapter": scene.adapter, "validation": args.is_present("validation"),
         "warmup": warmup, "iterations": iterations, "setup_ns": setup_ns,
         "bundle_build_ns": scene.bundle_build_ns, "encode_median_ns": sorted[sorted.len()/2],

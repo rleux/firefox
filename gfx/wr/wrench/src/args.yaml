@@ -253,6 +253,9 @@ subcommands:
               long: warmup
               takes_value: true
               help: Warmup frames (default 5)
+          - transient_target:
+              long: transient-target
+              help: Create and retire a render target each frame to model canvas texture lifetime
           - dynamic_offsets:
               long: dynamic-offsets
               help: Use one triangle bind group with dynamic offsets
