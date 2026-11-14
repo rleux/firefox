@@ -11,11 +11,27 @@ already satisfied. Buffer initialization is monotonic. The cache is set only
 after every saved action finds no uninitialized range; merely recording or
 dropping a command buffer does not satisfy it. Texture initialization and
 discard repair remain active, and resource destruction checks are separate.
-The change adds one AtomicBool per bind group; struct padding was not measured.
+The change adds one AtomicBool per bind group. Wrench DWARF reports a total
+BindGroup size of 296 bytes before and 304 bytes after this change; allocator
+size-class overhead and Firefox struct layout were not measured.
 
 The native inline regression covers dropped recordings, partial initialization,
 later writes, same-layout group switches and destruction. Existing texture,
 submission and bundle regressions also remain enabled.
+
+## Required and occupied slots
+
+Vertex state keeps required/occupied masks; bind-layout state keeps its occupied
+mask. Existing pipeline/vertex setters update required masks and limits, slot
+set/clear updates occupancy, and bundle resets start with empty masks. Draws
+still check the first missing required buffer, combined slot limits and their
+actual vertex/instance bounds. The fixed HAL capacities (16 vertex slots and
+8 groups) fit u32 masks. The regression clears high slots and required slots,
+checks combined limits and out-of-range draws, then verifies a valid draw.
+
+This adds two u32 fields to vertex state and one to the binder manager. Earlier
+independent dynamic pairs improved about 3.4%; repeated static results included
+regressions. This is not an established general static-path speedup.
 
 ## Checks and measurement scope
 
