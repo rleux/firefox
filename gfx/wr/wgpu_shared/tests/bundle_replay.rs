@@ -45,6 +45,10 @@ impl Fixture {
     }
 
     fn with_blend(blend: Option<wgt::BlendState>) -> Self {
+        Self::with_pipeline(blend, false)
+    }
+
+    fn with_pipeline(blend: Option<wgt::BlendState>, vertex_input: bool) -> Self {
         static START: std::sync::Once = std::sync::Once::new();
         START.call_once(|| {
             log::set_logger(&Logger).unwrap();
@@ -76,15 +80,21 @@ impl Fixture {
                 label: None,
                 runtime_checks: Default::default(),
             },
-            core::pipeline::ShaderModuleSource::Wgsl(Cow::Borrowed(
+            core::pipeline::ShaderModuleSource::Wgsl(Cow::Borrowed(if vertex_input {
+                r#"
+            @group(0) @binding(0) var<uniform> color: vec4f;
+            @vertex fn vs(@location(0) p:vec4f) -> @builtin(position) vec4f { return p; }
+            @fragment fn fs() -> @location(0) vec4f { return color; }
+        "#
+            } else {
                 r#"
             @group(0) @binding(0) var<uniform> color: vec4f;
             @vertex fn vs(@builtin(vertex_index) i:u32) -> @builtin(position) vec4f {
                 return vec4f(f32((i<<1u)&2u)*2.0-1.0,f32(i&2u)*2.0-1.0,0,1);
             }
             @fragment fn fs() -> @location(0) vec4f { return color; }
-        "#,
-            )),
+        "#
+            })),
         );
         let stage = |entry: &str| core::pipeline::ProgrammableStageDescriptor {
             module: shader.clone(),
@@ -98,7 +108,19 @@ impl Fixture {
                 layout: None,
                 vertex: core::pipeline::VertexState {
                     stage: stage("vs"),
-                    buffers: Cow::Borrowed(&[]),
+                    buffers: Cow::Owned(if vertex_input {
+                        vec![Some(core::pipeline::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgt::VertexStepMode::Vertex,
+                            attributes: Cow::Owned(vec![wgt::VertexAttribute {
+                                format: wgt::VertexFormat::Float32x4,
+                                offset: 0,
+                                shader_location: 0,
+                            }]),
+                        })]
+                    } else {
+                        vec![]
+                    }),
                 },
                 fragment: Some(core::pipeline::FragmentState {
                     stage: stage("fs"),
@@ -799,5 +821,114 @@ fn active_occlusion_query_uses_cpu_bundle_replay() {
     f.wait();
     assert_eq!(f.pixel(0, 0), [0, 255, 0, 255]);
     assert_eq!(f.draw(bundle), [0, 255, 0, 255]);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn vertex_and_index_destruction_remain_checked_after_unrelated_canvas_retirement() {
+    for destroy_index in [false, true] {
+        let f = Fixture::with_pipeline(None, true);
+        let uniform = f.buffer();
+        let group = f.group(uniform.clone(), 0);
+        let vertex = f.device.create_buffer(&core::resource::BufferDescriptor {
+            label: None,
+            size: 48,
+            usage: wgt::BufferUsages::VERTEX | wgt::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index = f.device.create_buffer(&core::resource::BufferDescriptor {
+            label: None,
+            size: 12,
+            usage: wgt::BufferUsages::INDEX | wgt::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut recorder =
+            f.device
+                .create_render_bundle_encoder(&core::command::RenderBundleEncoderDescriptor {
+                    label: None,
+                    color_formats: Cow::Owned(vec![Some(wgt::TextureFormat::Rgba8Unorm)]),
+                    depth_stencil: None,
+                    sample_count: 1,
+                    multiview: None,
+                });
+        recorder.set_pipeline(f.pipeline.clone());
+        recorder.set_bind_group(0, Some(group), &[]);
+        recorder.set_vertex_buffer(0, Some(vertex.clone()), 0, Some(48));
+        recorder.set_index_buffer(index.clone(), wgt::IndexFormat::Uint32, 0, Some(12));
+        recorder.draw_indexed(3, 1, 0, 0, 0);
+        let bundle = recorder.finish(&Default::default());
+        f.queue.write_buffer(
+            vertex.clone(),
+            0,
+            &[
+                -1.0f32, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0,
+            ]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>(),
+        );
+        f.queue.write_buffer(
+            index.clone(),
+            0,
+            &[0u32, 1, 2]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        for color in [
+            [0.0f32, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+        ] {
+            f.queue.write_buffer(
+                uniform.clone(),
+                0,
+                &color
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            let unrelated = f.device.create_texture(&core::resource::TextureDescriptor {
+                label: None,
+                size: wgt::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgt::TextureDimension::D2,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: vec![],
+            });
+            unrelated.destroy();
+            let expected = color.map(|v| (v * 255.0) as u8);
+            assert_eq!(f.draw(bundle.clone()), expected);
+        }
+        if destroy_index {
+            index.destroy();
+        } else {
+            vertex.destroy();
+        }
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        let command = f.encode(bundle.clone());
+        assert!(f.device.pop_error_scope().unwrap().is_none());
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        assert!(f.queue.submit(&[command]).is_none());
+        let error = validation_error(&f.device);
+        assert_eq!(error.fn_ident, "Queue::submit");
+        assert!(format!("{error:?}").contains("DestroyedResource"));
+        assert!(matches!(
+            error
+                .source
+                .downcast_ref::<core::device::queue::QueueSubmitError>(),
+            Some(core::device::queue::QueueSubmitError::CommandEncoder(_))
+        ));
+        assert!(f.device.is_valid());
+    }
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }

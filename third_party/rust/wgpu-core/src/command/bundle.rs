@@ -87,6 +87,9 @@ use alloc::{
 use core::{convert::Infallible, mem, num::NonZeroU32, ops::Range, str};
 use wgpu_sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(all(vulkan, feature = "std"))]
+use crate::resource::Texture;
+
 use arrayvec::ArrayVec;
 use thiserror::Error;
 
@@ -1457,6 +1460,70 @@ pub(crate) struct RenderBundleState {
     pub(super) context: RenderPassContext,
 }
 
+#[cfg(all(vulkan, feature = "std"))]
+#[derive(Debug)]
+struct CachedVulkanBundle {
+    raw: hal::vulkan::CachedRenderBundle,
+    buffers: Vec<Arc<Buffer>>,
+    textures: Vec<Arc<Texture>>,
+}
+
+#[cfg(all(vulkan, feature = "std"))]
+impl CachedVulkanBundle {
+    fn new(raw: hal::vulkan::CachedRenderBundle, commands: &[ArcRenderCommand]) -> Self {
+        let mut buffers = Vec::new();
+        let mut textures = Vec::new();
+        let mut seen_buffers = crate::FastHashSet::default();
+        let mut seen_textures = crate::FastHashSet::default();
+        let mut add_buffer = |buffer: &Arc<Buffer>| {
+            if seen_buffers.insert(Arc::as_ptr(buffer)) {
+                buffers.push(buffer.clone());
+            }
+        };
+        // Track normalized commands only; unused bindings remain submit-validated.
+        for command in commands {
+            match command {
+                ArcRenderCommand::SetBindGroup {
+                    bind_group: Some(group),
+                    ..
+                } => {
+                    for buffer in group.used.buffers.used_resources() {
+                        add_buffer(buffer);
+                    }
+                    for texture in group.used.views.used_textures() {
+                        if seen_textures.insert(Arc::as_ptr(texture)) {
+                            textures.push(texture.clone());
+                        }
+                    }
+                }
+                ArcRenderCommand::SetVertexBuffer {
+                    buffer: Some(buffer),
+                    ..
+                }
+                | ArcRenderCommand::SetIndexBuffer { buffer, .. } => add_buffer(buffer),
+                _ => {}
+            }
+        }
+        Self {
+            raw,
+            buffers,
+            textures,
+        }
+    }
+
+    fn validate_resources(&self, guard: &SnatchGuard) -> Result<(), DestroyedResourceError> {
+        // Native admission excludes external/AS bindings. Ordinary bind-group snatches
+        // cascade from destruction of one of these retained buffers or textures.
+        for buffer in &self.buffers {
+            buffer.try_raw(guard)?;
+        }
+        for texture in &self.textures {
+            texture.try_raw(guard)?;
+        }
+        Ok(())
+    }
+}
+
 // Vulkan can cache one native secondary recording; other cases replay the normalized stream.
 /// cbindgen:ignore
 #[derive(Debug)]
@@ -1480,7 +1547,7 @@ pub struct RenderBundle {
     native_eligible: bool,
     // Bounded to one render-pass/dynamic-state key; other configurations keep CPU replay.
     #[cfg(all(vulkan, feature = "std"))]
-    native_bundle: std::sync::OnceLock<Option<Arc<hal::vulkan::CachedRenderBundle>>>,
+    native_bundle: std::sync::OnceLock<Option<Arc<CachedVulkanBundle>>>,
 }
 
 impl Drop for RenderBundle {
@@ -1574,9 +1641,15 @@ impl RenderBundle {
                 .downcast_mut::<hal::vulkan::CommandEncoder>()
             {
                 if let Some(Some(bundle)) = self.native_bundle.get() {
-                    // A snatch generation change needs a full resource revalidation first.
-                    if !validate_bindings && unsafe { encoder.execute_cached_render_bundle(bundle) }
-                    {
+                    // Canvas retirement changes the device generation without destroying our bindings.
+                    if validate_bindings {
+                        bundle.validate_resources(snatch_guard)?;
+                    }
+                    if unsafe { encoder.execute_cached_render_bundle(&bundle.raw) } {
+                        if validate_bindings {
+                            self.bindings_validated_generation
+                                .store(generation, Ordering::Relaxed);
+                        }
                         return Ok(());
                     }
                 } else if self.native_bundle.get().is_none()
@@ -1602,9 +1675,12 @@ impl RenderBundle {
                             Ok(()) => {
                                 // Publish before execution: concurrent losers must never submit a pool
                                 // that is not retained by this bundle's command-buffer tracker.
-                                let _ = self.native_bundle.set(Some(Arc::new(bundle)));
+                                let _ = self.native_bundle.set(Some(Arc::new(
+                                    CachedVulkanBundle::new(bundle, &self.base.commands),
+                                )));
                                 if let Some(Some(bundle)) = self.native_bundle.get() {
-                                    if unsafe { encoder.execute_cached_render_bundle(bundle) } {
+                                    if unsafe { encoder.execute_cached_render_bundle(&bundle.raw) }
+                                    {
                                         self.bindings_validated_generation
                                             .store(generation, Ordering::Relaxed);
                                         return Ok(());
