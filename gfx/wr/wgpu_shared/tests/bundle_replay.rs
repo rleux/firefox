@@ -329,3 +329,271 @@ fn partial_initialization_and_later_writes_preserve_bundle_ranges() {
     drop(f);
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; diagnostic"]
+fn overwritten_binding_keeps_queue_submission_validation() {
+    let f = Fixture::new();
+    let dead = f.buffer();
+    let live = f.buffer();
+    let green = [0.0f32, 1.0, 0.0, 1.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(live.clone(), 0, &green);
+    let group = |buffer| {
+        f.device
+            .create_bind_group(&core::binding_model::BindGroupDescriptor {
+                label: None,
+                layout: f.pipeline.get_bind_group_layout(0),
+                entries: Cow::Owned(vec![core::binding_model::BindGroupEntry {
+                    binding: 0,
+                    resource: core::binding_model::BindingResource::Buffer(
+                        core::binding_model::BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: Some(16),
+                        },
+                    ),
+                }]),
+            })
+    };
+    let mut recorder =
+        f.device
+            .create_render_bundle_encoder(&core::command::RenderBundleEncoderDescriptor {
+                label: None,
+                color_formats: Cow::Owned(vec![Some(wgt::TextureFormat::Rgba8Unorm)]),
+                depth_stencil: None,
+                sample_count: 1,
+                multiview: None,
+            });
+    recorder.set_pipeline(f.pipeline.clone());
+    recorder.set_bind_group(0, Some(group(dead.clone())), &[]);
+    recorder.set_bind_group(0, Some(group(live)), &[]);
+    recorder.draw(3, 1, 0, 0);
+    let bundle = recorder.finish(&Default::default());
+    assert_eq!(f.draw(bundle.clone()), [0, 255, 0, 255]);
+    dead.destroy();
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    let submitted = f.queue.submit(&[f.encode(bundle.clone())]);
+    let error = f.device.pop_error_scope().unwrap();
+    eprintln!(
+        "OVERWRITTEN_BINDING_PROBE submitted={} error={error:?}",
+        submitted.is_some()
+    );
+    assert!(submitted.is_none());
+    let context = match error.expect("Expected destroyed resource validation") {
+        wgt::error::Error::Validation { source, .. } => {
+            source.downcast::<core::error::ContextError>().unwrap()
+        }
+        error => panic!("Expected validation error: {error:?}"),
+    };
+    assert_eq!(context.fn_ident, "Queue::submit");
+    assert!(matches!(
+        context
+            .source
+            .downcast_ref::<core::device::queue::QueueSubmitError>(),
+        Some(core::device::queue::QueueSubmitError::DestroyedResource(_))
+    ));
+    assert!(f.device.is_valid());
+    drop(bundle);
+    drop(f);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+fn validation_error(device: &Arc<core::device::Device>) -> Box<core::error::ContextError> {
+    match device
+        .pop_error_scope()
+        .unwrap()
+        .expect("Expected validation failure")
+    {
+        wgt::error::Error::Validation { source, .. } => {
+            source.downcast::<core::error::ContextError>().unwrap()
+        }
+        error => panic!("Expected validation error: {error:?}"),
+    }
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn destroyed_buffers_are_rejected_before_and_after_bundle_encoding() {
+    for recorded_first in [false, true] {
+        let f = Fixture::new();
+        let buffer = f.buffer();
+        let green = [0.0f32, 1.0, 0.0, 1.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let bundle = f.bundle(buffer.clone(), 0);
+        f.queue.write_buffer(buffer.clone(), 0, &green);
+        for _ in 0..3 {
+            assert_eq!(f.draw(bundle.clone()), [0, 255, 0, 255]);
+        }
+        // An unrelated snatch invalidates the cached generation without invalidating this bundle.
+        let unrelated = f.buffer();
+        unrelated.destroy();
+        assert_eq!(f.draw(bundle.clone()), [0, 255, 0, 255]);
+        let recorded = recorded_first.then(|| f.encode(bundle.clone()));
+        buffer.destroy();
+        let command = if let Some(command) = recorded {
+            command
+        } else {
+            f.device
+                .push_error_scope(wgt::error::ErrorFilter::Validation);
+            let command = f.encode(bundle.clone());
+            assert!(
+                f.device.pop_error_scope().unwrap().is_none(),
+                "Destroyed-resource errors must remain deferred until submission"
+            );
+            command
+        };
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        assert!(f.queue.submit(&[command]).is_none());
+        let error = validation_error(&f.device);
+        assert!(
+            format!("{error:?}").contains("DestroyedResource"),
+            "{error:?}"
+        );
+        assert_eq!(error.fn_ident, "Queue::submit");
+        assert!(f.device.is_valid());
+        drop(bundle);
+        drop(f);
+        assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn texture_discard_and_destruction_remain_checked_on_replay() {
+    let f = Fixture::new();
+    let source = f.device.create_texture(&core::resource::TextureDescriptor {
+        label: None,
+        size: wgt::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgt::TextureDimension::D2,
+        format: wgt::TextureFormat::Rgba8Unorm,
+        usage: wgt::TextureUsages::RENDER_ATTACHMENT | wgt::TextureUsages::TEXTURE_BINDING,
+        view_formats: vec![],
+    });
+    let shader = f.device.create_shader_module(
+        &core::pipeline::ShaderModuleDescriptor {
+            label: None,
+            runtime_checks: Default::default(),
+        },
+        core::pipeline::ShaderModuleSource::Wgsl(Cow::Borrowed(
+            r#"
+        @group(0) @binding(0) var image:texture_2d<f32>;
+        @vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f {
+            return vec4f(f32((i<<1u)&2u)*2.0-1.0,f32(i&2u)*2.0-1.0,0,1);
+        }
+        @fragment fn fs()->@location(0) vec4f{return textureLoad(image,vec2i(0),0);}
+    "#,
+        )),
+    );
+    let stage = |entry: &str| core::pipeline::ProgrammableStageDescriptor {
+        module: shader.clone(),
+        entry_point: Some(entry.to_string().into()),
+        constants: Default::default(),
+        zero_initialize_workgroup_memory: true,
+    };
+    let pipeline = f.device.create_render_pipeline(
+        core::pipeline::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: core::pipeline::VertexState {
+                stage: stage("vs"),
+                buffers: Cow::Borrowed(&[]),
+            },
+            fragment: Some(core::pipeline::FragmentState {
+                stage: stage("fs"),
+                targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
+                    format: wgt::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgt::ColorWrites::ALL,
+                })]),
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        }
+        .into(),
+    );
+    let group = f
+        .device
+        .create_bind_group(&core::binding_model::BindGroupDescriptor {
+            label: None,
+            layout: pipeline.get_bind_group_layout(0),
+            entries: Cow::Owned(vec![core::binding_model::BindGroupEntry {
+                binding: 0,
+                resource: core::binding_model::BindingResource::TextureView(
+                    source.create_view(&Default::default()),
+                ),
+            }]),
+        });
+    let mut recorder =
+        f.device
+            .create_render_bundle_encoder(&core::command::RenderBundleEncoderDescriptor {
+                label: None,
+                color_formats: Cow::Owned(vec![Some(wgt::TextureFormat::Rgba8Unorm)]),
+                depth_stencil: None,
+                sample_count: 1,
+                multiview: None,
+            });
+    recorder.set_pipeline(pipeline);
+    recorder.set_bind_group(0, Some(group), &[]);
+    recorder.draw(3, 1, 0, 0);
+    let bundle = recorder.finish(&Default::default());
+    for (store, expected) in [
+        (wgt::StoreOp::Store, [255, 0, 0, 255]),
+        (wgt::StoreOp::Discard, [0, 0, 0, 0]),
+    ] {
+        let encoder = f.device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+            color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+                view: source.create_view(&Default::default()),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: wgt::LoadOp::Clear(wgt::Color::RED),
+                store_op: store,
+            })]),
+            ..Default::default()
+        });
+        pass.end();
+        f.queue
+            .submit(&[encoder.finish(&Default::default())])
+            .unwrap();
+        f.wait();
+        assert_eq!(f.draw(bundle.clone()), expected);
+    }
+    source.destroy();
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    let command = f.encode(bundle.clone());
+    assert!(
+        f.device.pop_error_scope().unwrap().is_none(),
+        "Destroyed-resource errors must remain deferred until submission"
+    );
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    assert!(f.queue.submit(&[command]).is_none());
+    let error = validation_error(&f.device);
+    assert_eq!(error.fn_ident, "Queue::submit");
+    assert!(
+        format!("{error:?}").contains("DestroyedResource"),
+        "{error:?}"
+    );
+    assert!(f.device.is_valid());
+    drop(bundle);
+    drop(source);
+    drop(f);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}

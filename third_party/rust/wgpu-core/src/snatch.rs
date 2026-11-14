@@ -3,9 +3,9 @@ use core::{cell::UnsafeCell, fmt, mem::ManuallyDrop};
 use crate::lock::{rank, RankData, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// A guard that provides read access to snatchable data.
-pub struct SnatchGuard<'a>(RwLockReadGuard<'a, ()>);
+pub struct SnatchGuard<'a>(RwLockReadGuard<'a, usize>);
 /// A guard that allows snatching the snatchable data.
-pub struct ExclusiveSnatchGuard<'a>(#[expect(dead_code)] RwLockWriteGuard<'a, ()>);
+pub struct ExclusiveSnatchGuard<'a>(#[expect(dead_code)] RwLockWriteGuard<'a, usize>);
 
 /// A value that is mostly immutable but can be "snatched" if we need to destroy
 /// it early.
@@ -133,7 +133,7 @@ mod trace {
 
 /// A Device-global lock for all snatchable data.
 pub struct SnatchLock {
-    lock: RwLock<()>,
+    lock: RwLock<usize>,
 }
 
 impl SnatchLock {
@@ -143,7 +143,7 @@ impl SnatchLock {
     /// method should be called is when creating the device.
     pub unsafe fn new(rank: rank::LockRank) -> Self {
         SnatchLock {
-            lock: RwLock::new(rank, ()),
+            lock: RwLock::new(rank, 0),
         }
     }
 
@@ -162,7 +162,10 @@ impl SnatchLock {
     #[track_caller]
     pub fn write(&self) -> ExclusiveSnatchGuard<'_> {
         LockTrace::enter("write");
-        ExclusiveSnatchGuard(self.lock.write())
+        let mut guard = self.lock.write();
+        // Saturation disables generation caches instead of allowing stale values to match.
+        *guard = guard.saturating_add(1);
+        ExclusiveSnatchGuard(guard)
     }
 
     #[track_caller]
@@ -176,6 +179,10 @@ impl SnatchLock {
 }
 
 impl SnatchGuard<'_> {
+    pub(crate) fn generation(&self) -> usize {
+        *self.0
+    }
+
     /// Forget the guard, leaving the lock in a locked state with no guard.
     ///
     /// This is equivalent to `std::mem::forget`, but preserves the information about the lock
@@ -210,6 +217,20 @@ mod tests {
     use super::SnatchLock;
     use crate::lock::rank;
     use core::cell::Cell;
+
+    #[test]
+    fn generation_changes_only_with_exclusive_access_and_never_wraps() {
+        let lock = unsafe { SnatchLock::new(rank::DEVICE_SNATCHABLE_LOCK) };
+        assert_eq!(lock.read().generation(), 0);
+        assert_eq!(lock.read().generation(), 0);
+        drop(lock.write());
+        assert_eq!(lock.read().generation(), 1);
+        *lock.write().0 = usize::MAX - 1;
+        drop(lock.write());
+        assert_eq!(lock.read().generation(), usize::MAX);
+        drop(lock.write());
+        assert_eq!(lock.read().generation(), usize::MAX);
+    }
 
     /// A thing that reads a snatchlock during drop, to test destruction call order problems
     struct LockOnDrop(SnatchLock);
