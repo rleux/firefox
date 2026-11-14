@@ -56,3 +56,5 @@ validation and confirm the layer is absent; use the default five warmups and
 30 samples or specify `--warmup`/`--iterations`. Save source/binary hashes and
 compiler flags with each result. This is a replay benchmark, not browser FPS,
 full-chain GPU time or a replacement for WebGPU conformance tests.
+
+[Measured results, implementation and validation limits](benchmarks/animometer.md).
