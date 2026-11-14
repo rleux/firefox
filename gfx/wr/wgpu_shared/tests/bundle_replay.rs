@@ -932,3 +932,72 @@ fn vertex_and_index_destruction_remain_checked_after_unrelated_canvas_retirement
     }
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }
+
+impl Fixture {
+    fn inline_groups(
+        &self,
+        groups: &[Arc<core::binding_model::BindGroup>],
+    ) -> Arc<core::command::CommandBuffer> {
+        let encoder = self.device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+            color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+                view: self.target.create_view(&Default::default()),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+                store_op: wgt::StoreOp::Store,
+            })]),
+            ..Default::default()
+        });
+        pass.set_pipeline(self.pipeline.clone());
+        for group in groups {
+            pass.set_bind_group(0, Some(group.clone()), &[]);
+            pass.draw(3, 1, 0, 0);
+        }
+        pass.end();
+        encoder.finish(&Default::default())
+    }
+
+    fn draw_inline(&self, groups: &[Arc<core::binding_model::BindGroup>]) -> [u8; 4] {
+        self.queue.submit(&[self.inline_groups(groups)]).unwrap();
+        self.wait();
+        self.pixel(0, 0)
+    }
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn inline_initialization_dropped_recordings_and_same_layout_switches() {
+    let f = Fixture::new();
+    f.poison_allocator();
+    let buffer = f.buffer();
+    let a = f.group(buffer.clone(), 256);
+    let b = f.group(buffer.clone(), 0);
+    drop(f.inline_groups(&[a.clone()]));
+    f.queue
+        .write_buffer(buffer.clone(), 0, &1.0f32.to_le_bytes());
+    for _ in 0..3 {
+        assert_eq!(f.draw_inline(&[a.clone()]), [0; 4]);
+    }
+    let green = [0.0f32, 1.0, 0.0, 1.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(buffer.clone(), 256, &green);
+    assert_eq!(f.draw_inline(&[a.clone(), b.clone()]), [255, 0, 0, 0]);
+    assert_eq!(f.draw_inline(&[b.clone(), a.clone()]), [0, 255, 0, 255]);
+    let unrelated = f.buffer();
+    unrelated.destroy();
+    assert_eq!(f.draw_inline(&[a.clone()]), [0, 255, 0, 255]);
+    buffer.destroy();
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    assert!(f.queue.submit(&[f.inline_groups(&[a])]).is_none());
+    let error = validation_error(&f.device);
+    assert!(
+        format!("{error:?}").contains("DestroyedResource"),
+        "{error:?}"
+    );
+    assert!(f.device.is_valid());
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
