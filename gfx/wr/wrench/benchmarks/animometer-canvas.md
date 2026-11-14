@@ -141,3 +141,6 @@ Archive integrity and the local copy hash pass. Packaged ELF build IDs and all
 allocated sections match the verified built binaries after packaging. No user
 browser was installed/replaced, no global display/ptrace setting changed, and no
 branch was pushed.
+
+Further owned polling changes and their limits are recorded in
+[Animometer polling changes](animometer-polling.md).
