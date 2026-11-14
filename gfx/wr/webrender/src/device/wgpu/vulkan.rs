@@ -21,7 +21,7 @@ fn new_instance(options: &Options) -> Arc<core::instance::Instance> {
         flags: if options.validation { wgt::InstanceFlags::DEBUG | wgt::InstanceFlags::VALIDATION }
             else { wgt::InstanceFlags::empty() },
         memory_budget_thresholds: if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
-            wgt::MemoryBudgetThresholds { for_resource_creation: Some(95), for_device_loss: Some(99) }
+            wgt::MemoryBudgetThresholds { for_resource_creation: Some(95), for_device_loss: None }
         } else { wgt::MemoryBudgetThresholds::default() },
         ..wgt::InstanceDescriptor::new_without_display_handle()
     }, None)
