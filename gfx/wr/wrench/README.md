@@ -58,3 +58,9 @@ compiler flags with each result. This is a replay benchmark, not browser FPS,
 full-chain GPU time or a replacement for WebGPU conformance tests.
 
 [Measured results, implementation and validation limits](benchmarks/animometer.md).
+
+Use `--transient-target` when modeling canvas rendering: it destroys and recreates
+an attachment every frame. The default persistent target is a control that
+omits this lifecycle. Use `--warmup 0 --iterations 2` to record first bundle use.
+See the [canvas cache correction](benchmarks/animometer-canvas.md) for the browser
+profile, validation and corrected measurements.

@@ -5,6 +5,11 @@ that calls normal wgpu-core directly. It isolates the WebGPU Samples
 [Animometer](https://webgpu.github.io/webgpu-samples/?sample=animometer), pinned
 to upstream revision `e040ec1a20dbbe01afed30c812e825b2639cfe5b`.
 
+**Canvas lifecycle correction:** the initial persistent-target experiment below
+missed per-frame texture retirement, which disabled native cache reuse in the
+installed browser. See [the correction and actual browser profiles](animometer-canvas.md).
+Use `--transient-target` for canvas-oriented measurements.
+
 ## Reproduction and scope
 
 Build the Linux Wrench target with the checkout's vendored Cargo/toolchain setup:
@@ -51,10 +56,10 @@ WebGPU WGSL uses its normal validated path; WR's glslang path is unchanged.
 | Cache native Vulkan secondary commands | `ca1518a82532` | Static -99.897%; dynamic -99.888% vs preceding step | +382 / -11 |
 
 Counts include blank lines and comments, exclude checksums, tests, benchmark
-code and documentation. The final production diff is **+430 / -23, net +407**
+code and documentation. At `ca1518a82532`, the production diff was **+430 / -23, net +407**
 Rust lines. No new crates were added to the production path.
 
-The generation change's standalone speedup is inconclusive: inline controls
+At the original `ca1518a82532` snapshot, the generation change's standalone speedup was inconclusive: inline controls
 improved too, and Intel's smaller comparisons were noisy. Its invalidation
 mechanism is also required by the subsequent native cache. It adds one machine
 word per bundle and a word inside the existing destruction lock, with no new
@@ -63,15 +68,16 @@ atomic flag per bundle. Texture initialization/discard processing stays active.
 
 Native eligibility scanning increased measured bundle construction by about 5%
 on NVIDIA versus the preceding step. This excludes the first native recording,
-which happens on first execution. First-use encoding cost was not measured:
-the CLI requires a positive warmup and GDB optimized out the post-timer value.
+which happens on first execution. The initial first-use encoding cost was not measured. The CLI now accepts
+`--warmup 0`; the canvas correction reports the subsequent first-use measurements.
 
 ## Final warmed results
 
 Five process pairs per comparison, alternating AB/BA order; each process used
 five warmups and thirty measured frames. Both executables were prewarmed.
 Numbers below are medians of process medians for the original corrected
-baseline versus all retained optimizations.
+baseline versus the initial optimizations at `ca1518a82532`, using a persistent
+target. They do not represent the canvas retirement lifecycle; see the correction.
 
 | Hardware | CPU encoding, baseline → final | Sum of timed frame phases, baseline → final |
 | --- | --- | --- |
@@ -107,10 +113,10 @@ blend constants and stencil state. Different keys retain CPU replay. The owning
 HAL device keeps the render-pass cache alive.
 
 The existing snatch read guard prevents destruction during encoding. Every
-exclusive snatch acquisition increments a saturating generation. A cache hit is
-allowed only after a successful full replay in that generation. Any generation
-change forces ordinary replay before native reuse; saturation always disables
-generation-based reuse. Failed validation never publishes a generation.
+exclusive snatch acquisition increments a saturating generation. A cache hit initially required successful full replay in that generation.
+The canvas correction now validates only the cached bundle's unique normalized
+resources after a generation change, under the same guard. Saturation always
+requires that resource validation. Failed validation never publishes a generation.
 Submission-time validation remains responsible for resources destroyed after
 encoding. Buffer/texture destruction and discarded-texture regressions pass.
 
@@ -150,5 +156,6 @@ separate correctness tests and measurements.
   Cargo refused dev-dependency testing of the vendored non-workspace crate.
   Native tests exercise invalidation after unrelated and referenced destruction.
 
-No new Firefox distribution package was created, no browser FPS benchmark or
-full WebGPU conformance run was performed, and no branch was pushed.
+The subsequent release and canvas correction are documented separately. No
+browser FPS benchmark or full WebGPU conformance run was performed, and no
+branch was pushed.
