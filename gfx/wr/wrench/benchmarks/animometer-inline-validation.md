@@ -57,6 +57,17 @@ Those percentages apply to their respective intervals, not total browser CPU.
 A persistent-target control was stronger and is not substituted for canvas
 retirement measurements.
 
+## Binding Arc replacement
+
+The binder borrows the group layout Arc and replaces its retained layout only
+when the pointer changes. It similarly retains the payload group when it is
+already the same Arc. Native binding dirty state is always updated, including
+same-layout replacements and changing dynamic offsets. Offset data, resource
+tracking and late buffer sizes are still updated. No fields or dependencies
+are added. The same-layout A/B pixel regression and static/dynamic Wrench image
+checks exercise the behavior; earlier independent dynamic encoding improved
+about 2.1%, with small/noisy static timing changes.
+
 ## Checks and measurement scope
 
 Build Wrench and the assertion-enabled owned native tests with the normal
