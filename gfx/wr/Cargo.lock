@@ -7336,6 +7336,8 @@ dependencies = [
  "tracy-rs",
  "webrender",
  "webrender_build",
+ "wgpu-core 30.0.0",
+ "wgpu-types 30.0.0",
  "winit",
  "yaml-rust2",
 ]

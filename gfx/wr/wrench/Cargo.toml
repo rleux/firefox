@@ -45,6 +45,7 @@ core-foundation = "0.9"
 
 [features]
 vulkan = ["webrender/vulkan"]
+webgpu-perf = ["vulkan", "dep:wgpu-core", "dep:wgpu-types"]
 default = [ "env_logger" ]
 headless = [ "osmesa-sys", "osmesa-src" ]
 software = [ "swgl" ]
@@ -80,3 +81,7 @@ debuggable = true
 
 [build-dependencies]
 cc = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["std", "vulkan", "wgsl"] }
+wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "49325ca0a13bdc0787b1601138096cce743dd29e", optional = true, default-features = false, features = ["std"] }

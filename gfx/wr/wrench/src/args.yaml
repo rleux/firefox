@@ -238,6 +238,37 @@ subcommands:
               help: The input YAML file or capture directory
               required: true
               index: 1
+    - animometer:
+        about: 'Offscreen wgpu-core Animometer render-bundle encoding benchmark (Linux; webgpu-perf feature)'
+        args:
+          - triangles:
+              long: triangles
+              takes_value: true
+              help: Number of triangle draws (default 100000)
+          - iterations:
+              long: iterations
+              takes_value: true
+              help: Measured frames (default 30)
+          - warmup:
+              long: warmup
+              takes_value: true
+              help: Warmup frames (default 5)
+          - dynamic_offsets:
+              long: dynamic-offsets
+              help: Use one triangle bind group with dynamic offsets
+          - inline:
+              long: inline
+              help: Record inline commands instead of executing the prebuilt bundle
+          - check:
+              long: check
+              help: Check full bundle/inline pixel equality and animation at two times
+          - validation:
+              long: validation
+              help: Enable Vulkan validation for correctness checks (exclude from timings)
+          - output:
+              long: output
+              takes_value: true
+              help: Write JSON results and per-frame timings
     - test_invalidation:
         about: run invalidation tests
     - compare_perf:
