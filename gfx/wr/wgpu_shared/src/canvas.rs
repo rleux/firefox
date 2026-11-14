@@ -198,18 +198,16 @@ impl CanvasPublication {
         Some(lease)
     }
 
-    fn complete_producer(&self) -> bool {
+    fn producer_fence_value(&self) -> Option<Result<u64, hal::DeviceError>> {
+        let device = unsafe { self.producer.clone().as_hal::<hal::api::Vulkan>() }?;
+        let fence = unsafe { self.producer.clone().fence_as_hal::<hal::api::Vulkan>() }?;
+        Some(unsafe { device.get_fence_value(&fence) })
+    }
+
+    fn complete_producer(&self, completed: Result<u64, hal::DeviceError>) -> bool {
         if self.quarantined.load(Ordering::Acquire) {
             return false;
         }
-        let Some(device) = (unsafe { self.producer.clone().as_hal::<hal::api::Vulkan>() }) else {
-            return false;
-        };
-        let Some(fence) = (unsafe { self.producer.clone().fence_as_hal::<hal::api::Vulkan>() })
-        else {
-            return false;
-        };
-        let completed = unsafe { device.get_fence_value(&fence) };
         match producer_complete(
             completed,
             self.submission,
@@ -230,8 +228,19 @@ impl CanvasPublication {
         if self.ready.load(Ordering::Acquire) || self.quarantined.load(Ordering::Acquire) {
             return false;
         }
-        let _ = self.producer.poll(wgt::PollType::Poll);
-        if self.complete_producer() && !self.ready.swap(true, Ordering::AcqRel) {
+        let completed = self.producer_fence_value();
+        if matches!(completed, Some(Ok(value)) if value < self.submission) {
+            return true;
+        }
+        if !self.core_done.load(Ordering::Acquire)
+            || Arc::strong_count(self.keeper.original.as_ref().unwrap()) != 1
+            || !matches!(completed, Some(Ok(_)))
+        {
+            let _ = self.producer.poll(wgt::PollType::Poll);
+        }
+        if completed.is_some_and(|value| self.complete_producer(value))
+            && !self.ready.swap(true, Ordering::AcqRel)
+        {
             retain_pending(self.clone());
         }
         !self.ready.load(Ordering::Acquire) && !self.quarantined.load(Ordering::Acquire)
@@ -383,7 +392,10 @@ fn retain_pending(lease: Arc<CanvasPublication>) {
                         if lease.ready.load(Ordering::Acquire) {
                             return false;
                         }
-                        if lease.complete_producer() {
+                        if lease
+                            .producer_fence_value()
+                            .is_some_and(|value| lease.complete_producer(value))
+                        {
                             lease.ready.store(true, Ordering::Release);
                             return false;
                         }
