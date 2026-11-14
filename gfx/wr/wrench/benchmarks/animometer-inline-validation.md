@@ -33,6 +33,30 @@ This adds two u32 fields to vertex state and one to the binder manager. Earlier
 independent dynamic pairs improved about 3.4%; repeated static results included
 regressions. This is not an established general static-path speedup.
 
+## Resource lifetime validation reuse
+
+Bind groups cache successful buffer/texture liveness validation against the
+existing device snatch-lock generation. The read guard prevents destruction
+while encoding, so repeat bindings in that generation reuse the result.
+Every exclusive snatch-lock acquisition advances the saturating generation;
+even unrelated canvas retirement conservatively invalidates cached results.
+At usize::MAX the cache always misses. The group state and backend handle are
+still checked on every call, and failed resource validation publishes no hit.
+
+Submission rechecks every referenced bind group, including overwritten groups.
+It can reuse encoding's validation only if the generation is unchanged.
+Separate submission mapping/state checks remain active. One AtomicUsize is
+added per group, without another lock or reverse-reference graph. The inline
+regression warms caches, destroys resources before/after encoding, checks an
+overwritten binding, rejects a mapped buffer and succeeds after unmap. The
+texture regression also executes inline draws around discard and destruction.
+
+Earlier independent transient-target measurements reduced static submission
+by 26-37%, about 0.6-1.0 ms in those runs, and dynamic encoding about 2.6%.
+Those percentages apply to their respective intervals, not total browser CPU.
+A persistent-target control was stronger and is not substituted for canvas
+retirement measurements.
+
 ## Checks and measurement scope
 
 Build Wrench and the assertion-enabled owned native tests with the normal

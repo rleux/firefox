@@ -598,10 +598,28 @@ fn texture_discard_and_destruction_remain_checked_on_replay() {
                 sample_count: 1,
                 multiview: None,
             });
-    recorder.set_pipeline(pipeline);
-    recorder.set_bind_group(0, Some(group), &[]);
+    recorder.set_pipeline(pipeline.clone());
+    recorder.set_bind_group(0, Some(group.clone()), &[]);
     recorder.draw(3, 1, 0, 0);
     let bundle = recorder.finish(&Default::default());
+    let inline = || {
+        let encoder = f.device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+            color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+                view: f.target.create_view(&Default::default()),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+                store_op: wgt::StoreOp::Store,
+            })]),
+            ..Default::default()
+        });
+        pass.set_pipeline(pipeline.clone());
+        pass.set_bind_group(0, Some(group.clone()), &[]);
+        pass.draw(3, 1, 0, 0);
+        pass.end();
+        encoder.finish(&Default::default())
+    };
     for (store, expected) in [
         (wgt::StoreOp::Store, [255, 0, 0, 255]),
         (wgt::StoreOp::Discard, [0, 0, 0, 0]),
@@ -623,7 +641,13 @@ fn texture_discard_and_destruction_remain_checked_on_replay() {
             .unwrap();
         f.wait();
         assert_eq!(f.draw(bundle.clone()), expected);
+        for _ in 0..2 {
+            f.queue.submit(&[inline()]).unwrap();
+            f.wait();
+            assert_eq!(f.pixel(0, 0), expected);
+        }
     }
+    let inline_command = inline();
     source.destroy();
     f.device
         .push_error_scope(wgt::error::ErrorFilter::Validation);
@@ -635,6 +659,15 @@ fn texture_discard_and_destruction_remain_checked_on_replay() {
     f.device
         .push_error_scope(wgt::error::ErrorFilter::Validation);
     assert!(f.queue.submit(&[command]).is_none());
+    let error = validation_error(&f.device);
+    assert_eq!(error.fn_ident, "Queue::submit");
+    assert!(
+        format!("{error:?}").contains("DestroyedResource"),
+        "{error:?}"
+    );
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    assert!(f.queue.submit(&[inline_command]).is_none());
     let error = validation_error(&f.device);
     assert_eq!(error.fn_ident, "Queue::submit");
     assert!(
@@ -1084,5 +1117,85 @@ fn inline_vertex_state_clear_and_draw_bounds_stay_validated() {
         }
         assert!(f.device.is_valid());
     }
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn inline_cached_bindings_keep_submission_lifetime_and_mapping_checks() {
+    for encode_first in [false, true] {
+        let f = Fixture::new();
+        let buffer = f.buffer();
+        let group = f.group(buffer.clone(), 0);
+        assert_eq!(f.draw_inline(&[group.clone()]), [0; 4]);
+        let command = encode_first.then(|| f.inline_groups(&[group.clone()]));
+        buffer.destroy();
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        let command = command.unwrap_or_else(|| f.inline_groups(&[group.clone()]));
+        assert!(f.queue.submit(&[command]).is_none());
+        let error = validation_error(&f.device);
+        assert_eq!(error.fn_ident, "Queue::submit");
+        assert!(
+            format!("{error:?}").contains("DestroyedResource"),
+            "{error:?}"
+        );
+        assert!(f.device.is_valid());
+    }
+
+    let f = Fixture::new();
+    let dead = f.buffer();
+    let group = f.group(dead.clone(), 0);
+    assert_eq!(f.draw_inline(&[group.clone()]), [0; 4]);
+    let live = f.group(f.buffer(), 0);
+    let encoder = f.device.create_command_encoder(&Default::default());
+    let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+        color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+            view: f.target.create_view(&Default::default()),
+            depth_slice: None,
+            resolve_target: None,
+            load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+            store_op: wgt::StoreOp::Store,
+        })]),
+        ..Default::default()
+    });
+    pass.set_pipeline(f.pipeline.clone());
+    pass.set_bind_group(0, Some(group), &[]);
+    pass.set_bind_group(0, Some(live), &[]);
+    pass.draw(3, 1, 0, 0);
+    pass.end();
+    let command = encoder.finish(&Default::default());
+    dead.destroy();
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    assert!(f.queue.submit(&[command]).is_none());
+    let error = validation_error(&f.device);
+    assert_eq!(error.fn_ident, "Queue::submit");
+    assert!(
+        format!("{error:?}").contains("DestroyedResource"),
+        "{error:?}"
+    );
+    assert!(f.device.is_valid());
+
+    let mapped = f.device.create_buffer(&core::resource::BufferDescriptor {
+        label: None,
+        size: 512,
+        usage: wgt::BufferUsages::UNIFORM | wgt::BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    let group = f.group(mapped.clone(), 0);
+    let command = f.inline_groups(&[group.clone()]);
+    f.device
+        .push_error_scope(wgt::error::ErrorFilter::Validation);
+    assert!(f.queue.submit(&[command]).is_none());
+    let error = validation_error(&f.device);
+    assert_eq!(error.fn_ident, "Queue::submit");
+    assert!(
+        format!("{error:?}").contains("BufferStillMapped"),
+        "{error:?}"
+    );
+    mapped.unmap();
+    assert_eq!(f.draw_inline(&[group]), [0; 4]);
+    assert!(f.device.is_valid());
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }
