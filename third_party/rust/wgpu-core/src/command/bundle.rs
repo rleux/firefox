@@ -581,6 +581,36 @@ impl RenderBundleEncoder {
 
         let string_data = mem::take(&mut self.base.string_data);
         let context = mem::take(&mut self.context);
+        #[cfg(all(vulkan, feature = "std"))]
+        let native_eligible = commands.iter().all(|command| {
+            use ArcRenderCommand as Cmd;
+            match command {
+                Cmd::SetPipeline(pipeline) => {
+                    !pipeline.flags.contains(PipelineFlags::STENCIL_REFERENCE)
+                }
+                Cmd::SetBindGroup {
+                    bind_group: Some(group),
+                    ..
+                } => {
+                    (&group.used.external_textures).into_iter().next().is_none()
+                        && (&group.used.acceleration_structures)
+                            .into_iter()
+                            .next()
+                            .is_none()
+                }
+                Cmd::SetVertexBuffer { .. }
+                | Cmd::SetIndexBuffer { .. }
+                | Cmd::SetImmediate { .. }
+                | Cmd::Draw { .. }
+                | Cmd::DrawIndexed { .. }
+                | Cmd::PushDebugGroup { .. }
+                | Cmd::PopDebugGroup
+                | Cmd::InsertDebugMarker { .. } => true,
+                // shortcut: indirect, mesh and stencil-reference bundles replay on CPU;
+                // extend native admission after adding their validation tests.
+                _ => false,
+            }
+        });
         let render_bundle = RenderBundle {
             state: ResourceState::Valid(RenderBundleState {
                 context,
@@ -603,6 +633,10 @@ impl RenderBundleEncoder {
             tracking_data: TrackingData::new(tracker_indices),
             discard_hal_labels,
             bindings_validated_generation: AtomicUsize::new(usize::MAX),
+            #[cfg(all(vulkan, feature = "std"))]
+            native_eligible,
+            #[cfg(all(vulkan, feature = "std"))]
+            native_bundle: std::sync::OnceLock::new(),
         };
 
         let render_bundle = Arc::new(render_bundle);
@@ -1423,9 +1457,7 @@ pub(crate) struct RenderBundleState {
     pub(super) context: RenderPassContext,
 }
 
-//Note: here, `RenderBundle` is just wrapping a raw stream of render commands.
-// The plan is to back it by an actual Vulkan secondary buffer, D3D12 Bundle,
-// or Metal indirect command buffer.
+// Vulkan can cache one native secondary recording; other cases replay the normalized stream.
 /// cbindgen:ignore
 #[derive(Debug)]
 pub struct RenderBundle {
@@ -1444,6 +1476,11 @@ pub struct RenderBundle {
     pub(crate) tracking_data: TrackingData,
     discard_hal_labels: bool,
     bindings_validated_generation: AtomicUsize,
+    #[cfg(all(vulkan, feature = "std"))]
+    native_eligible: bool,
+    // Bounded to one render-pass/dynamic-state key; other configurations keep CPU replay.
+    #[cfg(all(vulkan, feature = "std"))]
+    native_bundle: std::sync::OnceLock<Option<Arc<hal::vulkan::CachedRenderBundle>>>,
 }
 
 impl Drop for RenderBundle {
@@ -1497,6 +1534,10 @@ impl RenderBundle {
             tracking_data: TrackingData::new(device.tracker_indices.bundles.clone()),
             discard_hal_labels: false,
             bindings_validated_generation: AtomicUsize::new(usize::MAX),
+            #[cfg(all(vulkan, feature = "std"))]
+            native_eligible: false,
+            #[cfg(all(vulkan, feature = "std"))]
+            native_bundle: std::sync::OnceLock::new(),
             device,
         })
     }
@@ -1526,6 +1567,86 @@ impl RenderBundle {
         let generation = snatch_guard.generation();
         let validate_bindings = generation == usize::MAX
             || self.bindings_validated_generation.load(Ordering::Relaxed) != generation;
+        #[cfg(all(vulkan, feature = "std"))]
+        if self.native_eligible {
+            if let Some(encoder) = raw
+                .as_any_mut()
+                .downcast_mut::<hal::vulkan::CommandEncoder>()
+            {
+                if let Some(Some(bundle)) = self.native_bundle.get() {
+                    // A snatch generation change needs a full resource revalidation first.
+                    if !validate_bindings && unsafe { encoder.execute_cached_render_bundle(bundle) }
+                    {
+                        return Ok(());
+                    }
+                } else if self.native_bundle.get().is_none()
+                    && encoder.supports_cached_render_bundles()
+                {
+                    let recording = unsafe { encoder.begin_cached_render_bundle() }
+                        .map_err(|error| self.device.handle_hal_error(error))?;
+                    if let Some((bundle, primary)) = recording {
+                        let result = unsafe {
+                            self.execute_commands(
+                                encoder,
+                                indirect_draw_validation_resources,
+                                indirect_draw_validation_batcher,
+                                snatch_guard,
+                                validate_bindings,
+                            )
+                        };
+                        let finish = unsafe {
+                            encoder.end_cached_render_bundle(&bundle, primary, result.is_ok())
+                        };
+                        result?;
+                        match finish {
+                            Ok(()) => {
+                                // Publish before execution: concurrent losers must never submit a pool
+                                // that is not retained by this bundle's command-buffer tracker.
+                                let _ = self.native_bundle.set(Some(Arc::new(bundle)));
+                                if let Some(Some(bundle)) = self.native_bundle.get() {
+                                    if unsafe { encoder.execute_cached_render_bundle(bundle) } {
+                                        self.bindings_validated_generation
+                                            .store(generation, Ordering::Relaxed);
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Err(hal::DeviceError::OutOfMemory) => {
+                                let _ = self.native_bundle.set(None);
+                            }
+                            Err(error) => return Err(self.device.handle_hal_error(error).into()),
+                        }
+                    } else {
+                        // Optional native allocation failed; CPU replay remains available.
+                        let _ = self.native_bundle.set(None);
+                    }
+                }
+            }
+        }
+        unsafe {
+            self.execute_commands(
+                raw,
+                indirect_draw_validation_resources,
+                indirect_draw_validation_batcher,
+                snatch_guard,
+                validate_bindings,
+            )
+        }?;
+        if validate_bindings {
+            self.bindings_validated_generation
+                .store(generation, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    unsafe fn execute_commands(
+        &self,
+        raw: &mut dyn hal::DynCommandEncoder,
+        indirect_draw_validation_resources: &mut crate::indirect_validation::DrawResources,
+        indirect_draw_validation_batcher: &mut crate::indirect_validation::DrawBatcher,
+        snatch_guard: &SnatchGuard,
+        validate_bindings: bool,
+    ) -> Result<(), ExecutionError> {
         let mut offsets = self.base.dynamic_offsets.as_slice();
         let mut pipeline_layout = None::<Arc<PipelineLayout>>;
         if !self.discard_hal_labels {
@@ -1740,11 +1861,6 @@ impl RenderBundle {
             unsafe { raw.end_debug_marker() };
         }
 
-        // Publish only after every binding has passed validation for this generation.
-        if validate_bindings {
-            self.bindings_validated_generation
-                .store(generation, Ordering::Relaxed);
-        }
         Ok(())
     }
 }

@@ -146,6 +146,7 @@ pub struct PhysicalDeviceFeatures {
     vulkan_memory_model: Option<vk::PhysicalDeviceVulkanMemoryModelFeaturesKHR<'static>>,
 
     shader_draw_parameters: Option<vk::PhysicalDeviceShaderDrawParametersFeatures<'static>>,
+    nested_command_buffer: Option<vk::PhysicalDeviceNestedCommandBufferFeaturesEXT<'static>>,
 }
 
 impl PhysicalDeviceFeatures {
@@ -159,6 +160,9 @@ impl PhysicalDeviceFeatures {
         mut info: vk::DeviceCreateInfo<'a>,
     ) -> vk::DeviceCreateInfo<'a> {
         info = info.enabled_features(&self.core);
+        if let Some(ref mut feature) = self.nested_command_buffer {
+            info = info.push_next(feature);
+        }
         if let Some(ref mut feature) = self.descriptor_indexing {
             info = info.push_next(feature);
         }
@@ -643,6 +647,12 @@ impl PhysicalDeviceFeatures {
             } else {
                 None
             },
+            nested_command_buffer: enabled_extensions
+                .contains(&ext::nested_command_buffer::NAME)
+                .then(|| {
+                    vk::PhysicalDeviceNestedCommandBufferFeaturesEXT::default()
+                        .nested_command_buffer(private_caps.native_render_bundles)
+                }),
             shader_draw_parameters: if device_api_version >= vk::API_VERSION_1_1 {
                 let needed = requested_features.contains(wgt::Features::SHADER_DRAW_INDEX);
                 Some(
@@ -2214,6 +2224,13 @@ impl super::InstanceShared {
                 features2 = features2.push_next(next);
             }
 
+            if capabilities.supports_extension(ext::nested_command_buffer::NAME) {
+                let next = features
+                    .nested_command_buffer
+                    .insert(vk::PhysicalDeviceNestedCommandBufferFeaturesEXT::default());
+                features2 = features2.push_next(next);
+            }
+
             if capabilities.supports_extension(ext::mesh_shader::NAME) {
                 let next = features
                     .mesh_shader
@@ -2454,6 +2471,9 @@ impl super::Instance {
         let alignments = phd_capabilities.to_hal_alignments(has_robust_buffer_access2);
 
         let private_caps = super::PrivateCapabilities {
+            native_render_bundles: phd_features
+                .nested_command_buffer
+                .is_some_and(|features| features.nested_command_buffer == vk::TRUE),
             image_view_usage: phd_capabilities.device_api_version >= vk::API_VERSION_1_1
                 || phd_capabilities.supports_extension(khr::maintenance2::NAME),
             // VeriSilicon's proprietary driver, as on NXP's i.MX 8 SoCs, advertises timeline
@@ -2591,7 +2611,7 @@ impl super::Adapter {
     }
 
     pub fn required_device_extensions(&self, features: wgt::Features) -> Vec<&'static CStr> {
-        let (supported_extensions, unsupported_extensions) = self
+        let (mut supported_extensions, unsupported_extensions) = self
             .phd_capabilities
             .get_required_extensions(features)
             .iter()
@@ -2603,6 +2623,9 @@ impl super::Adapter {
             log::debug!("Missing extensions: {unsupported_extensions:?}");
         }
 
+        if self.private_caps.native_render_bundles {
+            supported_extensions.push(ext::nested_command_buffer::NAME);
+        }
         log::debug!("Supported extensions: {supported_extensions:?}");
         supported_extensions
     }
@@ -3083,7 +3106,11 @@ impl super::Adapter {
             pipeline_cache_validation_key,
             vendor_id: self.phd_capabilities.properties.vendor_id,
             timestamp_period: self.phd_capabilities.properties.limits.timestamp_period,
-            private_caps: self.private_caps.clone(),
+            private_caps: super::PrivateCapabilities {
+                native_render_bundles: self.private_caps.native_render_bundles
+                    && enabled_extensions.contains(&ext::nested_command_buffer::NAME),
+                ..self.private_caps.clone()
+            },
             features,
             workarounds: self.workarounds,
             render_passes: Mutex::new(Default::default()),

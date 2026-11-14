@@ -39,6 +39,149 @@ impl super::Texture {
 }
 
 impl super::CommandEncoder {
+    /// Whether this pass permits a leaf secondary buffer without query inheritance.
+    pub fn supports_cached_render_bundles(&self) -> bool {
+        self.render_bundle_key.is_some() && self.active_queries == 0
+    }
+
+    /// Begin an optional, private secondary recording, saving the active primary handle.
+    ///
+    /// # Safety
+    /// The caller must finish or abandon the recording with `end_cached_render_bundle`,
+    /// and retain its resources until every primary referencing the result retires.
+    pub unsafe fn begin_cached_render_bundle(
+        &mut self,
+    ) -> Result<Option<(super::CachedRenderBundle, vk::CommandBuffer)>, crate::DeviceError> {
+        if !self.supports_cached_render_bundles() {
+            return Ok(None);
+        }
+        let key = self.render_bundle_key.unwrap();
+        let info =
+            vk::CommandPoolCreateInfo::default().queue_family_index(self.device.family_index);
+        let pool = match unsafe { self.device.raw.create_command_pool(&info, None) } {
+            Ok(pool) => pool,
+            Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(super::map_host_device_oom_and_lost_err(error)),
+        };
+        self.counters.command_encoders.add(1);
+        let mut bundle = super::CachedRenderBundle {
+            device: self.device.clone(),
+            pool,
+            raw: vk::CommandBuffer::null(),
+            key,
+            counters: self.counters.clone(),
+        };
+        let allocation = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::SECONDARY)
+            .command_buffer_count(1);
+        let inheritance = vk::CommandBufferInheritanceInfo::default().render_pass(key.render_pass);
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(
+                vk::CommandBufferUsageFlags::RENDER_PASS_CONTINUE
+                    | vk::CommandBufferUsageFlags::SIMULTANEOUS_USE,
+            )
+            .inheritance_info(&inheritance);
+        let result =
+            unsafe { self.device.raw.allocate_command_buffers(&allocation) }.and_then(|buffers| {
+                bundle.raw = buffers[0];
+                unsafe { self.device.raw.begin_command_buffer(bundle.raw, &begin) }
+            });
+        if let Err(error) = result {
+            return match error {
+                vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => {
+                    Ok(None)
+                }
+                error => Err(super::map_host_device_oom_and_lost_err(error)),
+            };
+        }
+        let primary = mem::replace(&mut self.active, bundle.raw);
+        unsafe { self.restore_bundle_dynamic_state(key) };
+        Ok(Some((bundle, primary)))
+    }
+
+    /// Restore the primary even when core abandoned a partially recorded bundle.
+    ///
+    /// # Safety
+    /// `bundle` and `primary` must come from the immediately preceding successful begin.
+    pub unsafe fn end_cached_render_bundle(
+        &mut self,
+        bundle: &super::CachedRenderBundle,
+        primary: vk::CommandBuffer,
+        successful: bool,
+    ) -> Result<(), crate::DeviceError> {
+        debug_assert_eq!(self.active, bundle.raw);
+        self.active = primary;
+        if successful {
+            unsafe { self.device.raw.end_command_buffer(bundle.raw) }
+                .map_err(super::map_host_device_oom_and_lost_err)?;
+        }
+        Ok(())
+    }
+
+    /// Execute only when the render pass and all inherited dynamic state match.
+    ///
+    /// # Safety
+    /// The caller must revalidate snatchable resources before using this recording,
+    /// and retain the owning bundle until this primary has completed execution.
+    pub unsafe fn execute_cached_render_bundle(
+        &mut self,
+        bundle: &super::CachedRenderBundle,
+    ) -> bool {
+        if !self.supports_cached_render_bundles()
+            || self.render_bundle_key != Some(bundle.key)
+            || !alloc::sync::Arc::ptr_eq(&self.device, &bundle.device)
+        {
+            return false;
+        }
+        unsafe {
+            self.device
+                .raw
+                .cmd_execute_commands(self.active, &[bundle.raw]);
+            // Vulkan makes primary state undefined after executing secondary commands.
+            self.restore_bundle_dynamic_state(bundle.key);
+        }
+        true
+    }
+
+    unsafe fn restore_bundle_dynamic_state(&self, key: super::RenderBundleKey) {
+        let viewport = key.viewport.map(f32::from_bits);
+        let viewport = vk::Viewport {
+            x: viewport[0],
+            y: viewport[1],
+            width: viewport[2],
+            height: viewport[3],
+            min_depth: viewport[4],
+            max_depth: viewport[5],
+        };
+        let scissor = vk::Rect2D {
+            offset: vk::Offset2D {
+                x: key.scissor[0] as i32,
+                y: key.scissor[1] as i32,
+            },
+            extent: vk::Extent2D {
+                width: key.scissor[2],
+                height: key.scissor[3],
+            },
+        };
+        unsafe {
+            self.device
+                .raw
+                .cmd_set_viewport(self.active, 0, &[viewport]);
+            self.device.raw.cmd_set_scissor(self.active, 0, &[scissor]);
+            self.device
+                .raw
+                .cmd_set_blend_constants(self.active, &key.blend.map(f32::from_bits));
+            self.device.raw.cmd_set_stencil_reference(
+                self.active,
+                vk::StencilFaceFlags::FRONT_AND_BACK,
+                key.stencil,
+            );
+        }
+    }
+
     fn write_pass_end_timestamp_if_requested(&mut self) {
         if let Some((query_set, index)) = self.end_of_pass_timer_query.take() {
             unsafe {
@@ -148,6 +291,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         // Reset some state in case the last renderpass was never ended.
         self.rpass_debug_marker_active = false;
         self.end_of_pass_timer_query = None;
+        self.render_bundle_key = None;
+        self.active_queries = 0;
 
         let vk_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -469,6 +614,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
     }
 
     unsafe fn begin_query(&mut self, set: &super::QuerySet, index: u32) {
+        self.active_queries += 1;
         unsafe {
             self.device.raw.cmd_begin_query(
                 self.active,
@@ -479,6 +625,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         };
     }
     unsafe fn end_query(&mut self, set: &super::QuerySet, index: u32) {
+        self.active_queries -= 1;
         unsafe { self.device.raw.cmd_end_query(self.active, set.raw, index) };
     }
     unsafe fn write_timestamp(&mut self, set: &super::QuerySet, index: u32) {
@@ -911,7 +1058,23 @@ impl crate::CommandEncoder for super::CommandEncoder {
             max_depth: 1.0,
         }];
 
+        let mixed_contents = self.device.private_caps.native_render_bundles;
         let raw_pass = self.device.make_render_pass(rp_key).unwrap();
+        self.render_bundle_key =
+            (mixed_contents && desc.multiview_mask.is_none()).then_some(super::RenderBundleKey {
+                render_pass: raw_pass,
+                viewport: [
+                    0.0f32.to_bits(),
+                    (desc.extent.height as f32).to_bits(),
+                    (desc.extent.width as f32).to_bits(),
+                    (-(desc.extent.height as f32)).to_bits(),
+                    0.0f32.to_bits(),
+                    1.0f32.to_bits(),
+                ],
+                scissor: [0, 0, desc.extent.width, desc.extent.height],
+                blend: [0; 4],
+                stencil: 0,
+            });
         fb_key.raw_pass = raw_pass;
         let raw_framebuffer = self.make_framebuffer(fb_key).unwrap();
 
@@ -948,7 +1111,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
             self.device.raw.cmd_begin_render_pass(
                 self.active,
                 &vk_info,
-                vk::SubpassContents::INLINE,
+                if mixed_contents {
+                    vk::SubpassContents::INLINE_AND_SECONDARY_COMMAND_BUFFERS_EXT
+                } else {
+                    vk::SubpassContents::INLINE
+                },
             );
         };
 
@@ -957,6 +1124,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         Ok(())
     }
     unsafe fn end_render_pass(&mut self) {
+        self.render_bundle_key = None;
         unsafe {
             self.device.raw.cmd_end_render_pass(self.active);
         }
@@ -1075,6 +1243,18 @@ impl crate::CommandEncoder for super::CommandEncoder {
             min_depth: depth_range.start,
             max_depth: depth_range.end,
         }];
+        if let Some(key) = self.render_bundle_key.as_mut() {
+            let viewport = vk_viewports[0];
+            key.viewport = [
+                viewport.x,
+                viewport.y,
+                viewport.width,
+                viewport.height,
+                viewport.min_depth,
+                viewport.max_depth,
+            ]
+            .map(f32::to_bits);
+        }
         unsafe {
             self.device
                 .raw
@@ -1092,6 +1272,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 height: rect.h,
             },
         }];
+        if let Some(key) = self.render_bundle_key.as_mut() {
+            key.scissor = [rect.x, rect.y, rect.w, rect.h];
+        }
         unsafe {
             self.device
                 .raw
@@ -1099,6 +1282,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         };
     }
     unsafe fn set_stencil_reference(&mut self, value: u32) {
+        if let Some(key) = self.render_bundle_key.as_mut() {
+            key.stencil = value;
+        }
         unsafe {
             self.device.raw.cmd_set_stencil_reference(
                 self.active,
@@ -1108,6 +1294,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         };
     }
     unsafe fn set_blend_constants(&mut self, color: &[f32; 4]) {
+        if let Some(key) = self.render_bundle_key.as_mut() {
+            key.blend = color.map(f32::to_bits);
+        }
         unsafe { self.device.raw.cmd_set_blend_constants(self.active, color) };
     }
 

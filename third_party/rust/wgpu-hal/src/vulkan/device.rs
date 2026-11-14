@@ -1461,6 +1461,8 @@ impl crate::Device for super::Device {
             temp_texture_views: Default::default(),
             counters: Arc::clone(&self.counters),
             current_pipeline_is_multiview: false,
+            render_bundle_key: None,
+            active_queries: 0,
         })
     }
 
