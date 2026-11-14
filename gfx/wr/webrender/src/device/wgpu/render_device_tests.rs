@@ -1141,3 +1141,51 @@ fn native_surface_capture_requests_are_consumed_without_output() {
     GpuBackend::deinit(&mut native);
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
 }
+
+#[test]
+#[ignore = "Requires Vulkan and Khronos validation"]
+fn native_backend_poll_drives_completion_and_mapping_with_or_without_registry() {
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    for registry in [true, false] {
+        let owner = Arc::new(device());
+        let mut backend = RenderDevice::new(owner.clone()).unwrap();
+        #[cfg(target_os = "linux")]
+        if registry {
+            assert!(backend.external_images.is_some());
+        } else {
+            backend.external_images = None;
+        }
+        let buffer = owner
+            .create_buffer(&core::resource::BufferDescriptor {
+                label: None,
+                size: 4,
+                usage: wgt::BufferUsages::COPY_DST | wgt::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+            .unwrap();
+        backend.begin_frame().unwrap();
+        backend.commands().unwrap().clear_buffer(buffer.clone(), 0, Some(4));
+        let last = backend.end_frame().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.map_async(wgt::MapMode::Read, 0, Some(4), Some(Box::new(move |r| {
+            tx.send(r).unwrap();
+        })));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            backend.poll().unwrap();
+            if let Ok(result) = rx.try_recv() {
+                result.unwrap();
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(backend.completed.load(Ordering::Acquire) >= last);
+        assert!(backend.in_flight.is_empty());
+        assert_eq!(buffer.get_mapped_range(0, Some(4)).unwrap().read_slice(), &[0; 4]);
+        buffer.unmap();
+        backend.deinit();
+        assert!(backend.failure().is_none());
+    }
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}

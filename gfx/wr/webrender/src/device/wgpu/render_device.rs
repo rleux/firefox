@@ -384,11 +384,15 @@ impl RenderDevice {
         Ok(())
     }
     pub(super) fn poll(&mut self) -> Result<()> {
-        self.owner.poll().map_err(|e| e.to_string())?;
         #[cfg(target_os = "linux")]
-        if let Some(native) = &self.external_images {
-            native.poll()?;
+        match &self.external_images {
+            Some(native) => native.poll()?,
+            None => {
+                self.owner.poll().map_err(|e| e.to_string())?;
+            }
         }
+        #[cfg(not(target_os = "linux"))]
+        self.owner.poll().map_err(|e| e.to_string())?;
         while self
             .in_flight
             .front()
