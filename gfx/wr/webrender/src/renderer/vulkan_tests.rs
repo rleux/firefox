@@ -24,6 +24,9 @@ mod blends;
 #[path = "vulkan_filter_tests.rs"]
 mod filters;
 
+#[path = "vulkan_glyph_tests.rs"]
+mod glyphs;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
