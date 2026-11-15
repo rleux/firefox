@@ -12,6 +12,7 @@
 #include "SwipeTracker.h"
 #include "TouchEvents.h"
 #include "TouchSwipeInfo.h"
+#include "WidgetAccelerationPolicy.h"
 #include "X11UndefineNone.h"
 #include "base/thread.h"
 #include "mozilla/GlobalKeyListener.h"
@@ -981,8 +982,9 @@ bool nsIWidget::IsSmallPopup() const {
 
 bool nsIWidget::ComputeShouldAccelerate() {
   return gfx::gfxConfig::IsEnabled(gfx::Feature::HW_COMPOSITING) &&
-         (WidgetTypeSupportsAcceleration() ||
-          StaticPrefs::gfx_webrender_unaccelerated_widget_force());
+         widget::CanAccelerateWidget(
+             WidgetTypeSupportsAcceleration(), RequiresSoftwareWebRender(),
+             StaticPrefs::gfx_webrender_unaccelerated_widget_force());
 }
 
 bool nsIWidget::UseAPZ() const {
@@ -1853,8 +1855,9 @@ already_AddRefed<WebRenderLayerManager> nsIWidget::CreateCompositorSession(
     bool supportsAcceleration = WidgetTypeSupportsAcceleration();
     bool enableSWWR = true;
     if (!IsHeadlessWidget() &&
-        (supportsAcceleration ||
-         StaticPrefs::gfx_webrender_unaccelerated_widget_force())) {
+        widget::CanAccelerateWidget(
+            supportsAcceleration, RequiresSoftwareWebRender(),
+            StaticPrefs::gfx_webrender_unaccelerated_widget_force())) {
       enableSWWR = gfx::gfxVars::UseSoftwareWebRender();
     }
     bool enableAPZ = UseAPZ();

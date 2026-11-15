@@ -74,6 +74,11 @@ pub enum ConfigureSurfaceError {
     Device(#[from] DeviceError),
     #[error("Invalid surface")]
     InvalidSurface,
+    #[error("Surface extent changed from {requested:?} to {current:?} before configuration")]
+    OutdatedExtent {
+        requested: wgt::Extent3d,
+        current: wgt::Extent3d,
+    },
     #[error("The view format {0:?} is not compatible with texture format {1:?}, only changing srgb-ness is allowed.")]
     InvalidViewFormat(wgt::TextureFormat, wgt::TextureFormat),
     #[error(transparent)]
@@ -136,6 +141,7 @@ impl WebGpuError for ConfigureSurfaceError {
             Self::Device(e) => e.webgpu_error_type(),
             Self::MissingDownlevelFlags(e) => e.webgpu_error_type(),
             Self::InvalidSurface
+            | Self::OutdatedExtent { .. }
             | Self::InvalidViewFormat(..)
             | Self::PreviousOutputExists
             | Self::GpuWaitTimeout

@@ -293,6 +293,76 @@ fn presented_size(window: &X11Window, size: [u32; 2], expected: u64) {
 }
 #[test]
 #[ignore = "Requires native X11, Vulkan presentation and Khronos validation"]
+fn native_surface_resize_between_capabilities_and_configure_retries() {
+    let (window, owner, mut surface) = setup();
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let image = surface.acquire([64, 48]).unwrap().unwrap();
+    let index = owner
+        .submit(&[clear(&owner, &image, wgt::Color::BLUE)])
+        .unwrap();
+    drop(image);
+    surface.present().unwrap();
+    owner.wait_for(index).unwrap();
+    presented(&window, 0x0000ff);
+    surface.begin_frame();
+    surface.reconfigure = true;
+    let caps = surface
+        .window
+        .as_ref()
+        .unwrap()
+        .raw
+        .get_hal_capabilities(&owner.adapter)
+        .unwrap();
+    assert_eq!(
+        caps.current_extent
+            .map(|extent| [extent.width, extent.height]),
+        Some([64, 48])
+    );
+    struct ClearConfigureHook;
+    impl Drop for ClearConfigureHook {
+        fn drop(&mut self) {
+            let _ = testing::BEFORE_CONFIGURE.with(|slot| slot.borrow_mut().take());
+        }
+    }
+    let _clear_hook = ClearConfigureHook;
+    let resized = window.clone();
+    testing::BEFORE_CONFIGURE.with(|slot| {
+        assert!(slot
+            .borrow_mut()
+            .replace(Box::new(move || resized.resize([32, 24])))
+            .is_none());
+    });
+    assert!(surface.acquire([64, 48]).unwrap().is_none());
+    assert_eq!(surface.outcome, Some(Outcome::Retry));
+    assert!(surface.reconfigure);
+    assert!(!surface.has_output());
+    assert_eq!(
+        [
+            surface.config.as_ref().unwrap().width,
+            surface.config.as_ref().unwrap().height
+        ],
+        [64, 48]
+    );
+    assert!(surface.acquire([64, 48]).unwrap().is_none());
+    owner.check().unwrap();
+    surface.begin_frame();
+    let image = surface.acquire([32, 24]).unwrap().unwrap();
+    assert_eq!([image.size().width, image.size().height], [32, 24]);
+    let index = owner
+        .submit(&[clear(&owner, &image, wgt::Color::GREEN)])
+        .unwrap();
+    drop(image);
+    surface.present().unwrap();
+    owner.wait_for(index).unwrap();
+    presented_size(&window, [32, 24], 0x00ff00);
+    drop(surface);
+    drop(owner);
+    drop(window);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}
+
+#[test]
+#[ignore = "Requires native X11, Vulkan presentation and Khronos validation"]
 fn native_surface_direct_output_discard_resize_and_snapshot() {
     let (window, owner, mut surface) = setup();
     let before = VALIDATION_ERRORS.load(Ordering::Relaxed);

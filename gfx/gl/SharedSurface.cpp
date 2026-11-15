@@ -17,6 +17,7 @@
 #include "mozilla/gfx/CanvasRenderThread.h"
 #include "mozilla/gfx/Logging.h"
 #include "mozilla/gfx/gfxVars.h"
+#include "mozilla/webrender/VulkanCompositorSupport.h"
 #include "mozilla/layers/CompositorTypes.h"
 #include "mozilla/layers/TextureClientSharedSurface.h"
 #include "mozilla/layers/TextureForwarder.h"
@@ -95,6 +96,10 @@ void SharedSurface::UnlockProd() {
 UniquePtr<SurfaceFactory> SurfaceFactory::Create(
     GLContext* const pGl, const layers::TextureType consumerType) {
   auto& gl = *pGl;
+
+  if (wr::IsVulkanCompositorRequested()) {
+    return nullptr;
+  }
 
   switch (consumerType) {
     case layers::TextureType::D3D11:

@@ -45,6 +45,7 @@ pub(crate) fn validate_surface_configuration(
     config: &mut hal::SurfaceConfiguration,
     caps: &hal::SurfaceCapabilities,
     max_texture_dimension_2d: u32,
+    require_current_extent: bool,
 ) -> Result<(), present::ConfigureSurfaceError> {
     use present::ConfigureSurfaceError as E;
     let width = config.extent.width;
@@ -56,6 +57,19 @@ pub(crate) fn validate_surface_configuration(
             height,
             max_texture_dimension_2d,
         });
+    }
+
+    // Vulkan fixes the swapchain extent when current_extent is known. Other
+    // backends (such as Metal) report it without requiring it for configuration.
+    if require_current_extent {
+        if let Some(current) = caps.current_extent {
+            if config.extent != current {
+                return Err(E::OutdatedExtent {
+                    requested: config.extent,
+                    current,
+                });
+            }
+        }
     }
 
     if !caps.present_modes.contains(&config.present_mode) {
@@ -232,6 +246,73 @@ mod surface_configuration_tests {
         }
     }
 
+    #[test]
+    fn stale_fixed_extent_is_rejected_without_changing_configuration() {
+        let mut caps = caps(vec![format_caps(
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::SurfaceColorSpaces::SRGB,
+        )]);
+        let mut config = config(wgt::TextureFormat::Rgba8Unorm, wgt::SurfaceColorSpace::Auto);
+        let requested = config.extent;
+        let current = wgt::Extent3d {
+            width: 900,
+            height: 650,
+            depth_or_array_layers: 1,
+        };
+        caps.current_extent = Some(current);
+        assert!(matches!(
+            validate_surface_configuration(&mut config, &caps, 4096, true),
+            Err(ConfigureSurfaceError::OutdatedExtent { requested: r, current: c })
+                if r == requested && c == current
+        ));
+        assert_eq!(config.extent, requested);
+        assert_eq!(config.color_space, wgt::SurfaceColorSpace::Auto);
+    }
+
+    #[test]
+    fn advisory_current_extent_does_not_restrict_configuration() {
+        let mut caps = caps(vec![format_caps(
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::SurfaceColorSpaces::SRGB,
+        )]);
+        let mut config = config(wgt::TextureFormat::Rgba8Unorm, wgt::SurfaceColorSpace::Auto);
+        let requested = config.extent;
+        caps.current_extent = Some(wgt::Extent3d {
+            width: 900,
+            height: 650,
+            depth_or_array_layers: 1,
+        });
+        validate_surface_configuration(&mut config, &caps, 4096, false).unwrap();
+        assert_eq!(config.extent, requested);
+        assert_ne!(Some(config.extent), caps.current_extent);
+    }
+
+    #[test]
+    fn matching_fixed_extent_is_accepted() {
+        let mut caps = caps(vec![format_caps(
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::SurfaceColorSpaces::SRGB,
+        )]);
+        let mut config = config(wgt::TextureFormat::Rgba8Unorm, wgt::SurfaceColorSpace::Auto);
+        caps.current_extent = Some(config.extent);
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
+        assert_eq!(Some(config.extent), caps.current_extent);
+    }
+
+    #[test]
+    fn variable_extent_preserves_requested_dimensions() {
+        let caps = caps(vec![format_caps(
+            wgt::TextureFormat::Rgba8Unorm,
+            wgt::SurfaceColorSpaces::SRGB,
+        )]);
+        let mut config = config(wgt::TextureFormat::Rgba8Unorm, wgt::SurfaceColorSpace::Auto);
+        config.extent.width = 37;
+        config.extent.height = 29;
+        let requested = config.extent;
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
+        assert_eq!(config.extent, requested);
+    }
+
     /// `Auto` resolves to extended linear scRGB for fp16 when supported,
     /// reproducing the historical hardcoded behavior.
     #[test]
@@ -244,7 +325,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgba16Float,
             wgt::SurfaceColorSpace::Auto,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(
             config.color_space,
             wgt::SurfaceColorSpace::ExtendedSrgbLinear
@@ -264,7 +345,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgba16Float,
             wgt::SurfaceColorSpace::Auto,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Srgb);
     }
 
@@ -280,7 +361,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgba16Float,
             wgt::SurfaceColorSpace::Auto,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Srgb);
     }
 
@@ -297,7 +378,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgb10a2Unorm,
             wgt::SurfaceColorSpace::Auto,
         );
-        let err = validate_surface_configuration(&mut config, &caps, 4096).unwrap_err();
+        let err = validate_surface_configuration(&mut config, &caps, 4096, true).unwrap_err();
         assert!(matches!(
             err,
             ConfigureSurfaceError::UnsupportedColorSpace { .. }
@@ -316,7 +397,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgb10a2Unorm,
             wgt::SurfaceColorSpace::Auto,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Srgb);
     }
 
@@ -334,7 +415,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgb10a2Unorm,
             wgt::SurfaceColorSpace::Auto,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Srgb);
     }
 
@@ -349,7 +430,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Rgb10a2Unorm,
             wgt::SurfaceColorSpace::Bt2100Pq,
         );
-        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        validate_surface_configuration(&mut config, &caps, 4096, true).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Bt2100Pq);
     }
 
@@ -364,7 +445,7 @@ mod surface_configuration_tests {
             wgt::TextureFormat::Bgra8UnormSrgb,
             wgt::SurfaceColorSpace::Bt2100Pq,
         );
-        let err = validate_surface_configuration(&mut config, &caps, 4096).unwrap_err();
+        let err = validate_surface_configuration(&mut config, &caps, 4096, true).unwrap_err();
         assert!(matches!(
             err,
             ConfigureSurfaceError::UnsupportedColorSpace {

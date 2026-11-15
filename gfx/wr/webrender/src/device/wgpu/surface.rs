@@ -246,10 +246,17 @@ impl Surface {
             self.owner.limits().max_texture_dimension_2d,
             self.readback,
         )?;
-        window
-            .raw
-            .configure(&self.owner.device, &config)
-            .map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        testing::before_configure();
+        match window.raw.configure(&self.owner.device, &config) {
+            Ok(()) => {}
+            Err(core::present::ConfigureSurfaceError::OutdatedExtent { .. }) => {
+                self.reconfigure = true;
+                self.outcome = Some(Outcome::Retry);
+                return Ok(());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
         self.owner.check().map_err(|e| e.to_string())?;
         self.config = Some(config);
         self.reconfigure = false;
@@ -309,6 +316,9 @@ impl Surface {
                 .is_none_or(|c| [c.width, c.height] != size)
         {
             self.configure(size)?;
+            if self.outcome.is_some() {
+                return Ok(None);
+            }
         }
         if self
             .config
@@ -513,7 +523,16 @@ impl Drop for Surface {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::wgt;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    thread_local! {
+        pub static BEFORE_CONFIGURE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+    pub fn before_configure() {
+        let callback = BEFORE_CONFIGURE.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
     thread_local! { pub static ACQUIRE: Cell<Option<wgt::SurfaceStatus>> = const { Cell::new(None) }; pub static PRESENT: Cell<Option<wgt::SurfaceStatus>> = const { Cell::new(None) }; }
     pub fn acquire_status() -> Option<wgt::SurfaceStatus> {
         ACQUIRE.with(|s| s.take())

@@ -346,6 +346,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
         }
         const WebRenderBackend backend = compositor->BackendType();
         const WebRenderCompositor compositorType = compositor->CompositorType();
+        const bool usesBackendPresentation = compositor->UsesBackendPresentation();
         const bool useANGLE = compositor->UseANGLE();
         const bool useDComp = compositor->UseDComp();
         const bool useLayerCompositor = compositor->ShouldUseLayerCompositor();
@@ -398,7 +399,7 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
 #endif
         };
         RefPtr<WebRenderAPI> api =
-            new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle);
+            new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle, usesBackendPresentation);
         return CreatePromise::CreateAndResolve(std::move(api), __func__);
       });
 }
@@ -408,7 +409,7 @@ already_AddRefed<WebRenderAPI> WebRenderAPI::Clone() {
   wr_api_clone(mDocHandle, &docHandle);
 
   RefPtr<WebRenderAPI> renderApi =
-      new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle, this, this);
+      new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle, mUsesBackendPresentation, this, this);
 
   return renderApi.forget();
 }
@@ -419,7 +420,7 @@ wr::WrIdNamespace WebRenderAPI::GetNamespace() {
 
 WebRenderAPI::WebRenderAPI(wr::DocumentHandle* aHandle, wr::WindowId aId,
                            WebRenderCapabilities aCapabilities,
-                           layers::SyncHandle aSyncHandle,
+                           layers::SyncHandle aSyncHandle, bool aUsesBackendPresentation,
                            wr::WebRenderAPI* aRootApi,
                            wr::WebRenderAPI* aRootDocumentApi)
     : mDocHandle(aHandle),
@@ -427,6 +428,7 @@ WebRenderAPI::WebRenderAPI(wr::DocumentHandle* aHandle, wr::WindowId aId,
       mCapabilities(std::move(aCapabilities)),
       mCaptureSequence(false),
       mSyncHandle(aSyncHandle),
+      mUsesBackendPresentation(aUsesBackendPresentation),
       mRendererDestroyed(false),
       mRootApi(aRootApi),
       mRootDocumentApi(aRootDocumentApi) {}

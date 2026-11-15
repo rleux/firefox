@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "RenderCompositorVulkan.h"
+#include "VulkanCompositorSupport.h"
 
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/webrender/RenderThread.h"
@@ -17,12 +18,71 @@
 #  include "mozilla/widget/AndroidCompositorWidget.h"
 #endif
 
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+#  include "mozilla/WidgetUtilsGtk.h"
+#  include "mozilla/X11Util.h"
+#  include "mozilla/widget/GtkCompositorWidget.h"
+#endif
+
 namespace mozilla::wr {
 
-bool RenderCompositorVulkan::IsRequested() {
-  return gfx::gfxVars::UseWebRenderVulkan() &&
-         !gfx::gfxVars::UseSoftwareWebRender();
+bool IsVulkanCompositorRequested() {
+  return CanUseVulkanCompositor(BuildVulkanCompositorPlatform(),
+                                gfx::gfxVars::WebRenderVulkanX11Display(),
+                                gfx::gfxVars::UseWebRenderVulkan(),
+                                gfx::gfxVars::UseSoftwareWebRender());
 }
+
+bool RenderCompositorVulkan::IsRequested() {
+  return IsVulkanCompositorRequested();
+}
+
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+class VulkanX11Display final {
+ public:
+  NS_INLINE_DECL_REFCOUNTING(VulkanX11Display)
+
+  explicit VulkanX11Display(Display* aDisplay) : mDisplay(aDisplay) {}
+  Display* Get() const { return mDisplay; }
+
+ private:
+  ~VulkanX11Display() { XCloseDisplay(mDisplay); }
+  Display* const mDisplay;
+};
+
+static Maybe<OwnedVulkanConfig> AcquireX11Surface(
+    widget::CompositorWidget* aWidget, VulkanX11Display* aDisplay,
+    bool aValidation, bool aVsync) {
+  auto* gtk = aWidget->AsGTK();
+  const auto window = gtk ? gtk->VulkanXWindow() : 0;
+  if (!window) {
+    return Nothing();
+  }
+  XWindowAttributes attributes{};
+  if (!XGetWindowAttributes(aDisplay->Get(), window, &attributes)) {
+    return Nothing();
+  }
+  // GTK synchronously destroys the Renderer before replacing or unrealizing its
+  // native window.
+  WrVulkanConfig config{
+      WrWindowHandle::Xlib(aDisplay->Get(), window,
+                           XScreenNumberOfScreen(attributes.screen)),
+      {aWidget,
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->AddRef();
+       },
+       [](void* aOwner) {
+         static_cast<widget::CompositorWidget*>(aOwner)->Release();
+       }},
+      {aDisplay,
+       [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->AddRef(); },
+       [](void* aOwner) { static_cast<VulkanX11Display*>(aOwner)->Release(); }},
+      aValidation,
+      aVsync,
+      gtk->VulkanNeedsAlpha()};
+  return Some(OwnedVulkanConfig(config));
+}
+#endif
 
 #ifdef MOZ_WIDGET_ANDROID
 static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
@@ -63,7 +123,33 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
     return std::make_unique<RenderCompositorVulkan>(aWidget, config);
   }
 #endif
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  if (aWidget && aWidget->AsGTK() && widget::GdkIsX11Display()) {
+    auto* connection = XOpenDisplay(XDisplayString(DefaultXDisplay()));
+    if (!connection) {
+      aError.AssignLiteral("RcVulkan(X11 display)");
+      return nullptr;
+    }
+    RefPtr<VulkanX11Display> display = new VulkanX11Display(connection);
+    auto config = AcquireX11Surface(aWidget, display, false, true);
+    if (!config) {
+      aError.AssignLiteral("RcVulkan(X11 window)");
+      return nullptr;
+    }
+    auto compositor =
+        std::make_unique<RenderCompositorVulkan>(aWidget, config->Raw());
+    compositor->mX11Display = std::move(display);
+    return compositor;
+  }
+#endif
+#ifdef XP_WIN
+  // shortcut: no HWND retirement lease or DXGI CPU host; keep Gecko disabled
+  // until explicit/parent window destruction and video fallback are supported.
+  aError.AssignLiteral(
+      "RcVulkan(Windows HWND lifetime and DXGI CPU hosts unsupported)");
+#else
   aError.AssignLiteral("RcVulkan(unsupported widget)");
+#endif
   return nullptr;
 }
 
@@ -72,16 +158,44 @@ RenderCompositorVulkan::RenderCompositorVulkan(
     const WrVulkanConfig& aConfig)
     : RenderCompositor(aWidget) {
   mConfig.emplace(aConfig);
-#ifdef MOZ_WIDGET_ANDROID
+  UpdateWindowVisibility();
   mValidation = aConfig.validation;
   mVsync = aConfig.vsync;
   mTransparent = aConfig.transparent;
-#endif
 }
 
 RenderCompositorVulkan::~RenderCompositorVulkan() {
   MOZ_ASSERT(!mRenderer);
   mCompletionTimer.Stop();
+}
+
+void RenderCompositorVulkan::UpdateWindowVisibility() {
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  mWindowVisibility.reset();
+  mWindowWasHidden = false;
+  if (mConfig && mConfig->Raw().window.IsXlib()) {
+    const auto& window = mConfig->Raw().window.xlib;
+    mWindowVisibility.emplace(window.display, window.window);
+  }
+#endif
+}
+
+bool RenderCompositorVulkan::IsWindowHidden() {
+  if (!mRenderer || mFailed || IsPaused()) {
+    return false;
+  }
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  const bool hidden =
+      mWindowVisibility &&
+      mWindowVisibility->Query() == X11WindowVisibility::State::Hidden;
+  if (mWindowWasHidden && !hidden) {
+    wr_renderer_force_redraw(mRenderer);
+  }
+  mWindowWasHidden = hidden;
+  return hidden;
+#else
+  return false;
+#endif
 }
 
 void RenderCompositorVulkan::SetRenderer(Renderer* aRenderer,
@@ -111,11 +225,10 @@ bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {
   mConfig.reset();
   if (next) {
     mConfig.emplace(std::move(next.ref()));
-#ifdef MOZ_WIDGET_ANDROID
     mVsync = mConfig->Raw().vsync;
     mTransparent = mConfig->Raw().transparent;
-#endif
   }
+  UpdateWindowVisibility();
   auto previous = mFrames.CompletedFrame();
   if (!PollCompletions()) {
     return false;
@@ -243,12 +356,31 @@ bool RenderCompositorVulkan::Resume() {
   if (!SetSurface(&config->Raw())) {
     return false;
   }
+#elif defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  if (mX11Display) {
+    Pause();
+    if (mFailed) {
+      return false;
+    }
+    auto config = AcquireX11Surface(mWidget, mX11Display, mValidation, mVsync);
+    if (!config) {
+      RenderThread::Get()->HandleWebRenderError(WebRenderError::NEW_SURFACE);
+      return false;
+    }
+    auto raw = config->Raw();
+    raw.transparent = mTransparent;
+    if (!SetSurface(&raw)) {
+      RenderThread::Get()->HandleWebRenderError(WebRenderError::NEW_SURFACE);
+      return false;
+    }
+  }
 #endif
   if (!mConfig || !mConfig->HasWindow()) {
     return false;
   }
   if (!wr_renderer_set_surface_paused(mRenderer, false)) {
     Fail();
+    RenderThread::Get()->HandleWebRenderError(WebRenderError::NEW_SURFACE);
     return false;
   }
   mPaused = false;

@@ -8,6 +8,7 @@
 #include "GLDefs.h"
 #include "WaylandSurfaceLock.h"
 #include "WindowSurfaceProvider.h"
+#include "mozilla/Atomics.h"
 #include "mozilla/DataMutex.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/ipc/Endpoint.h"
@@ -77,6 +78,9 @@ class GtkCompositorWidget : public CompositorWidget {
 #if defined(MOZ_X11)
   Window XWindow() const { return mProvider.GetXWindow(); }
 #endif
+  uint64_t VulkanXWindow() const { return mVulkanXWindow; }
+  void SetVulkanXWindow(uint64_t aWindow) { mVulkanXWindow = aWindow; }
+  bool VulkanNeedsAlpha() const { return mVulkanNeedsAlpha; }
 #if defined(MOZ_WAYLAND)
   void Init(CompositorWidgetInitData&& aInitData);
   mozilla::layers::NativeLayerRoot* GetNativeLayerRoot() override;
@@ -115,6 +119,8 @@ class GtkCompositorWidget : public CompositorWidget {
   DataMutex<LayoutDeviceIntSize> mClientSize;
 
   ipc::Endpoint<mozilla::layers::PNativeLayerRemoteChild> mChildEndpoint;
+  Atomic<uint64_t> mVulkanXWindow;
+  const bool mVulkanNeedsAlpha;
 
   // Holds rendering resources
   WindowSurfaceProvider mProvider;

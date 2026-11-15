@@ -222,6 +222,8 @@ class RenderThread final {
                        RendererStats* aStats, bool* aNeedsYFlip = nullptr,
                        bool* aReadbackSuccess = nullptr);
 
+  // Wait behind pending renderer construction before retiring a native XID.
+  bool RetireVulkanXWindow(uint64_t aWindow, bool* aFound = nullptr);
   void Pause(wr::WindowId aWindowId);
   bool Resume(wr::WindowId aWindowId);
   void NotifyIdle();

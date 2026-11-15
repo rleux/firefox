@@ -23,6 +23,7 @@ EXPORTS.mozilla.webrender += [
     "RenderTextureHostSWGL.h",
     "RenderTextureHostWrapper.h",
     "RenderThread.h",
+    "VulkanCompositorSupport.h",
     "webrender_ffi.h",
     "WebRenderAPI.h",
     "WebRenderTypes.h",
@@ -38,7 +39,6 @@ UNIFIED_SOURCES += [
     "RenderCompositorOGL.cpp",
     "RenderCompositorOGLSWGL.cpp",
     "RenderCompositorSWGL.cpp",
-    "RenderCompositorVulkan.cpp",
     "RenderEGLImageTextureHost.cpp",
     "RendererOGL.cpp",
     "RendererScreenshotGrabber.cpp",
@@ -49,6 +49,10 @@ UNIFIED_SOURCES += [
     "RenderThread.cpp",
     "WebRenderAPI.cpp",
     "WebRenderTypes.cpp",
+]
+
+SOURCES += [
+    "RenderCompositorVulkan.cpp",
 ]
 
 if CONFIG["MOZ_WIDGET_TOOLKIT"] in ("cocoa", "uikit"):

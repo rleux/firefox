@@ -994,6 +994,7 @@ impl Surface {
             &mut hal_config,
             &caps,
             device.limits.max_texture_dimension_2d,
+            device.backend() == wgt::Backend::Vulkan,
         )?;
 
         device.check_is_valid()?;

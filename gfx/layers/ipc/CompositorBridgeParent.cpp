@@ -83,6 +83,9 @@
 #  include "VsyncSource.h"
 #endif
 #include "mozilla/widget/CompositorWidget.h"
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+#  include "mozilla/widget/GtkCompositorWidget.h"
+#endif
 #ifdef MOZ_WIDGET_SUPPORTS_OOP_COMPOSITING
 #  include "mozilla/widget/CompositorWidgetParent.h"
 #endif
@@ -428,6 +431,62 @@ mozilla::ipc::IPCResult CompositorBridgeParent::RecvPause() {
                 mRootLayerTreeID);
   PauseComposition();
   return IPC_OK();
+}
+
+mozilla::ipc::IPCResult CompositorBridgeParent::RecvNotifyVulkanXWindowChanged(
+    const uint64_t& aOldWindow, const uint64_t& aWindow, bool* aRetired) {
+  *aRetired = false;
+#if defined(MOZ_WIDGET_GTK) && defined(MOZ_X11)
+  if (mOptions.UseSoftwareWebRender()) {
+    *aRetired = true;
+    return IPC_OK();
+  }
+  if (!mWidget || !mWrBridge) {
+    // Wait behind construction already queued before actor shutdown as well.
+    *aRetired = !wr::RenderThread::Get() ||
+                wr::RenderThread::Get()->RetireVulkanXWindow(aOldWindow);
+    return IPC_OK();
+  }
+  auto* gtk = mWidget->AsGTK();
+  if (!gtk || aOldWindow > UINT32_MAX || aWindow > UINT32_MAX) {
+    return IPC_FAIL(this, "Invalid Vulkan native window update");
+  }
+  RefPtr<wr::WebRenderAPI> api = mWrBridge->GetWebRenderAPI();
+  if (api && !api->UsesBackendPresentation()) {
+    *aRetired = true;
+    return IPC_OK();
+  }
+  if (!api && mVulkanWindowWasPaused.isNothing()) {
+    bool found = false;
+    *aRetired = !wr::RenderThread::Get() ||
+        wr::RenderThread::Get()->RetireVulkanXWindow(aOldWindow, &found);
+    if (!*aRetired || !found) { return IPC_OK(); }
+  }
+  if (mVulkanWindowWasPaused.isNothing()) {
+    mVulkanWindowWasPaused = Some(mPaused);
+  }
+  if (mPaused) {
+    mWrBridge->Pause();
+  } else {
+    PauseComposition();
+  }
+  if (!api && wr::RenderThread::Get() &&
+      !wr::RenderThread::Get()->RetireVulkanXWindow(aOldWindow)) {
+    return IPC_FAIL(this, "Could not retire a pending Vulkan window");
+  }
+  // Pause waits for RenderThread and drops the surface even after device loss.
+  gtk->SetVulkanXWindow(aWindow);
+  *aRetired = true;
+  if (aWindow) {
+    if (!mVulkanWindowWasPaused.ref()) {
+      ResumeComposition();
+    }
+    mVulkanWindowWasPaused.reset();
+  }
+  return IPC_OK();
+#else
+  return IPC_FAIL(this, "Vulkan native windows require GTK/X11");
+#endif
 }
 
 mozilla::ipc::IPCResult CompositorBridgeParent::RecvResume() {
