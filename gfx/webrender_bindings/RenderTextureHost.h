@@ -91,6 +91,10 @@ class RenderTextureHost {
 
   virtual void Unlock() {}
 
+  // Returned CPU bytes remain valid until UnlockExternalBuffer().
+  virtual wr::WrExternalImage LockExternalBuffer(uint8_t aChannelIndex);
+  virtual void UnlockExternalBuffer() {}
+
   virtual wr::WrExternalImage LockSWGL(uint8_t aChannelIndex, void* aContext,
                                        RenderCompositor* aCompositor);
 

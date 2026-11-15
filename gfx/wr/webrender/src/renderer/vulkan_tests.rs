@@ -31,6 +31,9 @@ mod glyphs;
 #[path = "vulkan_presentation_tests.rs"]
 mod presentation;
 
+#[path = "vulkan_external_buffer_tests.rs"]
+mod external_buffers;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
