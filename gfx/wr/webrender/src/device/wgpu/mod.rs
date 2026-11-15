@@ -9,6 +9,9 @@ use wgpu_hal as hal;
 use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
+mod bindings;
+mod pipeline;
+mod samplers;
 mod shader;
 mod vertex_layout;
 mod transfer;
