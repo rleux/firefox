@@ -85,6 +85,9 @@ class GPUVideoImage final : public Image {
   gfx::ColorRange GetColorRange() const { return mColorRange; }
 
   Maybe<SurfaceDescriptor> GetDesc() override {
+    if (!HasCurrentTextureClient()) {
+      return Nothing();
+    }
     return Some(SurfaceDescriptor(mSD));
   }
 
@@ -113,10 +116,16 @@ class GPUVideoImage final : public Image {
   TextureClient* GetTextureClient(KnowsCompositor* aKnowsCompositor) override {
     MOZ_ASSERT(aKnowsCompositor == ImageBridgeChild::GetSingleton(),
                "Must only use GPUVideo on ImageBridge");
-    return mTextureClient;
+    return HasCurrentTextureClient() ? mTextureClient.get() : nullptr;
   }
 
  private:
+  bool HasCurrentTextureClient() const {
+    auto bridge = ImageBridgeChild::GetSingleton();
+    return mTextureClient && mTextureClient->IsValid() && bridge &&
+           mTextureClient->GetAllocator() == bridge.get() && bridge->IPCOpen();
+  }
+
   const gfx::IntSize mSize;
   const gfx::ColorDepth mColorDepth;
   const gfx::ColorSpace2 mColorSpace;

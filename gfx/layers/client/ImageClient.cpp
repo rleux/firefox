@@ -134,7 +134,9 @@ already_AddRefed<TextureClient> ImageClient::CreateTextureClientForImage(
 #endif
   } else {
     RefPtr<gfx::SourceSurface> surface = aImage->GetAsSourceSurface();
-    MOZ_ASSERT(surface);
+    if (!surface) {
+      return nullptr;
+    }
     texture = TextureClient::CreateForDrawing(
         aKnowsCompositor, surface->GetFormat(), aImage->GetSize(),
         BackendSelector::Content, TextureFlags::DEFAULT);
