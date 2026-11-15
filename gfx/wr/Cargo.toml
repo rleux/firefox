@@ -28,6 +28,12 @@ opt-level = 2
 opt-level = 2
 
 [patch.crates-io]
+wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
+wgpu-core-deps-windows = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
+wgpu-core-deps-linux-android-bsd = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
+wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
+wgpu-sync = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
+
 naga = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
 naga-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
 wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699" }
