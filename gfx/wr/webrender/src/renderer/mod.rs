@@ -3229,11 +3229,10 @@ impl Renderer {
             None
         };
 
-        // A target with a clear color is fully overwritten by the clear,
-        // so its previous contents need not be loaded.
+        // Cached targets clear only their task rects and must retain the rest of the atlas.
         let color_load = match clear_color {
-            Some(..) => LoadOp::DontCare,
-            None => LoadOp::Load,
+            Some(..) if !require_precise_clear => LoadOp::DontCare,
+            _ => LoadOp::Load,
         };
         let depth_load = clear_depth.map_or(LoadOp::DontCare, LoadOp::Clear);
 

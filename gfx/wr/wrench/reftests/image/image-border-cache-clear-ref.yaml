@@ -1,0 +1,21 @@
+---
+root:
+  items:
+    - type: rect
+      bounds: [0, 0, 160, 80]
+      color: white
+    - type: rect
+      bounds: [16, 16, 48, 48]
+      color: green
+    - type: rect
+      bounds: [96, 16, 48, 4]
+      color: red
+    - type: rect
+      bounds: [96, 60, 48, 4]
+      color: red
+    - type: rect
+      bounds: [96, 20, 4, 40]
+      color: red
+    - type: rect
+      bounds: [140, 20, 4, 40]
+      color: red
