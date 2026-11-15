@@ -106,6 +106,10 @@ impl TextureStore {
         Ok(output)
     }
 
+    pub fn set_output(&mut self, output: Option<Arc<Texture>>) {
+        self.output = output;
+    }
+
     pub fn output(&self) -> Option<Arc<Texture>> {
         self.output.clone()
     }

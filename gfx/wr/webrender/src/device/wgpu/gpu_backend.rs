@@ -713,6 +713,7 @@ impl wr::GpuBackend for RenderDevice {
     fn deinit(&mut self) {
         self.pass = None;
         self.last_bindings = None;
+        self.skipped_pass = false;
         if self.failure.get().is_none() {
             let result = self
                 .submit()
@@ -720,6 +721,8 @@ impl wr::GpuBackend for RenderDevice {
             self.record_result(result);
         }
         self.encoder = None;
+        self.textures.set_output(None);
+        self.surface.take();
         self.blit_pipelines.clear();
         self.clear_pipelines.clear();
         self.programs.unbind();
@@ -739,6 +742,9 @@ impl wr::GpuBackend for RenderDevice {
     }
     fn set_scissor(&mut self, rect: Option<FramebufferIntRect>) {
         self.operation(|device| {
+            if device.skipped_pass {
+                return Ok(());
+            }
             let pass = device
                 .pass
                 .as_mut()

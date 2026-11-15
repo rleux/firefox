@@ -550,10 +550,7 @@ impl Device {
                 if options.resource_override_path.is_some() || options.dump_shader_source.is_some() {
                     return Err("Vulkan runtime shader source overrides and dumps are unsupported".into());
                 }
-                let owner = wgpu::Device::new(&config)?;
-                #[cfg(test)]
-                eprintln!("Core Vulkan adapter: {:?}", owner.info());
-                Box::new(wgpu::render_device::RenderDevice::new(std::sync::Arc::new(owner))?)
+                Box::new(wgpu::render_device::RenderDevice::new_windowed(&config)?)
             }
         };
         Ok(Device {
