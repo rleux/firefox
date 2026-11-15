@@ -10,6 +10,10 @@ use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
 mod surface;
+#[cfg(all(test, target_os = "linux", feature = "debugger"))]
+pub(crate) use surface::tests::x11::{X11Display, X11Window};
+#[cfg(test)]
+pub(crate) use surface::testing as surface_testing;
 pub use surface::{SurfaceOptions, SurfaceWindow};
 use raw_window_handle::HasDisplayHandle;
 use std::rc::Rc;

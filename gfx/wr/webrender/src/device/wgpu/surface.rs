@@ -182,13 +182,7 @@ pub(super) fn configuration(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Outcome {
-    Presented,
-    Retry,
-    Occluded,
-    SizeMismatch,
-}
+use crate::device::PresentResult as Outcome;
 
 pub(super) struct InitialSurface {
     pub window: Option<WindowSurface>,
@@ -406,6 +400,15 @@ impl Surface {
         if self.acquired.is_some() {
             return Err("Cannot replace an active Vulkan frame".into());
         }
+        if window.is_none() {
+            if let Some(window) = self.window.take() {
+                window.raw.unconfigure();
+            }
+            self.config = None;
+            self.options = options;
+            self.outcome = None;
+            return self.owner.check().map_err(|e| e.to_string());
+        }
         self.owner.check().map_err(|e| e.to_string())?;
         let replacement = window
             .map(|window| -> Result<WindowSurface, String> {
@@ -435,11 +438,33 @@ impl Surface {
         self.outcome = None;
         Ok(())
     }
-    pub fn enable_readback(&mut self) {
+    pub fn has_output(&self) -> bool {
+        self.acquired.is_some()
+    }
+    pub fn snapshot_enabled(&self) -> bool {
+        self.readback
+            && self.has_output()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|c| c.usage.contains(wgt::TextureUsages::COPY_SRC))
+    }
+    pub fn enable_readback(&mut self) -> Result<bool, String> {
         if !self.readback {
             self.readback = true;
             self.reconfigure = true;
         }
+        self.owner.check().map_err(|e| e.to_string())?;
+        self.window
+            .as_ref()
+            .map(|window| {
+                window
+                    .raw
+                    .get_capabilities(&self.owner.adapter)
+                    .map(|caps| caps.usages.contains(wgt::TextureUsages::COPY_SRC))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap_or(Ok(false))
     }
     pub fn snapshot(
         &self,
@@ -486,7 +511,7 @@ impl Drop for Surface {
 }
 
 #[cfg(test)]
-mod testing {
+pub(crate) mod testing {
     use super::wgt;
     use std::cell::Cell;
     thread_local! { pub static ACQUIRE: Cell<Option<wgt::SurfaceStatus>> = const { Cell::new(None) }; pub static PRESENT: Cell<Option<wgt::SurfaceStatus>> = const { Cell::new(None) }; }
@@ -499,4 +524,4 @@ mod testing {
 }
 #[cfg(test)]
 #[path = "surface_tests.rs"]
-mod tests;
+pub(super) mod tests;
