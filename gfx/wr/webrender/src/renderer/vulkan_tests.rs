@@ -27,6 +27,10 @@ mod filters;
 #[path = "vulkan_glyph_tests.rs"]
 mod glyphs;
 
+#[cfg(all(target_os="linux",feature="debugger"))]
+#[path = "vulkan_presentation_tests.rs"]
+mod presentation;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
