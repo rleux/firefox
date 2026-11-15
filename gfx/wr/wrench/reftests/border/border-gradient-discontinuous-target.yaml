@@ -1,0 +1,36 @@
+---
+root:
+  items:
+    - type: border
+      bounds: [20, 20, 200, 150]
+      width: [30, 60, 60, 20]
+      border-type: gradient
+      image-width: 100
+      image-height: 100
+      slice: [20, 30, 40, 10]
+      fill: true
+      start: [0, 0]
+      end: [100, 100]
+      stops: [0.0, red, 0.35, [0.0, 0.0, 1.0, 0.25], 0.65, [0.0, 0.0, 1.0, 0.25], 0.65, yellow, 1.0, green]
+    - type: border
+      bounds: [260, 20, 200, 150]
+      width: [30, 60, 60, 20]
+      border-type: radial-gradient
+      image-width: 100
+      image-height: 100
+      slice: [20, 30, 40, 10]
+      fill: true
+      center: [45, 55]
+      radius: [65, 40]
+      stops: [0.0, red, 0.35, [0.0, 0.0, 1.0, 0.25], 0.65, [0.0, 0.0, 1.0, 0.25], 0.65, yellow, 1.0, green]
+    - type: border
+      bounds: [500, 20, 200, 150]
+      width: [30, 60, 60, 20]
+      border-type: conic-gradient
+      image-width: 100
+      image-height: 100
+      slice: [20, 30, 40, 10]
+      fill: true
+      center: [45, 55]
+      angle: 0.7
+      stops: [0.0, red, 0.35, [0.0, 0.0, 1.0, 0.25], 0.65, [0.0, 0.0, 1.0, 0.25], 0.65, yellow, 1.0, green]
