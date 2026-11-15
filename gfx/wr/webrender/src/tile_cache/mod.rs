@@ -2584,6 +2584,7 @@ impl TileCacheInstance {
                 // Image primitives, including DRM images, only use overlays.
                 let mut is_opaque = false;
                 let mut is_drm_source = false;
+                let mut is_tiled = false;
 
                 if let Some(image_properties) = resource_cache.get_image_properties(image_data.key) {
                     // For an image to be a possible opaque backdrop, it must:
@@ -2605,12 +2606,15 @@ impl TileCacheInstance {
 
                     is_opaque = image_properties.descriptor.is_opaque();
                     is_drm_source = image_properties.descriptor.is_drm_source();
+                    is_tiled = image_properties.tiling.is_some();
                 }
 
                 let mut promotion_result: Result<CompositorSurfaceKind, SurfacePromotionFailure> = Ok(CompositorSurfaceKind::Blit);
                 if image_key.common.flags.contains(PrimitiveFlags::PREFER_COMPOSITOR_SURFACE) {
                     // DRM images should not wait for unrelated YUV images.
-                    if self.yuv_images_remaining > 0 && !is_drm_source {
+                    if is_tiled {
+                        promotion_result = Err(TiledImage);
+                    } else if self.yuv_images_remaining > 0 && !is_drm_source {
                         promotion_result = Err(ImageWaitingOnYuvImage);
                     } else {
                         promotion_result = self.can_promote_to_surface(
@@ -3628,6 +3632,7 @@ impl SubSlice {
 enum SurfacePromotionFailure {
     ImageWaitingOnYuvImage,
     YuvImageNotStable,
+    TiledImage,
     NotPremultipliedAlpha,
     OverlaySurfaceLimit,
     OverlayNeedsMask,
@@ -3650,6 +3655,7 @@ impl Display for SurfacePromotionFailure {
             match *self {
                 SurfacePromotionFailure::ImageWaitingOnYuvImage => "Image prim waiting for all YuvImage prims to be considered for promotion",
                 SurfacePromotionFailure::YuvImageNotStable => "YuvImage has not remained spatially stable long enough for surface promotion",
+                SurfacePromotionFailure::TiledImage => "image is tiled",
                 SurfacePromotionFailure::NotPremultipliedAlpha => "does not use premultiplied alpha",
                 SurfacePromotionFailure::OverlaySurfaceLimit => "hit the overlay surface limit",
                 SurfacePromotionFailure::OverlayNeedsMask => "overlay not allowed for prim with mask",

@@ -12,6 +12,9 @@ use crate::render_api::{RenderApi, Transaction};
 use api::*;
 use std::sync::{atomic::Ordering, mpsc};
 
+#[path = "vulkan_image_tests.rs"]
+mod images;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
