@@ -6,7 +6,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-static VALIDATION_ERRORS: AtomicUsize = AtomicUsize::new(0);
+pub(super) static VALIDATION_ERRORS: AtomicUsize = AtomicUsize::new(0);
 struct Logger;
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -21,7 +21,7 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
-fn device() -> Device {
+pub(super) fn device() -> Device {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         log::set_logger(&Logger).unwrap();
@@ -72,7 +72,9 @@ fn texture_desc() -> core::resource::TextureDescriptor<'static> {
     }
 }
 
-fn finish(encoder: &Arc<core::command::CommandEncoder>) -> Arc<core::command::CommandBuffer> {
+pub(super) fn finish(
+    encoder: &Arc<core::command::CommandEncoder>,
+) -> Arc<core::command::CommandBuffer> {
     encoder.finish(&wgt::CommandBufferDescriptor {
         label: Some("core resource test".into()),
     })
@@ -86,7 +88,7 @@ fn idle(device: &Device) {
     }
 }
 
-fn read(device: &Device, buffer: &Arc<core::resource::Buffer>, size: u64) -> Vec<u8> {
+pub(super) fn read(device: &Device, buffer: &Arc<core::resource::Buffer>, size: u64) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
     buffer.map_async(
         wgt::MapMode::Read,

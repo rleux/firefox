@@ -96,6 +96,11 @@ pub(super) fn open(
         required_limits: adapter.limits(),
         ..Default::default()
     };
+    #[cfg(test)]
+    if let Some(enabled) = options.primary_mapping {
+        desc.required_features
+            .set(wgt::Features::MAPPABLE_PRIMARY_BUFFERS, enabled);
+    }
     adapter
         .validate_device_descriptor(&mut desc)
         .map_err(|error| format!("Validating Vulkan device: {error}"))?;

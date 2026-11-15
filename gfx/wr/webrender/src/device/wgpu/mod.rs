@@ -9,12 +9,16 @@ use wgpu_hal as hal;
 use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
+mod transfer;
 mod vulkan;
+pub use self::transfer::{PendingReadback, Readback};
 
 #[derive(Default)]
 pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
+    #[cfg(test)]
+    pub primary_mapping: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +34,22 @@ impl fmt::Display for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+impl Failure {
+    fn validation(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorType::Validation,
+            message: message.into(),
+        }
+    }
+
+    fn from_error(error: impl WebGpuError + fmt::Display) -> Self {
+        Self {
+            kind: error.webgpu_error_type(),
+            message: error.to_string(),
+        }
+    }
+}
 
 #[derive(Default)]
 struct Errors(Mutex<Option<Failure>>);
@@ -158,7 +178,22 @@ impl Device {
 
     /// Poll even after failure so core can deliver mapping and device-loss callbacks.
     pub fn poll(&self) -> Result<wgt::PollStatus, Failure> {
-        let status = self.device.poll(wgt::PollType::Poll);
+        self.poll_with(wgt::PollType::Poll)
+    }
+
+    pub fn wait_for(&self, submission_index: core::SubmissionIndex) -> Result<(), Failure> {
+        self.poll_with(wgt::PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None,
+        })?;
+        Ok(())
+    }
+
+    fn poll_with(
+        &self,
+        poll_type: wgt::PollType<core::SubmissionIndex>,
+    ) -> Result<wgt::PollStatus, Failure> {
+        let status = self.device.poll(poll_type);
         if let Err(error) = &status {
             let kind = match error {
                 core::device::WaitIdleError::Device(error) => error.webgpu_error_type(),
