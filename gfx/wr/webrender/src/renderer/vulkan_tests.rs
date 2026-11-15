@@ -21,6 +21,9 @@ mod clips;
 #[path = "vulkan_blend_tests.rs"]
 mod blends;
 
+#[path = "vulkan_filter_tests.rs"]
+mod filters;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
