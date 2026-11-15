@@ -875,7 +875,10 @@ void RenderThread::UpdateAndRender(
     const Maybe<gfx::IntSize>& aReadbackSize,
     const Maybe<wr::ImageFormat>& aReadbackFormat,
     const Maybe<Range<uint8_t>>& aReadbackBuffer, RendererStats* aStats,
-    bool* aNeedsYFlip) {
+    bool* aNeedsYFlip, bool* aReadbackSuccess) {
+  if (aReadbackSuccess) {
+    *aReadbackSuccess = false;
+  }
   AUTO_PROFILER_LABEL("RenderThread::UpdateAndRender", GRAPHICS);
   MOZ_RELEASE_ASSERT(IsInRenderThread());
   MOZ_ASSERT(aParams.render || aReadbackBuffer.isNothing());
@@ -908,9 +911,9 @@ void RenderThread::UpdateAndRender(
 
   wr::RenderedFrameId latestFrameId;
   if (render) {
-    latestFrameId = renderer->UpdateAndRender(aReadbackSize, aReadbackFormat,
-                                              aReadbackBuffer, aNeedsYFlip,
-                                              aParams, aStats);
+    latestFrameId = renderer->UpdateAndRender(
+        aReadbackSize, aReadbackFormat, aReadbackBuffer, aNeedsYFlip, aParams,
+        aStats, aReadbackSuccess);
   } else {
     renderer->Update();
   }
