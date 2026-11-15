@@ -9363,6 +9363,7 @@ dependencies = [
  "nsstring",
  "num_cpus",
  "objc",
+ "raw-window-handle",
  "rayon",
  "rustc-hash 2.1.1",
  "static_prefs",
