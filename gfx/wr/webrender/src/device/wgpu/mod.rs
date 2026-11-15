@@ -13,6 +13,12 @@ mod bindings;
 mod pipeline;
 mod samplers;
 mod shader;
+mod images;
+mod program_store;
+mod texture_store;
+mod upload_buffers;
+mod vertex_array;
+pub use crate::device::TextureFilter;
 mod vertex_layout;
 mod transfer;
 

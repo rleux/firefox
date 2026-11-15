@@ -1,0 +1,413 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use super::images::Image as Texture;
+use super::transfer::texture_format;
+
+use super::{wgt, Device, TextureFilter};
+use crate::device::{
+    DrawTarget, GpuFrameId, ReadTarget, Texture as TextureHandle, TextureFlags, TextureId,
+    TextureSlot,
+};
+use crate::internal_types::FastHashMap;
+use crate::internal_types::RenderTargetInfo;
+use api::{
+    units::{DeviceIntRect, DeviceIntSize},
+    ImageBufferKind, ImageFormat, ImageRendering,
+};
+use std::cell::Cell;
+use std::convert::TryFrom;
+use std::sync::Arc;
+
+struct Entry {
+    color: Arc<Texture>,
+    depth: Option<Arc<Texture>>,
+    renderable: bool,
+}
+
+struct SharedDepthTarget {
+    texture: Arc<Texture>,
+    // Count texture-store entries independently of pending GPU references.
+    users: usize,
+}
+
+enum Binding {
+    Owned(u32),
+    External {
+        texture: Arc<Texture>,
+        filter: TextureFilter,
+    },
+}
+
+pub(super) struct TextureStore {
+    owner: Arc<Device>,
+    entries: FastHashMap<u32, Entry>,
+    depth_targets: FastHashMap<DeviceIntSize, SharedDepthTarget>,
+
+    last_id: u32,
+    frame: GpuFrameId,
+    created: u32,
+    deleted: u32,
+    bound: [Option<Binding>; 16],
+    output: Option<Arc<Texture>>,
+}
+
+impl TextureStore {
+    pub fn new(owner: &Arc<Device>) -> Self {
+        Self {
+            owner: owner.clone(),
+            entries: FastHashMap::default(),
+            depth_targets: FastHashMap::default(),
+
+            last_id: 0,
+            frame: GpuFrameId::new(0),
+            created: 0,
+            deleted: 0,
+            bound: std::array::from_fn(|_| None),
+            output: None,
+        }
+    }
+
+    pub fn begin_frame(&mut self, frame: GpuFrameId) {
+        self.reset_bindings();
+        self.frame = frame;
+        self.created = 0;
+        self.deleted = 0;
+    }
+
+    pub fn created(&self) -> u32 {
+        self.created
+    }
+    pub fn deleted(&self) -> u32 {
+        self.deleted
+    }
+
+    pub fn default_target(&mut self, size: DeviceIntSize) -> Result<Arc<Texture>, String> {
+        if size.width <= 0 || size.height <= 0 {
+            return Err("Invalid Vulkan output dimensions".into());
+        }
+        if let Some(output) = &self.output {
+            if output.size().width == size.width as u32
+                && output.size().height == size.height as u32
+            {
+                return Ok(output.clone());
+            }
+        }
+        let output = Texture::new(
+            &self.owner,
+            size.width as u32,
+            size.height as u32,
+            wgt::TextureFormat::Rgba8Unorm,
+            TextureFilter::Linear,
+            true,
+        )?;
+        self.output = Some(output.clone());
+        Ok(output)
+    }
+
+    pub fn output(&self) -> Option<Arc<Texture>> {
+        self.output.clone()
+    }
+
+    pub fn default_target_viewport(
+        target: DrawTarget,
+    ) -> Result<(DeviceIntSize, DeviceIntRect), String> {
+        let DrawTarget::Default {
+            rect,
+            total_size,
+            surface_origin_is_top_left,
+        } = target
+        else {
+            return Err("Expected a default Vulkan target".into());
+        };
+        // A resize can leave the frame's viewport larger than the current window.
+        if !surface_origin_is_top_left
+            || rect.min.x < 0
+            || rect.min.y < 0
+            || rect.max.x <= rect.min.x
+            || rect.max.y <= rect.min.y
+            || total_size.width <= 0
+            || total_size.height <= 0
+        {
+            return Err("Invalid Vulkan default-target viewport or orientation".into());
+        }
+        let dimensions = total_size.cast_unit();
+        Ok((dimensions, rect.cast_unit()))
+    }
+
+    pub fn draw_target(
+        &mut self,
+        target: DrawTarget,
+    ) -> Result<(Arc<Texture>, Option<Arc<Texture>>, Option<DeviceIntRect>), String> {
+        let (color, depth, dimensions, viewport) = match target {
+            DrawTarget::Texture {
+                texture,
+                with_depth,
+                dimensions,
+            } => {
+                let (color, depth) = self.render_target(texture, with_depth)?;
+                (color, depth, dimensions, None)
+            }
+            DrawTarget::Default { .. } => {
+                let (dimensions, rect) = Self::default_target_viewport(target)?;
+                (
+                    self.default_target(dimensions)?,
+                    None,
+                    dimensions,
+                    Some(rect),
+                )
+            }
+            DrawTarget::NativeSurface { .. } => {
+                return Err("Vulkan native-surface targets are unsupported".into())
+            }
+        };
+        if dimensions.width != color.size().width as i32
+            || dimensions.height != color.size().height as i32
+        {
+            return Err("Vulkan render target dimensions do not match its image".into());
+        }
+        Ok((color, depth, viewport))
+    }
+
+    pub fn read_target(&self, target: ReadTarget) -> Result<Arc<Texture>, String> {
+        match target {
+            ReadTarget::Default => self
+                .output()
+                .ok_or_else(|| "Vulkan output has not been allocated".into()),
+            ReadTarget::Texture { texture } => Ok(self.render_target(texture, false)?.0),
+            ReadTarget::NativeSurface { .. } => {
+                Err("Vulkan native-surface targets are unsupported".into())
+            }
+        }
+    }
+
+    pub fn create(
+        &mut self,
+        target: ImageBufferKind,
+        format: ImageFormat,
+        size: DeviceIntSize,
+        filter: TextureFilter,
+        render_target: Option<RenderTargetInfo>,
+    ) -> Result<TextureHandle, String> {
+        if !matches!(
+            target,
+            ImageBufferKind::Texture2D | ImageBufferKind::TextureRect
+        ) || size.width <= 0
+            || size.height <= 0
+        {
+            return Err("Invalid Vulkan texture kind or dimensions".into());
+        }
+        let id = self
+            .last_id
+            .checked_add(1)
+            .ok_or("Vulkan texture identifier space exhausted")?;
+        let color = Texture::new(
+            &self.owner,
+            size.width as u32,
+            size.height as u32,
+            texture_format(format),
+            filter,
+            render_target.is_some(),
+        )?;
+        let depth = if render_target.map_or(false, |info| info.has_depth) {
+            Some(self.acquire_depth_target(size)?)
+        } else {
+            None
+        };
+        self.entries.insert(
+            id,
+            Entry {
+                color,
+                depth,
+                renderable: render_target.is_some(),
+            },
+        );
+        self.last_id = id;
+        self.created += 1;
+        Ok(TextureHandle {
+            id,
+            target_id: TextureId(u64::from(id)),
+            target,
+            format,
+            size,
+            filter,
+            flags: TextureFlags::empty(),
+            active_swizzle: Cell::default(),
+            render_target,
+            last_frame_used: self.frame,
+        })
+    }
+
+    fn entry(&self, handle: &TextureHandle) -> Result<&Entry, String> {
+        if handle.target_id.0 != u64::from(handle.id) {
+            return Err("Invalid Vulkan texture handle".into());
+        }
+        self.entries
+            .get(&handle.id)
+            .ok_or_else(|| "Unknown Vulkan texture handle".into())
+    }
+
+    pub fn image(&self, handle: &TextureHandle) -> Result<Arc<Texture>, String> {
+        Ok(self.entry(handle)?.color.clone())
+    }
+
+    pub fn bind(&mut self, slot: TextureSlot, handle: &TextureHandle) -> Result<(), String> {
+        self.entry(handle)?;
+        let binding = self
+            .bound
+            .get_mut(slot.0)
+            .ok_or("Invalid Vulkan texture slot")?;
+        *binding = Some(Binding::Owned(handle.id));
+        Ok(())
+    }
+
+    pub fn bind_external_image(
+        &mut self,
+        slot: TextureSlot,
+        texture: Arc<Texture>,
+        rendering: ImageRendering,
+    ) -> Result<(), String> {
+        let binding = self
+            .bound
+            .get_mut(slot.0)
+            .ok_or("Invalid Vulkan texture slot")?;
+        let filter = match rendering {
+            ImageRendering::Auto | ImageRendering::CrispEdges => TextureFilter::Linear,
+            ImageRendering::Pixelated => TextureFilter::Nearest,
+        };
+        *binding = Some(Binding::External { texture, filter });
+        Ok(())
+    }
+
+    pub fn reset_bindings(&mut self) {
+        self.bound.fill_with(|| None);
+    }
+
+    pub fn clear_color_bindings(&mut self) {
+        self.bound[..3].fill_with(|| None);
+    }
+
+    fn unbind_texture(&mut self, id: u32) {
+        for slot in &mut self.bound {
+            if matches!(slot, Some(Binding::Owned(bound)) if *bound == id) {
+                *slot = None;
+            }
+        }
+    }
+
+    pub fn binding(&self, slot: usize) -> Option<Option<(Arc<Texture>, TextureFilter)>> {
+        self.bound.get(slot).map(|binding| {
+            binding.as_ref().map(|binding| match binding {
+                Binding::Owned(id) => (
+                    self.entries[id].color.clone(),
+                    self.entries[id].color.filter,
+                ),
+                Binding::External { texture, filter } => (texture.clone(), *filter),
+            })
+        })
+    }
+
+    pub fn render_target(
+        &self,
+        id: TextureId,
+        with_depth: bool,
+    ) -> Result<(Arc<Texture>, Option<Arc<Texture>>), String> {
+        let id = u32::try_from(id.0).map_err(|_| "Invalid Vulkan render target identifier")?;
+        let entry = self
+            .entries
+            .get(&id)
+            .ok_or("Unknown Vulkan render target")?;
+        if !entry.renderable {
+            return Err("Vulkan texture is not a render target".into());
+        }
+        let depth = if with_depth {
+            Some(
+                entry
+                    .depth
+                    .as_ref()
+                    .ok_or("Vulkan render target has no depth attachment")?
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        Ok((entry.color.clone(), depth))
+    }
+
+    fn acquire_depth_target(&mut self, size: DeviceIntSize) -> Result<Arc<Texture>, String> {
+        use std::collections::hash_map::Entry;
+        let target = match self.depth_targets.entry(size) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(SharedDepthTarget {
+                texture: Texture::new(
+                    &self.owner,
+                    size.width as u32,
+                    size.height as u32,
+                    wgt::TextureFormat::Depth32Float,
+                    TextureFilter::Nearest,
+                    true,
+                )?,
+                users: 0,
+            }),
+        };
+        target.users += 1;
+        Ok(target.texture.clone())
+    }
+
+    fn release_depth_target(&mut self, size: DeviceIntSize) {
+        let target = self
+            .depth_targets
+            .get_mut(&size)
+            .expect("Unknown depth target");
+        target.users -= 1;
+        if target.users == 0 {
+            self.depth_targets.remove(&size);
+        }
+    }
+
+    pub fn reuse_render_target(
+        &mut self,
+        handle: &mut TextureHandle,
+        info: RenderTargetInfo,
+    ) -> Result<(), String> {
+        let entry = self.entry(handle)?;
+        if !entry.renderable {
+            return Err("Vulkan texture is not a render target".into());
+        }
+        if info.has_depth && entry.depth.is_none() {
+            let depth = self.acquire_depth_target(handle.size)?;
+            self.entries.get_mut(&handle.id).unwrap().depth = Some(depth);
+        } else if !info.has_depth && entry.depth.is_some() {
+            self.entries.get_mut(&handle.id).unwrap().depth = None;
+            self.release_depth_target(handle.size);
+        }
+        handle.render_target = Some(info);
+        handle.last_frame_used = self.frame;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, handle: &mut TextureHandle) -> Result<(), String> {
+        if handle.id == 0 {
+            return Ok(());
+        }
+        self.entry(handle)?;
+        self.unbind_texture(handle.id);
+        let entry = self.entries.remove(&handle.id).unwrap();
+        if entry.depth.is_some() {
+            self.release_depth_target(handle.size);
+        }
+        handle.id = 0;
+        handle.render_target = None;
+        self.deleted += 1;
+        Ok(())
+    }
+
+    pub fn depth_bytes(&self) -> usize {
+        self.depth_targets.values().fold(0usize, |total, target| {
+            let size = target.texture.size();
+            let bytes = u64::from(size.width) * u64::from(size.height) * 4;
+            total.saturating_add(usize::try_from(bytes).unwrap_or(usize::MAX))
+        })
+    }
+}
