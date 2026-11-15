@@ -2,6 +2,7 @@
 members = [
     "examples",
     "webrender",
+    "webrender_shader_build",
     "webrender_api",
     "wrench",
     "wrshell",

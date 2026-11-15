@@ -25,6 +25,20 @@ bitflags! {
 
 pub type ShaderFeatures = HashMap<&'static str, Vec<String>>;
 
+#[cfg(feature = "vulkan")]
+pub fn get_vulkan_shader_features() -> ShaderFeatures {
+    let mut shaders = get_shader_features(
+        ShaderFeatureFlags::DUAL_SOURCE_BLENDING
+            | ShaderFeatureFlags::DEBUG
+            | ShaderFeatureFlags::PATH_AA_ALL_MODES,
+    );
+    shaders
+        .get_mut("ps_quad_gradient")
+        .unwrap()
+        .push("DITHERING".into());
+    shaders
+}
+
 /// Builder for a list of features.
 #[derive(Clone)]
 struct FeatureList<'a> {
@@ -223,4 +237,23 @@ pub fn get_shader_features(flags: ShaderFeatureFlags) -> ShaderFeatures {
     }
 
     shaders
+}
+
+
+#[cfg(all(test, feature = "vulkan"))]
+#[test]
+fn vulkan_catalog_includes_debug_path_and_dithering_variants() {
+    let shaders = get_vulkan_shader_features();
+    for name in ["debug_color", "debug_font"] {
+        assert!(shaders.contains_key(name));
+    }
+    for features in ["PATH_SSAA4", "PATH_SSAA8", ""] {
+        assert!(shaders["cs_path_tile"].iter().any(|value| value == features));
+    }
+    for features in ["", "DITHERING"] {
+        assert!(shaders["ps_quad_gradient"].iter().any(|value| value == features));
+    }
+    for features in ["DEBUG_OVERDRAW,TEXTURE_2D", "DEBUG_OVERDRAW,DUAL_SOURCE_BLENDING,TEXTURE_2D"] {
+        assert!(shaders["ps_text_run"].iter().any(|value| value == features));
+    }
 }
