@@ -229,7 +229,7 @@ pub struct Wrench {
 
     /// The GL context the renderer draws with, shared so that wrench can
     /// create GL textures to hand to the renderer as external images.
-    gl: Rc<dyn gl::Gl>,
+    gl: Option<Rc<dyn gl::Gl>>,
     pub renderer: webrender::Renderer,
     pub api: RenderApi,
     pub document_id: DocumentId,
@@ -275,7 +275,7 @@ pub struct Wrench {
 
 impl Wrench {
     pub fn gl(&self) -> &dyn gl::Gl {
-        &*self.gl
+        &**self.gl.as_ref().expect("Vulkan has no GL context")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -337,7 +337,7 @@ impl Wrench {
             clear_caches_with_quads: !window.is_software(),
             enable_shared_instance_buffer: !cfg!(target_os = "windows"),
             compositor_config,
-            enable_debugger: true,
+            enable_debugger: !window.is_vulkan(),
             ..Default::default()
         };
 
@@ -353,14 +353,14 @@ impl Wrench {
             Box::new(Notifier(data))
         });
 
-        let gl = window.clone_gl();
+        let gl = if window.is_vulkan() {None} else {Some(window.clone_gl())};
 
         // Build the shaders on a device of their own and share them with the
         // renderer, as Gecko does, so that programs created or linked through
         // one device are drawn with through another.
-        let shaders = {
+        let shaders = if window.is_vulkan() {None} else {
             let mut device = webrender::Device::new(
-                webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.clone())),
+                webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.as_ref().unwrap().clone())),
                 webrender::DeviceOptions {
                     crash_annotator: None,
                     resource_override_path: opts.resource_override_path.clone(),
@@ -383,14 +383,21 @@ impl Wrench {
             let mut pending = shaders.precache_all(precache_flags);
             while shaders.resume_precache(&mut device, &mut pending).unwrap() {}
             device.end_frame();
-            Rc::new(RefCell::new(shaders))
+            Some(Rc::new(RefCell::new(shaders)))
+        };
+        let config = match window {
+            #[cfg(all(feature="vulkan",target_os="linux"))]
+            WindowWrapper::Vulkan{window,vsync,validation} => webrender::GpuBackendConfig::Vulkan(webrender::wgpu::Options {
+                window:Some(window.clone()),validation:*validation,surface_options:webrender::wgpu::SurfaceOptions {vsync:*vsync,transparent:false},..Default::default()
+            }),
+            _ => webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.as_ref().unwrap().clone())),
         };
 
         let (renderer, sender) = webrender::create_webrender_instance(
-            webrender::GpuBackendConfig::Gl(webrender::GlBackendConfig::new(gl.clone())),
+            config,
             notifier,
             opts,
-            Some(&shaders),
+            shaders.as_ref(),
         ).unwrap();
         // The renderer now holds the only reference, so its deinit releases them.
         drop(shaders);
@@ -803,6 +810,29 @@ impl Wrench {
             .expect("errors encountered during render!")
     }
 
+    pub fn render_for_readback(&mut self, window: &mut WindowWrapper) -> RenderResults {
+        let backend_presents = window.is_vulkan();
+        render_until_readback(backend_presents, || {
+            window.update(self);
+            let results = if backend_presents {
+                self.renderer.update();
+                let _ = self.renderer.flush_pipeline_info();
+                assert!(
+                    self.renderer.prepare_readback().unwrap(),
+                    "Vulkan surface does not support the requested readback"
+                );
+                self.renderer
+                    .render(self.window_size, 0)
+                    .expect("errors encountered during render!")
+            } else {
+                self.render()
+            };
+            let ready = self.renderer.device.readback_ready();
+            (results, ready)
+        })
+        .expect("Unable to render a frame for synchronous readback")
+    }
+
     pub fn refresh(&mut self) {
         self.begin_frame();
         let mut txn = Transaction::new();
@@ -834,7 +864,7 @@ impl Wrench {
 
         let color_and_offset = [(ColorF::BLACK, 2.0), (ColorF::WHITE, 0.0)];
         self.renderer.device.begin_frame(); // next line might compile shaders:
-        let dr = self.renderer.debug_renderer().unwrap();
+        let Some(dr) = self.renderer.debug_renderer() else { self.renderer.device.end_frame(); return; };
 
         for co in &color_and_offset {
             let x = 15.0 + co.1;
@@ -859,5 +889,140 @@ impl Wrench {
         }
 
         self.renderer.deinit();
+    }
+}
+
+fn render_until_readback(
+    backend_presents: bool,
+    mut render: impl FnMut() -> (RenderResults, bool),
+) -> Result<RenderResults, &'static str> {
+    let mut first_attempt = None;
+    for attempt in 0..3 {
+        let (results, ready) = render();
+        match results.present_result {
+            None if backend_presents => {
+                return Err("No frame was presented for synchronous readback")
+            }
+            Some(webrender::PresentResult::Retry | webrender::PresentResult::SizeMismatch) => {
+                // Retries may only composite cached tiles; retain the scene's invalidation evidence.
+                if first_attempt.is_none() {
+                    first_attempt = Some(results);
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+            }
+            Some(webrender::PresentResult::Occluded) => {
+                return Err("The window is occluded; synchronous readback cannot proceed")
+            }
+            Some(webrender::PresentResult::Presented) | None => {
+                if !ready {
+                    return Err("The rendered frame does not support readback");
+                }
+                let mut result = first_attempt.unwrap_or(results);
+                result.present_result = if backend_presents {
+                    Some(webrender::PresentResult::Presented)
+                } else {
+                    None
+                };
+                return Ok(result);
+            }
+        }
+    }
+    Err("Presentation did not succeed after three readback attempts")
+}
+
+#[cfg(test)]
+mod readback_tests {
+    use super::*;
+    use webrender::PresentResult;
+
+    #[test]
+    fn acquisition_failures_retry_before_pixels_can_be_read() {
+        let mut attempts = 0;
+        let mut pixels = None;
+        let result = render_until_readback(true, || {
+            attempts += 1;
+            if attempts < 3 {
+                (
+                    RenderResults {
+                        present_result: Some(PresentResult::Retry),
+                        vertex_data_uploads: attempts,
+                        ..Default::default()
+                    },
+                    false,
+                )
+            } else {
+                pixels = Some([255u8, 0, 0, 255]);
+                (
+                    RenderResults {
+                        present_result: Some(PresentResult::Presented),
+                        vertex_data_uploads: attempts,
+                        ..Default::default()
+                    },
+                    true,
+                )
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(result.vertex_data_uploads, 1);
+        assert_eq!(result.present_result, Some(PresentResult::Presented));
+        assert_eq!(pixels, Some([255, 0, 0, 255]));
+    }
+    #[test]
+    fn size_mismatch_renders_again_and_occlusion_cannot_return_stale_pixels() {
+        let mut attempts = 0;
+        let result = render_until_readback(true, || {
+            attempts += 1;
+            (
+                RenderResults {
+                    present_result: Some(if attempts == 1 {
+                        PresentResult::SizeMismatch
+                    } else {
+                        PresentResult::Presented
+                    }),
+                    ..Default::default()
+                },
+                attempts > 1,
+            )
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts, 2);
+        assert!(render_until_readback(true, || (
+            RenderResults {
+                present_result: Some(PresentResult::Occluded),
+                ..Default::default()
+            },
+            true
+        ))
+        .unwrap_err()
+        .contains("occluded"));
+    }
+    #[test]
+    fn failed_or_unsupported_capture_returns_no_frame_and_gl_remains_supported() {
+        let mut attempts = 0;
+        assert!(render_until_readback(true, || {
+            attempts += 1;
+            (
+                RenderResults {
+                    present_result: Some(PresentResult::Retry),
+                    ..Default::default()
+                },
+                false,
+            )
+        })
+        .is_err());
+        assert_eq!(attempts, 3);
+        assert!(render_until_readback(true, || (RenderResults::default(), true)).is_err());
+        assert!(render_until_readback(true, || (
+            RenderResults {
+                present_result: Some(PresentResult::Presented),
+                ..Default::default()
+            },
+            false
+        ))
+        .is_err());
+        assert!(render_until_readback(false, || (RenderResults::default(), true)).is_ok());
     }
 }

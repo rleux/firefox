@@ -30,6 +30,14 @@ args:
   - slow_subpixel:
       long: slow-subpixel
       help: Disable dual source blending
+  - vulkan:
+      long: vulkan
+      help: Use native Vulkan presentation (Linux X11, requires the vulkan feature)
+      conflicts_with: [headless, angle, software, compositor, shaders, dump_shader_source, color_target_init]
+  - vulkan_validation:
+      long: vulkan-validation
+      help: Enable Vulkan validation (requires the Khronos layer)
+      requires: vulkan
   - headless:
       long: headless
       help: Enable headless rendering
