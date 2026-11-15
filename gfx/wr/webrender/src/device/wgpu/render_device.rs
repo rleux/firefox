@@ -961,3 +961,10 @@ mod texture_blit;
 #[cfg(test)]
 #[path = "instance_tests.rs"]
 mod instance_tests;
+
+#[path = "gpu_backend.rs"]
+mod backend;
+
+#[cfg(test)]
+#[path = "render_device_tests.rs"]
+mod tests;

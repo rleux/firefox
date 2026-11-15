@@ -6,7 +6,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-pub(super) static VALIDATION_ERRORS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static VALIDATION_ERRORS: AtomicUsize = AtomicUsize::new(0);
 struct Logger;
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -21,12 +21,16 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
-pub(super) fn device() -> Device {
+pub(crate) fn validation_logging() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         log::set_logger(&Logger).unwrap();
         log::set_max_level(log::LevelFilter::Error);
     });
+}
+
+pub(super) fn device() -> Device {
+    validation_logging();
     let device = Device::new(&Options {
         validation: true,
         ..Default::default()

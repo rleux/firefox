@@ -250,4 +250,4 @@ fn select_adapter(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
