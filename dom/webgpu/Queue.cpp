@@ -12,6 +12,7 @@
 #include "Utility.h"
 #include "ipc/WebGPUChild.h"
 #include "mozilla/Casting.h"
+#include "mozilla/webgpu/CanvasContext.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/dom/BufferSourceBinding.h"
 #include "mozilla/dom/HTMLCanvasElement.h"
@@ -32,6 +33,12 @@ namespace mozilla::webgpu {
 
 GPU_IMPL_CYCLE_COLLECTION(Queue, mParent)
 GPU_IMPL_JS_WRAP(Queue)
+
+static void NotifyCanvasWrite(Texture& aTexture) {
+  if (aTexture.mTargetContext) {
+    aTexture.mTargetContext->MaybeQueueSwapChainPresent(&aTexture);
+  }
+}
 
 Queue::Queue(Device* const aParent, RawId aId)
     : ObjectBase(aParent->GetChild(), aId, ffi::wgpu_client_drop_queue),
@@ -329,6 +336,7 @@ void Queue::WriteTexture(
     auto shmem_handle_index = GetChild()->QueueShmemHandle(std::move(handle));
     ffi::wgpu_queue_write_texture_via_shmem(
         GetClient(), GetId(), copyView, dataLayout, extent, shmem_handle_index);
+    NotifyCanvasWrite(*aDestination.mTexture);
   });
 }
 
@@ -599,6 +607,7 @@ void Queue::CopyExternalImageToTexture(
   auto shmem_handle_index = GetChild()->QueueShmemHandle(std::move(handle));
   ffi::wgpu_queue_write_texture_via_shmem(
       GetClient(), GetId(), copyView, dataLayout, extent, shmem_handle_index);
+  NotifyCanvasWrite(*aDestination.mTexture);
 }
 
 }  // namespace mozilla::webgpu

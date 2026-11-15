@@ -97,6 +97,7 @@ class VulkanFrameTracker {
 
 class RenderCompositorVulkan final : public RenderCompositor {
  public:
+  static bool IsRequested();
   static UniquePtr<RenderCompositor> Create(
       const RefPtr<widget::CompositorWidget>& aWidget, nsACString& aError);
 

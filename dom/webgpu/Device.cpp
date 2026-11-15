@@ -990,7 +990,21 @@ already_AddRefed<Texture> Device::InitSwapChain(
     return nullptr;
   }
 
-  const layers::RGBDescriptor rgbDesc(aCanvasSize, aFormat,
+  auto presentationFormat = aFormat;
+  if (aConfig->mAlphaMode == dom::GPUCanvasAlphaMode::Opaque) {
+    switch (aFormat) {
+      case gfx::SurfaceFormat::R8G8B8A8:
+        presentationFormat = gfx::SurfaceFormat::R8G8B8X8;
+        break;
+      case gfx::SurfaceFormat::B8G8R8A8:
+        presentationFormat = gfx::SurfaceFormat::B8G8R8X8;
+        break;
+      default:
+        MOZ_ASSERT_UNREACHABLE("Invalid canvas format!");
+        return nullptr;
+    }
+  }
+  const layers::RGBDescriptor rgbDesc(aCanvasSize, presentationFormat,
                                       gfx::ColorSpace2::SRGB,
                                       gfx::TransferFunction::SRGB);
 
@@ -1002,7 +1016,8 @@ already_AddRefed<Texture> Device::InitSwapChain(
       (int8_t)rgbDesc.format(), aOwnerId.mId, aUseSharedTextureInSwapChain);
 
   // TODO: `mColorSpace`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846608>
-  // TODO: `mAlphaMode`: <https://bugzilla.mozilla.org/show_bug.cgi?id=1846605>
+  // TODO: `mAlphaMode` for shared textures:
+  // <https://bugzilla.mozilla.org/show_bug.cgi?id=1846605>
   return CreateTexture(textureDesc, Some(aOwnerId));
 }
 

@@ -244,14 +244,16 @@ RefPtr<Texture> CanvasContext::GetCurrentTexture(ErrorResult& aRv) {
   return mCurrentTexture;
 }
 
-void CanvasContext::MaybeQueueSwapChainPresent() {
-  if (!mConfiguration) {
+void CanvasContext::MaybeQueueSwapChainPresent(Texture* aQueueWriteTexture) {
+  if (!mConfiguration ||
+      (aQueueWriteTexture && (mUseSharedTextureInSwapChain ||
+                              aQueueWriteTexture != mCurrentTexture.get()))) {
     return;
   }
 
   MOZ_ASSERT(mCurrentTexture);
 
-  if (mCurrentTexture) {
+  if (mCurrentTexture && !aQueueWriteTexture) {
     mChild->NotifyWaitForSubmit(mCurrentTexture->GetId());
   }
 
@@ -324,7 +326,7 @@ bool CanvasContext::InitializeCanvasRenderer(
   layers::CanvasRendererData data;
   data.mContext = this;
   data.mSize = mCanvasSize;
-  data.mIsOpaque = false;
+  data.mIsOpaque = GetIsOpaque();
   data.mRemoteTextureOwnerId = mRemoteTextureOwnerId;
 
   aRenderer->Initialize(data);
@@ -496,7 +498,7 @@ void CanvasContext::ForceNewFrame() {
   } else if (mOffscreenCanvas) {
     dom::OffscreenCanvasDisplayData data;
     data.mSize = mCanvasSize;
-    data.mIsOpaque = false;
+    data.mIsOpaque = GetIsOpaque();
     mOffscreenCanvas->UpdateDisplayData(data);
   }
 }

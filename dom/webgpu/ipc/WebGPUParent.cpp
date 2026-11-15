@@ -12,6 +12,7 @@
 #include "mozilla/dom/WebGPUBinding.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
 #include "mozilla/gfx/Logging.h"
+#include "mozilla/gfx/Swizzle.h"
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/ImageDataSerializer.h"
 #include "mozilla/layers/RemoteTextureMap.h"
@@ -402,6 +403,7 @@ class PresentationData {
  public:
   WeakPtr<WebGPUParent> mParent;
   bool mUseSharedTextureInSwapChain;
+  const bool mIsOpaque;
   const RawId mDeviceId;
   const RawId mQueueId;
   Maybe<RawId> mLastSubmittedTextureId;
@@ -430,10 +432,12 @@ class PresentationData {
 
   PresentationData(WebGPUParent* aParent, bool aUseSharedTextureInSwapChain,
                    RawId aDeviceId, RawId aQueueId,
-                   const layers::RGBDescriptor& aDesc, uint32_t aBufferStride,
+                   const layers::RGBDescriptor& aDesc, bool aIsOpaque,
+                   uint32_t aBufferStride,
                    size_t aBufferSize, const nsTArray<RawId>& aBufferIds)
       : mParent(aParent),
         mUseSharedTextureInSwapChain(aUseSharedTextureInSwapChain),
+        mIsOpaque(aIsOpaque),
         mDeviceId(aDeviceId),
         mQueueId(aQueueId),
         mDesc(aDesc),
@@ -754,7 +758,14 @@ void WebGPUParent::DeviceCreateSwapChain(
     const nsTArray<RawId>& aBufferIds,
     const layers::RemoteTextureOwnerId& aOwnerId,
     bool aUseSharedTextureInSwapChain) {
+  auto storageDesc = aDesc;
   switch (aDesc.format()) {
+    case gfx::SurfaceFormat::R8G8B8X8:
+      storageDesc.format() = gfx::SurfaceFormat::R8G8B8A8;
+      break;
+    case gfx::SurfaceFormat::B8G8R8X8:
+      storageDesc.format() = gfx::SurfaceFormat::B8G8R8A8;
+      break;
     case gfx::SurfaceFormat::R8G8B8A8:
     case gfx::SurfaceFormat::B8G8R8A8:
       break;
@@ -762,6 +773,7 @@ void WebGPUParent::DeviceCreateSwapChain(
       MOZ_ASSERT_UNREACHABLE("Invalid surface format!");
       return;
   }
+  const bool isOpaque = gfx::IsOpaque(aDesc.format());
 
   const auto bufferStrideWithMask =
       Device::BufferStrideWithMask(aDesc.size(), aDesc.format());
@@ -793,7 +805,7 @@ void WebGPUParent::DeviceCreateSwapChain(
   mRemoteTextureOwner->RegisterTextureOwner(aOwnerId);
 
   auto data = MakeRefPtr<PresentationData>(
-      this, aUseSharedTextureInSwapChain, aDeviceId, aQueueId, aDesc,
+      this, aUseSharedTextureInSwapChain, aDeviceId, aQueueId, storageDesc, isOpaque,
       bufferStride, bufferSize.value(), aBufferIds);
   if (!mPresentationDataMap.emplace(aOwnerId, data).second) {
     NS_ERROR("External image is already registered as WebGPU canvas!");
@@ -842,7 +854,7 @@ static void ReadbackPresentCallback(uint8_t* userdata,
   });
 
   if (!req->mRemoteTextureOwner->IsRegistered(req->mOwnerId)) {
-    // SwapChain is already Destroyed
+    // Actor teardown may have destroyed the context before this callback ran.
     return;
   }
 
@@ -854,8 +866,12 @@ static void ReadbackPresentCallback(uint8_t* userdata,
     data->mQueuedBufferIds.pop_back();
   }
 
-  // Ensure we'll make the bufferId available for reuse
-  data->mAvailableBufferIds.push_back(bufferId);
+  const auto releaseBuffer = mozilla::MakeScopeExit([&] {
+    if (status == ffi::WGPUBufferMapAsyncStatus_Success) {
+      wgpu_server_buffer_unmap(req->mContext, bufferId);
+    }
+    data->mAvailableBufferIds.push_back(bufferId);
+  });
 
   MOZ_LOG(sLogger, LogLevel::Info,
           ("ReadbackPresentCallback for buffer %" PRIu64 " status=%d\n",
@@ -903,10 +919,27 @@ static void ReadbackPresentCallback(uint8_t* userdata,
       MOZ_RELEASE_ASSERT(src_stride >= bytesPerRow);
       MOZ_RELEASE_ASSERT(dst_stride >= bytesPerRow);
 
+      gfx::SwizzleRowFn copyOpaqueRow = nullptr;
+      if (data->mIsOpaque) {
+        const auto opaqueFormat =
+            data->mDesc.format() == gfx::SurfaceFormat::R8G8B8A8
+                ? gfx::SurfaceFormat::R8G8B8X8
+                : gfx::SurfaceFormat::B8G8R8X8;
+        copyOpaqueRow = gfx::SwizzleRow(data->mDesc.format(), opaqueFormat);
+        if (!copyOpaqueRow) {
+          gfxCriticalNoteOnce << "Failed to copy opaque WebGPU pixels";
+          return;
+        }
+      }
+
       // The height is in bounds for both buffers since we just requested a new
       // destination buffer with the same height of the source.
       for (auto row = 0; row < size.height; ++row) {
-        memcpy(dst, src, bytesPerRow);
+        if (copyOpaqueRow) {
+          copyOpaqueRow(src, dst, size.width);
+        } else {
+          memcpy(dst, src, bytesPerRow);
+        }
         if (bytesPerRow < dst_stride) {
           memset(dst + bytesPerRow, 0, dst_stride - bytesPerRow);
         }
@@ -919,10 +952,6 @@ static void ReadbackPresentCallback(uint8_t* userdata,
       NS_WARNING("WebGPU present skipped: the swapchain is resized!");
     }
 
-    // Release the lock on the mapped range, so the unmap doesn't deadlock.
-    mapped.reset();
-
-    wgpu_server_buffer_unmap(req->mContext, bufferId);
   } else {
     // TODO: better handle errors
     NS_WARNING("WebGPU frame mapping failed!");
@@ -1258,6 +1287,11 @@ void WebGPUParent::SwapChainPresent(
   if (!succeeded) {
     return;
   }
+
+  // Queue-side writes may present without a client QueueSubmit. The accepted
+  // internal copy has submitted this source; snapshots can now read it or the
+  // completed publication if the client destroys/removes the texture.
+  data->mLastSubmittedTextureId = Some(aTextureId);
 
   auto& waitingTextures = data->mWaitingReadbackTexturesForPresent;
   auto it = waitingTextures.find(aRemoteTextureId);

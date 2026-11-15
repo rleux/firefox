@@ -1085,6 +1085,14 @@ MediaResult FFmpegVideoDecoder<LIBAV_VER>::ProcessInitHWDecoder() {
   MediaResult rv(NS_ERROR_DOM_MEDIA_FATAL_ERR,
                  RESULT_DETAIL("no hardware decoder available"));
 
+#  ifdef MOZ_WIDGET_GTK
+  if (gfx::gfxVars::UseWebRenderVulkan() &&
+      !gfx::gfxVars::UseSoftwareWebRender()) {
+    FFMPEG_LOG("Vulkan native video transport unavailable, using CPU frames");
+    return;
+  }
+#  endif
+
 #  ifdef MOZ_USE_HWDECODE_VULKAN
   rv = InitVulkanDecoder();
   if (NS_SUCCEEDED(rv)) {

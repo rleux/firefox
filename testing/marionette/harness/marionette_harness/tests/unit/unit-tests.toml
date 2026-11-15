@@ -211,3 +211,7 @@ skip-if = [
 run-if = [
   "os == 'mac'", # only supported on MacOS
 ]
+
+["test_webgpu_cpu_canvas.py"]
+run-if = ["os == 'linux'"]
+support-files = ["webgpu_cpu_canvas_x11_sampler.py"]
