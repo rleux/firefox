@@ -57,16 +57,16 @@ class RendererOGL {
   void SetFramePublishId(FramePublishId aPublishId);
 
   /// This can be called on the render thread only.
-  void Update();
+  Maybe<WrRendererUpdateStatus> Update();
 
   /// This can be called on the render thread only.
-  RenderedFrameId UpdateAndRender(const Maybe<gfx::IntSize>& aReadbackSize,
-                                  const Maybe<wr::ImageFormat>& aReadbackFormat,
-                                  const Maybe<Range<uint8_t>>& aReadbackBuffer,
-                                  bool* aNeedsYFlip,
-                                  const wr::FrameReadyParams& aFrameParams,
-                                  RendererStats* aOutStats,
-                                  bool* aReadbackSuccess = nullptr);
+  RenderedFrameId UpdateAndRender(
+      const Maybe<gfx::IntSize>& aReadbackSize,
+      const Maybe<wr::ImageFormat>& aReadbackFormat,
+      const Maybe<Range<uint8_t>>& aReadbackBuffer, bool* aNeedsYFlip,
+      const wr::FrameReadyParams& aFrameParams, RendererStats* aOutStats,
+      bool* aReadbackSuccess = nullptr,
+      const Maybe<WrRendererUpdateStatus>& aUpdated = Nothing());
 
   /// This can be called on the render thread only.
   void WaitForGPU();
@@ -79,6 +79,7 @@ class RendererOGL {
 
   /// This can be called on the render thread only.
   RenderedFrameId UpdateFrameId();
+  bool NativeImagesPending() const { return mNativeImagesPending; }
 
   /// This can be called on the render thread only.
   void SetProfilerEnabled(bool aEnabled);
@@ -203,6 +204,7 @@ class RendererOGL {
   // Tracks whether the last render rasterized any tiles.
   // Used by reftest to verify no rasterization occurred.
   bool mLastFrameDidRasterize = false;
+  bool mNativeImagesPending = false;
 
  public:
   bool CheckAndClearDidRasterize();

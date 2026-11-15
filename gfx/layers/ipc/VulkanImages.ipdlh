@@ -1,0 +1,50 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+include "mozilla/GfxMessageUtils.h";
+include "mozilla/webrender/VulkanImageIPC.h";
+
+using mozilla::gfx::IntSize from "mozilla/gfx/Point.h";
+using mozilla::gfx::SurfaceFormat from "mozilla/gfx/Types.h";
+[RefCounted] using mozilla::gfx::FileHandleWrapper from "mozilla/gfx/FileHandleWrapper.h";
+using mozilla::wr::VulkanUUID from "mozilla/webrender/VulkanImageTypes.h";
+using mozilla::wr::VulkanImageReturnStatus from "mozilla/webrender/VulkanImageTypes.h";
+
+namespace mozilla {
+namespace layers {
+
+// The handle is a Vulkan OPAQUE_FD timeline semaphore, never a sync-file.
+struct VulkanTimelineDescriptor {
+  nullable FileHandleWrapper handle;
+  VulkanUUID deviceUUID;
+  VulkanUUID driverUUID;
+  uint64_t value;
+};
+
+// One immutable, single-plane Vulkan DMA-BUF publication. IDs must not be
+// reused within the producer's channel; the ready UUIDs also identify memory.
+struct VulkanImagePublication {
+  uint64_t publicationId;
+  nullable FileHandleWrapper memory;
+  IntSize size;
+  SurfaceFormat format;
+  uint64_t modifier;
+  uint64_t offset;
+  uint64_t stride;
+  bool copySrc;
+  bool copyDst;
+  bool colorTarget;
+  VulkanTimelineDescriptor ready;
+};
+
+// Submitted requires a GPU wait on signal before reuse. Abandoned requires
+// discarding the allocation; neither Unused nor Abandoned carries a signal.
+struct VulkanImageReturnMessage {
+  uint64_t publicationId;
+  VulkanImageReturnStatus status;
+  VulkanTimelineDescriptor? signal;
+};
+
+}  // namespace layers
+}  // namespace mozilla
