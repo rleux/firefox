@@ -14,6 +14,8 @@ mod pipeline;
 mod samplers;
 mod shader;
 mod images;
+pub(super) mod render_device;
+mod renderer_properties;
 mod program_store;
 mod texture_store;
 mod upload_buffers;
