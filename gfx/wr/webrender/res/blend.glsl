@@ -155,7 +155,7 @@ vec4 ComponentTransfer(vec4 colora, vec4 vfuncs, highp int table_address) {
             case COMPONENT_TRANSFER_TABLE:
             case COMPONENT_TRANSFER_DISCRETE: {
                 // fetch value from lookup table
-                k = int(floor(colora[i]*255.0 + 0.5));
+                k = int(floor(clamp(colora[i], 0.0, 1.0)*255.0 + 0.5));
                 texel = fetch_from_gpu_buffer_1f(table_address + offset + k/4);
                 colora[i] = clamp(texel[k % 4], 0.0, 1.0);
                 // offset plus 256/4 blocks

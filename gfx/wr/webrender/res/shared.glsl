@@ -90,7 +90,7 @@ uniform bool u_mali_workaround_dummy;
 
     #if __VERSION__ == 100
         #define oFragColor gl_FragColor
-    #elif defined(WR_FEATURE_DUAL_SOURCE_BLENDING)
+    #elif defined(WR_FEATURE_DUAL_SOURCE_BLENDING) && !(defined(WR_FEATURE_VULKAN) && defined(WR_FEATURE_DEBUG_OVERDRAW))
         layout(location = 0, index = 0) out vec4 oFragColor;
         layout(location = 0, index = 1) out vec4 oFragBlend;
     #else

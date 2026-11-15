@@ -6243,6 +6243,7 @@ dependencies = [
  "url",
  "webrender_api",
  "webrender_build",
+ "webrender_shader_build",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",

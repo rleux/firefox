@@ -22,6 +22,9 @@ void main(void) {
     // Transform into framebuffer [-1, 1] space.
     vec2 pos = mix(a_dst_rect.xy, a_dst_rect.zw, aPosition.xy);
     gl_Position = vec4(pos / (a_dst_texture_size  * 0.5) - vec2(1.0, 1.0), 0.0, 1.0);
+#ifdef WR_FEATURE_VULKAN
+    gl_Position.y = -gl_Position.y;
+#endif
 }
 #endif
 
