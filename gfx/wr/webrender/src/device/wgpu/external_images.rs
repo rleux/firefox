@@ -62,6 +62,11 @@ impl PendingExternalRelease {
 }
 
 impl NativeImage {
+    #[cfg(test)]
+    pub(crate) fn test_is_wrapped(&self) -> bool {
+        self.raw.get().is_some()
+    }
+
     pub fn has_access(&self) -> bool {
         self.access.borrow().has_access()
     }

@@ -101,6 +101,8 @@ pub struct ExternalTextureHandle(pub u64);
 
 /// The source for an external image.
 pub enum ExternalImageSource<'a> {
+    /// Temporarily unavailable; retry before drawing.
+    Pending,
     /// A raw pixel buffer.
     RawData(&'a [u8]),
     /// A texture created by the application.

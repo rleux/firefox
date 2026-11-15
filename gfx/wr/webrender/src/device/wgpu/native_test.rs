@@ -60,21 +60,30 @@ impl Producer {
         value: u64,
     ) -> (Rc<SharedTimeline>, Rc<SharedTimeline>) {
         let retirement = SharedTimeline::new(registry.device()).unwrap();
-        let outcome = unsafe {
-            registry.device().submit_native(
-                &[],
-                &[native_submit::NativeWait {
-                    semaphore: ready.semaphore,
-                    value: Some(value),
-                }],
-                &[],
-                native_submit::NativeSignal {
-                    semaphore: retirement.semaphore,
-                    value: 1,
-                },
-            )
-        };
-        outcome.result.unwrap();
+        // This artificial stall must not advance HAL's binary submission relay:
+        // the next real submission must be enqueueable before the producer opens it.
+        let waits = [ready.semaphore];
+        let stages = [vk::PipelineStageFlags::TOP_OF_PIPE];
+        let signals = [retirement.semaphore];
+        let wait_values = [value];
+        let signal_values = [1];
+        let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(&wait_values)
+            .signal_semaphore_values(&signal_values);
+        let submit = vk::SubmitInfo::default()
+            .wait_semaphores(&waits)
+            .wait_dst_stage_mask(&stages)
+            .signal_semaphores(&signals)
+            .push_next(&mut timeline);
+        let owner = registry.device();
+        let _queue_access = owner.queue_access();
+        let hal = owner.raw_device();
+        unsafe {
+            hal.raw_device()
+                .queue_submit(hal.raw_queue(), &[submit], vk::Fence::null())
+        }
+        .unwrap();
+        retirement.signal_submitted(1);
         (retirement, ready.clone())
     }
     pub(crate) fn new() -> Self {

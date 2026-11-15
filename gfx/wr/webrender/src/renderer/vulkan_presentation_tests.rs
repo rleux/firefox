@@ -8,7 +8,7 @@ use crate::{GpuSubmissionStatus, PresentResult};
 use std::time::{Duration, Instant};
 use wgpu_types::SurfaceStatus;
 
-fn window_renderer(
+pub(super) fn window_renderer(
     detached: bool,
 ) -> (
     Renderer,
@@ -39,7 +39,7 @@ fn window_renderer(
     .unwrap();
     (renderer, sender.create_api(), rx, window, display)
 }
-fn publish(
+pub(super) fn publish(
     renderer: &mut Renderer,
     api: &mut RenderApi,
     rx: &mpsc::Receiver<()>,
@@ -91,7 +91,7 @@ fn idle(renderer: &mut Renderer) -> GpuSubmissionStatus {
         std::thread::yield_now();
     }
 }
-fn observe(window: &X11Window) {
+pub(super) fn observe(window: &X11Window) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let pixels = window.pixels([64, 48]);

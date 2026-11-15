@@ -106,6 +106,9 @@ pub fn upload_to_texture_cache(
                         ExternalImageSource::RawData(data) => {
                             &data[offset as usize ..]
                         }
+                        ExternalImageSource::Pending => {
+                            panic!("Pending native image cannot be used as a CPU buffer")
+                        }
                         ExternalImageSource::Invalid => {
                             // Create a local buffer to fill the pbo.
                             let bpp = texture.get_format().bytes_per_pixel();

@@ -34,6 +34,10 @@ mod presentation;
 #[path = "vulkan_external_buffer_tests.rs"]
 mod external_buffers;
 
+#[cfg(target_os = "linux")]
+#[path = "vulkan_native_image_tests.rs"]
+mod native_images;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
