@@ -9,7 +9,11 @@ use wgpu_hal as hal;
 use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
+mod shader;
+mod vertex_layout;
 mod transfer;
+
+pub use crate::shader_source::vulkan as shaders;
 mod vulkan;
 pub use self::transfer::{PendingReadback, Readback};
 
@@ -69,6 +73,7 @@ pub struct Device {
     pub(super) device: Arc<core::device::Device>,
     pub(super) queue: Arc<core::device::queue::Queue>,
     errors: Arc<Errors>,
+    shaders: Mutex<std::collections::HashMap<usize, std::sync::Weak<shader::PreparedShader>>>,
 }
 
 impl Device {
@@ -95,6 +100,7 @@ impl Device {
             device,
             queue,
             errors,
+            shaders: Mutex::default(),
         };
         result.check().map_err(|error| error.to_string())?;
         Ok(result)

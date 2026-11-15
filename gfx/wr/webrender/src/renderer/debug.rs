@@ -12,9 +12,9 @@ use crate::composite::{NativeSurfaceId, NativeTileId};
 use crate::debug_colors;
 use crate::debug_font_data;
 use crate::debug_item::DebugItem;
-use crate::device::{BlendMode, Buffer, BufferKind, Device, Program, Texture, TextureSlot, VertexArray, VertexDescriptor, ShaderError};
+use crate::device::{BlendMode, Buffer, BufferKind, Device, Program, Texture, TextureSlot, VertexArray, ShaderError};
 use crate::device::{DrawTarget, LoadOp, ReadTarget, RenderPassDescriptor, TextureFlags};
-use crate::device::{TextureFilter, VertexAttribute, VertexAttributeKind, VertexUsageHint};
+use crate::device::{TextureFilter, VertexUsageHint};
 use euclid::{rect, Point2D, Rect, Size2D, Transform3D, default};
 use crate::internal_types::{RenderTargetInfo, Swizzle};
 
@@ -32,43 +32,6 @@ impl Into<TextureSlot> for DebugSampler {
         }
     }
 }
-
-const DESC_FONT: VertexDescriptor = VertexDescriptor {
-    vertex_attributes: &[
-        VertexAttribute {
-            name: "aPosition",
-            count: 2,
-            kind: VertexAttributeKind::F32,
-        },
-        VertexAttribute {
-            name: "aColor",
-            count: 4,
-            kind: VertexAttributeKind::U8Norm,
-        },
-        VertexAttribute {
-            name: "aColorTexCoord",
-            count: 2,
-            kind: VertexAttributeKind::F32,
-        },
-    ],
-    instance_attributes: &[],
-};
-
-const DESC_COLOR: VertexDescriptor = VertexDescriptor {
-    vertex_attributes: &[
-        VertexAttribute {
-            name: "aPosition",
-            count: 2,
-            kind: VertexAttributeKind::F32,
-        },
-        VertexAttribute {
-            name: "aColor",
-            count: 4,
-            kind: VertexAttributeKind::U8Norm,
-        },
-    ],
-    instance_attributes: &[],
-};
 
 #[repr(C)]
 pub struct DebugFontVertex {
@@ -123,25 +86,25 @@ impl DebugRenderer {
         let font_program = device.create_program_linked(
             "debug_font",
             &[],
-            &DESC_FONT,
+            &super::desc::DEBUG_FONT,
             &[("sColor0", DebugSampler::Font.into())],
         )?;
 
         let color_program = device.create_program_linked(
             "debug_color",
             &[],
-            &DESC_COLOR,
+            &super::desc::DEBUG_COLOR,
             &[],
         )?;
 
         let font_vertex_buffer = device.create_buffer(BufferKind::Vertex);
         let font_index_buffer = device.create_buffer(BufferKind::Index);
-        let font_vao = device.create_vertex_array(&DESC_FONT, &font_vertex_buffer, None, Some(&font_index_buffer), 1);
+        let font_vao = device.create_vertex_array(&super::desc::DEBUG_FONT, &font_vertex_buffer, None, Some(&font_index_buffer), 1);
         let line_vertex_buffer = device.create_buffer(BufferKind::Vertex);
-        let line_vao = device.create_vertex_array(&DESC_COLOR, &line_vertex_buffer, None, None, 1);
+        let line_vao = device.create_vertex_array(&super::desc::DEBUG_COLOR, &line_vertex_buffer, None, None, 1);
         let tri_vertex_buffer = device.create_buffer(BufferKind::Vertex);
         let tri_index_buffer = device.create_buffer(BufferKind::Index);
-        let tri_vao = device.create_vertex_array(&DESC_COLOR, &tri_vertex_buffer, None, Some(&tri_index_buffer), 1);
+        let tri_vao = device.create_vertex_array(&super::desc::DEBUG_COLOR, &tri_vertex_buffer, None, Some(&tri_index_buffer), 1);
 
         let font_texture = device.create_texture(
             ImageBufferKind::Texture2D,
