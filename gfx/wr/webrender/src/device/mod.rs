@@ -530,6 +530,14 @@ pub trait GpuBackend {
     fn deinit(&mut self);
 
     fn end_frame(&mut self);
+    fn finish_resource_work(&mut self) {
+        self.end_frame();
+    }
+    fn flush_external_images(&mut self) {}
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    fn wgpu_external_textures(&self) -> Option<Rc<wgpu::ExternalTextureRegistry>> {
+        None
+    }
 
     /// Clears `rect` of the current render pass target. Whole-target clears
     /// are the pass's load ops instead. Clears are independent of the bound

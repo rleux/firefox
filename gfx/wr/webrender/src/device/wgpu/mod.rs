@@ -35,6 +35,17 @@ mod transfer;
 pub use crate::shader_source::vulkan as shaders;
 #[cfg(target_os = "linux")]
 mod native_access;
+#[cfg(target_os = "linux")]
+mod external_images;
+#[cfg(target_os = "linux")]
+mod native_submit;
+#[cfg(target_os = "linux")]
+pub use external_images::{
+    ExternalTextureRegistry, NativeImage, PendingExternalRelease, ExternalReleaseStatus,
+    poll_retired_native_images, shutdown_native_images, take_native_image_progress,
+};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) mod native_test;
 mod vulkan;
 #[cfg(target_os = "linux")]
 pub use vulkan::{
