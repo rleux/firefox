@@ -266,6 +266,7 @@ version = "0.8"
 optional = true
 
 [features]
+wr_startup_probe = []
 backgroundtaskregistrar = []
 msixcomserver_s = []
 crash_helper_server = ["dep:cc", "dep:num-traits", "dep:log", "dep:once_cell", "dep:uuid", "dep:windows-sys"]

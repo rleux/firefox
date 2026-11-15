@@ -73,6 +73,7 @@ members = [
   "toolkit/crashreporter/mozwer-rust",
   "toolkit/library/gtest/rust",
   "toolkit/library/rust/",
+  "toolkit/xre/gfxtest/rust",
   "toolkit/components/taskscheduler/rust",
   "toolkit/mozapps/msixcomserver-rust",
   "toolkit/mozapps/pushnotificationhelper",

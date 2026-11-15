@@ -45,6 +45,9 @@ if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk":
         "TestSourceSurfaceToPixbuf.cpp",
     ]
 
+if CONFIG["MOZ_WIDGET_TOOLKIT"] == "gtk" and CONFIG["OS_TARGET"] == "Linux":
+    SOURCES += ["TestVulkanProcess.cpp"]
+
 FINAL_LIBRARY = "xul-gtest"
 
 include("/ipc/chromium/chromium-config.mozbuild")

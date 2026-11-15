@@ -8,6 +8,7 @@
 
 #include "GfxInfoBase.h"
 #include "nsString.h"
+#include "nsTHashSet.h"
 
 namespace mozilla {
 namespace widget {
@@ -53,6 +54,9 @@ class GfxInfo final : public GfxInfoBase {
   const nsTArray<uint64_t>& GetDMABufEGLModifiers(uint32_t aDrmFourcc) const;
 
   static bool FireGLXTestProcess();
+  static bool IsVulkanWebRenderSupported();
+  static bool IsVulkanWebRenderAlphaSupported(uint32_t aScreen,
+                                              uint32_t aVisual);
 
 #ifdef DEBUG
   NS_DECL_ISUPPORTS_INHERITED
@@ -89,6 +93,12 @@ class GfxInfo final : public GfxInfoBase {
                              const char** aStringArgs);
 
  private:
+  struct VulkanWebRenderSupport {
+    bool supported = false;
+    nsTHashSet<uint64_t> alphaVisuals;
+  };
+  static const VulkanWebRenderSupport& GetVulkanWebRenderSupport();
+
   bool mInitialized = false;
   nsCString mVendorId;
   nsCString mDeviceId;
