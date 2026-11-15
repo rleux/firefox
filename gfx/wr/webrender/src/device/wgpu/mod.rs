@@ -9,6 +9,10 @@ use wgpu_hal as hal;
 use wgpu_types as wgt;
 use wgt::error::{ErrorType, WebGpuError};
 
+mod surface;
+pub use surface::{SurfaceOptions, SurfaceWindow};
+use raw_window_handle::HasDisplayHandle;
+use std::rc::Rc;
 mod bindings;
 mod pipeline;
 mod samplers;
@@ -34,6 +38,11 @@ pub struct Options {
     pub validation: bool,
     #[cfg(test)]
     pub primary_mapping: Option<bool>,
+    /// The native window remains owned until detached or the renderer is destroyed.
+    pub window: Option<Rc<dyn SurfaceWindow>>,
+    /// Allows detached startup and releasing old windows while retaining their display.
+    pub display_owner: Option<Rc<dyn HasDisplayHandle>>,
+    pub surface_options: SurfaceOptions,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,11 +93,18 @@ pub struct Device {
     pub(super) device: Arc<core::device::Device>,
     pub(super) queue: Arc<core::device::queue::Queue>,
     errors: Arc<Errors>,
+    instance: Arc<core::instance::Instance>,
     shaders: Mutex<std::collections::HashMap<usize, std::sync::Weak<shader::PreparedShader>>>,
 }
 
 impl Device {
     pub fn new(options: &Options) -> Result<Self, String> {
+        Self::new_with_surface(options).map(|(device, _)| device)
+    }
+
+    fn new_with_surface(
+        options: &Options,
+    ) -> Result<(Self, Option<surface::InitialSurface>), String> {
         if options
             .adapter_name
             .as_ref()
@@ -96,7 +112,14 @@ impl Device {
         {
             return Err("Adapter name must not be empty".into());
         }
-        let (adapter, device, queue) = vulkan::open(options)?;
+        let display_owner = options.display_owner.clone().or_else(|| {
+            options
+                .window
+                .clone()
+                .map(|window| window as Rc<dyn HasDisplayHandle>)
+        });
+        surface::validate_display(options, display_owner.as_ref())?;
+        let (instance, initial_surface, adapter, device, queue) = vulkan::open(options)?;
         let errors = Arc::new(Errors::default());
         let uncaptured = errors.clone();
         device.on_uncaptured_error(Arc::new(move |error: wgt::error::Error| {
@@ -111,10 +134,16 @@ impl Device {
             device,
             queue,
             errors,
+            instance,
             shaders: Mutex::default(),
         };
         result.check().map_err(|error| error.to_string())?;
-        Ok(result)
+        let surface = display_owner.map(|display_owner| surface::InitialSurface {
+            window: initial_surface,
+            display_owner,
+            options: options.surface_options,
+        });
+        Ok((result, surface))
     }
 
     pub fn info(&self) -> wgt::AdapterInfo {

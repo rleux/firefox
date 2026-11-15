@@ -72,6 +72,19 @@ impl Image {
             filter,
         }))
     }
+    pub fn from_surface(
+        owner: &Device,
+        raw: Arc<core::resource::Texture>,
+    ) -> Result<Arc<Self>, String> {
+        let view = raw.create_view(&Default::default());
+        owner.check().map_err(|e| e.to_string())?;
+        Ok(Arc::new(Self {
+            raw,
+            sampled: view.clone(),
+            levels: vec![view],
+            filter: TextureFilter::Nearest,
+        }))
+    }
     pub fn size(&self) -> wgt::Extent3d {
         self.raw.descriptor().size
     }
