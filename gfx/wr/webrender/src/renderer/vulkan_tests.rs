@@ -15,6 +15,9 @@ use std::sync::{atomic::Ordering, mpsc};
 #[path = "vulkan_image_tests.rs"]
 mod images;
 
+#[path = "vulkan_clip_tests.rs"]
+mod clips;
+
 struct Notice(mpsc::Sender<()>);
 
 impl RenderNotifier for Notice {
