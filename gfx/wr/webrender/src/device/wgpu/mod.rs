@@ -33,7 +33,14 @@ mod vertex_layout;
 mod transfer;
 
 pub use crate::shader_source::vulkan as shaders;
+#[cfg(target_os = "linux")]
+mod native_access;
 mod vulkan;
+#[cfg(target_os = "linux")]
+pub use vulkan::{
+    DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, SharedTimeline,
+    TimelineHandle,
+};
 pub use self::transfer::{PendingReadback, Readback};
 
 #[derive(Default)]
@@ -97,11 +104,18 @@ pub struct Device {
     pub(super) device: Arc<core::device::Device>,
     pub(super) queue: Arc<core::device::queue::Queue>,
     errors: Arc<Errors>,
+    queue_serial: Mutex<()>,
+    #[cfg(target_os = "linux")]
+    native_cache: vulkan::NativeCache,
     instance: Arc<core::instance::Instance>,
     shaders: Mutex<std::collections::HashMap<usize, std::sync::Weak<shader::PreparedShader>>>,
 }
 
 impl Device {
+    pub(super) fn queue_access(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.queue_serial.lock().unwrap()
+    }
+
     pub fn new(options: &Options) -> Result<Self, String> {
         Self::new_with_surface(options).map(|(device, _)| device)
     }
@@ -138,6 +152,9 @@ impl Device {
             device,
             queue,
             errors,
+            queue_serial: Mutex::new(()),
+            #[cfg(target_os = "linux")]
+            native_cache: Default::default(),
             instance,
             shaders: Mutex::default(),
         };
@@ -220,6 +237,7 @@ impl Device {
         commands: &[Arc<core::command::CommandBuffer>],
     ) -> Result<core::SubmissionIndex, Failure> {
         self.check()?;
+        let _queue_access = self.queue_access();
         let index = self.queue.submit(commands);
         // A returned index can also accompany a failed core submission.
         self.check()?;
@@ -243,6 +261,7 @@ impl Device {
         &self,
         poll_type: wgt::PollType<core::SubmissionIndex>,
     ) -> Result<wgt::PollStatus, Failure> {
+        let _queue_access = self.queue_access();
         let status = self.device.poll(poll_type);
         if let Err(error) = &status {
             let kind = match error {
@@ -284,3 +303,6 @@ fn select_adapter(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(target_os = "linux")]
+pub use wgpu_types::{TextureFormat, TextureUses};

@@ -119,13 +119,17 @@ pub(super) fn open(
         .validate_device_descriptor(&mut desc)
         .map_err(|error| format!("Validating Vulkan device: {error}"))?;
     let raw_adapter = unsafe { adapter.clone().as_hal::<hal::api::Vulkan>() }.unwrap();
+    #[cfg(target_os = "linux")]
+    let callback = external_extensions(&raw_adapter);
+    #[cfg(not(target_os = "linux"))]
+    let callback = None;
     // Validate first, then use the same features, limits and physical device for HAL and core.
     let open = unsafe {
         raw_adapter.open_with_callback(
             desc.required_features,
             &desc.required_limits,
             &desc.memory_hints,
-            None,
+            callback,
         )
     }
     .map_err(|error| format!("Opening Vulkan device: {error}"))?;
@@ -146,3 +150,80 @@ pub(super) fn primary_buffer_features(
         wgt::Features::empty()
     }
 }
+
+#[cfg(target_os = "linux")]
+fn external_extensions(
+    adapter: &hal::vulkan::Adapter,
+) -> Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> {
+    let caps = adapter.physical_device_capabilities();
+    let instance = adapter.shared_instance();
+    if ![
+        ash::khr::external_memory_fd::NAME,
+        ash::ext::external_memory_dma_buf::NAME,
+        ash::ext::image_drm_format_modifier::NAME,
+        ash::khr::external_semaphore_fd::NAME,
+    ]
+    .iter()
+    .all(|extension| caps.supports_extension(extension))
+        || (caps.properties().api_version < vk::API_VERSION_1_2
+            && !caps.supports_extension(ash::khr::timeline_semaphore::NAME))
+    {
+        return None;
+    }
+    let mut features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+    let mut semaphore = vk::ExternalSemaphoreProperties::default();
+    unsafe {
+        instance.raw_instance().get_physical_device_features2(
+            adapter.raw_physical_device(),
+            &mut vk::PhysicalDeviceFeatures2::default().push_next(&mut features),
+        );
+        if features.timeline_semaphore == vk::TRUE {
+            let mut timeline =
+                vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+            instance
+                .raw_instance()
+                .get_physical_device_external_semaphore_properties(
+                    adapter.raw_physical_device(),
+                    &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
+                        .push_next(&mut timeline),
+                    &mut semaphore,
+                );
+        }
+    }
+    if !semaphore.external_semaphore_features.contains(
+        vk::ExternalSemaphoreFeatureFlags::IMPORTABLE
+            | vk::ExternalSemaphoreFeatureFlags::EXPORTABLE,
+    ) {
+        return None;
+    }
+    Some(Box::new(move |args| {
+        for extension in [
+            ash::khr::external_memory_fd::NAME,
+            ash::ext::external_memory_dma_buf::NAME,
+            ash::ext::image_drm_format_modifier::NAME,
+            ash::khr::external_semaphore_fd::NAME,
+            ash::ext::queue_family_foreign::NAME,
+        ] {
+            if caps.supports_extension(extension) && !args.extensions.contains(&extension) {
+                args.extensions.push(extension);
+            }
+        }
+    }))
+}
+
+#[cfg(target_os = "linux")]
+#[path = "vulkan/native.rs"]
+mod native;
+#[cfg(target_os = "linux")]
+pub(super) use native::NativeCache;
+#[cfg(target_os = "linux")]
+#[path = "vulkan/dmabuf.rs"]
+mod dmabuf;
+#[cfg(target_os = "linux")]
+pub use dmabuf::{DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor};
+#[cfg(target_os = "linux")]
+#[path = "vulkan/timeline.rs"]
+pub(super) mod timeline;
+#[cfg(target_os = "linux")]
+pub use timeline::{SharedTimeline, TimelineHandle};

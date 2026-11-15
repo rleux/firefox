@@ -333,6 +333,7 @@ impl Readback {
         device: &Device,
         submission: core::SubmissionIndex,
     ) -> Result<PendingReadback, Failure> {
+        let _queue_access = device.queue_access();
         device.check()?;
         self.buffer
             .same_device(&device.device)
