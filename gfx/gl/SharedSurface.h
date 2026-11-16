@@ -159,10 +159,16 @@ class SharedSurface {
 
   virtual Maybe<layers::SurfaceDescriptor> ToSurfaceDescriptor() = 0;
 
-  void BeginWrite() {
+  virtual bool PrepareForWrite() { return true; }
+
+  [[nodiscard]] bool BeginWrite() {
+    if (!PrepareForWrite()) {
+      return false;
+    }
     WaitForBufferOwnership();
     ProducerAcquire();
     LockProd();
+    return true;
   }
 
   void EndWrite() {
@@ -171,10 +177,16 @@ class SharedSurface {
     Commit();
   }
 
-  void BeginRead() {
+  virtual bool PrepareForRead() { return true; }
+
+  [[nodiscard]] bool BeginRead() {
+    if (!PrepareForRead()) {
+      return false;
+    }
     WaitForBufferOwnership();
     LockProd();
     ProducerReadAcquire();
+    return true;
   }
 
   void EndRead() {

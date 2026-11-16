@@ -40,10 +40,16 @@ UniquePtr<SwapChainPresenter> SwapChain::Acquire(
     surf = mPool.front();
     mPool.pop();
   }
+  if (surf && !surf->BeginWrite()) {
+    surf = nullptr;
+  }
   if (!surf) {
     auto uniquePtrSurf = mFactory->CreateShared(size, colorSpace);
     if (!uniquePtrSurf) return nullptr;
     surf.reset(uniquePtrSurf.release());
+    if (!surf->BeginWrite()) {
+      return nullptr;
+    }
   }
   if (mPoolLimit > 0) {
     mPool.push(surf);
@@ -106,7 +112,7 @@ std::shared_ptr<SharedSurface> SwapChainPresenter::SwapBackBuffer(
   auto old = mBackBuffer;
   mBackBuffer = std::move(back);
   if (mBackBuffer) {
-    mBackBuffer->BeginWrite();
+    MOZ_RELEASE_ASSERT(mBackBuffer->IsProducerAcquired());
   }
   return old;
 }

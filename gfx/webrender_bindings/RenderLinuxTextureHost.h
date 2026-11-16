@@ -29,6 +29,12 @@ class RenderLinuxTextureHost final : public RenderTextureHostSWGL {
   gfx::IntSize GetSize(uint8_t aChannelIndex) const;
   wr::WrExternalImage Lock(uint8_t aChannelIndex, gl::GLContext* aGL) override;
   void Unlock() override;
+  WrExternalImage LockExternalBuffer(uint8_t aChannelIndex) override;
+#ifdef XP_LINUX
+  WrExternalImage LockVulkan(uint8_t, WrVulkanExternalImages*) override;
+  Maybe<VulkanImageRelease> UnlockVulkan(WrVulkanExternalImages*) override;
+  void NotifyVulkanRelease(uint64_t, WrVulkanReleaseStatus) override;
+#endif
   void ClearCachedResources() override;
 
   size_t Bytes() override {
@@ -59,6 +65,10 @@ class RenderLinuxTextureHost final : public RenderTextureHostSWGL {
   virtual ~RenderLinuxTextureHost();
   void DeleteTextureHandle();
 
+#ifdef XP_LINUX
+  class VulkanState;
+  UniquePtr<VulkanState> mVulkan;
+#endif
   RefPtr<BufferSurface> mSurface;
   RefPtr<gl::GLContext> mGL;
   RefPtr<gfx::DataSourceSurface> mReadback;

@@ -19,6 +19,10 @@
 #include "mozilla/webrender/RenderThread.h"
 #include "nsThreadUtils.h"
 
+#ifdef MOZ_WIDGET_GTK
+#  include "mozilla/webrender/RenderLinuxTextureHost.h"
+#endif
+
 namespace mozilla::wr {
 
 using namespace gfx;
@@ -98,6 +102,28 @@ TEST_F(RenderExternalBuffer, BufferMappingAndRelock) {
   });
 }
 
+#if defined(MOZ_WIDGET_GTK) && defined(XP_LINUX)
+TEST_F(RenderExternalBuffer, LinuxSharedMemoryVulkanMappingAndRelock) {
+  OnRenderThread([] {
+    std::array<uint8_t, 24> bytes{};
+    RefPtr<RenderTextureHost> host =
+        new RenderLinuxTextureHost(bytes.data(), BufferDescriptorForTest());
+    EXPECT_EQ(host->LockVulkan(1, nullptr).image_type,
+              WrExternalImageType::Invalid);
+    EXPECT_TRUE(host->UnlockVulkan(nullptr).isNothing());
+    for (uint8_t value : {0x35, 0x9a}) {
+      bytes[0] = value;
+      auto image = host->LockVulkan(0, nullptr);
+      ASSERT_EQ(image.image_type, WrExternalImageType::RawData);
+      EXPECT_EQ(image.buff, bytes.data());
+      EXPECT_EQ(image.size, bytes.size());
+      EXPECT_EQ(image.buff[0], value);
+      EXPECT_TRUE(host->UnlockVulkan(nullptr).isNothing());
+    }
+  });
+}
+#endif
+
 TEST_F(RenderExternalBuffer, SharedSurfaceKeepsStorageAndStride) {
   OnRenderThread([] {
     RefPtr<SourceSurfaceSharedData> source = new SourceSurfaceSharedData;
@@ -145,21 +171,27 @@ TEST_F(RenderExternalBuffer, PlanarVideoChannelsKeepOffsetsAndStride) {
         StereoMode::MONO, gfx::ColorDepth::COLOR_8, YUVColorSpace::BT709,
         gfx::ColorRange::LIMITED, TransferFunction::BT709,
         ChromaSubsampling::HALF_WIDTH_AND_HEIGHT, Nothing());
-    RefPtr<RenderTextureHost> host =
-        new RenderBufferTextureHost(bytes.data(), descriptor);
-    EXPECT_EQ(host->LockExternalBuffer(3).image_type,
-              WrExternalImageType::Invalid);
-    host->UnlockExternalBuffer();
-    const std::array<uint32_t, 3> offsets{yOffset, cbOffset, crOffset};
-    for (uint8_t channel = 0; channel != 3; ++channel) {
-      bytes[offsets[channel]] = 0x70 + channel;
-      auto image = host->LockExternalBuffer(channel);
-      auto unlock = MakeScopeExit([&] { host->UnlockExternalBuffer(); });
-      ASSERT_EQ(image.image_type, WrExternalImageType::RawData);
-      ASSERT_EQ(image.buff, bytes.data() + offsets[channel]);
-      EXPECT_EQ(image.size, channel == 0 ? 24U : 8U);
-      EXPECT_EQ(image.buff[0], 0x70 + channel);
-      EXPECT_EQ(image.buff[image.size - 1], 0x39);
+    std::vector<RefPtr<RenderTextureHost>> hosts;
+    hosts.push_back(new RenderBufferTextureHost(bytes.data(), descriptor));
+#ifdef MOZ_WIDGET_GTK
+    hosts.push_back(new RenderLinuxTextureHost(bytes.data(), descriptor));
+#endif
+    for (const auto& host : hosts) {
+      std::fill(bytes.begin(), bytes.end(), 0x39);
+      EXPECT_EQ(host->LockExternalBuffer(3).image_type,
+                WrExternalImageType::Invalid);
+      host->UnlockExternalBuffer();
+      const std::array<uint32_t, 3> offsets{yOffset, cbOffset, crOffset};
+      for (uint8_t channel = 0; channel != 3; ++channel) {
+        bytes[offsets[channel]] = 0x70 + channel;
+        auto image = host->LockExternalBuffer(channel);
+        auto unlock = MakeScopeExit([&] { host->UnlockExternalBuffer(); });
+        ASSERT_EQ(image.image_type, WrExternalImageType::RawData);
+        ASSERT_EQ(image.buff, bytes.data() + offsets[channel]);
+        EXPECT_EQ(image.size, channel == 0 ? 24U : 8U);
+        EXPECT_EQ(image.buff[0], 0x70 + channel);
+        EXPECT_EQ(image.buff[image.size - 1], 0x39);
+      }
     }
   });
 }

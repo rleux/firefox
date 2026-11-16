@@ -6,6 +6,7 @@
 #include <gbm.h>
 #include <unistd.h>
 
+#include "GLContext.h"
 #include "gtest/gtest.h"
 #include "mozilla/NotNull.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
@@ -44,7 +45,7 @@ static SurfaceDescriptor MakeRGBADescriptor(RefPtr<FileHandleWrapper> fd) {
       width, height, width, height, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
 }
 
 // Matches what DMABufSurfaceYUV::Serialize() produces for a two-plane 128×128
@@ -67,7 +68,7 @@ static SurfaceDescriptor MakeYUVDescriptor(RefPtr<FileHandleWrapper> fd0,
       height, widthAligned, heightAligned, format, strides, offsets,
       gfx::YUVColorSpace::BT601, gfx::ColorRange::LIMITED,
       gfx::ColorSpace2::UNKNOWN, gfx::TransferFunction::Default, 0, fence, 1, 0,
-      refCount, nullptr, false, gfx::HDRMetadata()));
+      refCount, nullptr, false, gfx::HDRMetadata(), Nothing()));
 }
 
 // Run 3 serialize → import cycles for a single-plane RGBA surface.
@@ -156,4 +157,25 @@ TEST(DMABufSurface, YUVRoundtrip)
   EXPECT_EQ(surface->GetWidth(1), 64);
   EXPECT_EQ(surface->GetHeight(1), 64);
   YUVRoundtrip(surface);
+}
+
+TEST(DMABufSurface, FenceWaitWithoutGLContext)
+{
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  RefPtr<FileHandleWrapper> reader =
+      new FileHandleWrapper(UniqueFileHandle(fds[0]));
+  UniqueFileHandle writer(fds[1]);
+
+  EXPECT_FALSE(DMABufSurface::FenceWaitFd(nullptr, reader));
+  const char byte = 1;
+  ASSERT_EQ(write(writer.get(), &byte, 1), 1);
+  EXPECT_TRUE(DMABufSurface::FenceWaitFd(nullptr, reader));
+  EXPECT_NE(fcntl(reader->GetHandle(), F_GETFD), -1);
+}
+
+TEST(DMABufSurface, FenceWaitWithoutGLRejectsInvalidFd)
+{
+  RefPtr<FileHandleWrapper> invalid = new FileHandleWrapper(UniqueFileHandle());
+  EXPECT_FALSE(DMABufSurface::FenceWaitFd(nullptr, invalid));
 }

@@ -39,11 +39,34 @@ class SharedSurface_DMABUF final : public SharedSurface {
 
   // Non-exclusive Content/WebGL lock/unlock for read from surface
   virtual void ProducerReadAcquireImpl() override {}
-  virtual void ProducerReadReleaseImpl() override {}
+  virtual void ProducerReadReleaseImpl() override {
+    if (mSurface->IsForeignRGB()) {
+      mSurface->UnlockForeignRGB();
+    }
+  }
+  bool PrepareForWrite() override { return mSurface->BeginForeignWrite(); }
+  bool PrepareForRead() override {
+    if (!mSurface->IsForeignRGB()) {
+      return true;
+    }
+    if (!mSurface->LockForeignRGB()) {
+      return false;
+    }
+    if (!mSurface->FenceWait()) {
+      mSurface->UnlockForeignRGB(true);
+      return false;
+    }
+    return true;
+  }
 
   Maybe<layers::SurfaceDescriptor> ToSurfaceDescriptor() override;
 
   void WaitForBufferOwnership() override;
+  bool IsValid() const override {
+    return SharedSurface::IsValid() &&
+           (!mSurface->IsForeignRGB() ||
+            (mSurface->ForeignRGBUsable() && !mSurface->IsGlobalRefSet()));
+  }
 };
 
 class SurfaceFactory_DMABUF : public SurfaceFactory {
