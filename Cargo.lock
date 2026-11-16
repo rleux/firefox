@@ -9296,6 +9296,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "lazy_static",
+ "libc",
  "libloading",
  "log",
  "malloc_size_of_derive",

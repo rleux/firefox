@@ -9,7 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
-vulkan = ["dep:webrender_shader_build", "webrender_shader_build/glslang", "webrender_build/vulkan", "dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:raw-window-handle"]
+vulkan = ["dep:libc", "dep:webrender_shader_build", "webrender_shader_build/glslang", "webrender_build/vulkan", "dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:raw-window-handle"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -80,3 +80,6 @@ wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d6
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", optional = true, default-features = false, features = ["vulkan"] }
 wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", optional = true, default-features = false, features = ["std"] }
 ash = { version = "0.38", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true, default-features = false }

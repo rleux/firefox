@@ -50,7 +50,7 @@ mod vulkan;
 #[cfg(target_os = "linux")]
 pub use vulkan::{
     DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, SharedTimeline,
-    TimelineHandle,
+    TimelineHandle, ForeignRgbLayout, SyncFileWait,
 };
 pub use self::transfer::{PendingReadback, Readback};
 
