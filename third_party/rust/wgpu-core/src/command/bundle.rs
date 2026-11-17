@@ -85,7 +85,7 @@ use alloc::{
     vec::Vec,
 };
 use core::{convert::Infallible, mem, num::NonZeroU32, ops::Range, str};
-use wgpu_sync::atomic::AtomicBool;
+use wgpu_sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use arrayvec::ArrayVec;
 use thiserror::Error;
@@ -602,6 +602,7 @@ impl RenderBundleEncoder {
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(tracker_indices),
             discard_hal_labels,
+            bindings_validated_generation: AtomicUsize::new(usize::MAX),
         };
 
         let render_bundle = Arc::new(render_bundle);
@@ -1442,6 +1443,7 @@ pub struct RenderBundle {
     label: String,
     pub(crate) tracking_data: TrackingData,
     discard_hal_labels: bool,
+    bindings_validated_generation: AtomicUsize,
 }
 
 impl Drop for RenderBundle {
@@ -1494,6 +1496,7 @@ impl RenderBundle {
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(device.tracker_indices.bundles.clone()),
             discard_hal_labels: false,
+            bindings_validated_generation: AtomicUsize::new(usize::MAX),
             device,
         })
     }
@@ -1520,6 +1523,9 @@ impl RenderBundle {
         indirect_draw_validation_batcher: &mut crate::indirect_validation::DrawBatcher,
         snatch_guard: &SnatchGuard,
     ) -> Result<(), ExecutionError> {
+        let generation = snatch_guard.generation();
+        let validate_bindings = generation == usize::MAX
+            || self.bindings_validated_generation.load(Ordering::Relaxed) != generation;
         let mut offsets = self.base.dynamic_offsets.as_slice();
         let mut pipeline_layout = None::<Arc<PipelineLayout>>;
         if !self.discard_hal_labels {
@@ -1537,7 +1543,18 @@ impl RenderBundle {
                     num_dynamic_offsets,
                     bind_group,
                 } => {
-                    let raw_bg = bind_group.as_ref().unwrap().try_raw(snatch_guard)?;
+                    let bind_group = bind_group.as_ref().unwrap();
+                    // The read guard prevents resource destruction until encoding ends.
+                    let raw_bg = if validate_bindings {
+                        bind_group.try_raw(snatch_guard)?
+                    } else {
+                        bind_group
+                            .state()?
+                            .raw
+                            .get(snatch_guard)
+                            .ok_or_else(|| DestroyedResourceError(bind_group.error_ident()))?
+                            .as_ref()
+                    };
                     unsafe {
                         raw.set_bind_group(
                             pipeline_layout
@@ -1723,6 +1740,11 @@ impl RenderBundle {
             unsafe { raw.end_debug_marker() };
         }
 
+        // Publish only after every binding has passed validation for this generation.
+        if validate_bindings {
+            self.bindings_validated_generation
+                .store(generation, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
