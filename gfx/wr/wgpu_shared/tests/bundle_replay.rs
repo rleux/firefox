@@ -30,6 +30,7 @@ impl log::Log for Logger {
     fn flush(&self) {}
 }
 
+#[derive(Clone)]
 struct Fixture {
     _instance: Arc<core::instance::Instance>,
     device: Arc<core::device::Device>,
@@ -40,6 +41,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_blend(None)
+    }
+
+    fn with_blend(blend: Option<wgt::BlendState>) -> Self {
+        Self::with_pipeline(blend, false)
+    }
+
+    fn with_pipeline(blend: Option<wgt::BlendState>, vertex_input: bool) -> Self {
         static START: std::sync::Once = std::sync::Once::new();
         START.call_once(|| {
             log::set_logger(&Logger).unwrap();
@@ -72,15 +81,21 @@ impl Fixture {
                 label: None,
                 runtime_checks: Default::default(),
             },
-            core::pipeline::ShaderModuleSource::Wgsl(Cow::Borrowed(
+            core::pipeline::ShaderModuleSource::Wgsl(Cow::Borrowed(if vertex_input {
+                r#"
+            @group(0) @binding(0) var<uniform> color: vec4f;
+            @vertex fn vs(@location(0) p:vec4f) -> @builtin(position) vec4f { return p; }
+            @fragment fn fs() -> @location(0) vec4f { return color; }
+        "#
+            } else {
                 r#"
             @group(0) @binding(0) var<uniform> color: vec4f;
             @vertex fn vs(@builtin(vertex_index) i:u32) -> @builtin(position) vec4f {
                 return vec4f(f32((i<<1u)&2u)*2.0-1.0,f32(i&2u)*2.0-1.0,0,1);
             }
             @fragment fn fs() -> @location(0) vec4f { return color; }
-        "#,
-            )),
+        "#
+            })),
         );
         let stage = |entry: &str| core::pipeline::ProgrammableStageDescriptor {
             module: shader.clone(),
@@ -94,13 +109,25 @@ impl Fixture {
                 layout: None,
                 vertex: core::pipeline::VertexState {
                     stage: stage("vs"),
-                    buffers: Cow::Borrowed(&[]),
+                    buffers: Cow::Owned(if vertex_input {
+                        vec![Some(core::pipeline::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgt::VertexStepMode::Vertex,
+                            attributes: Cow::Owned(vec![wgt::VertexAttribute {
+                                format: wgt::VertexFormat::Float32x4,
+                                offset: 0,
+                                shader_location: 0,
+                            }]),
+                        })]
+                    } else {
+                        vec![]
+                    }),
                 },
                 fragment: Some(core::pipeline::FragmentState {
                     stage: stage("fs"),
                     targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
                         format: wgt::TextureFormat::Rgba8Unorm,
-                        blend: None,
+                        blend,
                         write_mask: wgt::ColorWrites::ALL,
                     })]),
                 }),
@@ -173,13 +200,12 @@ impl Fixture {
         self.wait();
     }
 
-    fn bundle(
+    fn group(
         &self,
         buffer: Arc<core::resource::Buffer>,
         offset: u64,
-    ) -> Arc<core::command::RenderBundle> {
-        let group = self
-            .device
+    ) -> Arc<core::binding_model::BindGroup> {
+        self.device
             .create_bind_group(&core::binding_model::BindGroupDescriptor {
                 label: None,
                 layout: self.pipeline.get_bind_group_layout(0),
@@ -193,7 +219,15 @@ impl Fixture {
                         },
                     ),
                 }]),
-            });
+            })
+    }
+
+    fn bundle(
+        &self,
+        buffer: Arc<core::resource::Buffer>,
+        offset: u64,
+    ) -> Arc<core::command::RenderBundle> {
+        let group = self.group(buffer, offset);
         let mut recorder = self.device.create_render_bundle_encoder(
             &core::command::RenderBundleEncoderDescriptor {
                 label: None,
@@ -232,6 +266,10 @@ impl Fixture {
     fn draw(&self, bundle: Arc<core::command::RenderBundle>) -> [u8; 4] {
         self.queue.submit(&[self.encode(bundle)]).unwrap();
         self.wait();
+        self.pixel(0, 0)
+    }
+
+    fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let buffer = self
             .device
             .create_buffer(&core::resource::BufferDescriptor {
@@ -245,7 +283,7 @@ impl Fixture {
             &wgt::TexelCopyTextureInfo {
                 texture: self.target.clone(),
                 mip_level: 0,
-                origin: wgt::Origin3d::ZERO,
+                origin: wgt::Origin3d { x, y, z: 0 },
                 aspect: wgt::TextureAspect::All,
             },
             &wgt::TexelCopyBufferInfo {
@@ -592,5 +630,302 @@ fn texture_discard_and_destruction_remain_checked_on_replay() {
     drop(bundle);
     drop(source);
     drop(f);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn concurrent_first_recordings_survive_bundle_handle_drop_and_pending_reuse() {
+    let f = Fixture::new();
+    let buffer = f.buffer();
+    let bundle = f.bundle(buffer.clone(), 0);
+    let green = [0.0f32, 1.0, 0.0, 1.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(buffer, 0, &green);
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let threads = (0..4)
+        .map(|_| {
+            let (f, bundle, barrier) = (f.clone(), bundle.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                f.encode(bundle)
+            })
+        })
+        .collect::<Vec<_>>();
+    let commands = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    // Two occurrences in a single primary also require SIMULTANEOUS_USE.
+    let encoder = f.device.create_command_encoder(&Default::default());
+    let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+        color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+            view: f.target.create_view(&Default::default()),
+            depth_slice: None,
+            resolve_target: None,
+            load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+            store_op: wgt::StoreOp::Store,
+        })]),
+        ..Default::default()
+    });
+    pass.execute_bundles(&[bundle.clone(), bundle.clone()]);
+    pass.end();
+    let repeated = encoder.finish(&Default::default());
+    f.queue.submit(&commands).unwrap();
+    f.queue.submit(&[repeated]).unwrap();
+    drop(bundle);
+    drop(commands);
+    f.wait();
+    assert_eq!(f.pixel(0, 0), [0, 255, 0, 255]);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn native_bundle_preserves_dynamic_state_and_does_not_capture_framebuffers() {
+    let component = wgt::BlendComponent {
+        src_factor: wgt::BlendFactor::Constant,
+        dst_factor: wgt::BlendFactor::Zero,
+        operation: wgt::BlendOperation::Add,
+    };
+    let mut f = Fixture::with_blend(Some(wgt::BlendState {
+        color: component,
+        alpha: component,
+    }));
+    let buffer = f.buffer();
+    let group = f.group(buffer.clone(), 0);
+    let bundle = f.bundle(buffer.clone(), 0);
+    f.queue.write_buffer(
+        buffer,
+        0,
+        &[1.0f32; 4]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    let red = wgt::Color {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    let blue = wgt::Color {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    for (width, replace_target, viewport_width, scissor_width, color) in [
+        (4, true, 4, 2, red),   // record
+        (4, false, 4, 2, red),  // replay with inline draws on either side
+        (4, false, 4, 2, blue), // blend mismatch: CPU fallback
+        (4, false, 4, 2, red),  // original key remains reusable
+        (4, false, 2, 4, red),  // viewport/scissor mismatch: CPU fallback
+        (4, true, 4, 2, red),   // different framebuffer, same render pass and state
+        (8, true, 8, 4, red),   // resize: CPU fallback
+    ] {
+        if replace_target {
+            f.target = f.device.create_texture(&core::resource::TextureDescriptor {
+                label: None,
+                size: wgt::Extent3d {
+                    width,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgt::TextureDimension::D2,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                usage: wgt::TextureUsages::RENDER_ATTACHMENT | wgt::TextureUsages::COPY_SRC,
+                view_formats: vec![],
+            });
+        }
+        let encoder = f.device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+            color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+                view: f.target.create_view(&Default::default()),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+                store_op: wgt::StoreOp::Store,
+            })]),
+            ..Default::default()
+        });
+        pass.set_viewport(0.0, 0.0, viewport_width as f32, 4.0, 0.0, 1.0);
+        pass.set_scissor_rect(0, 0, scissor_width, 4);
+        pass.set_blend_constant(color);
+        pass.set_pipeline(f.pipeline.clone());
+        pass.set_bind_group(0, Some(group.clone()), &[]);
+        pass.draw(0, 1, 0, 0);
+        pass.execute_bundles(&[bundle.clone()]);
+        pass.set_pipeline(f.pipeline.clone());
+        pass.set_bind_group(0, Some(group.clone()), &[]);
+        pass.draw(0, 1, 0, 0);
+        pass.end();
+        f.queue
+            .submit(&[encoder.finish(&Default::default())])
+            .unwrap();
+        f.wait();
+        let expected = if color.b > 0.0 {
+            [0, 0, 255, 255]
+        } else {
+            [255, 0, 0, 255]
+        };
+        assert_eq!(f.pixel(0, 0), expected);
+        assert_eq!(f.pixel(width - 1, 3), [255; 4]);
+    }
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn active_occlusion_query_uses_cpu_bundle_replay() {
+    let f = Fixture::new();
+    let buffer = f.buffer();
+    let bundle = f.bundle(buffer.clone(), 0);
+    let green = [0.0f32, 1.0, 0.0, 1.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(buffer, 0, &green);
+    assert_eq!(f.draw(bundle.clone()), [0, 255, 0, 255]);
+    let query = f.device.create_query_set(&wgt::QuerySetDescriptor {
+        label: None,
+        ty: wgt::QueryType::Occlusion,
+        count: 1,
+    });
+    let encoder = f.device.create_command_encoder(&Default::default());
+    let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+        color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+            view: f.target.create_view(&Default::default()),
+            depth_slice: None,
+            resolve_target: None,
+            load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+            store_op: wgt::StoreOp::Store,
+        })]),
+        occlusion_query_set: Some(query),
+        ..Default::default()
+    });
+    pass.begin_occlusion_query(0);
+    pass.execute_bundles(&[bundle.clone()]);
+    pass.end_occlusion_query();
+    pass.end();
+    f.queue
+        .submit(&[encoder.finish(&Default::default())])
+        .unwrap();
+    f.wait();
+    assert_eq!(f.pixel(0, 0), [0, 255, 0, 255]);
+    assert_eq!(f.draw(bundle), [0, 255, 0, 255]);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn vertex_and_index_destruction_remain_checked_after_unrelated_canvas_retirement() {
+    for destroy_index in [false, true] {
+        let f = Fixture::with_pipeline(None, true);
+        let uniform = f.buffer();
+        let group = f.group(uniform.clone(), 0);
+        let vertex = f.device.create_buffer(&core::resource::BufferDescriptor {
+            label: None,
+            size: 48,
+            usage: wgt::BufferUsages::VERTEX | wgt::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let index = f.device.create_buffer(&core::resource::BufferDescriptor {
+            label: None,
+            size: 12,
+            usage: wgt::BufferUsages::INDEX | wgt::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut recorder =
+            f.device
+                .create_render_bundle_encoder(&core::command::RenderBundleEncoderDescriptor {
+                    label: None,
+                    color_formats: Cow::Owned(vec![Some(wgt::TextureFormat::Rgba8Unorm)]),
+                    depth_stencil: None,
+                    sample_count: 1,
+                    multiview: None,
+                });
+        recorder.set_pipeline(f.pipeline.clone());
+        recorder.set_bind_group(0, Some(group), &[]);
+        recorder.set_vertex_buffer(0, Some(vertex.clone()), 0, Some(48));
+        recorder.set_index_buffer(index.clone(), wgt::IndexFormat::Uint32, 0, Some(12));
+        recorder.draw_indexed(3, 1, 0, 0, 0);
+        let bundle = recorder.finish(&Default::default());
+        f.queue.write_buffer(
+            vertex.clone(),
+            0,
+            &[
+                -1.0f32, -1.0, 0.0, 1.0, -1.0, 3.0, 0.0, 1.0, 3.0, -1.0, 0.0, 1.0,
+            ]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>(),
+        );
+        f.queue.write_buffer(
+            index.clone(),
+            0,
+            &[0u32, 1, 2]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        for color in [
+            [0.0f32, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+        ] {
+            f.queue.write_buffer(
+                uniform.clone(),
+                0,
+                &color
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            );
+            let unrelated = f.device.create_texture(&core::resource::TextureDescriptor {
+                label: None,
+                size: wgt::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgt::TextureDimension::D2,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: vec![],
+            });
+            unrelated.destroy();
+            let expected = color.map(|v| (v * 255.0) as u8);
+            assert_eq!(f.draw(bundle.clone()), expected);
+        }
+        if destroy_index {
+            index.destroy();
+        } else {
+            vertex.destroy();
+        }
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        let command = f.encode(bundle.clone());
+        assert!(f.device.pop_error_scope().unwrap().is_none());
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        assert!(f.queue.submit(&[command]).is_none());
+        let error = validation_error(&f.device);
+        assert_eq!(error.fn_ident, "Queue::submit");
+        assert!(format!("{error:?}").contains("DestroyedResource"));
+        assert!(matches!(
+            error
+                .source
+                .downcast_ref::<core::device::queue::QueueSubmitError>(),
+            Some(core::device::queue::QueueSubmitError::CommandEncoder(_))
+        ));
+        assert!(f.device.is_valid());
+    }
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }

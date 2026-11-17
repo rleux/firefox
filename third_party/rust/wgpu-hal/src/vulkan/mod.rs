@@ -427,6 +427,7 @@ struct RayTracingDeviceExtensionFunctions {
 /// device geometry, but affect the code paths taken internally.
 #[derive(Clone, Debug)]
 struct PrivateCapabilities {
+    native_render_bundles: bool,
     image_view_usage: bool,
     timeline_semaphores: bool,
     texture_d24: bool,
@@ -1227,6 +1228,8 @@ pub struct CommandEncoder {
     counters: Arc<wgt::HalCounters>,
 
     current_pipeline_is_multiview: bool,
+    render_bundle_key: Option<RenderBundleKey>,
+    active_queries: u32,
 }
 
 impl Drop for CommandEncoder {
@@ -1274,6 +1277,40 @@ impl fmt::Debug for CommandEncoder {
         f.debug_struct("CommandEncoder")
             .field("raw", &self.raw)
             .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderBundleKey {
+    render_pass: vk::RenderPass,
+    viewport: [u32; 6],
+    scissor: [u32; 4],
+    blend: [u32; 4],
+    stencil: u32,
+}
+
+/// A leaf secondary command buffer retained by its core render bundle until GPU retirement.
+pub struct CachedRenderBundle {
+    device: Arc<DeviceShared>,
+    pool: vk::CommandPool,
+    raw: vk::CommandBuffer,
+    key: RenderBundleKey,
+    counters: Arc<wgt::HalCounters>,
+}
+
+impl fmt::Debug for CachedRenderBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CachedRenderBundle")
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
+impl Drop for CachedRenderBundle {
+    fn drop(&mut self) {
+        // Core command-buffer trackers retain the owning bundle through submission retirement.
+        unsafe { self.device.raw.destroy_command_pool(self.pool, None) };
+        self.counters.command_encoders.sub(1);
     }
 }
 
