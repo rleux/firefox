@@ -20,6 +20,7 @@ autogen_warning = """/* DO NOT MODIFY THIS MANUALLY! This file was generated usi
 // Opaque struct types that C++ only sees behind a pointer
 struct WGPUByteBuf;
 struct WGPUBufferMapping;
+struct WGPUCanvasExport;
 
 using WGPUNonZeroU64 = uint64_t;
 using WGPUOption_BufferSize = uint64_t;
@@ -77,6 +78,7 @@ style = "tag"
 prefix = "WGPU"
 renaming_overrides_prefixing = true
 exclude = [
+	"CanvasExport",
 	"Option_AdapterId",
 	"Option_BufferId",
 	"Option_BindGroupId",
@@ -136,6 +138,7 @@ derive_helper_methods = true
 bitflags = true
 
 [defines]
+"target_os = linux" = "XP_LINUX"
 "target_os = windows" = "XP_WIN"
 "target_os = macos" = "XP_MACOSX"
 "target_os = android" = "ANDROID"

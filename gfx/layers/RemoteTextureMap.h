@@ -251,6 +251,10 @@ class RemoteTextureOwnerClient final {
       const VulkanImagePublication& aPublication,
       std::function<void(VulkanImageReturnMessage&&)>&& aReturn,
       bool aOpaque = false);
+  bool PushSharedVulkanTexture(RemoteTextureId, RemoteTextureOwnerId,
+                               const std::shared_ptr<void>&,
+                               const gfx::IntSize&, gfx::SurfaceFormat,
+                               bool aOpaque);
   webgpu::FrontBufferSnapshot GetLatestBufferSnapshot(
       const RemoteTextureOwnerId aOwnerId);
   UniquePtr<TextureData> GetRecycledTextureData(

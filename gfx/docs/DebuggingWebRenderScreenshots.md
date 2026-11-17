@@ -92,10 +92,16 @@ magick in.png -crop 30x30+30+30 out.png
   general normal-browser macOS debugging path.
 
 Correct pixels and a Vulkan backend identify rendering output, not the producer's
-transport. Native GL FOREIGN or WebGPU publication requires correlated producer,
-compositor acquisition and return evidence. Explicit compositor and native-image
-snapshots perform observer readback even when native presentation avoids CPU
-readback. Optional native-device sharing with WebGPU does not enable native
-browser WebGPU publication or make a screenshot evidence of device sharing. See the
-[Vulkan implementation guide](VulkanWebRenderImplementation.md) for the native
+transport. GL FOREIGN publication needs correlated producer, compositor acquisition
+and return evidence. Shared WebGPU canvas publication needs successful device
+admission and matching producer/consumer records for owner, publication, generation,
+nonce, native device and image, followed by compositor acquisition in the same GPU
+process. Require `same_image=true`, `gpu_copy=0` and `fd_transport=0`; join acquisition
+by owner and publication. A replacement GPU process starts a separate evidence set.
+
+Distinguish the shared-image path from native-export fallback (`gpu_copy=1`) and
+CPU readback. Explicit compositor and native-image snapshots perform observer
+readback even when presentation avoids CPU readback; capture pixels alone do not
+prove normal presentation or transport. See [shared canvas images](WebGPUSharedVulkanCanvas.md)
+and the [Vulkan implementation guide](VulkanWebRenderImplementation.md) for
 ownership and validation boundaries.

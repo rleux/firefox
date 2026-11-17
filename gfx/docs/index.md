@@ -17,6 +17,8 @@ Moz2D
 DebuggingWebRenderScreenshots
 VulkanWebRenderOverview
 VulkanWebRenderImplementation
+WgpuNativeTextureHandoff
+WebGPUSharedVulkanCanvas
 GraphicsOverview
 VendoringANGLE
 ```

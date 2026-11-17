@@ -73,6 +73,159 @@ pub struct WrVulkanRelease {
     receipt: PendingExternalRelease,
 }
 
+pub struct WrVulkanSharedImage {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    registry: Rc<ExternalTextureRegistry>,
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    image: Rc<webrender::wgpu::SharedImage>,
+    normal: ExternalTextureHandle,
+    opaque: ExternalTextureHandle,
+}
+impl Drop for WrVulkanSharedImage {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "vulkan", target_os = "linux"))]
+        {
+            let _ = self.registry.unregister(self.normal);
+            let _ = self.registry.unregister(self.opaque);
+        }
+    }
+}
+
+/// token is a live GPU-process Arc<CanvasPublication> created by wgpu_canvas_shared_export.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_supported(
+    images: &WrVulkanExternalImages,
+    token: *const std::ffi::c_void,
+    owner: u64,
+    publication: u64,
+) -> bool {
+    if token.is_null() {
+        return false;
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        let lease = unsafe { &*token.cast::<std::sync::Arc<webrender::wgpu::CanvasPublication>>() };
+        return images.registry.supports_shared(lease, owner, publication);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (images, token, owner, publication);
+        false
+    }
+}
+
+/// The trusted in-process token stays live for this call; owner and publication are route identities.
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_new(
+    images: &WrVulkanExternalImages,
+    token: *const std::ffi::c_void,
+    owner: u64,
+    publication: u64,
+) -> *mut WrVulkanSharedImage {
+    if token.is_null() {
+        return ptr::null_mut();
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        let lease = unsafe { &*token.cast::<std::sync::Arc<webrender::wgpu::CanvasPublication>>() };
+        let result = (|| {
+            let image = images.registry.import_shared(lease.clone(), owner, publication)?;
+            let normal = images.registry.register_shared(&image, false)?;
+            let opaque = match images.registry.register_shared(&image, true) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = images.registry.unregister(normal);
+                    return Err(error);
+                },
+            };
+            Ok(WrVulkanSharedImage {
+                registry: images.registry.clone(),
+                image,
+                normal,
+                opaque,
+            })
+        })();
+        return boxed(result);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (images, token, owner, publication);
+        ptr::null_mut()
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_delete(image: *mut WrVulkanSharedImage) {
+    if !image.is_null() {
+        drop(unsafe { Box::from_raw(image) });
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_shared_image_matches_context(
+    image: &WrVulkanSharedImage,
+    images: &WrVulkanExternalImages,
+) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return Rc::ptr_eq(&image.registry, &images.registry);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, images);
+        false
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_shared_image_acquire(
+    image: &WrVulkanSharedImage,
+    channel: u8,
+    output: &mut ExternalTextureHandle,
+) -> WrVulkanAcquireStatus {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        if channel > 1 || !image.registry.is_attached() {
+            return WrVulkanAcquireStatus::Failed;
+        }
+        return match image.image.prepare() {
+            Ok(true) => {
+                *output = if channel == 0 { image.normal } else { image.opaque };
+                WrVulkanAcquireStatus::Ready
+            },
+            Ok(false) => WrVulkanAcquireStatus::Pending,
+            Err(error) => {
+                log::warn!("Shared canvas acquire: {error}");
+                WrVulkanAcquireStatus::Failed
+            },
+        };
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, channel, output);
+        WrVulkanAcquireStatus::Failed
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn wr_vulkan_shared_image_readback(
+    image: &WrVulkanSharedImage,
+    output: *mut u8,
+    length: usize,
+) -> bool {
+    if output.is_null() {
+        return false;
+    }
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return image
+            .registry
+            .readback_shared(&image.image, unsafe { std::slice::from_raw_parts_mut(output, length) })
+            .is_ok();
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        let _ = (image, output, length);
+        false
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn wr_vulkan_external_images_new(renderer: &Renderer) -> *mut WrVulkanExternalImages {
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
@@ -112,6 +265,18 @@ pub extern "C" fn wr_vulkan_process_native_work(
         if let Some(progress) = progress {
             *progress = false;
         }
+        false
+    }
+}
+#[no_mangle]
+pub extern "C" fn wr_vulkan_native_retirement_pending(work_id: &mut u64) -> bool {
+    #[cfg(all(feature = "vulkan", target_os = "linux"))]
+    {
+        return webrender::wgpu::native_retirement_pending(work_id);
+    }
+    #[cfg(not(all(feature = "vulkan", target_os = "linux")))]
+    {
+        *work_id = 0;
         false
     }
 }

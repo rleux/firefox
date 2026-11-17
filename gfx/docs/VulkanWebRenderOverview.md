@@ -43,9 +43,13 @@ it requires restart. Admission needs an active WR context and compatible device
 requirements. Core identities, feature policies and resource lifetimes remain
 independent; unsupported admission retains independent devices.
 
-Device sharing does not enable native WebGPU canvas publication. WebGPU canvas
-presentation retains its CPU fallback; native-image consumers and test publishers
-do not themselves activate a browser WebGPU producer.
+Eligible WebGPU canvases can publish their original Vulkan image to WR through
+isolated core devices on that shared native device. This path avoids a transport
+copy and FD export/import. Ineligible publications retain native-export fallback
+with one GPU copy, or CPU readback when native presentation is unavailable.
+`dom.webgpu.allow-present-without-readback` controls native presentation attempts.
+See [shared canvas images](WebGPUSharedVulkanCanvas.md) for admission, lifetime
+and evidence requirements; device sharing alone does not prove this path ran.
 
 Final composition renders directly into a core-acquired surface texture.
 Intermediate picture caches, blits and uploads remain normal rendering work.

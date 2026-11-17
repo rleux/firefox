@@ -26,6 +26,7 @@
 #include "mozilla/layers/LayersSurfaces.h"
 #include "mozilla/layers/RenderRootStateManager.h"
 #include "mozilla/layers/WebRenderCanvasRenderer.h"
+#include "mozilla/webrender/RenderCompositorVulkan.h"
 #include "nsDisplayList.h"
 
 namespace mozilla {
@@ -136,6 +137,11 @@ void CanvasContext::Configure(const dom::GPUCanvasConfiguration& aConfig,
                          "canvas configuration format not supported";
       mUseSharedTextureInSwapChain = false;
     }
+  }
+  // Match SharedTexture::Create before InitSwapChain: native Vulkan export
+  // publications use ordinary core textures, not the old shared-texture mode.
+  if (wr::RenderCompositorVulkan::IsRequested()) {
+    mUseSharedTextureInSwapChain = false;
   }
   if (!gfx::gfxVars::AllowWebGPUPresentWithoutReadback()) {
     gfxCriticalNote
@@ -287,7 +293,9 @@ Maybe<layers::SurfaceDescriptor> CanvasContext::SwapChainPresent() {
   mLastRemoteTextureId = Some(layers::RemoteTextureId::GetNext());
   mChild->SwapChainPresent(mCurrentTexture->GetId(), *mLastRemoteTextureId,
                            *mRemoteTextureOwnerId);
-  if (mUseSharedTextureInSwapChain) {
+  if (mUseSharedTextureInSwapChain ||
+      (gfx::gfxVars::UseWebRenderVulkan() &&
+       gfx::gfxVars::WebRenderVulkanSharedWebGPURequested())) {
     mCurrentTexture->Destroy();
     mNewTextureRequested = true;
   }

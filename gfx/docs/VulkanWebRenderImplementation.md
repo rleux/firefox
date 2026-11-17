@@ -58,10 +58,12 @@ and validation errors remain isolated. Actual native device loss invalidates the
 context and stops further sharing admission. A failed context cannot be replaced
 while retained owners remain; callers retain the independent-device fallback.
 
-This sharing does not hand textures between core devices or enable native canvas
-publication. Cached WR diagnostics and screenshots identify a renderer, not shared
-native handles or producer transport; sharing needs separate admission and handle
-checks. No performance result follows from using the same native device.
+Eligible canvas images use a separate trusted publication protocol over these
+isolated core devices; see [shared canvas images](WebGPUSharedVulkanCanvas.md) and
+the [native texture handoff contract](WgpuNativeTextureHandoff.md). Cached WR
+diagnostics and screenshots identify a renderer, not shared native handles or
+producer transport. Admission and matched producer/consumer evidence are required;
+no performance result follows from using the same native device.
 
 ## Trusted shader artifacts
 
@@ -165,17 +167,19 @@ does not establish a successful submit.
 ## Native-image admission and return
 
 `ExternalTextureRegistry` binds admitted allocations/views to the actual core
-device. It checks identity, dimensions, format/modifier/usage, allocation layout
-and FDs. Aliases share access state; an opaque alpha-ONE view is not an independent
-publication. The producer must fully initialize the image, publish a genuine
-ready signal and keep every alias immutable until its required return condition.
+device. For imported images it checks identity, dimensions, format/modifier/usage,
+allocation layout and FDs. Aliases share access state; an opaque alpha-ONE view
+is not an independent publication. The producer must fully initialize the image,
+publish a genuine ready signal and keep every alias immutable until its required
+return condition.
 
-The first raw acquire completes before the image is wrapped as initialized core
-storage. Until then the handler reports `Pending`, withholds the rendered epoch
-and schedules progress. Retry must perform a real render with the document's
-original present/offscreen intent, even after update-only notifications.
-Native work orders raw acquire, core sampling and raw release. The core image
-is transitioned to the agreed `RESOURCE` state before ownership release.
+For imported images, the first raw acquire completes before the image is wrapped
+as initialized core storage. Until then the handler reports `Pending`, withholds
+the rendered epoch and schedules progress. Retry must perform a real render with
+the document's original present/offscreen intent, even after update-only
+notifications. Imported native work orders raw acquire, core sampling and raw
+release. The core image is transitioned to the agreed `RESOURCE` state before
+ownership release.
 
 The GTK GL route uses `SharedSurface_DMABUF`, serialized `DMABufSurfaceRGBA`,
 `RenderDMABUFTextureHost` and the registry. Admission requires the actual render
@@ -206,12 +210,23 @@ finish. Uncertain raw work is drained or quarantined by native retirement.
 These obligations concern interop allocations, raw commands and synchronization,
 not ordinary core resource retention.
 
-WebGPU keeps a separate core device even when its native Vulkan device is shared,
-and uses CPU canvas presentation fallback. Generic EXTERNAL consumers and test
-publishers are groundwork for later native WebGPU canvas integration, not an
-implemented browser producer. Native browser GL transport likewise needs
-correlated publication/acquire/return evidence beyond fixture success or correct
-compositor pixels.
+WebGPU canvas publication keeps separate core identities while retaining the
+original core-allocated image. Sealing initializes its contents, transitions it
+to RESOURCE and invalidates producer aliases. WR can wrap it for sampling only
+after native completion, owner-thread core callback delivery and exclusive
+retained allocation ownership. The trusted in-process token binds owner, publication,
+context generation and nonce. Six live images and 256 MiB of actual allocation
+backing bound this path, including pending and consumer-held images.
+
+Shared publication uses no FD transport or external queue-family transfer;
+consumer retirement retains the original allocation. Ineligible shared admission
+can instead export an immutable DMA-BUF using one GPU copy, subject to native
+capability checks. Unsupported or disabled native presentation retains CPU
+readback. See [shared canvas images](WebGPUSharedVulkanCanvas.md) for the complete
+admission and failure rules. Browser GL transport still requires correlated
+publication/acquire/return evidence; a shared canvas requires matched
+producer/consumer image identity and compositor acquisition. Fixture pixels alone
+establish neither browser transport.
 
 ## Cached backend diagnostics
 

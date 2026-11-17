@@ -6,6 +6,9 @@
 
 #include "mozilla/layers/AsyncImagePipelineManager.h"
 #include "mozilla/webrender/RenderTextureHost.h"
+#if defined(MOZ_WIDGET_GTK)
+#  include "mozilla/webrender/RenderVulkanSharedTextureHost.h"
+#endif
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/webrender/VulkanImageIPC.h"
 #include "mozilla/webrender/WebRenderAPI.h"
@@ -27,6 +30,39 @@ already_AddRefed<VulkanTextureHost> VulkanTextureHost::Create(
                                                  texture.forget());
   return host.forget();
 }
+
+already_AddRefed<VulkanTextureHost> VulkanTextureHost::CreateShared(
+    TextureFlags aFlags, std::shared_ptr<void> aLease, uint64_t aOwner,
+    uint64_t aPublication, const gfx::IntSize& aSize,
+    gfx::SurfaceFormat aFormat) {
+#if defined(MOZ_WIDGET_GTK)
+  if (!wr::RenderThread::Get()) {
+    return nullptr;
+  }
+  RefPtr<wr::RenderTextureHost> texture =
+      wr::RenderVulkanSharedTextureHost::Create(std::move(aLease), aOwner,
+                                                aPublication, aSize, aFormat);
+  if (!texture) {
+    return nullptr;
+  }
+  RefPtr<VulkanTextureHost> host =
+      new VulkanTextureHost(aFlags, aSize, aFormat);
+  host->mExternalImageId =
+      Some(AsyncImagePipelineManager::GetNextExternalImageId());
+  wr::RenderThread::Get()->RegisterExternalImage(host->mExternalImageId.ref(),
+                                                 texture.forget());
+  return host.forget();
+#else
+  return nullptr;
+#endif
+}
+
+VulkanTextureHost::VulkanTextureHost(TextureFlags aFlags,
+                                     const gfx::IntSize& aSize,
+                                     gfx::SurfaceFormat aFormat)
+    : TextureHost(TextureHostType::Vulkan, aFlags),
+      mSize(aSize),
+      mFormat(aFormat) {}
 
 VulkanTextureHost::VulkanTextureHost(TextureFlags aFlags,
                                      const VulkanImagePublication& aPublication)

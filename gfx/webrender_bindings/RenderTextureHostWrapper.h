@@ -34,6 +34,7 @@ class RenderTextureHostWrapper final : public RenderTextureHostSWGL {
   wr::WrExternalImage LockVulkan(uint8_t aChannelIndex,
                                  WrVulkanExternalImages* aImages) override;
   uint64_t VulkanPublicationId() const override;
+  uint64_t VulkanOwnerId() const override;
   bool CanReadbackVulkan(WrVulkanExternalImages*, bool) const override;
   bool ReadbackVulkan(uint8_t*, size_t) override;
   Maybe<VulkanImageRelease> UnlockVulkan(

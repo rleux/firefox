@@ -12,19 +12,37 @@ void VulkanImageRetirement::Add(VulkanImageRelease&& aRelease,
   MOZ_ASSERT(RenderThread::IsInRenderThread());
   mShuttingDown |= RenderThread::Get()->HasShutdown();
   mPending.push_back({std::move(aRelease), std::move(aNotify)});
+  mSharedPolls = 0;
+  if (mPollDelayMs != 2) {
+    mTimer.Stop();
+  }
   Schedule();
 }
 void VulkanImageRetirement::Defer(std::function<void()>&& aCallback) {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
   mShuttingDown |= RenderThread::Get()->HasShutdown();
   mCallbacks.push_back(std::move(aCallback));
+  mSharedPolls = 0;
+  if (mPollDelayMs != 2) {
+    mTimer.Stop();
+  }
   Schedule();
 }
 void VulkanImageRetirement::Schedule() {
   MOZ_ASSERT(RenderThread::IsInRenderThread());
+  uint64_t workId = 0;
+  const bool retiring = wr_vulkan_native_retirement_pending(&workId);
+  if (retiring || workId != mWorkId) {
+    mWorkId = workId;
+    mSharedPolls = 0;
+    if (mPollDelayMs != 2) {
+      mTimer.Stop();
+    }
+  }
   if (!mShuttingDown && !mTimer.IsRunning() &&
       !RenderThread::Get()->HasShutdown()) {
-    mTimer.Start(base::TimeDelta::FromMilliseconds(2), this,
+    mPollDelayMs = 2;
+    mTimer.Start(base::TimeDelta::FromMilliseconds(mPollDelayMs), this,
                  &VulkanImageRetirement::Poll);
   }
 }
@@ -55,6 +73,24 @@ void VulkanImageRetirement::Poll() {
   }
   if (!nativePending && mPending.empty() && mCallbacks.empty()) {
     mTimer.Stop();
+    mSharedPolls = 0;
+    return;
+  }
+  uint64_t workId = 0;
+  const bool retiring = wr_vulkan_native_retirement_pending(&workId);
+  if (nativeProgress || retiring || !mPending.empty() || !mCallbacks.empty() ||
+      workId != mWorkId) {
+    mSharedPolls = 0;
+  } else if (mSharedPolls < 30) {
+    ++mSharedPolls;
+  }
+  mWorkId = workId;
+  const uint32_t delay = mSharedPolls < 16 ? 2 : mSharedPolls < 30 ? 16 : 100;
+  if (!mShuttingDown && delay != mPollDelayMs) {
+    mTimer.Stop();
+    mPollDelayMs = delay;
+    mTimer.Start(base::TimeDelta::FromMilliseconds(delay), this,
+                 &VulkanImageRetirement::Poll);
   }
 }
 void VulkanImageRetirement::BeginShutdown() {

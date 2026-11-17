@@ -304,6 +304,12 @@ pub struct Global {
     global: wgpu_core_remote::global::Global,
     #[cfg(target_os = "linux")]
     pub(crate) shared: Option<Arc<wgpu_shared::NativeContext>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) shared_targets: Mutex<HashMap<id::TextureId, crate::canvas::SharedTarget>>,
+    #[cfg(target_os = "linux")]
+    canvas_queues: Mutex<HashMap<SwapChainId, id::QueueId>>,
+    #[cfg(target_os = "linux")]
+    pub(crate) shared_pending: Mutex<Vec<std::sync::Weak<wgpu_shared::canvas::CanvasPublication>>>,
 
     /// Swap chain texture descriptors.
     ///
@@ -408,6 +414,12 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr, share_requested: bool)
         global,
         #[cfg(target_os = "linux")]
         shared,
+        #[cfg(target_os = "linux")]
+        shared_targets: Mutex::new(HashMap::new()),
+        #[cfg(target_os = "linux")]
+        canvas_queues: Mutex::new(HashMap::new()),
+        #[cfg(target_os = "linux")]
+        shared_pending: Mutex::new(Vec::new()),
         swap_chain_configs: Mutex::new(HashMap::new()),
     };
     Box::into_raw(Box::new(global))
@@ -2543,6 +2555,27 @@ impl Global {
                     };
                 }
 
+                #[cfg(target_os = "linux")]
+                if let Some(swap_chain_id) = swap_chain_id {
+                    let queue_id = self
+                        .canvas_queues
+                        .lock()
+                        .unwrap()
+                        .get(&swap_chain_id)
+                        .copied();
+                    if let Some(queue_id) = queue_id {
+                        if crate::canvas::create_target(
+                            self,
+                            device_id,
+                            queue_id,
+                            id,
+                            swap_chain_id.0,
+                            &desc,
+                        ) {
+                            return;
+                        }
+                    }
+                }
                 self.device_create_texture(device_id, &desc, id);
             }
             DeviceAction::CreateExternalTexture(id, desc) => {
@@ -3149,6 +3182,12 @@ unsafe fn process_message(
             }
 
             let res = global.device_validate_texture_descriptor(device_id, &sanitized_desc);
+            #[cfg(target_os = "linux")]
+            global
+                .shared_targets
+                .lock()
+                .unwrap()
+                .retain(|_, target| target.owner != remote_texture_owner_id.0);
 
             // In order to support `getCurrentTexture()` on invalid canvas configurations,
             // we store the configuration even when it is not valid.
@@ -3158,6 +3197,14 @@ unsafe fn process_message(
                 .unwrap()
                 .insert(SwapChainId(remote_texture_owner_id.0), sanitized_desc);
 
+            #[cfg(target_os = "linux")]
+            if res.is_none() {
+                global
+                    .canvas_queues
+                    .lock()
+                    .unwrap()
+                    .insert(SwapChainId(remote_texture_owner_id.0), queue_id);
+            }
             if let Some(err) = res {
                 // This is a validation error from the device timeline
                 // steps of `GPUCanvasContext.configure`.
@@ -3203,6 +3250,18 @@ unsafe fn process_message(
                 .lock()
                 .unwrap()
                 .remove(&SwapChainId(remote_texture_owner_id.0));
+            #[cfg(target_os = "linux")]
+            global
+                .canvas_queues
+                .lock()
+                .unwrap()
+                .remove(&SwapChainId(remote_texture_owner_id.0));
+            #[cfg(target_os = "linux")]
+            global
+                .shared_targets
+                .lock()
+                .unwrap()
+                .retain(|_, target| target.owner != remote_texture_owner_id.0);
             wgpu_parent_swap_chain_drop(global.owner, remote_texture_owner_id, txn_type, txn_id);
         }
 
@@ -3211,6 +3270,8 @@ unsafe fn process_message(
             global.buffer_destroy(id);
         }
         Message::DestroyTexture(id) => {
+            #[cfg(target_os = "linux")]
+            global.shared_targets.lock().unwrap().remove(&id);
             wgpu_server_remove_shared_texture(global.owner, id);
             global.texture_destroy(id);
         }
@@ -3271,6 +3332,8 @@ unsafe fn process_message(
             global.render_pipeline_remove(id);
         }
         Message::DropTexture(id) => {
+            #[cfg(target_os = "linux")]
+            global.shared_targets.lock().unwrap().remove(&id);
             wgpu_server_remove_shared_texture(global.owner, id);
             global.texture_remove(id);
         }
