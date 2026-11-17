@@ -243,8 +243,14 @@ mod compat {
             }
         }
 
-        pub fn assign(&mut self, index: usize, value: Arc<BindGroupLayout>) {
-            self.entries[index].assigned = Some(value);
+        pub fn assign(&mut self, index: usize, value: &Arc<BindGroupLayout>) {
+            if self.entries[index]
+                .assigned
+                .as_ref()
+                .is_none_or(|old| !Arc::ptr_eq(old, value))
+            {
+                self.entries[index].assigned = Some(value.clone());
+            }
             self.assigned_slots |= 1 << index;
             self.update_rebind_start_index(index);
         }
@@ -388,7 +394,13 @@ impl Binder {
         offsets: &[wgt::DynamicOffset],
     ) {
         let payload = &mut self.payloads[index];
-        payload.group = Some(bind_group.clone());
+        if payload
+            .group
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, bind_group))
+        {
+            payload.group = Some(bind_group.clone());
+        }
         payload.dynamic_offsets.clear();
         payload.dynamic_offsets.extend_from_slice(offsets);
 
@@ -419,7 +431,7 @@ impl Binder {
             }
         }
 
-        self.manager.assign(index, bind_group.layout.clone());
+        self.manager.assign(index, &bind_group.layout);
     }
 
     pub(super) fn clear_group(&mut self, index: usize) {
