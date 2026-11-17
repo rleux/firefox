@@ -10,6 +10,7 @@ use core::{
     mem::ManuallyDrop,
     num::{NonZeroU32, Saturating},
     ops::Range,
+    sync::atomic::AtomicBool,
 };
 
 use arrayvec::ArrayVec;
@@ -1773,6 +1774,7 @@ pub struct BindGroup {
     pub(crate) tracking_data: TrackingData,
     pub(crate) used: BindGroupStates,
     pub(crate) buffer_init_actions: Vec<BufferInitTrackerAction>,
+    pub(crate) buffer_init_complete: AtomicBool,
     pub(crate) texture_init_actions: Vec<TextureInitTrackerAction>,
     /// INVARIANT: Sorted by binding index order.
     pub(crate) dynamic_binding_info: Vec<BindGroupDynamicBindingData>,
@@ -1845,6 +1847,7 @@ impl BindGroup {
             tracking_data: TrackingData::new(device.tracker_indices.bind_groups.clone()),
             used: BindGroupStates::new(),
             buffer_init_actions: Vec::new(),
+            buffer_init_complete: AtomicBool::new(true),
             texture_init_actions: Vec::new(),
             dynamic_binding_info: Vec::new(),
             late_buffer_binding_infos: Vec::new(),

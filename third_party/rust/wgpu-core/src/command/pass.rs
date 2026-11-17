@@ -214,15 +214,29 @@ pub(super) fn flush_bindings_helper(
     let pipeline_layout = state.binder.pipeline_layout.as_ref().unwrap();
 
     for (i, bind_group, dynamic_offsets) in entries {
-        state.base.buffer_memory_init_actions.extend(
-            bind_group.buffer_init_actions.iter().filter_map(|action| {
-                action
-                    .buffer
-                    .initialization_status
-                    .read()
-                    .check_action(action)
-            }),
-        );
+        if !bind_group
+            .buffer_init_complete
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            let mut complete = true;
+            state.base.buffer_memory_init_actions.extend(
+                bind_group.buffer_init_actions.iter().filter_map(|action| {
+                    let pending = action
+                        .buffer
+                        .initialization_status
+                        .read()
+                        .check_action(action);
+                    complete &= pending.is_none();
+                    pending
+                }),
+            );
+            // Buffer initialization is monotonic; texture discards still need the checks below.
+            if complete {
+                bind_group
+                    .buffer_init_complete
+                    .store(true, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
         for action in bind_group.texture_init_actions.iter() {
             state.pending_discard_init_fixups.extend(
                 state

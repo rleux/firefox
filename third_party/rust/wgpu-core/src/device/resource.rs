@@ -4084,6 +4084,9 @@ impl Device {
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(self.tracker_indices.bind_groups.clone()),
             used,
+            buffer_init_complete: core::sync::atomic::AtomicBool::new(
+                buffer_init_actions.is_empty(),
+            ),
             buffer_init_actions,
             texture_init_actions,
             dynamic_binding_info,
