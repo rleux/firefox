@@ -2666,6 +2666,69 @@ impl super::Adapter {
         family_index: u32,
         queue_index: u32,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
+        unsafe {
+            self.device_from_raw_inner(
+                raw_device,
+                drop_callback,
+                enabled_extensions,
+                features,
+                limits,
+                memory_hints,
+                family_index,
+                queue_index,
+                Arc::new(Mutex::new(())),
+            )
+        }
+    }
+
+    /// Create an isolated HAL device over an existing native device and queue.
+    /// The returned device retains the native owner and serializes queue access.
+    pub fn open_shared(
+        &self,
+        source: &super::Device,
+        queue: &super::Queue,
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+    ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
+        let owner = &source.shared;
+        if self.raw != owner.physical_device
+            || !Arc::ptr_eq(&self.instance, &owner.instance)
+            || !Arc::ptr_eq(owner, &queue.device)
+            || !owner.features.contains(features)
+            || !limits.check_limits(&owner.limits)
+        {
+            return Err(crate::DeviceError::Unexpected);
+        }
+        let retained = owner.clone();
+        unsafe {
+            self.device_from_raw_inner(
+                owner.raw.clone(),
+                Some(Box::new(move || drop(retained))),
+                &owner.enabled_extensions,
+                features,
+                limits,
+                memory_hints,
+                owner.family_index,
+                owner.queue_index,
+                owner.queue_sync.clone(),
+            )
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn device_from_raw_inner(
+        &self,
+        raw_device: ash::Device,
+        drop_callback: Option<crate::DropCallback>,
+        enabled_extensions: &[&'static CStr],
+        features: wgt::Features,
+        limits: &wgt::Limits,
+        memory_hints: &wgt::MemoryHints,
+        family_index: u32,
+        queue_index: u32,
+        queue_sync: Arc<Mutex<()>>,
+    ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -3013,6 +3076,8 @@ impl super::Adapter {
             queue_flags,
             queue_index,
             raw_queue,
+            queue_sync,
+            limits: limits.clone(),
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
