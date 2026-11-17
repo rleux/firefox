@@ -10,7 +10,7 @@ use core::{
     mem::ManuallyDrop,
     num::{NonZeroU32, Saturating},
     ops::Range,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use arrayvec::ArrayVec;
@@ -1773,6 +1773,7 @@ pub struct BindGroup {
     pub(crate) label: String,
     pub(crate) tracking_data: TrackingData,
     pub(crate) used: BindGroupStates,
+    pub(crate) validated_generation: AtomicUsize,
     pub(crate) buffer_init_actions: Vec<BufferInitTrackerAction>,
     pub(crate) buffer_init_complete: AtomicBool,
     pub(crate) texture_init_actions: Vec<TextureInitTrackerAction>,
@@ -1810,11 +1811,18 @@ impl BindGroup {
         &'a self,
         guard: &'a SnatchGuard,
     ) -> Result<&'a dyn hal::DynBindGroup, InvalidOrDestroyedResourceError> {
-        for buffer in self.used.buffers.used_resources() {
-            buffer.try_raw(guard)?;
-        }
-        for texture in self.used.views.used_textures() {
-            texture.try_raw(guard)?;
+        let generation = guard.generation();
+        if generation == usize::MAX
+            || self.validated_generation.load(Ordering::Relaxed) != generation
+        {
+            for buffer in self.used.buffers.used_resources() {
+                buffer.try_raw(guard)?;
+            }
+            for texture in self.used.views.used_textures() {
+                texture.try_raw(guard)?;
+            }
+            self.validated_generation
+                .store(generation, Ordering::Relaxed);
         }
 
         self.state()?
@@ -1846,6 +1854,7 @@ impl BindGroup {
             label,
             tracking_data: TrackingData::new(device.tracker_indices.bind_groups.clone()),
             used: BindGroupStates::new(),
+            validated_generation: AtomicUsize::new(usize::MAX),
             buffer_init_actions: Vec::new(),
             buffer_init_complete: AtomicBool::new(true),
             texture_init_actions: Vec::new(),
