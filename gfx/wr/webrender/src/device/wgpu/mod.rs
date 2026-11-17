@@ -37,12 +37,19 @@ pub use crate::shader_source::vulkan as shaders;
 mod native_access;
 #[cfg(target_os = "linux")]
 mod external_images;
+#[cfg(all(target_os = "linux", feature = "shared-webgpu"))]
+mod shared_images;
+#[cfg(all(target_os = "linux", feature = "shared-webgpu"))]
+pub use shared_images::SharedImage;
+#[cfg(feature = "shared-webgpu")]
+pub use wgpu_shared::canvas::CanvasPublication;
 #[cfg(target_os = "linux")]
 mod native_submit;
 #[cfg(target_os = "linux")]
 pub use external_images::{
     ExternalTextureRegistry, NativeImage, PendingExternalRelease, ExternalReleaseStatus,
-    poll_retired_native_images, shutdown_native_images, take_native_image_progress,
+    native_retirement_pending, poll_retired_native_images, shutdown_native_images,
+    take_native_image_progress,
 };
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod native_test;

@@ -2,10 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::{core, hal, wgt, Device, DmaBufImage, SharedTimeline, SyncFileWait};
 use super::images::Image;
 use super::native_access::{NativeAccess, NativeReturn, Prepare, ReturnKind, ReturnStatus};
 use super::native_submit::{NativeSignal, NativeWait};
+use super::{core, hal, wgt, Device, DmaBufImage, SharedTimeline, SyncFileWait};
 use api::ExternalTextureHandle;
 use ash::vk;
 use std::{
@@ -216,6 +216,8 @@ pub struct ExternalTextureRegistry {
     owner: Arc<Device>,
     views: RefCell<HashMap<u32, View>>,
     next_id: Cell<u32>,
+    #[cfg(feature = "shared-webgpu")]
+    shared_views: RefCell<HashMap<u32, (Rc<super::SharedImage>, bool)>>,
     batch: Cell<u64>,
     operations: RefCell<Vec<Operation>>,
     commands: RefCell<Vec<Arc<core::command::CommandBuffer>>>,
@@ -232,7 +234,22 @@ pub struct ExternalTextureRegistry {
 
 thread_local! {static RETIRED:RefCell<Vec<Rc<ExternalTextureRegistry>>>=const{RefCell::new(Vec::new())};}
 thread_local! {static ACTIVE:RefCell<Vec<Weak<ExternalTextureRegistry>>>=const{RefCell::new(Vec::new())};}
+thread_local! {static NATIVE_WORK:Cell<u64>=const{Cell::new(0)};}
 thread_local! {static NATIVE_PROGRESS:Cell<bool>=const{Cell::new(false)};}
+
+pub fn native_retirement_pending(work_id: &mut u64) -> bool {
+    *work_id = NATIVE_WORK.with(Cell::get);
+    let pending = |context: &ExternalTextureRegistry| {
+        !context.operations.borrow().is_empty() || !context.in_flight.borrow().is_empty()
+    };
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|context| pending(&context))
+    }) || RETIRED.with(|retired| retired.borrow().iter().any(|context| pending(context)))
+}
 
 pub fn take_native_image_progress() -> bool {
     NATIVE_PROGRESS.with(|progress| progress.replace(false))
@@ -312,13 +329,15 @@ impl ExternalTextureRegistry {
             owner: owner.clone(),
             views: RefCell::new(HashMap::new()),
             next_id: Cell::new(0),
+            #[cfg(feature = "shared-webgpu")]
+            shared_views: RefCell::new(HashMap::new()),
             batch: Cell::new(1),
             operations: RefCell::new(Vec::new()),
             commands: RefCell::new(Vec::new()),
             waits: RefCell::new(Vec::new()),
             binary_waits: RefCell::new(Vec::new()),
             signals: RefCell::new(Vec::new()),
-            retirement: SharedTimeline::new(owner)?,
+            retirement: SharedTimeline::local(owner)?,
             next_point: Cell::new(0),
             in_flight: RefCell::new(VecDeque::new()),
             attached: Cell::new(true),
@@ -354,6 +373,15 @@ impl ExternalTextureRegistry {
         std::ptr::eq(self, other)
     }
     pub fn pending_work(&self) -> bool {
+        #[cfg(feature = "shared-webgpu")]
+        if self
+            .shared_views
+            .borrow()
+            .values()
+            .any(|(image, _)| image.pending())
+        {
+            return true;
+        }
         !self.operations.borrow().is_empty() || !self.in_flight.borrow().is_empty()
     }
     pub(super) fn recording_work(&self) -> bool {
@@ -391,6 +419,107 @@ impl ExternalTextureRegistry {
             receipt: RefCell::new(None),
         }))
     }
+    #[cfg(feature = "shared-webgpu")]
+    pub fn supports_shared(
+        &self,
+        publication: &Arc<super::CanvasPublication>,
+        owner: u64,
+        id: u64,
+    ) -> bool {
+        self.attached.get()
+            && self
+                .owner
+                .shared
+                .as_ref()
+                .is_some_and(|context| publication.matches(context, owner, id))
+    }
+    #[cfg(feature = "shared-webgpu")]
+    pub fn import_shared(
+        &self,
+        publication: Arc<super::CanvasPublication>,
+        owner: u64,
+        id: u64,
+    ) -> Result<Rc<super::SharedImage>, String> {
+        if !self.attached.get() {
+            return Err("Shared renderer is retired".into());
+        }
+        super::SharedImage::new(&self.owner, publication, owner, id)
+    }
+    #[cfg(feature = "shared-webgpu")]
+    pub fn register_shared(
+        &self,
+        image: &Rc<super::SharedImage>,
+        opaque: bool,
+    ) -> Result<ExternalTextureHandle, String> {
+        if !self.attached.get() || !image.belongs_to(&self.owner) {
+            return Err("Shared renderer mismatch".into());
+        }
+        if opaque
+            && !self
+                .owner
+                .features()
+                .contains(wgt::Features::TEXTURE_COMPONENT_SWIZZLE)
+        {
+            return Err("Opaque shared sampling unavailable".into());
+        }
+        let id = self
+            .next_id
+            .get()
+            .checked_add(1)
+            .ok_or("Shared texture names exhausted")?;
+        self.next_id.set(id);
+        self.shared_views
+            .borrow_mut()
+            .insert(id, (image.clone(), opaque));
+        NATIVE_WORK.with(|work| work.set(work.get().wrapping_add(1)));
+        Ok(ExternalTextureHandle(u64::from(id)))
+    }
+    #[cfg(feature = "shared-webgpu")]
+    pub fn readback_shared(
+        &self,
+        image: &Rc<super::SharedImage>,
+        output: &mut [u8],
+    ) -> Result<(), String> {
+        if self.frame_active.get() || !self.attached.get() || !image.belongs_to(&self.owner) {
+            return Err("Shared snapshot requires acquired idle access".into());
+        }
+        let source = image.image(false)?;
+        let desc = source.raw.descriptor();
+        let length = (desc.size.width as usize)
+            .checked_mul(desc.size.height as usize)
+            .and_then(|n| n.checked_mul(4));
+        if length != Some(output.len()) {
+            return Err("Shared snapshot size mismatch".into());
+        }
+        let rect = api::units::DeviceIntRect::from_size(api::units::DeviceIntSize::new(
+            desc.size.width as i32,
+            desc.size.height as i32,
+        ));
+        let format = if desc.format == wgt::TextureFormat::Bgra8Unorm {
+            api::ImageFormat::BGRA8
+        } else {
+            api::ImageFormat::RGBA8
+        };
+        let scratch = Image::new(
+            &self.owner,
+            desc.size.width,
+            desc.size.height,
+            desc.format,
+            super::TextureFilter::Nearest,
+            true,
+        )?;
+        let mut snapshot = super::render_device::RenderDevice::new(self.owner.clone())?;
+        snapshot.blit_level(
+            source,
+            0,
+            scratch.clone(),
+            0,
+            rect,
+            rect,
+            super::TextureFilter::Nearest,
+        )?;
+        snapshot.capture_into(scratch, rect, format, output)
+    }
     pub fn register(
         &self,
         image: &Rc<NativeImage>,
@@ -423,6 +552,15 @@ impl ExternalTextureRegistry {
         Ok(ExternalTextureHandle(u64::from(id)))
     }
     pub fn unregister(&self, handle: ExternalTextureHandle) -> Result<(), String> {
+        #[cfg(feature = "shared-webgpu")]
+        if self
+            .shared_views
+            .borrow_mut()
+            .remove(&u32::try_from(handle.0).map_err(|_| "Invalid shared texture name")?)
+            .is_some()
+        {
+            return Ok(());
+        }
         self.views
             .borrow_mut()
             .remove(&u32::try_from(handle.0).map_err(|_| "Invalid native texture name")?)
@@ -431,6 +569,10 @@ impl ExternalTextureRegistry {
     }
     #[cfg(feature = "capture")]
     pub(super) fn is_opaque(&self, id: u32) -> Result<bool, String> {
+        #[cfg(feature = "shared-webgpu")]
+        if let Some((_, opaque)) = self.shared_views.borrow().get(&id) {
+            return Ok(*opaque);
+        }
         self.views
             .borrow()
             .get(&id)
@@ -438,6 +580,10 @@ impl ExternalTextureRegistry {
             .ok_or_else(|| "Unknown native texture".into())
     }
     pub(super) fn image(&self, id: u32) -> Result<Arc<Image>, String> {
+        #[cfg(feature = "shared-webgpu")]
+        if let Some((image, opaque)) = self.shared_views.borrow().get(&id) {
+            return image.image(*opaque);
+        }
         let views = self.views.borrow();
         let view = views.get(&id).ok_or("Unknown native texture")?;
         if !view.image.access.borrow().may_sample(self.batch.get()) {
@@ -784,6 +930,12 @@ impl ExternalTextureRegistry {
     }
     pub fn poll(&self) -> Result<(), String> {
         let polled = self.owner.poll().map_err(|e| e.to_string());
+        #[cfg(feature = "shared-webgpu")]
+        for (image, _) in self.shared_views.borrow().values() {
+            if image.poll() {
+                NATIVE_PROGRESS.with(|progress| progress.set(true));
+            }
+        }
         if polled.is_err() {
             for batch in self.in_flight.borrow().iter() {
                 for operation in &batch.operations {
@@ -940,5 +1092,95 @@ impl ExternalTextureRegistry {
         if !self.in_flight.borrow().is_empty() {
             RETIRED.with(|retired| retired.borrow_mut().push(self.clone()));
         }
+    }
+}
+
+#[cfg(all(test, feature = "shared-webgpu"))]
+mod shared_wait_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires remote Vulkan and Khronos synchronization validation; run serially"]
+    fn shared_wait_distinguishes_retirement_and_reports_ready_progress() {
+        super::super::tests::validation_logging();
+        let owner = Arc::new(
+            Device::new(&super::super::Options {
+                validation: true,
+                shared_webgpu: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        eprintln!("Core Vulkan adapter: {:?}", owner.info());
+        let context = owner.shared.as_ref().unwrap();
+        let (producer, queue) = context
+            .open(
+                &owner.adapter,
+                &core::device::DeviceDescriptor {
+                    required_limits: owner.adapter.limits(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let texture = producer
+            .create_texture_with_internal_sampling(&core::resource::TextureDescriptor {
+                label: Some("Registry shared wait".into()),
+                size: wgt::Extent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgt::TextureDimension::D2,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: vec![],
+            })
+            .unwrap();
+        let publication =
+            unsafe { super::super::CanvasPublication::seal(context, &texture, &queue, 19, 23) }
+                .unwrap();
+        let registry = ExternalTextureRegistry::new(&owner).unwrap();
+        let _ = take_native_image_progress();
+        let mut previous = 0;
+        assert!(!native_retirement_pending(&mut previous));
+        let image = registry.import_shared(publication.clone(), 19, 23).unwrap();
+        let handle = registry.register_shared(&image, false).unwrap();
+        let mut registered = 0;
+        assert!(!native_retirement_pending(&mut registered));
+        assert_ne!(registered, previous);
+        assert!(registry.pending_work());
+        registry.poll().unwrap();
+        let mut unchanged = 0;
+        assert!(!native_retirement_pending(&mut unchanged));
+        assert_eq!(registered, unchanged);
+        assert!(!take_native_image_progress());
+
+        registry.checkpoint.set(true);
+        let submitted = registry.submit(&[]).unwrap();
+        assert!(native_retirement_pending(&mut unchanged));
+        owner.wait_for(submitted).unwrap();
+        registry.poll().unwrap();
+        assert!(!native_retirement_pending(&mut unchanged));
+        assert!(registry.pending_work());
+        assert!(!take_native_image_progress());
+
+        producer
+            .poll(wgt::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .unwrap();
+        assert!(!unsafe { publication.poll_producer_on_owner_thread() });
+        registry.poll().unwrap();
+        assert!(take_native_image_progress());
+        assert!(!registry.pending_work());
+        assert!(!native_retirement_pending(&mut unchanged));
+        assert!(registry.image(handle.0 as u32).is_ok());
+        registry.poll().unwrap();
+        assert!(!take_native_image_progress());
+        assert_eq!(registered, unchanged);
+        registry.unregister(handle).unwrap();
     }
 }

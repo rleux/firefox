@@ -81,7 +81,7 @@ impl RenderDevice {
         }
         Ok(())
     }
-    pub(super) fn blit_level(
+    pub(in crate::device::wgpu) fn blit_level(
         &mut self,
         mut source: Arc<Image>,
         mut source_level: u32,

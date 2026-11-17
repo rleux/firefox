@@ -285,6 +285,103 @@ fn closing_a_renderer_preserves_the_remaining_shared_context() {
     assert_eq!(tests::VALIDATION_ERRORS.load(Ordering::Relaxed), errors);
 }
 
+#[test]
+#[ignore = "Requires Vulkan timeline semaphores and Khronos validation"]
+fn shared_canvas_poll_waits_for_native_progress_then_drains_owner_callbacks() {
+    use ash::vk;
+    let owner = Arc::new(tests::device());
+    let errors = tests::VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let context = Arc::new(wgpu_shared::NativeContext::new(
+        owner.instance.clone(),
+        owner.adapter.clone(),
+        owner.device.clone(),
+        owner.queue.clone(),
+    ));
+    let (producer, queue) = context
+        .open(
+            &owner.adapter,
+            &core::device::DeviceDescriptor {
+                required_limits: owner.adapter.limits(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let texture = producer
+        .create_texture_with_internal_sampling(&core::resource::TextureDescriptor {
+            label: None,
+            size: wgt::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: wgt::TextureFormat::Rgba8Unorm,
+            usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: vec![],
+        })
+        .unwrap();
+    // Unblock even when an assertion unwinds, before destroying the semaphore.
+    struct Release(Rc<SharedTimeline>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let hal = self.0.owner.raw_device();
+            let info = vk::SemaphoreSignalInfo::default()
+                .semaphore(self.0.semaphore)
+                .value(1);
+            unsafe {
+                if hal
+                    .enabled_device_extensions()
+                    .contains(&ash::khr::timeline_semaphore::NAME)
+                {
+                    ash::khr::timeline_semaphore::Device::new(
+                        hal.shared_instance().raw_instance(),
+                        hal.raw_device(),
+                    )
+                    .signal_semaphore(&info)
+                    .unwrap();
+                } else {
+                    hal.raw_device().signal_semaphore(&info).unwrap();
+                }
+            }
+            self.0.owner.native_idle().unwrap();
+        }
+    }
+    let release = Release(SharedTimeline::local(&owner).unwrap());
+    unsafe {
+        queue
+            .clone()
+            .as_hal::<hal::api::Vulkan>()
+            .unwrap()
+            .add_wait_semaphore(
+                release.0.semaphore,
+                Some(1),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+            );
+    }
+    let lease = unsafe { CanvasPublication::seal(&context, &texture, &queue, 91, 101) }.unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        assert!(unsafe { lease.poll_producer_on_owner_thread() });
+        assert!(!lease.is_ready());
+    }
+    eprintln!("1000 native-pending canvas polls: {:?}", start.elapsed());
+    assert!(lease.wrap(&context.device).unwrap().is_none());
+    drop(release);
+    assert!(
+        !lease.is_ready(),
+        "Native completion alone must not deliver core callbacks"
+    );
+    assert!(!unsafe { lease.poll_producer_on_owner_thread() });
+    assert!(lease.is_ready());
+    let consumer = lease.wrap(&context.device).unwrap().unwrap();
+    assert!(lease.matches_texture(&consumer));
+    assert!(!unsafe { lease.poll_producer_on_owner_thread() });
+    consumer.destroy();
+    assert_eq!(tests::VALIDATION_ERRORS.load(Ordering::Relaxed), errors);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "Requires Vulkan and the Khronos validation layer"]
