@@ -376,7 +376,14 @@ pub extern "C" fn wgpu_server_new(owner: WebGPUParentPtr, share_requested: bool)
         },
         memory_budget_thresholds: wgt::MemoryBudgetThresholds {
             for_resource_creation: Some(95),
-            for_device_loss: Some(99),
+            // Linux Vulkan budget queries read system memory statistics on every poll.
+            for_device_loss: if cfg!(target_os = "linux")
+                && backends.contains(wgt::Backends::VULKAN)
+            {
+                None
+            } else {
+                Some(99)
+            },
         },
         display: None,
     };

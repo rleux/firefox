@@ -28,7 +28,7 @@ fn new_instance(options: &Options) -> Arc<core::instance::Instance> {
             memory_budget_thresholds: if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
                 wgt::MemoryBudgetThresholds {
                     for_resource_creation: Some(95),
-                    for_device_loss: Some(99),
+                    for_device_loss: None,
                 }
             } else {
                 wgt::MemoryBudgetThresholds::default()

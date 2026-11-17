@@ -33,6 +33,15 @@ explicit local retirement or confirmed process exit. Replacement preserves the
 retained scene without reviving a failed device. Windows and Android startup
 remain gated as described in the overview.
 
+### Memory budget policy
+
+Linux WebGPU instances whose allowed backend mask includes Vulkan disable the
+proactive memory-budget device-loss threshold, including independent devices and
+mixed masks that later select another backend. Resource creation retains its 95%
+threshold. WR applies these thresholds only to its shared-WebGPU instance path;
+ordinary WR instances keep the default policy. Native out-of-memory and device-loss
+errors continue through ordinary error handling and recovery.
+
 ### Shared WebGPU native device
 
 The default-off startup preference `gfx.webrender.vulkan.shared-webgpu` requests
