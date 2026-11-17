@@ -48,10 +48,6 @@ mod compat {
             }
         }
 
-        fn is_assigned(&self) -> bool {
-            self.assigned.is_some()
-        }
-
         fn is_active(&self) -> bool {
             self.assigned.is_some() && self.expected.is_some()
         }
@@ -192,6 +188,7 @@ mod compat {
     #[derive(Debug)]
     pub(super) struct BoundBindGroupLayouts {
         entries: [Entry; hal::MAX_BIND_GROUPS],
+        assigned_slots: u32,
         rebind_start: usize,
     }
 
@@ -199,6 +196,7 @@ mod compat {
         pub fn new() -> Self {
             Self {
                 entries: [const { Entry::empty() }; hal::MAX_BIND_GROUPS],
+                assigned_slots: 0,
                 rebind_start: 0,
             }
         }
@@ -247,18 +245,19 @@ mod compat {
 
         pub fn assign(&mut self, index: usize, value: Arc<BindGroupLayout>) {
             self.entries[index].assigned = Some(value);
+            self.assigned_slots |= 1 << index;
             self.update_rebind_start_index(index);
         }
 
         pub fn clear(&mut self, index: usize) {
             self.entries[index].assigned = None;
+            self.assigned_slots &= !(1 << index);
         }
 
-        pub fn list_assigned(&self) -> impl Iterator<Item = usize> + '_ {
-            self.entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| if e.is_assigned() { Some(i) } else { None })
+        pub fn last_assigned_index(&self) -> Option<usize> {
+            self.assigned_slots
+                .checked_ilog2()
+                .map(|slot| slot as usize)
         }
 
         pub fn list_active(&self) -> impl Iterator<Item = usize> + '_ {
@@ -451,7 +450,7 @@ impl Binder {
     }
 
     pub(super) fn last_assigned_index(&self) -> Option<usize> {
-        self.manager.list_assigned().last()
+        self.manager.last_assigned_index()
     }
 
     pub(super) fn list_active(&self) -> impl Iterator<Item = &Arc<BindGroup>> + '_ {

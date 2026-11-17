@@ -49,6 +49,14 @@ impl Fixture {
     }
 
     fn with_pipeline(blend: Option<wgt::BlendState>, vertex_input: bool) -> Self {
+        Self::with_pipeline_limits(blend, vertex_input, None)
+    }
+
+    fn with_pipeline_limits(
+        blend: Option<wgt::BlendState>,
+        vertex_input: bool,
+        combined_limit: Option<u32>,
+    ) -> Self {
         static START: std::sync::Once = std::sync::Once::new();
         START.call_once(|| {
             log::set_logger(&Logger).unwrap();
@@ -69,9 +77,13 @@ impl Fixture {
             .next()
             .unwrap();
         eprintln!("Bundle replay adapter: {:?}", adapter.get_info());
+        let mut limits = adapter.limits();
+        if let Some(limit) = combined_limit {
+            limits.max_bind_groups_plus_vertex_buffers = limit;
+        }
         let (device, queue) = adapter
             .request_device(&core::device::DeviceDescriptor {
-                required_limits: adapter.limits(),
+                required_limits: limits,
                 ..Default::default()
             })
             .unwrap();
@@ -996,5 +1008,78 @@ fn inline_initialization_dropped_recordings_and_same_layout_switches() {
         "{error:?}"
     );
     assert!(f.device.is_valid());
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+#[ignore = "Requires hardware Vulkan with synchronization validation; run serially"]
+fn inline_vertex_state_clear_and_draw_bounds_stay_validated() {
+    let f = Fixture::with_pipeline_limits(None, true, Some(2));
+    let buffer = f.buffer();
+    let group = f.group(buffer.clone(), 0);
+    let vertex = f.device.create_buffer(&core::resource::BufferDescriptor {
+        label: None,
+        size: 48,
+        usage: wgt::BufferUsages::VERTEX | wgt::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let positions = [-1.0f32, -1., 0., 1., -1., 3., 0., 1., 3., -1., 0., 1.]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(vertex.clone(), 0, &positions);
+    let green = [0.0f32, 1., 0., 1.]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    f.queue.write_buffer(buffer, 0, &green);
+    for (clear_extra, clear_required, count, expected_error) in [
+        (true, false, 3, None),
+        (false, false, 3, Some("TooManyBindGroupsPlusVertexBuffers")),
+        (true, true, 3, Some("MissingVertexBuffer")),
+        (true, false, 4, Some("VertexBeyondLimit")),
+        (true, false, 3, None),
+    ] {
+        f.device
+            .push_error_scope(wgt::error::ErrorFilter::Validation);
+        let encoder = f.device.create_command_encoder(&Default::default());
+        let mut pass = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
+            color_attachments: Cow::Owned(vec![Some(core::command::RenderPassColorAttachment {
+                view: f.target.create_view(&Default::default()),
+                depth_slice: None,
+                resolve_target: None,
+                load_op: wgt::LoadOp::Clear(wgt::Color::WHITE),
+                store_op: wgt::StoreOp::Store,
+            })]),
+            ..Default::default()
+        });
+        pass.set_pipeline(f.pipeline.clone());
+        pass.set_vertex_buffer(0, Some(vertex.clone()), 0, Some(48));
+        pass.set_vertex_buffer(1, Some(vertex.clone()), 0, Some(48));
+        pass.set_bind_group(0, Some(group.clone()), &[]);
+        pass.set_bind_group(1, Some(group.clone()), &[]);
+        if clear_extra {
+            pass.set_vertex_buffer(1, None, 0, None);
+            pass.set_bind_group(1, None, &[]);
+        }
+        if clear_required {
+            pass.set_vertex_buffer(0, None, 0, None);
+        }
+        pass.draw(count, 1, 0, 0);
+        pass.end();
+        let command = encoder.finish(&Default::default());
+        let submitted = f.queue.submit(&[command]);
+        if let Some(expected) = expected_error {
+            assert!(submitted.is_none());
+            let error = validation_error(&f.device);
+            assert!(format!("{error:?}").contains(expected), "{error:?}");
+        } else {
+            assert!(submitted.is_some());
+            assert!(f.device.pop_error_scope().unwrap().is_none());
+            f.wait();
+            assert_eq!(f.pixel(0, 0), [0, 255, 0, 255]);
+        }
+        assert!(f.device.is_valid());
+    }
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), 0);
 }

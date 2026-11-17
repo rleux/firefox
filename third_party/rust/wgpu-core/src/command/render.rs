@@ -557,6 +557,8 @@ pub(crate) struct VertexSlot {
 #[derive(Debug, Default)]
 pub(crate) struct VertexState {
     slots: [Option<VertexSlot>; hal::MAX_VERTEX_BUFFERS],
+    assigned_slots: u32,
+    required_slots: u32,
     pub(crate) limits: VertexLimits,
 }
 
@@ -573,15 +575,23 @@ impl VertexState {
             range,
             is_dirty: true,
         });
+        self.assigned_slots |= 1 << slot;
     }
 
     /// Clear a vertex buffer slot.
     pub(crate) fn clear_buffer(&mut self, slot: usize) {
         self.slots[slot] = None;
+        self.assigned_slots &= !(1 << slot);
     }
 
     /// Recompute the cached vertex and instance limits based on the current slots and pipeline.
     pub(crate) fn update_limits(&mut self, pipeline_steps: &[Option<VertexStep>]) {
+        self.required_slots = pipeline_steps
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (index, step)| {
+                mask | if step.is_some() { 1 << index } else { 0 }
+            });
         self.limits = VertexLimits::new(
             self.slots
                 .iter()
@@ -591,11 +601,9 @@ impl VertexState {
     }
 
     fn last_assigned_index(&self) -> Option<usize> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|_| i))
-            .next_back()
+        self.assigned_slots
+            .checked_ilog2()
+            .map(|slot| slot as usize)
     }
 
     pub(super) fn validate(
@@ -604,18 +612,12 @@ impl VertexState {
         binder: &Binder,
     ) -> Result<(), DrawError> {
         // Check all needed vertex buffers have been bound
-        for index in pipeline
-            .vertex_steps
-            .iter()
-            .enumerate()
-            .filter_map(|(index, step)| step.map(|_| index))
-        {
-            if self.slots[index].is_none() {
-                return Err(DrawError::MissingVertexBuffer {
-                    pipeline: pipeline.error_ident(),
-                    index,
-                });
-            }
+        let missing = self.required_slots & !self.assigned_slots;
+        if missing != 0 {
+            return Err(DrawError::MissingVertexBuffer {
+                pipeline: pipeline.error_ident(),
+                index: missing.trailing_zeros() as usize,
+            });
         }
 
         let bind_group_space_used = binder.last_assigned_index().map_or(0, |i| i + 1);
