@@ -2110,9 +2110,41 @@ impl Device {
         self: &Arc<Self>,
         desc: &resource::TextureDescriptor,
     ) -> Result<Arc<Texture>, resource::CreateTextureError> {
+        self.create_texture_with_internal_usage(desc, wgt::TextureUsages::empty())
+    }
+
+    /// Allocates a presentation texture with native sampling support, without
+    /// granting sampling permission to commands using the public descriptor.
+    pub fn create_texture_with_internal_sampling(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+    ) -> Result<Arc<Texture>, resource::CreateTextureError> {
+        let texture =
+            self.create_texture_with_internal_usage(desc, wgt::TextureUsages::TEXTURE_BINDING)?;
+        #[cfg(feature = "trace")]
+        if let Some(ref mut trace) = *self.trace.lock() {
+            trace.add(trace::Action::CreateTexture(
+                texture.to_trace(),
+                desc.clone(),
+            ));
+        }
+        Ok(texture)
+    }
+
+    fn create_texture_with_internal_usage(
+        self: &Arc<Self>,
+        desc: &resource::TextureDescriptor,
+        internal_usage: wgt::TextureUsages,
+    ) -> Result<Arc<Texture>, resource::CreateTextureError> {
         let (format_features, hal_view_formats) = self.validate_texture_descriptor_inner(desc)?;
 
-        let hal_usage = conv::map_texture_usage_for_texture(desc, &format_features);
+        let mut hal_usage = conv::map_texture_usage_for_texture(desc, &format_features);
+        if !internal_usage.is_empty() {
+            let mut native_desc = desc.clone();
+            native_desc.usage |= internal_usage;
+            self.validate_texture_descriptor_inner(&native_desc)?;
+            hal_usage = conv::map_texture_usage_for_texture(&native_desc, &format_features);
+        }
 
         let hal_desc = hal::TextureDescriptor {
             label: desc.label.to_hal(self.instance_flags),
