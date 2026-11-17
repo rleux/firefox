@@ -51,3 +51,6 @@ for every submission. JSON separates update, encoding, submit and wait times.
 `--check` compares complete inline/bundle pixels at two animation times. These
 serialized CPU timings do not measure browser FPS or in-flight GPU throughput.
 Save exact source/binary/driver identities and compare matched builds and inputs.
+
+See the [benchmark guide](benchmarks/animometer.md) for the correctness matrix,
+JSON fields and measurement limits.
