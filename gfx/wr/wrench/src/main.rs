@@ -19,6 +19,8 @@ extern crate tracy_rs;
 pub const AU_PER_DEV_PX: f32 = 60.0;
 
 mod angle;
+#[cfg(all(feature = "webgpu-perf", target_os = "linux"))]
+mod animometer;
 mod bench;
 mod blob;
 #[cfg(target_os = "windows")]
@@ -1680,6 +1682,22 @@ pub fn main() {
     }
 
     let args = parse_args();
+    if let Some(options) = args.subcommand_matches("animometer") {
+        #[cfg(all(feature = "webgpu-perf", target_os = "linux"))]
+        {
+            if let Err(error) = animometer::run(options) {
+                eprintln!("Animometer: {error}");
+                process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(all(feature = "webgpu-perf", target_os = "linux")))]
+        {
+            let _ = options;
+            eprintln!("Animometer requires Linux and the webgpu-perf feature");
+            process::exit(2);
+        }
+    }
     let exit_code = if args.is_present("headless") {
         run_headless(args)
     } else {
