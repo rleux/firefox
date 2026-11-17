@@ -3,13 +3,16 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, Weak,
 };
 use wgpu_core as core;
 use wgpu_hal as hal;
 use wgpu_types as wgt;
 
+pub mod canvas;
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
 static ACTIVE: Mutex<Weak<NativeContext>> = Mutex::new(Weak::new());
 
 pub struct NativeContext {
@@ -18,6 +21,7 @@ pub struct NativeContext {
     pub device: Arc<core::device::Device>,
     pub queue: Arc<core::device::queue::Queue>,
     failed: AtomicBool,
+    generation: u64,
 }
 
 impl NativeContext {
@@ -33,7 +37,12 @@ impl NativeContext {
             device,
             queue,
             failed: AtomicBool::new(false),
+            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn is_valid(&self) -> bool {
