@@ -52,6 +52,7 @@ pub struct WrVulkanConfig {
     pub validation: bool,
     pub vsync: bool,
     pub transparent: bool,
+    pub shared_webgpu: bool,
 }
 
 #[cfg(not(all(
@@ -244,6 +245,7 @@ mod enabled {
             window: window.map(|window| window as Rc<dyn webrender::wgpu::SurfaceWindow>),
             display_owner: Some(display),
             validation: config.validation,
+            shared_webgpu: config.shared_webgpu,
             surface_options: surface_options(config),
             ..Default::default()
         }))
@@ -304,6 +306,7 @@ mod enabled {
                 validation: true,
                 vsync: false,
                 transparent: true,
+                shared_webgpu: false,
             }
         }
 

@@ -9322,6 +9322,7 @@ dependencies = [
  "wgpu-core",
  "wgpu-hal",
  "wgpu-types",
+ "wgpu_shared",
  "wr_glyph_rasterizer",
  "wr_malloc_size_of",
  "zeitstempel",
@@ -9613,7 +9614,17 @@ dependencies = [
  "wgpu-core-remote-types",
  "wgpu-hal",
  "wgpu-types",
+ "wgpu_shared",
  "windows",
+]
+
+[[package]]
+name = "wgpu_shared"
+version = "0.1.0"
+dependencies = [
+ "wgpu-core",
+ "wgpu-hal",
+ "wgpu-types",
 ]
 
 [[package]]

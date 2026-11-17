@@ -21,6 +21,7 @@
 #include "mozilla/webgpu/FrontBufferSnapshot.h"
 #include "mozilla/webgpu/SharedTexture.h"
 #include "mozilla/webgpu/ffi/wgpu.h"
+#include "nsXULAppAPI.h"
 
 #if defined(XP_WIN)
 #  include "mozilla/gfx/DeviceManagerDx.h"
@@ -455,7 +456,10 @@ class PresentationData {
 };
 
 WebGPUParent::WebGPUParent(const dom::ContentParentId& aContentId)
-    : mContentId(aContentId), mContext(ffi::wgpu_server_new(this)) {
+    : mContentId(aContentId),
+      mContext(ffi::wgpu_server_new(
+          this, XRE_IsGPUProcess() && gfx::gfxVars::UseWebRenderVulkan() &&
+                    gfx::gfxVars::WebRenderVulkanSharedWebGPURequested())) {
   mTimer.Start(base::TimeDelta::FromMilliseconds(POLL_TIME_MS), this,
                &WebGPUParent::MaintainDevices);
 }

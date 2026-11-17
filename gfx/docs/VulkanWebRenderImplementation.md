@@ -33,6 +33,36 @@ explicit local retirement or confirmed process exit. Replacement preserves the
 retained scene without reviving a failed device. Windows and Android startup
 remain gated as described in the overview.
 
+### Shared WebGPU native device
+
+The default-off startup preference `gfx.webrender.vulkan.shared-webgpu` requests
+sharing when Vulkan WR is selected in the GTK/X11 GPU process. The parent latches
+the request for the session; replacement GPU processes inherit it. A requested
+preference does not prove successful admission.
+
+WR publishes a retained `NativeContext` for its native Vulkan device and queue.
+WebGPU actors can join only an active context, with Vulkan enabled in their
+backend policy and matching adapter, features and limits. Unsupported admission
+uses independent devices. Actors created before WR publishes its context remain
+independent; enabling the request does not migrate existing devices.
+
+Clients share native handles, not core resource identities, submission indices
+or callbacks. Each client keeps its own validated feature policy and resource
+lifetime. WebGPU retains strict compliance and timestamp normalization; WR's
+shader-passthrough feature does not grant content that feature. Retained ownership
+keeps the native device alive when another renderer or client closes.
+
+HAL serializes shared submissions, presentation and idle operations with the
+same queue lock, including WR native-image retirement. Logical client destruction
+and validation errors remain isolated. Actual native device loss invalidates the
+context and stops further sharing admission. A failed context cannot be replaced
+while retained owners remain; callers retain the independent-device fallback.
+
+This sharing does not hand textures between core devices or enable native canvas
+publication. Cached WR diagnostics and screenshots identify a renderer, not shared
+native handles or producer transport; sharing needs separate admission and handle
+checks. No performance result follows from using the same native device.
+
 ## Trusted shader artifacts
 
 `webrender_build` defines the catalog. `webrender_shader_build` compiles and links
@@ -176,11 +206,12 @@ finish. Uncertain raw work is drained or quarantined by native retirement.
 These obligations concern interop allocations, raw commands and synchronization,
 not ordinary core resource retention.
 
-WebGPU still owns a separate device and uses CPU canvas presentation fallback.
-Generic EXTERNAL consumers and test publishers are groundwork for later native
-WebGPU integration, not an implemented browser producer. Native browser GL
-transport likewise needs correlated publication/acquire/return evidence beyond
-fixture success or correct compositor pixels.
+WebGPU keeps a separate core device even when its native Vulkan device is shared,
+and uses CPU canvas presentation fallback. Generic EXTERNAL consumers and test
+publishers are groundwork for later native WebGPU canvas integration, not an
+implemented browser producer. Native browser GL transport likewise needs
+correlated publication/acquire/return evidence beyond fixture success or correct
+compositor pixels.
 
 ## Cached backend diagnostics
 

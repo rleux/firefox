@@ -95,7 +95,7 @@ Correct pixels and a Vulkan backend identify rendering output, not the producer'
 transport. Native GL FOREIGN or WebGPU publication requires correlated producer,
 compositor acquisition and return evidence. Explicit compositor and native-image
 snapshots perform observer readback even when native presentation avoids CPU
-readback. Shared WebGPU devices and native browser WebGPU publication are not
-implemented in this backend yet. See the
+readback. Optional native-device sharing with WebGPU does not enable native
+browser WebGPU publication or make a screenshot evidence of device sharing. See the
 [Vulkan implementation guide](VulkanWebRenderImplementation.md) for the native
 ownership and validation boundaries.

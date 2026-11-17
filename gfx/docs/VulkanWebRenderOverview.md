@@ -36,11 +36,16 @@ graphics `webRenderBackend` object when a live initialized renderer is available
 | `wgpu-core` | Resource/command validation, initialization, transitions, retention, surfaces and submission progress |
 | Native interoperability boundary | Device opening, admitted external images, queue-family ownership and producer synchronization |
 
-The backend lives under `gfx/wr/webrender/src/device/wgpu/`. WebRender owns its
-device and queue. Shared WebGPU devices and native WebGPU canvas publication
-are not implemented here; WebGPU canvas presentation retains its CPU fallback.
-The native-image consumers and test publishers do not themselves activate a
-browser WebGPU producer.
+The backend lives under `gfx/wr/webrender/src/device/wgpu/`. The default-off
+startup preference `gfx.webrender.vulkan.shared-webgpu` requests sharing WR's
+native Vulkan device and queue with WebGPU in the GTK/X11 GPU process; changing
+it requires restart. Admission needs an active WR context and compatible device
+requirements. Core identities, feature policies and resource lifetimes remain
+independent; unsupported admission retains independent devices.
+
+Device sharing does not enable native WebGPU canvas publication. WebGPU canvas
+presentation retains its CPU fallback; native-image consumers and test publishers
+do not themselves activate a browser WebGPU producer.
 
 Final composition renders directly into a core-acquired surface texture.
 Intermediate picture caches, blits and uploads remain normal rendering work.
