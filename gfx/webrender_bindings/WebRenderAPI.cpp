@@ -7,6 +7,7 @@
 #include "GLContext.h"
 #include "TextDrawTarget.h"
 #include "malloc_decls.h"
+#include "mozilla/JSONStringWriteFuncs.h"
 #include "mozilla/Logging.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/StaticPrefs_webgl.h"
@@ -344,9 +345,33 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
           return CreatePromise::CreateAndReject(
               "wr_window_new without docHandle"_ns, __func__);
         }
+        nsAutoCString backendName, adapter, driver;
+        wr_renderer_get_backend_info(wrRenderer, &backendName, &adapter,
+                                     &driver);
+        if (swgl) {
+          backendName.AssignLiteral("SWGL");
+          driver.AssignLiteral("SWGL");
+        } else if (gl && gl->IsGLES()) {
+          backendName.AssignLiteral("OpenGL ES");
+        }
+        JSONStringWriteFunc<nsCString> backendInfo;
+        JSONWriter json(backendInfo);
+        json.Start();
+        json.StringProperty("backend", backendName);
+        json.StringProperty("renderer", adapter);
+        json.StringProperty("driver", driver);
+        json.IntProperty("maxTextureSize", maxTextureSize);
+        if (XRE_IsGPUProcess()) {
+          json.StringProperty("process", "GPU");
+        } else {
+          json.StringProperty("process", "Parent");
+        }
+        json.End();
+
         const WebRenderBackend backend = compositor->BackendType();
         const WebRenderCompositor compositorType = compositor->CompositorType();
-        const bool usesBackendPresentation = compositor->UsesBackendPresentation();
+        const bool usesBackendPresentation =
+            compositor->UsesBackendPresentation();
         const bool useANGLE = compositor->UseANGLE();
         const bool useDComp = compositor->UseDComp();
         const bool useLayerCompositor = compositor->ShouldUseLayerCompositor();
@@ -399,7 +424,8 @@ RefPtr<WebRenderAPI::CreatePromise> WebRenderAPI::Create(
 #endif
         };
         RefPtr<WebRenderAPI> api =
-            new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle, usesBackendPresentation);
+            new WebRenderAPI(docHandle, aWindowId, capabilities, syncHandle,
+                             usesBackendPresentation, backendInfo.StringCRef());
         return CreatePromise::CreateAndResolve(std::move(api), __func__);
       });
 }
@@ -409,7 +435,8 @@ already_AddRefed<WebRenderAPI> WebRenderAPI::Clone() {
   wr_api_clone(mDocHandle, &docHandle);
 
   RefPtr<WebRenderAPI> renderApi =
-      new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle, mUsesBackendPresentation, this, this);
+      new WebRenderAPI(docHandle, mId, mCapabilities, mSyncHandle,
+                       mUsesBackendPresentation, mBackendInfo, this, this);
 
   return renderApi.forget();
 }
@@ -420,12 +447,14 @@ wr::WrIdNamespace WebRenderAPI::GetNamespace() {
 
 WebRenderAPI::WebRenderAPI(wr::DocumentHandle* aHandle, wr::WindowId aId,
                            WebRenderCapabilities aCapabilities,
-                           layers::SyncHandle aSyncHandle, bool aUsesBackendPresentation,
-                           wr::WebRenderAPI* aRootApi,
+                           layers::SyncHandle aSyncHandle,
+                           bool aUsesBackendPresentation,
+                           nsCString aBackendInfo, wr::WebRenderAPI* aRootApi,
                            wr::WebRenderAPI* aRootDocumentApi)
     : mDocHandle(aHandle),
       mId(aId),
       mCapabilities(std::move(aCapabilities)),
+      mBackendInfo(std::move(aBackendInfo)),
       mCaptureSequence(false),
       mSyncHandle(aSyncHandle),
       mUsesBackendPresentation(aUsesBackendPresentation),

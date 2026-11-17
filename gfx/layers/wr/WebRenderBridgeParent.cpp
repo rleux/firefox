@@ -2745,6 +2745,14 @@ mozilla::ipc::IPCResult WebRenderBridgeParent::RecvGetFrameUniformity(
   return IPC_OK();
 }
 
+mozilla::ipc::IPCResult WebRenderBridgeParent::RecvGetBackendInfo(
+    GetBackendInfoResolver&& aResolve) {
+  aResolve(!mDestroyed && mLateInit && mLateInit->mApi
+               ? mLateInit->mApi->GetBackendInfo()
+               : EmptyCString());
+  return IPC_OK();
+}
+
 mozilla::ipc::IPCResult WebRenderBridgeParent::RecvEndWheelTransaction(
     EndWheelTransactionResolver&& aResolve) {
   if (!EnsureInitialized()) {

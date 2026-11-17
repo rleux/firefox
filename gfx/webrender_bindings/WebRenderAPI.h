@@ -325,6 +325,7 @@ class WebRenderAPI final {
   void AccumulateMemoryReport(wr::MemoryReport*);
 
   wr::WrIdNamespace GetNamespace();
+  const nsCString& GetBackendInfo() const { return mBackendInfo; }
   const WebRenderCapabilities& GetCapabilities() const { return mCapabilities; }
   layers::SyncHandle GetSyncHandle() const { return mSyncHandle; }
   bool UsesBackendPresentation() const { return mUsesBackendPresentation; }
@@ -367,7 +368,7 @@ class WebRenderAPI final {
   WebRenderAPI(wr::DocumentHandle* aHandle, wr::WindowId aId,
                WebRenderCapabilities aCapabilities,
                layers::SyncHandle aSyncHandle, bool aUsesBackendPresentation,
-               wr::WebRenderAPI* aRootApi = nullptr,
+               nsCString aBackendInfo, wr::WebRenderAPI* aRootApi = nullptr,
                wr::WebRenderAPI* aRootDocumentApi = nullptr);
 
   ~WebRenderAPI();
@@ -503,6 +504,7 @@ class WebRenderAPI final {
   wr::DocumentHandle* mDocHandle;
   wr::WindowId mId;
   const WebRenderCapabilities mCapabilities;
+  const nsCString mBackendInfo;
   bool mCaptureSequence;
   layers::SyncHandle mSyncHandle;
   const bool mUsesBackendPresentation;
