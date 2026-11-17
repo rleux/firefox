@@ -54,10 +54,11 @@ pub use vulkan::{
 };
 pub use self::transfer::{PendingReadback, Readback};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
+    pub shared_webgpu: bool,
     #[cfg(test)]
     pub primary_mapping: Option<bool>,
     /// The native window remains owned until detached or the renderer is destroyed.
@@ -115,6 +116,8 @@ pub struct Device {
     pub(super) device: Arc<core::device::Device>,
     pub(super) queue: Arc<core::device::queue::Queue>,
     errors: Arc<Errors>,
+    #[cfg(feature = "shared-webgpu")]
+    shared: Option<Arc<wgpu_shared::NativeContext>>,
     queue_serial: Mutex<()>,
     #[cfg(target_os = "linux")]
     native_cache: vulkan::NativeCache,
@@ -148,14 +151,43 @@ impl Device {
                 .map(|window| window as Rc<dyn HasDisplayHandle>)
         });
         surface::validate_display(options, display_owner.as_ref())?;
-        let (instance, initial_surface, adapter, device, queue) = vulkan::open(options)?;
+        let opened = vulkan::open(options).or_else(|error| {
+            if !options.shared_webgpu {
+                return Err(error);
+            }
+            log::warn!(
+                "Shared Vulkan initialization failed: {}; using independent WR device",
+                error
+            );
+            vulkan::open(&Options {
+                shared_webgpu: false,
+                ..options.clone()
+            })
+        })?;
+        let vulkan::Opened {
+            instance,
+            surface: initial_surface,
+            adapter,
+            device,
+            queue,
+            #[cfg(feature = "shared-webgpu")]
+            shared,
+        } = opened;
         let errors = Arc::new(Errors::default());
         let uncaptured = errors.clone();
         device.on_uncaptured_error(Arc::new(move |error: wgt::error::Error| {
             uncaptured.record(error.webgpu_error_type(), error.to_string());
         }));
         let lost = errors.clone();
+        #[cfg(feature = "shared-webgpu")]
+        let shared_loss = shared.clone();
         device.set_device_lost_closure(Box::new(move |reason, message| {
+            #[cfg(feature = "shared-webgpu")]
+            if reason == wgt::DeviceLostReason::Unknown {
+                if let Some(context) = shared_loss {
+                    context.mark_failed();
+                }
+            }
             lost.record(ErrorType::DeviceLost, format!("{reason:?}: {message}"));
         }));
         let result = Self {
@@ -163,6 +195,8 @@ impl Device {
             device,
             queue,
             errors,
+            #[cfg(feature = "shared-webgpu")]
+            shared,
             queue_serial: Mutex::new(()),
             #[cfg(target_os = "linux")]
             native_cache: Default::default(),
@@ -197,7 +231,14 @@ impl Device {
     /// Check at shared GPU boundaries; CPU frame preparation need not check for loss.
     pub(super) fn check(&self) -> Result<(), Failure> {
         // Core can become invalid before its deferred loss callback is fired by polling.
-        if !self.device.is_valid() {
+        #[cfg(feature = "shared-webgpu")]
+        let shared_failed = self
+            .shared
+            .as_ref()
+            .is_some_and(|context| !context.is_valid());
+        #[cfg(not(feature = "shared-webgpu"))]
+        let shared_failed = false;
+        if !self.device.is_valid() || shared_failed {
             let mut failure = self.errors.0.lock().unwrap();
             if failure
                 .as_ref()
@@ -317,3 +358,6 @@ pub(crate) mod tests;
 
 #[cfg(target_os = "linux")]
 pub use wgpu_types::{TextureFormat, TextureUses};
+
+#[cfg(all(test, feature = "shared-webgpu"))]
+mod shared_device_tests;

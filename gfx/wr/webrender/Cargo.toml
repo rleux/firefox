@@ -10,6 +10,7 @@ edition = "2018"
 
 [features]
 vulkan = ["dep:libc", "dep:webrender_shader_build", "webrender_shader_build/glslang", "webrender_build/vulkan", "dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:raw-window-handle"]
+shared-webgpu = ["vulkan", "dep:wgpu_shared"]
 default = ["static_freetype"]
 tracy = ["tracy-rs/enable_profiler"]
 capture = ["api/serialize", "ron", "serde", "smallvec/serde", "etagere/serialization", "glyph_rasterizer/capture"]
@@ -76,6 +77,7 @@ mozangle = "0.5.2"
 rand = "0.4"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "android"))'.dependencies]
+wgpu_shared = { path = "../wgpu_shared", optional = true }
 wgpu-core = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", optional = true, default-features = false, features = ["std", "vulkan"] }
 wgpu-hal = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", optional = true, default-features = false, features = ["vulkan"] }
 wgpu-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", optional = true, default-features = false, features = ["std"] }

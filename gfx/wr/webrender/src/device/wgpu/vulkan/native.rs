@@ -33,6 +33,10 @@ impl Device {
         let message = format!("{operation}: {error:?}");
         let kind = match error {
             vk::Result::ERROR_DEVICE_LOST => {
+                #[cfg(feature = "shared-webgpu")]
+                if let Some(context) = &self.shared {
+                    context.mark_failed();
+                }
                 self.native_cache
                     .device_lost
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -51,14 +55,26 @@ impl Device {
     }
     pub(in crate::device::wgpu) fn native_idle(&self) -> Result<(), String> {
         let _queue = self.queue_access();
-        let result = unsafe { self.raw_device().raw_device().device_wait_idle() };
+        // WR and shared WebGPU clients use this one queue and its HAL mutex.
+        let result = {
+            let queue = unsafe { self.queue.clone().as_hal::<hal::api::Vulkan>() }
+                .expect("Native image retirement requires Vulkan");
+            unsafe { hal::Queue::wait_for_idle(&*queue) }
+        };
         match result {
             Ok(()) => Ok(()),
-            Err(vk::Result::ERROR_DEVICE_LOST) => {
+            Err(hal::DeviceError::Lost) => {
                 self.native_error("Draining native device", vk::Result::ERROR_DEVICE_LOST);
                 Ok(())
             }
-            Err(error) => Err(self.native_error("Draining native device", error)),
+            Err(error) => {
+                let message = format!("Draining native device: {error}");
+                if error == hal::DeviceError::OutOfMemory {
+                    self.errors
+                        .record(wgt::error::ErrorType::OutOfMemory, message.clone());
+                }
+                Err(message)
+            }
         }
     }
     pub(in crate::device::wgpu) fn native_device_lost(&self) -> bool {

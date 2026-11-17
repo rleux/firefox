@@ -5,18 +5,41 @@
 use super::*;
 use ash::vk;
 
-pub(super) fn open(
-    options: &Options,
-) -> Result<
-    (
-        Arc<core::instance::Instance>,
-        Option<surface::WindowSurface>,
-        Arc<core::instance::Adapter>,
-        Arc<core::device::Device>,
-        Arc<core::device::queue::Queue>,
-    ),
-    String,
-> {
+pub(super) struct Opened {
+    pub instance: Arc<core::instance::Instance>,
+    pub surface: Option<surface::WindowSurface>,
+    pub adapter: Arc<core::instance::Adapter>,
+    pub device: Arc<core::device::Device>,
+    pub queue: Arc<core::device::queue::Queue>,
+    #[cfg(feature = "shared-webgpu")]
+    pub shared: Option<Arc<wgpu_shared::NativeContext>>,
+}
+
+fn new_instance(options: &Options) -> Arc<core::instance::Instance> {
+    core::instance::Instance::new(
+        "WebRender Vulkan",
+        wgt::InstanceDescriptor {
+            backends: wgt::Backends::VULKAN,
+            flags: if options.validation {
+                wgt::InstanceFlags::DEBUG | wgt::InstanceFlags::VALIDATION
+            } else {
+                wgt::InstanceFlags::empty()
+            },
+            memory_budget_thresholds: if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
+                wgt::MemoryBudgetThresholds {
+                    for_resource_creation: Some(95),
+                    for_device_loss: Some(99),
+                }
+            } else {
+                wgt::MemoryBudgetThresholds::default()
+            },
+            ..wgt::InstanceDescriptor::new_without_display_handle()
+        },
+        None,
+    )
+}
+
+pub(super) fn open(options: &Options) -> Result<Opened, String> {
     if options.validation {
         let entry =
             unsafe { ash::Entry::load() }.map_err(|error| format!("Loading Vulkan: {error}"))?;
@@ -29,19 +52,18 @@ pub(super) fn open(
             return Err("Requested Vulkan validation layer is unavailable".into());
         }
     }
-    let instance = core::instance::Instance::new(
-        "WebRender Vulkan",
-        wgt::InstanceDescriptor {
-            backends: wgt::Backends::VULKAN,
-            flags: if options.validation {
-                wgt::InstanceFlags::DEBUG | wgt::InstanceFlags::VALIDATION
-            } else {
-                wgt::InstanceFlags::empty()
-            },
-            ..wgt::InstanceDescriptor::new_without_display_handle()
-        },
-        None,
-    );
+    #[cfg(feature = "shared-webgpu")]
+    let shared = options
+        .shared_webgpu
+        .then(wgpu_shared::NativeContext::active)
+        .flatten();
+    #[cfg(feature = "shared-webgpu")]
+    let instance = shared
+        .as_ref()
+        .map(|context| context.instance.clone())
+        .unwrap_or_else(|| new_instance(options));
+    #[cfg(not(feature = "shared-webgpu"))]
+    let instance = new_instance(options);
     let raw_instance = unsafe { instance.as_hal::<hal::api::Vulkan>() }
         .ok_or_else(|| "Initializing Vulkan failed".to_string())?;
     if raw_instance.shared_instance().instance_api_version() < vk::API_VERSION_1_1 {
@@ -71,6 +93,21 @@ pub(super) fn open(
         })
         .collect();
     let adapter = adapters.swap_remove(select_adapter(&info, options.adapter_name.as_deref())?);
+    #[cfg(feature = "shared-webgpu")]
+    let adapter = if let Some(shared) = &shared {
+        if options.adapter_name.is_some() && !shared.matches_adapter(&adapter) {
+            return Err("Shared Vulkan device does not match requested adapter".into());
+        }
+        if surface
+            .as_ref()
+            .is_some_and(|surface| !surface.supports_adapter(&shared.adapter))
+        {
+            return Err("Shared Vulkan device cannot present to this surface".into());
+        }
+        shared.adapter.clone()
+    } else {
+        adapter
+    };
     for (format, usage) in [
         (
             wgt::TextureFormat::Rgba8Unorm,
@@ -118,15 +155,38 @@ pub(super) fn open(
     adapter
         .validate_device_descriptor(&mut desc)
         .map_err(|error| format!("Validating Vulkan device: {error}"))?;
+    #[cfg(feature = "shared-webgpu")]
+    if let Some(shared) = shared {
+        let (device, queue) = shared.open(&adapter, &desc).map_err(|e| e.to_string())?;
+        return Ok(Opened {
+            instance,
+            surface,
+            adapter,
+            device,
+            queue,
+            shared: Some(shared),
+        });
+    }
     let raw_adapter = unsafe { adapter.clone().as_hal::<hal::api::Vulkan>() }.unwrap();
     #[cfg(target_os = "linux")]
     let callback = external_extensions(&raw_adapter);
     #[cfg(not(target_os = "linux"))]
     let callback = None;
     // Validate first, then use the same features, limits and physical device for HAL and core.
+    let native_features = if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
+        desc.required_features
+            | adapter.features()
+                & (wgt::Features::all_webgpu_mask()
+                    | wgt::Features::EXTERNAL_TEXTURE
+                    | wgt::Features::TEXTURE_FORMAT_NV12
+                    | wgt::Features::TEXTURE_FORMAT_P010
+                    | wgt::Features::TEXTURE_FORMAT_16BIT_NORM)
+    } else {
+        desc.required_features
+    };
     let open = unsafe {
         raw_adapter.open_with_callback(
-            desc.required_features,
+            native_features,
             &desc.required_limits,
             &desc.memory_hints,
             callback,
@@ -136,7 +196,38 @@ pub(super) fn open(
     let (device, queue) = unsafe { adapter.create_device_and_queue_from_hal(open.into(), &desc) }
         .map_err(|error| format!("Creating core Vulkan device: {error}"))?;
     drop(raw_adapter);
-    Ok((instance, surface, adapter, device, queue))
+    #[cfg(feature = "shared-webgpu")]
+    if options.shared_webgpu {
+        let context = Arc::new(wgpu_shared::NativeContext::new(
+            instance.clone(),
+            adapter.clone(),
+            device,
+            queue,
+        ));
+        let (device, queue) = context.open(&adapter, &desc).map_err(|e| e.to_string())?;
+        context.publish().map_err(str::to_owned)?;
+        log::info!(
+            "Shared Vulkan native context active on {}",
+            adapter.get_info().name
+        );
+        return Ok(Opened {
+            instance,
+            surface,
+            adapter,
+            device,
+            queue,
+            shared: Some(context),
+        });
+    }
+    Ok(Opened {
+        instance,
+        surface,
+        adapter,
+        device,
+        queue,
+        #[cfg(feature = "shared-webgpu")]
+        shared: None,
+    })
 }
 
 pub(super) fn primary_buffer_features(
