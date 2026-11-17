@@ -9558,6 +9558,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgpu-native-canvas-tests"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "hashbrown 0.17.1",
+ "log",
+ "webrender",
+ "wgpu-core",
+ "wgpu-core-remote",
+ "wgpu-core-remote-types",
+ "wgpu-hal",
+ "wgpu-types",
+ "wgpu_shared",
+]
+
+[[package]]
 name = "wgpu-sync"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=4fe54b0207a2ec7e0d65af900b1218b3c1529699#4fe54b0207a2ec7e0d65af900b1218b3c1529699"

@@ -1,0 +1,24 @@
+[package]
+name = "wgpu-native-canvas-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+path = "native_canvas.rs"
+
+[features]
+native-vulkan = ["dep:webrender", "dep:wgpu_shared", "dep:ash"]
+
+[dependencies]
+webrender = { path = "../../../wr/webrender", default-features = false, features = ["shared-webgpu", "dynamic_freetype"], optional = true }
+wgpu_shared = { path = "../../../wr/wgpu_shared", optional = true }
+ash = { version = "0.38", optional = true }
+log = "0.4"
+hashbrown = { version = "0.17", features = ["serde"] }
+wgc = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", package = "wgpu-core", features = ["std", "vulkan", "wgsl"] }
+wgh = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", package = "wgpu-hal", features = ["vulkan"] }
+wgt = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", package = "wgpu-types", features = ["std"] }
+wgpu-core-remote = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", package = "wgpu-core-remote", features = ["serde"] }
+wgpu-core-remote-types = { git = "https://github.com/gfx-rs/wgpu", rev = "4fe54b0207a2ec7e0d65af900b1218b3c1529699", package = "wgpu-core-remote-types", features = [] }
