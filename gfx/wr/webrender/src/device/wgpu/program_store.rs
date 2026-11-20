@@ -13,6 +13,7 @@ use crate::device::{
 };
 use crate::internal_types::FastHashMap;
 use euclid::default::Transform3D;
+use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::CString;
 use std::hash::{Hash, Hasher};
@@ -38,6 +39,16 @@ pub(in crate::device::wgpu) struct ProgramStore {
 }
 
 impl ProgramStore {
+    pub fn heap_size(&self, ops: &mut MallocSizeOfOps) -> usize {
+        let mut size = self.entries.shallow_size_of(ops);
+        for entry in self.entries.values() {
+            size += unsafe { ops.malloc_size_of(entry.name.as_ptr()) };
+            size += entry.state.slots.shallow_size_of(ops);
+            size += entry.pipelines.shallow_size_of(ops);
+        }
+        size
+    }
+
     pub fn create(
         &mut self,
         name: &'static str,

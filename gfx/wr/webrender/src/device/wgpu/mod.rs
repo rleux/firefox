@@ -54,6 +54,11 @@ pub use external_images::{
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod native_test;
 mod vulkan;
+
+/// Measures the live host allocations made through WebRender's Vulkan device allocator.
+pub fn driver_heap_size(malloc_size_of: unsafe extern "C" fn(*const std::ffi::c_void) -> usize) -> usize {
+    vulkan::driver_heap_size(malloc_size_of)
+}
 #[cfg(target_os = "linux")]
 pub use vulkan::{
     DmaBufCapabilities, DmaBufFormat, DmaBufImage, DmaBufImageDescriptor, SharedTimeline,

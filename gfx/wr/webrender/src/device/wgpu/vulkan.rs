@@ -5,6 +5,68 @@
 use super::*;
 use ash::vk;
 
+mod driver_heap;
+
+pub(super) use driver_heap::size_of as driver_heap_size;
+
+struct OwnedDevice {
+    raw: ash::Device,
+    _instance: Arc<core::instance::Instance>,
+}
+
+impl Drop for OwnedDevice {
+    fn drop(&mut self) {
+        unsafe { self.raw.destroy_device(Some(&driver_heap::CALLBACKS)) };
+    }
+}
+
+fn open_native_device(
+    instance: &Arc<core::instance::Instance>,
+    adapter: &hal::vulkan::Adapter,
+    features: wgt::Features,
+    desc: &core::device::DeviceDescriptor,
+) -> Result<hal::OpenDevice<hal::api::Vulkan>, String> {
+    let mut extensions = adapter.required_device_extensions(features);
+    let mut device_features = adapter.physical_device_features(&extensions, features);
+    #[cfg(target_os = "linux")]
+    add_external_extensions(adapter, &mut extensions);
+    let extension_names: Vec<_> = extensions.iter().map(|extension| extension.as_ptr()).collect();
+    let queue_family = 0;
+    let queues = [vk::DeviceQueueCreateInfo::default()
+        .queue_family_index(queue_family)
+        .queue_priorities(&[1.0])];
+    let info = device_features.add_to_device_create(
+        vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queues)
+            .enabled_extension_names(&extension_names),
+    );
+    let raw = unsafe {
+        adapter.shared_instance().raw_instance().create_device(
+            adapter.raw_physical_device(),
+            &info,
+            Some(&driver_heap::CALLBACKS),
+        )
+    }
+    .map_err(|error| format!("Creating native Vulkan device: {error}"))?;
+    let owner = OwnedDevice {
+        raw,
+        _instance: instance.clone(),
+    };
+    unsafe {
+        adapter.device_from_raw(
+            owner.raw.clone(),
+            Some(Box::new(move || drop(owner))),
+            &extensions,
+            features,
+            &desc.required_limits,
+            &desc.memory_hints,
+            queue_family,
+            0,
+        )
+    }
+    .map_err(|error| format!("Importing native Vulkan device: {error}"))
+}
+
 pub(super) struct Opened {
     pub instance: Arc<core::instance::Instance>,
     pub surface: Option<surface::WindowSurface>,
@@ -168,10 +230,6 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
         });
     }
     let raw_adapter = unsafe { adapter.clone().as_hal::<hal::api::Vulkan>() }.unwrap();
-    #[cfg(target_os = "linux")]
-    let callback = external_extensions(&raw_adapter);
-    #[cfg(not(target_os = "linux"))]
-    let callback = None;
     // Validate first, then use the same features, limits and physical device for HAL and core.
     let native_features = if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
         desc.required_features
@@ -184,15 +242,7 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
     } else {
         desc.required_features
     };
-    let open = unsafe {
-        raw_adapter.open_with_callback(
-            native_features,
-            &desc.required_limits,
-            &desc.memory_hints,
-            callback,
-        )
-    }
-    .map_err(|error| format!("Opening Vulkan device: {error}"))?;
+    let open = open_native_device(&instance, &raw_adapter, native_features, &desc)?;
     let (device, queue) = unsafe { adapter.create_device_and_queue_from_hal(open.into(), &desc) }
         .map_err(|error| format!("Creating core Vulkan device: {error}"))?;
     drop(raw_adapter);
@@ -243,9 +293,10 @@ pub(super) fn primary_buffer_features(
 }
 
 #[cfg(target_os = "linux")]
-fn external_extensions(
+fn add_external_extensions(
     adapter: &hal::vulkan::Adapter,
-) -> Option<Box<hal::vulkan::CreateDeviceCallback<'_>>> {
+    extensions: &mut Vec<&'static std::ffi::CStr>,
+) {
     let caps = adapter.physical_device_capabilities();
     let instance = adapter.shared_instance();
     if ![
@@ -259,7 +310,7 @@ fn external_extensions(
         || (caps.properties().api_version < vk::API_VERSION_1_2
             && !caps.supports_extension(ash::khr::timeline_semaphore::NAME))
     {
-        return None;
+        return;
     }
     let mut features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
     let mut semaphore = vk::ExternalSemaphoreProperties::default();
@@ -286,21 +337,19 @@ fn external_extensions(
         vk::ExternalSemaphoreFeatureFlags::IMPORTABLE
             | vk::ExternalSemaphoreFeatureFlags::EXPORTABLE,
     ) {
-        return None;
+        return;
     }
-    Some(Box::new(move |args| {
-        for extension in [
-            ash::khr::external_memory_fd::NAME,
-            ash::ext::external_memory_dma_buf::NAME,
-            ash::ext::image_drm_format_modifier::NAME,
-            ash::khr::external_semaphore_fd::NAME,
-            ash::ext::queue_family_foreign::NAME,
-        ] {
-            if caps.supports_extension(extension) && !args.extensions.contains(&extension) {
-                args.extensions.push(extension);
-            }
+    for extension in [
+        ash::khr::external_memory_fd::NAME,
+        ash::ext::external_memory_dma_buf::NAME,
+        ash::ext::image_drm_format_modifier::NAME,
+        ash::khr::external_semaphore_fd::NAME,
+        ash::ext::queue_family_foreign::NAME,
+    ] {
+        if caps.supports_extension(extension) && !extensions.contains(&extension) {
+            extensions.push(extension);
         }
-    }))
+    }
 }
 
 #[cfg(target_os = "linux")]

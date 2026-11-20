@@ -23,6 +23,7 @@ use api::{ExternalTextureHandle, ImageDescriptor};
 use api::{ImageBufferKind, ImageFormat, Parameter};
 use api::units::*;
 use euclid::default::Transform3D;
+use malloc_size_of::MallocSizeOfOps;
 use std::borrow::Cow;
 use std::mem;
 use std::num::NonZeroUsize;
@@ -556,7 +557,11 @@ pub trait GpuBackend {
     fn echo_driver_messages(&self);
 
     /// Generates a memory report for the resources managed by the device layer.
-    fn report_memory(&self) -> MemoryReport;
+    fn report_memory(
+        &self,
+        ops: &MallocSizeOfOps,
+        upload_pool: &UploadBufferPool,
+    ) -> MemoryReport;
 
     fn depth_targets_memory(&self) -> usize;
 }

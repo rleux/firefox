@@ -5,7 +5,7 @@
 use super::super::shader_source::{OPTIMIZED_SHADERS, UNOPTIMIZED_SHADERS};
 use super::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
 use super::types::*;
-use super::{GlBackendConfig, GpuBackend};
+use super::{GlBackendConfig, GpuBackend, UploadBufferPool};
 use api::{ImageFormat, Parameter, BoolParameter, IntParameter, ImageRendering};
 use api::{MixBlendMode, ImageBufferKind};
 #[cfg(feature = "capture")]
@@ -22,6 +22,7 @@ use crate::internal_types::FastHashSet;
 use crate::util::round_up_to_multiple;
 use crate::profiler;
 use log::Level;
+use malloc_size_of::MallocSizeOfOps;
 #[cfg(feature = "debugger")]
 use std::cell::RefCell;
 use std::{
@@ -3866,8 +3867,8 @@ impl GpuBackend for GlDevice {
         }
     }
 
-    fn report_memory(&self) -> MemoryReport {
-        let mut report = MemoryReport::default();
+    fn report_memory(&self, _: &MallocSizeOfOps, upload_pool: &UploadBufferPool) -> MemoryReport {
+        let mut report = upload_pool.report_memory();
         report.depth_target_textures += self.depth_targets_memory();
         report
     }

@@ -16,6 +16,7 @@ use api::{
     units::{DeviceIntRect, DeviceIntSize},
     ImageBufferKind, ImageFormat, ImageRendering,
 };
+use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use std::cell::Cell;
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -54,6 +55,10 @@ pub(super) struct TextureStore {
 }
 
 impl TextureStore {
+    pub fn heap_size(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.entries.shallow_size_of(ops) + self.depth_targets.shallow_size_of(ops)
+    }
+
     pub fn new(owner: &Arc<Device>) -> Self {
         Self {
             owner: owner.clone(),

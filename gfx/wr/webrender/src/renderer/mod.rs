@@ -4366,8 +4366,9 @@ impl Renderer {
     /// Collects a memory report.
     pub fn report_memory(&self, swgl: *mut c_void) -> MemoryReport {
         let mut report = MemoryReport::default();
+        let ops = self.size_of_ops.as_ref().unwrap();
 
-        self.staging_texture_pool.report_memory_to(&mut report, self.size_of_ops.as_ref().unwrap());
+        self.staging_texture_pool.report_memory_to(&mut report, ops);
 
         // Render task CPU memory.
         for (_id, doc) in &self.active_documents {
@@ -4386,16 +4387,11 @@ impl Renderer {
         // Texture cache and render target GPU memory.
         report += self.texture_resolver.report_memory();
 
-        // Texture upload buffer memory.
-        report += self.texture_upload_buffer_pool.report_memory();
-
-        // Textures held internally within the device layer.
-        report += self.device.report_memory();
+        report += self.device.report_memory(ops, &self.texture_upload_buffer_pool);
 
         #[cfg(feature = "sw_compositor")]
         if !swgl.is_null() {
-            let size_of_op = self.size_of_ops.as_ref().unwrap().size_of_op;
-            report.swgl += swgl::Context::from(swgl).report_memory(size_of_op);
+            report.swgl += swgl::Context::from(swgl).report_memory(ops.size_of_op);
         }
         #[cfg(not(feature = "sw_compositor"))]
         let _ = swgl;

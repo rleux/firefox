@@ -237,6 +237,7 @@ inline auto TiedFields<mozilla::wr::MemoryReport>(
     a.interning,
     a.display_list,
     a.upload_staging_memory,
+    a.vulkan_heap,
     a.swgl,
     a.frame_allocator,
     a.render_tasks,

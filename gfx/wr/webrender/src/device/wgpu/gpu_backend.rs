@@ -13,6 +13,7 @@ use api::units::DeviceSize;
 use api::{ExternalTextureHandle, ImageDescriptor};
 use api::{ImageBufferKind, Parameter};
 use euclid::default::Transform3D;
+use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use std::{borrow::Cow, cell::Cell, mem::MaybeUninit, num::NonZeroUsize, ptr::NonNull, rc::Rc};
 use webrender_build::shader::ShaderFeatureFlags;
 
@@ -890,10 +891,15 @@ impl wr::GpuBackend for RenderDevice {
         });
     }
     fn echo_driver_messages(&self) {}
-    fn report_memory(&self) -> MemoryReport {
+    fn report_memory(&self, ops: &MallocSizeOfOps, _: &wr::UploadBufferPool) -> MemoryReport {
+        let mut ops = MallocSizeOfOps::new(ops.size_of_op, ops.enclosing_size_of_op);
         MemoryReport {
             depth_target_textures: self.textures.depth_bytes(),
-            texture_upload_pbos: self.uploads.bytes(),
+            vulkan_heap: self.programs.heap_size(&mut ops)
+                + self.textures.heap_size(&mut ops)
+                + self.vertex_arrays.heap_size(&mut ops)
+                + self.uploads.heap_size(&mut ops)
+                + self.ordered_commands.shallow_size_of(&mut ops),
             ..MemoryReport::default()
         }
     }

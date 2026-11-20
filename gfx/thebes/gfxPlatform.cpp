@@ -623,6 +623,32 @@ class WebRenderMemoryReporter final : public nsIMemoryReporter {
   ~WebRenderMemoryReporter() = default;
 };
 
+#ifdef MOZ_WEBRENDER_VULKAN
+class VulkanDriverMemoryReporter final : public nsIMemoryReporter {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSIMEMORYREPORTER
+
+ private:
+  ~VulkanDriverMemoryReporter() = default;
+};
+
+NS_IMPL_ISUPPORTS(VulkanDriverMemoryReporter, nsIMemoryReporter)
+MOZ_DEFINE_MALLOC_SIZE_OF(VulkanDriverMallocSizeOf)
+
+NS_IMETHODIMP
+VulkanDriverMemoryReporter::CollectReports(nsIHandleReportCallback* aHandleReport,
+                                           nsISupports* aData, bool aAnonymize) {
+  size_t bytes = wr::wr_vulkan_driver_heap_size(VulkanDriverMallocSizeOf);
+  if (bytes) {
+    return aHandleReport->Callback(
+        EmptyCString(), "explicit/gfx/webrender/vulkan-driver"_ns, KIND_HEAP,
+        UNITS_BYTES, bytes, "Vulkan device allocator host heap"_ns, aData);
+  }
+  return NS_OK;
+}
+#endif
+
 // Memory reporter for WebRender.
 //
 // The reporting within WebRender is manual and incomplete. We could do a much
@@ -738,6 +764,7 @@ WebRenderMemoryReporter::CollectReports(nsIHandleReportCallback* aHandleReport,
         helper.Report(aReport.display_list, "display-list");
         helper.Report(aReport.swgl, "swgl");
         helper.Report(aReport.upload_staging_memory, "upload-stagin-memory");
+        helper.Report(aReport.vulkan_heap, "vulkan");
         helper.Report(aReport.frame_allocator, "frame-allocator");
         helper.Report(aReport.render_tasks, "frame-allocator/render-tasks");
 
@@ -1044,6 +1071,9 @@ void gfxPlatform::Init() {
   RegisterStrongMemoryReporter(MakeAndAddRef<GfxMemoryImageReporter>());
   if (XRE_IsParentProcess()) {
     RegisterStrongAsyncMemoryReporter(MakeAndAddRef<WebRenderMemoryReporter>());
+#ifdef MOZ_WEBRENDER_VULKAN
+    RegisterStrongMemoryReporter(MakeAndAddRef<VulkanDriverMemoryReporter>());
+#endif
   }
 
   RegisterStrongMemoryReporter(MakeAndAddRef<SkMemoryReporter>());
@@ -1071,6 +1101,9 @@ void gfxPlatform::InitMemoryReportersForGPUProcess() {
 
   RegisterStrongMemoryReporter(MakeAndAddRef<GfxMemoryImageReporter>());
   RegisterStrongMemoryReporter(MakeAndAddRef<SkMemoryReporter>());
+#ifdef MOZ_WEBRENDER_VULKAN
+  RegisterStrongMemoryReporter(MakeAndAddRef<VulkanDriverMemoryReporter>());
+#endif
 }
 
 void gfxPlatform::ReportTelemetry() {

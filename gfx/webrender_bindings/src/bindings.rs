@@ -4878,3 +4878,11 @@ pub unsafe extern "C" fn wr_program_cache_report_memory(
 ) -> usize {
     (*cache).program_cache.report_memory(size_of_op)
 }
+
+#[no_mangle]
+pub extern "C" fn wr_vulkan_driver_heap_size(_size_of_op: VoidPtrToSizeFn) -> usize {
+    #[cfg(feature = "vulkan")]
+    return webrender::wgpu::driver_heap_size(_size_of_op);
+    #[cfg(not(feature = "vulkan"))]
+    0
+}

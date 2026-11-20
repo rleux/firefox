@@ -4,6 +4,7 @@
 
 use crate::device::{TransferBuffer, UploadBufferMapping};
 use crate::internal_types::FastHashMap;
+use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use std::{mem::MaybeUninit, ptr::NonNull};
 
 struct Storage {
@@ -147,7 +148,34 @@ impl UploadBuffers {
         }
         Ok(&entry.bytes)
     }
-    pub fn bytes(&self) -> usize {
-        self.entries.values().map(|s| s.bytes.len()).sum()
+    pub fn heap_size(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.entries.shallow_size_of(ops)
+            + self.entries
+                .values()
+                .map(|storage| storage.bytes.shallow_size_of(ops))
+                .sum::<usize>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    #[test]
+    fn heap_size_tracks_cpu_upload_storage() {
+        unsafe extern "C" fn allocation_size(_: *const c_void) -> usize {
+            128
+        }
+
+        let mut ops = MallocSizeOfOps::new(allocation_size, None);
+        let mut uploads = UploadBuffers::default();
+        let mut buffer = uploads.create().unwrap();
+        let bookkeeping = uploads.heap_size(&mut ops);
+        uploads.allocate(&mut buffer, 64, true).unwrap();
+        assert_eq!(uploads.heap_size(&mut ops), bookkeeping + 128);
+        uploads.orphan(&mut buffer).unwrap();
+        assert_eq!(uploads.heap_size(&mut ops), bookkeeping);
+        uploads.delete(&mut buffer).unwrap();
     }
 }

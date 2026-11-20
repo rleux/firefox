@@ -4,6 +4,7 @@
 
 use crate::device::{Buffer as DeviceBuffer, BufferId, BufferKind, VertexArray, VertexDescriptor};
 use crate::internal_types::FastHashMap;
+use malloc_size_of::{MallocShallowSizeOf, MallocSizeOfOps};
 use std::num::NonZeroUsize;
 
 pub(super) struct Data {
@@ -50,6 +51,15 @@ pub(super) struct VertexArrayStore {
 }
 
 impl VertexArrayStore {
+    pub fn heap_size(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.arrays.shallow_size_of(ops)
+            + self.buffers.shallow_size_of(ops)
+            + self.buffers
+                .values()
+                .map(|buffer| buffer.bytes.shallow_size_of(ops))
+                .sum::<usize>()
+    }
+
     fn entry(&self, array: &VertexArray) -> Result<&Array, String> {
         self.arrays
             .get(&array.id)

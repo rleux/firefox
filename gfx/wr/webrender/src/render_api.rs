@@ -1731,6 +1731,7 @@ pub struct MemoryReport {
     pub interning: InterningMemoryReport,
     pub display_list: usize,
     pub upload_staging_memory: usize,
+    pub vulkan_heap: usize,
     pub swgl: usize,
     pub frame_allocator: usize,
     pub render_tasks: usize,
