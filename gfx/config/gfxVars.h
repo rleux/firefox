@@ -60,6 +60,7 @@ class MOZ_STACK_CLASS gfxVarsCollectUpdates;
   _(WebRenderVulkanX11Display, bool, false)                        \
   _(UseWebRenderVulkan, bool, false)                               \
   _(WebRenderVulkanSharedWebGPURequested, bool, false)             \
+  _(WebRenderVulkanDescriptorHeapRequested, bool, false)           \
   _(UseWebRenderANGLE, bool, false)                                \
   _(UseWebRenderFlipSequentialWin, bool, false)                    \
   _(UseWebRenderDCompWin, bool, false)                             \

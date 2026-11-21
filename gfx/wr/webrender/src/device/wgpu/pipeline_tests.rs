@@ -363,7 +363,15 @@ fn draw_pixels(
         ..Default::default()
     });
     pass.set_pipeline(pipeline.raw.clone());
-    pass.set_bind_group(0, Some(bindings), &[0]);
+    pass.set_bind_group(
+        0,
+        Some(bindings),
+        if pipeline.prepared.layouts.projection_dynamic {
+            &[0]
+        } else {
+            &[]
+        },
+    );
     pass.set_vertex_buffer(0, Some(vertex), 0, None);
     if let Some(instance) = instance {
         pass.set_vertex_buffer(1, Some(instance), 0, None);

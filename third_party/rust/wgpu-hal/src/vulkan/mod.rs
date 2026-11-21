@@ -28,6 +28,7 @@ mod adapter;
 mod command;
 pub mod conv;
 mod descriptor;
+pub mod descriptor_heap;
 mod device;
 mod drm;
 mod instance;
@@ -638,6 +639,7 @@ struct DeviceShared {
     texture_view_identity_factory: ResourceIdentityFactory<vk::ImageView>,
 
     empty_descriptor_set_layout: vk::DescriptorSetLayout,
+    wr_heap: Mutex<Option<Arc<descriptor_heap::HeapDevice>>>,
 
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
@@ -646,6 +648,9 @@ struct DeviceShared {
 
 impl Drop for DeviceShared {
     fn drop(&mut self) {
+        // Encoders retain DeviceShared until their pools are destroyed. Reserved heap tails
+        // therefore remain backed until every command buffer has been freed or reset.
+        drop(self.wr_heap.lock().take());
         for &raw in self.render_passes.lock().values() {
             unsafe { self.raw.destroy_render_pass(raw, None) };
         }
@@ -988,6 +993,8 @@ impl Texture {
 
 #[derive(Debug)]
 pub struct TextureView {
+    heap_view: vk::ImageViewCreateInfo<'static>,
+    heap_usage: vk::ImageUsageFlags,
     raw_texture: vk::Image,
     raw: vk::ImageView,
     _layers: NonZeroU32,
@@ -1038,6 +1045,7 @@ struct BindingInfo {
 
 #[derive(Debug)]
 pub struct BindGroupLayout {
+    heap: Option<Arc<descriptor_heap::Layout>>,
     raw: vk::DescriptorSetLayout,
     desc_count: descriptor::DescriptorCounts,
     /// Sorted list of entries.
@@ -1052,6 +1060,8 @@ impl crate::DynBindGroupLayout for BindGroupLayout {}
 
 #[derive(Debug)]
 pub struct PipelineLayout {
+    heap: Option<Arc<descriptor_heap::Layout>>,
+    set_layouts: Vec<Option<vk::DescriptorSetLayout>>,
     raw: vk::PipelineLayout,
     binding_map: naga::back::spv::BindingMap,
 }
@@ -1060,7 +1070,9 @@ impl crate::DynPipelineLayout for PipelineLayout {}
 
 #[derive(Debug)]
 pub struct BindGroup {
-    set: descriptor::DescriptorSet,
+    set: Option<descriptor::DescriptorSet>,
+    heap: Option<descriptor_heap::Slice>,
+    layout: vk::DescriptorSetLayout,
 }
 
 impl crate::DynBindGroup for BindGroup {}
@@ -1187,6 +1199,16 @@ struct TempTextureViewKey {
 // Any state in this struct that may be dirty after an abandoned encoding must
 // be reset for reused encoders in `begin_encoding`.
 pub struct CommandEncoder {
+    // Drop this reference before the device, after Drop has freed the command pool.
+    wr_heap_device: Option<Arc<descriptor_heap::HeapDevice>>,
+    wr_groups: [descriptor_heap::GroupState; crate::MAX_BIND_GROUPS],
+    wr_heap_mode: bool,
+    wr_bound_page: Option<(u64, u64)>,
+    #[cfg(any(
+        feature = "wr-descriptor-heap-diagnostics",
+        wr_descriptor_heap_diagnostics
+    ))]
+    wr_heap_counts: [u64; 4],
     raw: vk::CommandPool,
     device: Arc<DeviceShared>,
 
@@ -1334,6 +1356,9 @@ impl crate::DynShaderModule for ShaderModule {}
 
 #[derive(Debug)]
 pub struct RenderPipeline {
+    wr_heap: bool,
+    layout: vk::PipelineLayout,
+    set_layouts: Vec<Option<vk::DescriptorSetLayout>>,
     raw: vk::Pipeline,
     is_multiview: bool,
 }

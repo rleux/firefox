@@ -39,6 +39,60 @@ impl super::Texture {
 }
 
 impl super::CommandEncoder {
+    unsafe fn bind_wr_heap(&mut self, binding: super::descriptor_heap::Binding) {
+        let key = binding.page_key();
+        let rebind = self.wr_bound_page != Some(key);
+        unsafe {
+            self.wr_heap_device
+                .as_ref()
+                .unwrap()
+                .bind(self.active, binding, rebind);
+        }
+        self.wr_bound_page = Some(key);
+        #[cfg(any(
+            feature = "wr-descriptor-heap-diagnostics",
+            wr_descriptor_heap_diagnostics
+        ))]
+        if rebind {
+            self.wr_heap_counts[0] += 1;
+        }
+    }
+    unsafe fn restore_wr_groups(&mut self, pipeline: &super::RenderPipeline) {
+        if self.wr_heap_mode {
+            if pipeline.set_layouts.first().copied().flatten() == Some(self.wr_groups[0].layout) {
+                if let Some(binding) = self.wr_groups[0].heap {
+                    unsafe { self.bind_wr_heap(binding) };
+                }
+            }
+        } else {
+            for (index, layout) in pipeline.set_layouts.iter().enumerate() {
+                let group = &self.wr_groups[index];
+                if *layout == Some(group.layout) {
+                    if let Some(set) = group.set {
+                        unsafe {
+                            self.device.raw.cmd_bind_descriptor_sets(
+                                self.active,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.layout,
+                                index as u32,
+                                &[set],
+                                &group.dynamic_offsets,
+                            )
+                        };
+                        self.wr_bound_page = None;
+                        #[cfg(any(
+                            feature = "wr-descriptor-heap-diagnostics",
+                            wr_descriptor_heap_diagnostics
+                        ))]
+                        {
+                            self.wr_heap_counts[1] += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether this pass permits a leaf secondary buffer without query inheritance.
     pub fn supports_cached_render_bundles(&self) -> bool {
         self.render_bundle_key.is_some() && self.active_queries == 0
@@ -293,6 +347,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.end_of_pass_timer_query = None;
         self.render_bundle_key = None;
         self.active_queries = 0;
+        self.wr_bound_page = None;
+        #[cfg(any(
+            feature = "wr-descriptor-heap-diagnostics",
+            wr_descriptor_heap_diagnostics
+        ))]
+        {
+            self.wr_heap_counts = [0; 4];
+        }
 
         let vk_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -311,6 +373,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
             // We don't use VK_KHR_video_encode_queue
             // VK_ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR
             super::map_host_device_oom_err(err)
+        }
+        #[cfg(any(
+            feature = "wr-descriptor-heap-diagnostics",
+            wr_descriptor_heap_diagnostics
+        ))]
+        if let Some(heap) = &self.wr_heap_device {
+            heap.add_counts(self.wr_heap_counts);
         }
         Ok(super::CommandBuffer { raw })
     }
@@ -972,6 +1041,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         &mut self,
         desc: &crate::RenderPassDescriptor<super::QuerySet, super::TextureView>,
     ) -> Result<(), crate::DeviceError> {
+        self.wr_heap_mode = false;
+        for group in &mut self.wr_groups {
+            group.clear();
+        }
         let mut vk_clear_values =
             ArrayVec::<vk::ClearValue, { super::MAX_TOTAL_ATTACHMENTS }>::new();
         let mut rp_key = super::RenderPassKey {
@@ -1147,7 +1220,36 @@ impl crate::CommandEncoder for super::CommandEncoder {
         group: &super::BindGroup,
         dynamic_offsets: &[wgt::DynamicOffset],
     ) {
-        let sets = [group.set.raw()];
+        if self.wr_heap_device.is_some() {
+            self.wr_groups[index as usize].remember(group, dynamic_offsets);
+            if self.wr_heap_mode {
+                assert_eq!(index, 0, "WR heap-only pipelines have one group");
+                assert!(
+                    dynamic_offsets.is_empty(),
+                    "WR heap projections must be static"
+                );
+                let binding = group
+                    .heap
+                    .as_ref()
+                    .expect("Heap pipeline requires a heap-only group")
+                    .binding;
+                unsafe { self.bind_wr_heap(binding) };
+                return;
+            }
+            self.wr_bound_page = None;
+            #[cfg(any(
+                feature = "wr-descriptor-heap-diagnostics",
+                wr_descriptor_heap_diagnostics
+            ))]
+            {
+                self.wr_heap_counts[1] += 1;
+            }
+        }
+        let sets = [group
+            .set
+            .as_ref()
+            .expect("Ordinary pipeline requires an ordinary group")
+            .raw()];
         unsafe {
             self.device.raw.cmd_bind_descriptor_sets(
                 self.active,
@@ -1165,6 +1267,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset_bytes: u32,
         data: &[u32],
     ) {
+        self.wr_bound_page = None;
         unsafe {
             self.device.raw.cmd_push_constants(
                 self.active,
@@ -1197,6 +1300,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
     }
 
     unsafe fn set_render_pipeline(&mut self, pipeline: &super::RenderPipeline) {
+        let mode_changed = self.wr_heap_mode != pipeline.wr_heap;
+        self.wr_heap_mode = pipeline.wr_heap;
         unsafe {
             self.current_pipeline_is_multiview = pipeline.is_multiview;
             self.device.raw.cmd_bind_pipeline(
@@ -1205,6 +1310,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 pipeline.raw,
             )
         };
+        if mode_changed {
+            unsafe { self.restore_wr_groups(pipeline) };
+        }
     }
 
     unsafe fn set_index_buffer<'a>(
@@ -1307,6 +1415,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        #[cfg(any(
+            feature = "wr-descriptor-heap-diagnostics",
+            wr_descriptor_heap_diagnostics
+        ))]
+        if self.wr_heap_device.is_some() {
+            self.wr_heap_counts[if self.wr_heap_mode { 2 } else { 3 }] += 1;
+        }
         if self.current_pipeline_is_multiview
             && (first_instance as u64 + instance_count as u64 - 1)
                 > self.device.private_caps.multiview_instance_index_limit as u64
@@ -1331,6 +1446,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        #[cfg(any(
+            feature = "wr-descriptor-heap-diagnostics",
+            wr_descriptor_heap_diagnostics
+        ))]
+        if self.wr_heap_device.is_some() {
+            self.wr_heap_counts[if self.wr_heap_mode { 2 } else { 3 }] += 1;
+        }
         if self.current_pipeline_is_multiview
             && (first_instance as u64 + instance_count as u64 - 1)
                 > self.device.private_caps.multiview_instance_index_limit as u64
@@ -1540,6 +1662,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         &mut self,
         desc: &crate::ComputePassDescriptor<'_, super::QuerySet>,
     ) {
+        self.wr_heap_mode = false;
+        self.wr_bound_page = None;
+        for group in &mut self.wr_groups {
+            group.clear();
+        }
         self.bind_point = vk::PipelineBindPoint::COMPUTE;
         if let Some(label) = desc.label {
             unsafe { self.begin_debug_marker(label) };
@@ -1598,6 +1725,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
     // ray tracing
 
     unsafe fn begin_ray_tracing_pass(&mut self, desc: &crate::RayTracingPassDescriptor<'_>) {
+        self.wr_heap_mode = false;
+        self.wr_bound_page = None;
+        for group in &mut self.wr_groups {
+            group.clear();
+        }
         self.bind_point = vk::PipelineBindPoint::RAY_TRACING_KHR;
         if let Some(label) = desc.label {
             unsafe { self.begin_debug_marker(label) };

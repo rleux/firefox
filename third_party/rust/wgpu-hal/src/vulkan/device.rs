@@ -1017,7 +1017,14 @@ impl crate::Device for super::Device {
     ) -> Result<(super::Buffer, wgt::BufferAddress), crate::DeviceError> {
         let vk_info = vk::BufferCreateInfo::default()
             .size(desc.size)
-            .usage(conv::map_buffer_usage(desc.usage))
+            .usage(
+                conv::map_buffer_usage(desc.usage)
+                    | if self.shared.wr_heap.lock().is_some() {
+                        vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    } else {
+                        vk::BufferUsageFlags::empty()
+                    },
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let raw = unsafe {
@@ -1359,7 +1366,20 @@ impl crate::Device for super::Device {
 
         self.counters.texture_views.add(1);
 
+        let heap_view = vk::ImageViewCreateInfo::default()
+            .flags(vk_info.flags)
+            .image(vk_info.image)
+            .view_type(vk_info.view_type)
+            .format(vk_info.format)
+            .components(vk_info.components)
+            .subresource_range(vk_info.subresource_range);
         Ok(super::TextureView {
+            heap_view,
+            heap_usage: if self.shared.private_caps.image_view_usage {
+                conv::map_texture_usage(desc.usage)
+            } else {
+                vk::ImageUsageFlags::empty()
+            },
             raw_texture: texture.raw,
             raw,
             _layers: layers,
@@ -1457,6 +1477,15 @@ impl crate::Device for super::Device {
         self.counters.command_encoders.add(1);
 
         Ok(super::CommandEncoder {
+            wr_heap_device: self.shared.wr_heap.lock().clone(),
+            wr_groups: core::array::from_fn(|_| super::descriptor_heap::GroupState::default()),
+            wr_heap_mode: false,
+            wr_bound_page: None,
+            #[cfg(any(
+                feature = "wr-descriptor-heap-diagnostics",
+                wr_descriptor_heap_diagnostics
+            ))]
+            wr_heap_counts: [0; 4],
             raw,
             device: Arc::clone(&self.shared),
             active: vk::CommandBuffer::null(),
@@ -1628,6 +1657,12 @@ impl crate::Device for super::Device {
         }
 
         let layout = super::BindGroupLayout {
+            heap: self
+                .shared
+                .wr_heap
+                .lock()
+                .as_ref()
+                .and_then(|heap| heap.layout(desc.entries)),
             raw,
             desc_count,
             entries: desc.entries.into(),
@@ -1670,6 +1705,26 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::PipelineLayoutDescriptor<super::BindGroupLayout>,
     ) -> Result<super::PipelineLayout, crate::DeviceError> {
+        let heap = if self.shared.wr_heap.lock().is_some() {
+            if desc.bind_group_layouts.len() == 1 && desc.immediate_size == 0 {
+                desc.bind_group_layouts[0]
+                    .as_ref()
+                    .and_then(|layout| layout.heap.clone())
+            } else {
+                if desc
+                    .bind_group_layouts
+                    .iter()
+                    .flatten()
+                    .any(|layout| layout.heap.is_some())
+                {
+                    log::error!("WR heap-only groups require one set and no immediates");
+                    return Err(crate::DeviceError::Unexpected);
+                }
+                None
+            }
+        } else {
+            None
+        };
         //Note: not bothering with on stack array here as it's low frequency
         let vk_set_layouts = desc
             .bind_group_layouts
@@ -1740,7 +1795,16 @@ impl crate::Device for super::Device {
         }
 
         self.counters.pipeline_layouts.add(1);
-        Ok(super::PipelineLayout { raw, binding_map })
+        Ok(super::PipelineLayout {
+            raw,
+            binding_map,
+            heap,
+            set_layouts: desc
+                .bind_group_layouts
+                .iter()
+                .map(|layout| layout.as_ref().map(|layout| layout.raw))
+                .collect(),
+        })
     }
     unsafe fn destroy_pipeline_layout(&self, pipeline_layout: super::PipelineLayout) {
         unsafe {
@@ -1762,6 +1826,21 @@ impl crate::Device for super::Device {
             super::AccelerationStructure,
         >,
     ) -> Result<super::BindGroup, crate::DeviceError> {
+        if desc.layout.heap.is_some() {
+            let heap = self
+                .shared
+                .wr_heap
+                .lock()
+                .clone()
+                .ok_or(crate::DeviceError::Unexpected)?;
+            let slice = heap.group(desc)?;
+            self.counters.bind_groups.add(1);
+            return Ok(super::BindGroup {
+                set: None,
+                heap: Some(slice),
+                layout: desc.layout.raw,
+            });
+        }
         let set = unsafe {
             self.desc_allocator
                 .lock()
@@ -2013,11 +2092,17 @@ impl crate::Device for super::Device {
 
         self.counters.bind_groups.add(1);
 
-        Ok(super::BindGroup { set })
+        Ok(super::BindGroup {
+            set: Some(set),
+            heap: None,
+            layout: desc.layout.raw,
+        })
     }
 
     unsafe fn destroy_bind_group(&self, group: super::BindGroup) {
-        unsafe { self.desc_allocator.lock().free(&self.shared.raw, group.set) };
+        if let Some(set) = group.set {
+            unsafe { self.desc_allocator.lock().free(&self.shared.raw, set) };
+        }
 
         self.counters.bind_groups.sub(1);
     }
@@ -2102,6 +2187,23 @@ impl crate::Device for super::Device {
             super::PipelineCache,
         >,
     ) -> Result<super::RenderPipeline, crate::PipelineError> {
+        let wr_heap = desc.layout.heap.is_some();
+        if wr_heap {
+            let valid_vertex = match &desc.vertex_processor {
+                crate::VertexProcessor::Standard { vertex_stage, .. } => {
+                    matches!(vertex_stage.module, super::ShaderModule::Raw(_))
+                }
+                _ => false,
+            };
+            if !valid_vertex
+                || !desc
+                    .fragment_stage
+                    .as_ref()
+                    .is_some_and(|stage| matches!(stage.module, super::ShaderModule::Raw(_)))
+            {
+                return Err(crate::PipelineError::Device(crate::DeviceError::Unexpected));
+            }
+        }
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
@@ -2327,9 +2429,22 @@ impl crate::Device for super::Device {
 
         let raw_pass = self.shared.make_render_pass(compatible_rp_key)?;
 
-        let vk_infos = [{
+        let heap_mapping = desc.layout.heap.as_ref().map(|layout| layout.info());
+        if let Some(mapping) = &heap_mapping {
+            for stage in &mut stages {
+                stage.p_next = (mapping as *const super::descriptor_heap::MappingInfo).cast();
+            }
+        }
+        let mut heap_flags = vk::PipelineCreateFlags2CreateInfoKHR::default().flags(
+            vk::PipelineCreateFlags2KHR::from_raw(super::descriptor_heap::HEAP_PIPELINE_FLAG),
+        );
+        let mut vk_infos = [{
             vk::GraphicsPipelineCreateInfo::default()
-                .layout(desc.layout.raw)
+                .layout(if wr_heap {
+                    vk::PipelineLayout::null()
+                } else {
+                    desc.layout.raw
+                })
                 .stages(&stages)
                 .vertex_input_state(&vk_vertex_input)
                 .input_assembly_state(&vk_input_assembly)
@@ -2341,6 +2456,9 @@ impl crate::Device for super::Device {
                 .dynamic_state(&vk_dynamic_state)
                 .render_pass(raw_pass)
         }];
+        if wr_heap {
+            vk_infos[0] = vk_infos[0].push_next(&mut heap_flags);
+        }
 
         let pipeline_cache = desc
             .cache
@@ -2393,7 +2511,18 @@ impl crate::Device for super::Device {
 
         self.counters.render_pipelines.add(1);
 
+        if wr_heap {
+            self.shared
+                .wr_heap
+                .lock()
+                .as_ref()
+                .unwrap()
+                .pipeline_created();
+        }
         Ok(super::RenderPipeline {
+            wr_heap,
+            layout: desc.layout.raw,
+            set_layouts: desc.layout.set_layouts.clone(),
             raw,
             is_multiview: desc.multiview_mask.is_some(),
         })
@@ -2413,6 +2542,9 @@ impl crate::Device for super::Device {
             super::PipelineCache,
         >,
     ) -> Result<super::ComputePipeline, crate::PipelineError> {
+        if desc.layout.heap.is_some() {
+            return Err(crate::PipelineError::Device(crate::DeviceError::Unexpected));
+        }
         let compiled = self.compile_stage(
             &desc.stage,
             naga::ShaderStage::Compute,

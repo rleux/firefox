@@ -53,6 +53,7 @@ pub struct WrVulkanConfig {
     pub vsync: bool,
     pub transparent: bool,
     pub shared_webgpu: bool,
+    pub descriptor_heap: bool,
 }
 
 #[cfg(not(all(
@@ -246,6 +247,7 @@ mod enabled {
             display_owner: Some(display),
             validation: config.validation,
             shared_webgpu: config.shared_webgpu,
+            descriptor_heap: config.descriptor_heap,
             surface_options: surface_options(config),
             ..Default::default()
         }))
@@ -307,6 +309,7 @@ mod enabled {
                 vsync: false,
                 transparent: true,
                 shared_webgpu: false,
+                descriptor_heap: false,
             }
         }
 
@@ -328,6 +331,23 @@ mod enabled {
             assert_eq!((window_count.get(), display_count.get()), (1, 1));
             drop(window);
             assert_eq!((window_count.get(), display_count.get()), (0, 0));
+        }
+
+        #[test]
+        fn descriptor_heap_request_reaches_wr_options() {
+            for enabled in [false, true] {
+                let window_count = Cell::new(0usize);
+                let display_count = Cell::new(0usize);
+                let mut config = config(&window_count, &display_count);
+                config.descriptor_heap = enabled;
+                let backend = unsafe { create_backend(&config) }.unwrap();
+                match &backend {
+                    GpuBackendConfig::Vulkan(options) => assert_eq!(options.descriptor_heap, enabled),
+                    _ => unreachable!(),
+                }
+                drop(backend);
+                assert_eq!((window_count.get(), display_count.get()), (0, 0));
+            }
         }
 
         #[test]

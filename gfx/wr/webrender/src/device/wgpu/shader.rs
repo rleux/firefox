@@ -67,6 +67,7 @@ pub(super) fn draw_vertex_descriptor(
 }
 
 pub(super) struct ShaderLayouts {
+    pub projection_dynamic: bool,
     pub layout: Arc<core::binding_model::PipelineLayout>,
     pub bindings: Arc<core::binding_model::BindGroupLayout>,
 }
@@ -130,6 +131,7 @@ pub(super) fn prepare_shader(
 
 fn create_layouts(owner: &Device, artifact: &ShaderArtifact) -> Result<ShaderLayouts, Failure> {
     let mut entries = Vec::new();
+    let projection_dynamic = artifact.projection_stages != 0 && !owner.descriptor_heap_enabled();
     let stages = |bits| wgt::ShaderStagesWebGPU::from_bits_retain(bits).into();
     if artifact.projection_stages != 0 {
         entries.push(wgt::BindGroupLayoutEntry {
@@ -137,7 +139,7 @@ fn create_layouts(owner: &Device, artifact: &ShaderArtifact) -> Result<ShaderLay
             visibility: stages(artifact.projection_stages),
             ty: wgt::BindingType::Buffer {
                 ty: wgt::BufferBindingType::Uniform,
-                has_dynamic_offset: true,
+                has_dynamic_offset: projection_dynamic,
                 min_binding_size: std::num::NonZeroU64::new(64),
             },
             count: None,
@@ -205,7 +207,11 @@ fn create_layouts(owner: &Device, artifact: &ShaderArtifact) -> Result<ShaderLay
                 immediate_size: 0,
             });
     owner.check()?;
-    Ok(ShaderLayouts { layout, bindings })
+    Ok(ShaderLayouts {
+        layout,
+        bindings,
+        projection_dynamic,
+    })
 }
 
 fn validate_shader_interface(

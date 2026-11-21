@@ -9,6 +9,7 @@ build = "build.rs"
 edition = "2018"
 
 [features]
+descriptor-heap-diagnostics = ["vulkan", "wgpu-hal/wr-descriptor-heap-diagnostics"]
 vulkan = ["dep:libc", "dep:webrender_shader_build", "webrender_shader_build/glslang", "webrender_build/vulkan", "dep:wgpu-core", "dep:wgpu-hal", "dep:wgpu-types", "dep:ash", "dep:raw-window-handle"]
 shared-webgpu = ["vulkan", "dep:wgpu_shared"]
 default = ["static_freetype"]
@@ -85,3 +86,7 @@ ash = { version = "0.38", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true, default-features = false }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(wr_descriptor_heap_diagnostics)"]

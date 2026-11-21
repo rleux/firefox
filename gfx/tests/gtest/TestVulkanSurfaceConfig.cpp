@@ -41,6 +41,8 @@ WrVulkanConfig MakeVulkanConfig(OwnerCounts& aCounts) {
           display,
           false,
           true,
+          false,
+          false,
           false};
 }
 }  // namespace
@@ -53,6 +55,20 @@ TEST(VulkanSurfaceConfig, RetainsOwnersAndReleasesWindowFirst)
     EXPECT_EQ(counts.mWindow, 1);
     EXPECT_EQ(counts.mDisplay, 1);
     EXPECT_EQ(config.Raw().window_owner.object, &counts);
+  }
+  EXPECT_EQ(counts.mWindow, 0);
+  EXPECT_EQ(counts.mDisplay, 0);
+}
+
+TEST(VulkanSurfaceConfig, CopiesDescriptorHeapRequest)
+{
+  OwnerCounts counts;
+  auto raw = MakeVulkanConfig(counts);
+  raw.descriptor_heap = true;
+  {
+    OwnedVulkanConfig config(raw);
+    raw.descriptor_heap = false;
+    EXPECT_TRUE(config.Raw().descriptor_heap);
   }
   EXPECT_EQ(counts.mWindow, 0);
   EXPECT_EQ(counts.mDisplay, 0);
@@ -145,7 +161,7 @@ TEST(VulkanSurfaceConfig, DeferredCompositorRemainsPaused)
 TEST(VulkanSurfaceConfig, DeferredAndroidNeedsNoNativeOwners)
 {
   WrVulkanConfig raw{
-      WrWindowHandle::Android(nullptr), {}, {}, false, true, false};
+      WrWindowHandle::Android(nullptr), {}, {}, false, true, false, false, false};
   RenderCompositorVulkan compositor(nullptr, raw);
   EXPECT_NE(compositor.GetVulkanConfig(), nullptr);
   EXPECT_TRUE(compositor.UsesBackendPresentation());

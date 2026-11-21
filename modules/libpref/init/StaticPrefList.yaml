@@ -8375,6 +8375,12 @@
   mirror: once
   rust: true
 
+# Enable descriptor heaps on a dedicated Vulkan WebRender device. Requires a restart.
+- name: gfx.webrender.vulkan.descriptor_heap
+  type: bool
+  value: false
+  mirror: once
+
 # Share the Vulkan native device with WebGPU. Requires a restart.
 - name: gfx.webrender.vulkan.shared-webgpu
   type: bool

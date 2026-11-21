@@ -2540,6 +2540,8 @@ void gfxPlatform::InitWebRenderConfig() {
 #if defined(MOZ_WEBRENDER_VULKAN)
   gfxVars::SetWebRenderVulkanSharedWebGPURequested(
       StaticPrefs::gfx_webrender_vulkan_shared_webgpu_AtStartup());
+  gfxVars::SetWebRenderVulkanDescriptorHeapRequested(
+      StaticPrefs::gfx_webrender_vulkan_descriptor_heap_AtStartup());
 #endif
 
   Preferences::RegisterPrefixCallbackAndCall(SwapIntervalPrefChangeCallback,

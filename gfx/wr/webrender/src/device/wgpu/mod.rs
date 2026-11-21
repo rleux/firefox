@@ -66,6 +66,7 @@ pub struct Options {
     pub adapter_name: Option<String>,
     pub validation: bool,
     pub shared_webgpu: bool,
+    pub descriptor_heap: bool,
     #[cfg(test)]
     pub primary_mapping: Option<bool>,
     /// The native window remains owned until detached or the renderer is destroyed.
@@ -223,6 +224,16 @@ impl Device {
         self.adapter.get_info()
     }
 
+    pub(super) fn descriptor_heap_enabled(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.raw_device().wr_descriptor_heap_enabled()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
     pub fn features(&self) -> wgt::Features {
         *self.device.features()
     }

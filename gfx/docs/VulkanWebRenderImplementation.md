@@ -42,6 +42,16 @@ threshold. WR applies these thresholds only to its shared-WebGPU instance path;
 ordinary WR instances keep the default policy. Native out-of-memory and device-loss
 errors continue through ordinary error handling and recovery.
 
+### Descriptor heap prototype
+
+The default-off startup preference `gfx.webrender.vulkan.descriptor_heap` requests
+experimental descriptor heaps on supported dedicated Linux Vulkan WR devices.
+The parent latches it through `gfxVars`; replacement GPU processes inherit the
+same browser-startup choice. Changing the preference requires a browser restart.
+Gecko forwards it through `WrVulkanConfig` to WR's explicit `Options.descriptor_heap`;
+standalone native tests use that option directly. `WR_VK_DESCRIPTOR_HEAP` no longer
+controls device creation. Shared-WebGPU device admission is not supported in heap mode.
+
 ### Shared WebGPU native device
 
 The default-off startup preference `gfx.webrender.vulkan.shared-webgpu` requests

@@ -92,6 +92,7 @@ mod native {
             vsync: true,
             transparent: false,
             shared_webgpu: false,
+            descriptor_heap: false,
         }
     }
     struct Notice;

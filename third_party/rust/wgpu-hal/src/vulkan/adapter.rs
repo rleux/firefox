@@ -87,7 +87,8 @@ pub struct PhysicalDeviceFeatures {
     ///
     /// [`Instance::expose_adapter`]: super::Instance::expose_adapter
     /// [`Features::EXPERIMENTAL_RAY_QUERY`]: wgt::Features::EXPERIMENTAL_RAY_QUERY
-    buffer_device_address: Option<vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR<'static>>,
+    pub(super) buffer_device_address:
+        Option<vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR<'static>>,
 
     /// Features provided by `VK_KHR_ray_query`,
     ///
@@ -3133,6 +3134,7 @@ impl super::Adapter {
             texture_identity_factory: super::ResourceIdentityFactory::new(),
             texture_view_identity_factory: super::ResourceIdentityFactory::new(),
             empty_descriptor_set_layout,
+            wr_heap: Mutex::new(None),
         });
 
         let relay_semaphores = super::RelaySemaphores::new(&shared)?;

@@ -89,7 +89,8 @@ static Maybe<OwnedVulkanConfig> AcquireX11Surface(
       aVsync,
       gtk->VulkanNeedsAlpha(),
       XRE_IsGPUProcess() &&
-          gfx::gfxVars::WebRenderVulkanSharedWebGPURequested()};
+          gfx::gfxVars::WebRenderVulkanSharedWebGPURequested(),
+      gfx::gfxVars::WebRenderVulkanDescriptorHeapRequested()};
   return Some(OwnedVulkanConfig(config));
 }
 #endif
@@ -120,6 +121,7 @@ static Maybe<OwnedVulkanConfig> AcquireAndroidSurface(
       aValidation,
       aVsync,
       aTransparent,
+      false,
       false};
   return Some(OwnedVulkanConfig(config));
 }
@@ -130,7 +132,7 @@ UniquePtr<RenderCompositor> RenderCompositorVulkan::Create(
 #ifdef MOZ_WIDGET_ANDROID
   if (aWidget && aWidget->AsAndroid()) {
     WrVulkanConfig config{
-        WrWindowHandle::Android(nullptr), {}, {}, false, true, false, false};
+        WrWindowHandle::Android(nullptr), {}, {}, false, true, false, false, false};
     return std::make_unique<RenderCompositorVulkan>(aWidget, config);
   }
 #endif

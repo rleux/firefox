@@ -134,6 +134,15 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
     {
         return Err("WebRender requires Vulkan shader passthrough support".into());
     }
+    let descriptor_heap = options.descriptor_heap;
+    if descriptor_heap && !cfg!(target_os = "linux") {
+        return Err("WR descriptor heap prototype currently supports Linux only".into());
+    }
+    if descriptor_heap && options.shared_webgpu {
+        return Err(
+            "WR descriptor heaps require a dedicated device; shared WebGPU is unsupported".into(),
+        );
+    }
     let mut desc = core::device::DeviceDescriptor {
         label: Some("WebRender Vulkan".into()),
         required_features: adapter.features()
@@ -172,6 +181,18 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
     let callback = external_extensions(&raw_adapter);
     #[cfg(not(target_os = "linux"))]
     let callback = None;
+    let mut heap_features = if descriptor_heap {
+        Some(
+            hal::vulkan::descriptor_heap::DeviceFeatures::new(&raw_adapter)
+                .map_err(|error| format!("Preparing WR descriptor heap features: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let callback = match heap_features.as_mut() {
+        Some(features) => Some(features.callback(callback)),
+        None => callback,
+    };
     // Validate first, then use the same features, limits and physical device for HAL and core.
     let native_features = if options.shared_webgpu && cfg!(feature = "shared-webgpu") {
         desc.required_features
@@ -193,6 +214,11 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
         )
     }
     .map_err(|error| format!("Opening Vulkan device: {error}"))?;
+    if descriptor_heap {
+        unsafe { open.device.enable_wr_descriptor_heap() }
+            .map_err(|error| format!("Enabling WR descriptor heap: {error}"))?;
+        log::info!("Private WR descriptor heap prototype enabled");
+    }
     let (device, queue) = unsafe { adapter.create_device_and_queue_from_hal(open.into(), &desc) }
         .map_err(|error| format!("Creating core Vulkan device: {error}"))?;
     drop(raw_adapter);

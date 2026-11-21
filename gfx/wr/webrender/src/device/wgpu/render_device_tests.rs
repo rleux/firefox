@@ -1200,3 +1200,454 @@ fn native_backend_poll_drives_completion_and_mapping_with_or_without_registry() 
     }
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Requires Vulkan and Khronos synchronization validation"]
+fn native_backend_descriptor_heap_mixed_mode_pixels_off() {
+    check_descriptor_heap_mixed_mode_pixels(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Requires descriptor heaps, diagnostics, and Khronos synchronization validation"]
+fn native_backend_descriptor_heap_mixed_mode_pixels_on() {
+    check_descriptor_heap_mixed_mode_pixels(true);
+}
+
+#[cfg(target_os = "linux")]
+fn check_descriptor_heap_mixed_mode_pixels(descriptor_heap: bool) {
+    use super::super::shader::{PreparedShader, ShaderLayouts};
+    super::super::tests::validation_logging();
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let owner = Arc::new(
+        Device::new(&super::super::Options {
+            validation: true,
+            descriptor_heap,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    assert_eq!(owner.descriptor_heap_enabled(), descriptor_heap);
+    let mut native = RenderDevice::new(owner.clone()).unwrap();
+    let size = DeviceIntSize::new(8, 1);
+    let shader = select_draw_shader("cs_scale", &["TEXTURE_2D"], false).unwrap();
+    let template = DrawPipeline::new(
+        &owner,
+        shader,
+        wgt::TextureFormat::Rgba8Unorm,
+        false,
+        RenderState::default(),
+        wgt::PrimitiveTopology::TriangleList,
+    )
+    .unwrap();
+    let projection_dynamic = template.prepared.layouts.projection_dynamic;
+    let stages = |bits| wgt::ShaderStagesWebGPU::from_bits_retain(bits).into();
+    // The unused storage binding deliberately selects the ordinary descriptor path.
+    let legacy_bindings =
+        owner
+            .device
+            .create_bind_group_layout(&core::binding_model::BindGroupLayoutDescriptor {
+                label: Some("WR heap test ordinary bindings".into()),
+                entries: Cow::Owned(vec![
+                    wgt::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: stages(shader.projection_stages),
+                        ty: wgt::BindingType::Buffer {
+                            ty: wgt::BufferBindingType::Uniform,
+                            has_dynamic_offset: projection_dynamic,
+                            min_binding_size: std::num::NonZeroU64::new(64),
+                        },
+                        count: None,
+                    },
+                    wgt::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: stages(shader.textures[0].stages),
+                        ty: wgt::BindingType::Texture {
+                            sample_type: wgt::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgt::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgt::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: stages(shader.textures[0].sampler_stages),
+                        ty: wgt::BindingType::Sampler(wgt::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgt::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: stages(shader.projection_stages),
+                        ty: wgt::BindingType::Buffer {
+                            ty: wgt::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: std::num::NonZeroU64::new(16),
+                        },
+                        count: None,
+                    },
+                ]),
+            });
+    owner.check().unwrap();
+    let legacy_layout =
+        owner
+            .device
+            .create_pipeline_layout(&core::binding_model::PipelineLayoutDescriptor {
+                label: Some("WR heap test ordinary layout".into()),
+                bind_group_layouts: Cow::Owned(vec![Some(legacy_bindings.clone())]),
+                immediate_size: 0,
+            });
+    let (vertex, instances, vertex_stride, instance_stride) =
+        super::super::vertex_layout::vertex_layouts(&desc::SCALE, shader).unwrap();
+    let stage = |module| core::pipeline::ProgrammableStageDescriptor {
+        module,
+        entry_point: Some("main".into()),
+        constants: Default::default(),
+        zero_initialize_workgroup_memory: true,
+    };
+    let legacy_raw = owner.device.create_render_pipeline(
+        core::pipeline::RenderPipelineDescriptor {
+            label: Some("WR heap test ordinary pipeline".into()),
+            layout: Some(legacy_layout.clone()),
+            vertex: core::pipeline::VertexState {
+                stage: stage(template.prepared.vertex.clone()),
+                buffers: Cow::Owned(vec![
+                    Some(core::pipeline::VertexBufferLayout {
+                        array_stride: vertex_stride.max(4),
+                        step_mode: wgt::VertexStepMode::Vertex,
+                        attributes: Cow::Owned(vertex),
+                    }),
+                    Some(core::pipeline::VertexBufferLayout {
+                        array_stride: instance_stride,
+                        step_mode: wgt::VertexStepMode::Instance,
+                        attributes: Cow::Owned(instances),
+                    }),
+                ]),
+            },
+            fragment: Some(core::pipeline::FragmentState {
+                stage: stage(template.prepared.fragment.clone()),
+                targets: Cow::Owned(vec![Some(wgt::ColorTargetState {
+                    format: wgt::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgt::ColorWrites::ALL,
+                })]),
+            }),
+            primitive: wgt::PrimitiveState {
+                topology: wgt::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        }
+        .into(),
+    );
+    owner.check().unwrap();
+    let legacy = Arc::new(DrawPipeline {
+        owner: owner.clone(),
+        shader,
+        prepared: Arc::new(PreparedShader {
+            vertex: template.prepared.vertex.clone(),
+            fragment: template.prepared.fragment.clone(),
+            layouts: ShaderLayouts {
+                layout: legacy_layout,
+                bindings: legacy_bindings,
+                projection_dynamic,
+            },
+        }),
+        raw: legacy_raw,
+        format: wgt::TextureFormat::Rgba8Unorm,
+        has_depth: false,
+        topology: wgt::PrimitiveTopology::TriangleList,
+        instance_stride,
+    });
+    let dummy = owner
+        .create_buffer_with_data(
+            "WR heap test unused storage",
+            &[0; 16],
+            wgt::BufferUsages::STORAGE,
+        )
+        .unwrap();
+    let source = Image::new(
+        &owner,
+        2,
+        1,
+        wgt::TextureFormat::Rgba8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let blue = Image::new(
+        &owner,
+        2,
+        1,
+        wgt::TextureFormat::Rgba8Unorm,
+        TextureFilter::Nearest,
+        false,
+    )
+    .unwrap();
+    let encoder = native.commands().unwrap();
+    owner
+        .upload_texture(
+            &encoder,
+            &source.raw,
+            0,
+            bounds(&source),
+            &[255, 0, 0, 255, 0, 255, 0, 255],
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    owner
+        .upload_texture(
+            &encoder,
+            &blue.raw,
+            0,
+            bounds(&blue),
+            &[0, 0, 255, 255].repeat(2),
+            None,
+            0,
+            None,
+        )
+        .unwrap();
+    let transform = Transform3D::ortho(0., 8., 0., 1., -1., 1.);
+    let matrix = projection(&transform);
+    let held_projection = owner
+        .create_buffer_with_data(
+            "WR heap held projection",
+            crate::device::as_bytes(&matrix),
+            wgt::BufferUsages::UNIFORM,
+        )
+        .unwrap();
+    // Keep both pages live and force actual page A -> B -> A use while rendering.
+    let mut held = Vec::new();
+    for index in 0..257 {
+        held.push(
+            template
+                .create_bindings(
+                    Some(held_projection.clone()),
+                    &[(
+                        source.sampled.clone(),
+                        if index == 256 {
+                            TextureFilter::Linear
+                        } else {
+                            TextureFilter::Nearest
+                        },
+                    )],
+                    &[],
+                    &native.samplers,
+                )
+                .unwrap(),
+        );
+    }
+    let mut program = GpuBackend::create_program(&mut native, "cs_scale", &["TEXTURE_2D"]).unwrap();
+    GpuBackend::link_program(
+        &mut native,
+        &mut program,
+        &desc::SCALE,
+        &[("sColor0", TextureSlot(0))],
+    )
+    .unwrap();
+    let vertices = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let mut instance_buffer = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let array = GpuBackend::create_vertex_array(
+        &mut native,
+        &desc::SCALE,
+        &vertices,
+        Some(&instance_buffer),
+        None,
+        1,
+    );
+    let mut readbacks = Vec::new();
+    for frame in 0..3 {
+        native.begin_frame().unwrap();
+        GpuBackend::bind_vertex_array(&mut native, &array);
+        native.begin_render_pass(&pass(size)).unwrap();
+        assert!(GpuBackend::bind_pipeline(
+            &mut native,
+            &program,
+            &RenderState::default()
+        ));
+        GpuBackend::set_uniforms(&native, &program, &transform);
+        for x in 0..8 {
+            let image = if x == 3 { &blue } else { &source };
+            let filter = if x == 2 {
+                TextureFilter::Linear
+            } else {
+                TextureFilter::Nearest
+            };
+            native
+                .textures
+                .bind_external_image(
+                    TextureSlot(0),
+                    image.clone(),
+                    if x == 2 {
+                        api::ImageRendering::Auto
+                    } else {
+                        api::ImageRendering::Pixelated
+                    },
+                )
+                .unwrap();
+            if x == 5 {
+                GpuBackend::set_uniforms(
+                    &native,
+                    &program,
+                    &Transform3D::ortho(-1., 7., 0., 1., -1., 1.),
+                );
+            }
+            if x == 6 {
+                GpuBackend::set_uniforms(&native, &program, &transform);
+            }
+            let left = if x == 5 { 4. } else { x as f32 };
+            GpuBackend::draw_instanced_batch(
+                &mut native,
+                &mut instance_buffer,
+                crate::device::as_bytes(&[left, 0., left + 1., 1., 0.375f32, 0.5, 0.375, 0.5, 0.]),
+                1,
+                VertexUsageHint::Stream,
+            );
+            if x % 2 == 1 {
+                use self::core::binding_model::{BindGroupEntry, BindingResource, BufferBinding};
+                let uniform = native
+                    .programs
+                    .state(&program)
+                    .unwrap()
+                    .projection
+                    .borrow()
+                    .clone()
+                    .unwrap();
+                let group =
+                    owner
+                        .device
+                        .create_bind_group(&core::binding_model::BindGroupDescriptor {
+                            label: Some("WR heap test ordinary group".into()),
+                            layout: legacy.prepared.layouts.bindings.clone(),
+                            entries: Cow::Owned(vec![
+                                BindGroupEntry {
+                                    binding: 0,
+                                    resource: BindingResource::Buffer(BufferBinding {
+                                        buffer: uniform,
+                                        offset: 0,
+                                        size: Some(64),
+                                    }),
+                                },
+                                BindGroupEntry {
+                                    binding: 1,
+                                    resource: BindingResource::TextureView(image.sampled.clone()),
+                                },
+                                BindGroupEntry {
+                                    binding: 2,
+                                    resource: BindingResource::Sampler(native.samplers.get(filter)),
+                                },
+                                BindGroupEntry {
+                                    binding: 3,
+                                    resource: BindingResource::Buffer(BufferBinding {
+                                        buffer: dummy.clone(),
+                                        offset: 0,
+                                        size: Some(16),
+                                    }),
+                                },
+                            ]),
+                        });
+                owner.check().unwrap();
+                let draw = native.pass.as_mut().unwrap().pending.last_mut().unwrap();
+                draw.pipeline = legacy.clone();
+                draw.bindings = group;
+            } else if let Some(index) = match x {
+                0 => Some(0),
+                2 => Some(256),
+                4 => Some(1),
+                _ => None,
+            } {
+                native
+                    .pass
+                    .as_mut()
+                    .unwrap()
+                    .pending
+                    .last_mut()
+                    .unwrap()
+                    .bindings = held[index].clone();
+            }
+        }
+        native.end_render_pass(StoreOp::Store).unwrap();
+        let encoder = native.commands().unwrap();
+        let readback = owner
+            .encode_readback(
+                &encoder,
+                &native.textures.output().unwrap().raw,
+                0,
+                DeviceIntRect::from_size(size),
+                Some(ImageFormat::RGBA8),
+            )
+            .unwrap();
+        let index = native.end_frame().unwrap();
+        readbacks.push((frame, readback.map(&owner, index).unwrap()));
+    }
+    for (frame, mut readback) in readbacks {
+        let actual = readback.wait(&owner).unwrap();
+        let expected = [
+            255u8, 0, 0, 255, 255, 0, 0, 255, 191, 64, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 255,
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+        ];
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (*actual as i16 - expected as i16).abs() <= 1,
+                "frame{}: {} vs{}",
+                frame,
+                actual,
+                expected
+            );
+        }
+        eprintln!("WR_HEAP_PIXEL_FRAME {frame} {:?}", actual);
+    }
+    owner.poll().unwrap();
+    let stats = owner.raw_device().wr_descriptor_heap_stats();
+    if owner.descriptor_heap_enabled() {
+        let stats = stats.unwrap();
+        assert!(
+            stats.diagnostics_enabled,
+            "Build with descriptor-heap-diagnostics"
+        );
+        assert!(
+            stats.heap_draws > 0
+                && stats.legacy_draws > 0
+                && stats.heap_binds > 0
+                && stats.legacy_binds > 0,
+            "{:?}",
+            stats
+        );
+        assert_eq!(stats.pages, 2, "{stats:?}");
+        let live = stats.live_slots;
+        drop(held);
+        owner.poll().unwrap();
+        let after_drop = owner.raw_device().wr_descriptor_heap_stats().unwrap();
+        assert!(
+            after_drop.live_slots < live,
+            "Retired heap groups must release their slots"
+        );
+        let replacement = template
+            .create_bindings(
+                Some(held_projection),
+                &[(source.sampled.clone(), TextureFilter::Nearest)],
+                &[],
+                &native.samplers,
+            )
+            .unwrap();
+        let after_reuse = owner.raw_device().wr_descriptor_heap_stats().unwrap();
+        assert_eq!(after_reuse.pages, 2, "Freed slots must be reused");
+        assert_eq!(after_reuse.live_slots, after_drop.live_slots + 1);
+        drop(replacement);
+        eprintln!("WR_HEAP_PIXEL_STATS {after_reuse:?}");
+    } else {
+        assert!(stats.is_none());
+        eprintln!("WR_HEAP_PIXEL_STATS ordinary-only");
+    }
+    GpuBackend::delete_program(&mut native, program);
+    GpuBackend::delete_vertex_array(&mut native, array);
+    GpuBackend::delete_buffer(&mut native, vertices);
+    GpuBackend::delete_buffer(&mut native, instance_buffer);
+    GpuBackend::deinit(&mut native);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}

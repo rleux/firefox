@@ -461,6 +461,17 @@ impl RenderDevice {
         self.owner.check().map_err(|e| e.to_string())?;
         self.submitted = index;
         self.in_flight.push_back(index);
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                feature = "descriptor-heap-diagnostics",
+                wr_descriptor_heap_diagnostics
+            )
+        ))]
+        if let Some(stats) = self.owner.raw_device().wr_descriptor_heap_stats() {
+            eprintln!("WR_HEAP_DIAGNOSTIC frame={} heap_draws={} legacy_draws={} heap_binds={} legacy_binds={} pages={} live_slots={}",
+                self.frame.0, stats.heap_draws, stats.legacy_draws, stats.heap_binds, stats.legacy_binds, stats.pages, stats.live_slots);
+        }
         Ok(index)
     }
     pub fn begin_frame(&mut self) -> Result<GpuFrameId> {
@@ -674,7 +685,7 @@ impl RenderDevice {
             native.set_bind_group(
                 0,
                 Some(draw.bindings),
-                if draw.pipeline.shader.projection_stages != 0 {
+                if draw.pipeline.prepared.layouts.projection_dynamic {
                     &[0]
                 } else {
                     &[]

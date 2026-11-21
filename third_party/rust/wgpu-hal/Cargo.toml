@@ -49,6 +49,7 @@ targets = [
 ignored = ["cfg_aliases"]
 
 [features]
+wr-descriptor-heap-diagnostics = []
 device_lost_panic = []
 dx12 = [
     "dep:arrayvec",
@@ -529,6 +530,7 @@ missing_debug_implementations = "warn"
 level = "warn"
 priority = 0
 check-cfg = [
+    "cfg(wr_descriptor_heap_diagnostics)",
     'cfg(feature, values("cargo-clippy"))',
     "cfg(web_sys_unstable_apis)",
     "cfg(windows_angle)",
