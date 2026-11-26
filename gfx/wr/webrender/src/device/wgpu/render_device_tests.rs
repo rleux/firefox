@@ -1676,3 +1676,233 @@ fn check_descriptor_heap_mixed_mode_pixels(descriptor_heap: bool, shared_webgpu:
     GpuBackend::deinit(&mut native);
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
 }
+
+#[test]
+#[ignore = "Requires Vulkan and Khronos synchronization validation"]
+fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
+    use crate::gpu_types::CompositeInstance;
+    use api::{units::DeviceRect, PremultipliedColorF};
+    let owner = Arc::new(device());
+    let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let mut native = RenderDevice::new(owner.clone()).unwrap();
+    eprintln!(
+        "bounded composite cache metadata/renderer: {} bytes",
+        std::mem::size_of::<[(u32, Option<DrawBindings>); 32]>()
+    );
+    let size = DeviceIntSize::new(4, 1);
+    let mut program =
+        GpuBackend::create_program(&mut native, "composite", &["FAST_PATH", "TEXTURE_2D"]).unwrap();
+    GpuBackend::link_program(
+        &mut native,
+        &mut program,
+        &desc::COMPOSITE,
+        &[("sColor0", TextureSlot(0))],
+    )
+    .unwrap();
+    assert_eq!(
+        native
+            .programs
+            .state(&program)
+            .unwrap()
+            .shader
+            .textures
+            .len(),
+        1
+    );
+    let vertices = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let mut instances = GpuBackend::create_buffer(&mut native, BufferKind::Vertex);
+    let array = GpuBackend::create_vertex_array(
+        &mut native,
+        &desc::COMPOSITE,
+        &vertices,
+        Some(&instances),
+        None,
+        1,
+    );
+    let mut sources: Vec<_> = [[255, 0, 0, 255], [0, 255, 0, 255]]
+        .iter()
+        .map(|rgba| {
+            let texture = GpuBackend::create_texture(
+                &mut native,
+                ImageBufferKind::Texture2D,
+                ImageFormat::RGBA8,
+                1,
+                1,
+                TextureFilter::Nearest,
+                Some(RenderTargetInfo { has_depth: false }),
+            );
+            native.upload_texture_immediate(&texture, rgba).unwrap();
+            texture
+        })
+        .collect();
+    let mut previous: Vec<Arc<core::binding_model::BindGroup>> = Vec::new();
+    let mut collisions = Vec::new();
+    for frame in 0..6 {
+        native.begin_frame().unwrap();
+        if frame == 5 {
+            for _ in 0..31 {
+                collisions.push(GpuBackend::create_texture(
+                    &mut native,
+                    ImageBufferKind::Texture2D,
+                    ImageFormat::RGBA8,
+                    1,
+                    1,
+                    TextureFilter::Nearest,
+                    None,
+                ));
+            }
+            let collision = collisions.last().unwrap();
+            assert_eq!(collision.id % 32, sources[0].id % 32);
+            GpuBackend::bind_texture(&mut native, TextureSlot(0), collision, Swizzle::default());
+            assert!(native.textures.composite_bindings(0).unwrap().is_none());
+        }
+        native.begin_render_pass(&pass(size)).unwrap();
+        GpuBackend::bind_vertex_array(&mut native, &array);
+        assert!(GpuBackend::bind_pipeline(
+            &mut native,
+            &program,
+            &RenderState {
+                blend_mode: if frame < 2 {
+                    BlendMode::None
+                } else {
+                    BlendMode::PremultipliedAlpha
+                },
+                ..Default::default()
+            }
+        ));
+        GpuBackend::set_uniforms(
+            &native,
+            &program,
+            &Transform3D::ortho(0., if frame < 3 { 4. } else { 8. }, 0., 1., -1., 1.),
+        );
+        let mut current = Vec::new();
+        for (index, source) in sources.iter().enumerate() {
+            GpuBackend::bind_texture(&mut native, TextureSlot(0), source, Swizzle::default());
+            let rect = DeviceRect::new(
+                DevicePoint::new(index as f32 * 2., 0.),
+                DevicePoint::new(index as f32 * 2. + 2., 1.),
+            );
+            let data = [CompositeInstance::new(
+                rect,
+                DeviceRect::from_size(size.to_f32()),
+                PremultipliedColorF {
+                    r: 1.,
+                    g: 1.,
+                    b: 1.,
+                    a: 1.,
+                },
+                (false, false),
+                None,
+            )];
+            GpuBackend::draw_instanced_batch(
+                &mut native,
+                &mut instances,
+                crate::device::as_bytes(&data),
+                1,
+                VertexUsageHint::Stream,
+            );
+            let bindings = native.pass.as_ref().unwrap().pending[index]
+                .bindings
+                .clone();
+            if !previous.is_empty() {
+                assert_eq!(
+                    Arc::ptr_eq(&bindings, &previous[index]),
+                    frame == 1 || frame == 4 || (frame == 5 && index == 1)
+                );
+            }
+            let different_view = native
+                .textures
+                .image(source)
+                .unwrap()
+                .raw
+                .create_view(&Default::default());
+            let cached = native
+                .textures
+                .composite_bindings(0)
+                .unwrap()
+                .as_ref()
+                .unwrap();
+            assert!(Arc::ptr_eq(&cached.raw, &bindings));
+            assert!(!cached.matches(
+                &cached.pipeline,
+                &cached.projection,
+                &[(cached.textures[0].0.clone(), TextureFilter::Linear)]
+            ));
+            assert!(!cached.matches(
+                &cached.pipeline,
+                &cached.projection,
+                &[(different_view, TextureFilter::Nearest)]
+            ));
+            current.push(bindings);
+        }
+        native.end_render_pass(StoreOp::Store).unwrap();
+        native.end_frame().unwrap();
+        let image = native.textures.read_target(ReadTarget::Default).unwrap();
+        let mut pixels = [0; 16];
+        native
+            .capture_into(
+                image,
+                DeviceIntRect::from_size(size),
+                ImageFormat::RGBA8,
+                &mut pixels,
+            )
+            .unwrap();
+        assert_eq!(
+            pixels,
+            if frame < 3 {
+                [
+                    255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
+                ]
+            } else {
+                [
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+                ]
+            }
+        );
+        previous = current;
+    }
+    let released = [Arc::downgrade(&previous[0]), Arc::downgrade(&previous[1])];
+    previous.clear();
+    owner.wait_for(native.submitted).unwrap();
+    native.poll().unwrap();
+    native
+        .textures
+        .reuse_render_target(&mut sources[0], RenderTargetInfo { has_depth: false })
+        .unwrap();
+    assert!(released[0].upgrade().is_none());
+    GpuBackend::delete_texture(&mut native, sources.remove(1));
+    assert!(released[1].upgrade().is_none());
+    GpuBackend::delete_texture(&mut native, sources.remove(0));
+    let replacement = GpuBackend::create_texture(
+        &mut native,
+        ImageBufferKind::Texture2D,
+        ImageFormat::RGBA8,
+        1,
+        1,
+        TextureFilter::Nearest,
+        None,
+    );
+    GpuBackend::bind_texture(
+        &mut native,
+        TextureSlot(0),
+        &replacement,
+        Swizzle::default(),
+    );
+    assert!(native.textures.composite_bindings(0).unwrap().is_none());
+    let external = native.textures.image(&replacement).unwrap();
+    native
+        .textures
+        .bind_external_image(TextureSlot(0), external, api::ImageRendering::Auto)
+        .unwrap();
+    assert!(native.textures.composite_bindings(0).is_none());
+    for texture in collisions {
+        GpuBackend::delete_texture(&mut native, texture);
+    }
+    GpuBackend::delete_texture(&mut native, replacement);
+    GpuBackend::delete_program(&mut native, program);
+    GpuBackend::delete_vertex_array(&mut native, array);
+    GpuBackend::delete_buffer(&mut native, vertices);
+    GpuBackend::delete_buffer(&mut native, instances);
+    GpuBackend::deinit(&mut native);
+    assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}

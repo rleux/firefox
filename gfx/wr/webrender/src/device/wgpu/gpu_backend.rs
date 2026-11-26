@@ -3,11 +3,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use super::*;
-use crate::wgpu::{SurfaceWindow, SurfaceOptions};
 use crate::device as wr;
 use crate::device::query::{GpuProfiler, GpuQueryBackend, GpuQueryId, GpuQueryKind};
 use crate::internal_types::{RenderTargetInfo, Swizzle, SwizzleSettings};
 use crate::render_api::MemoryReport;
+use crate::wgpu::{SurfaceOptions, SurfaceWindow};
 use api::units::DeviceSize;
 #[cfg(feature = "capture")]
 use api::{ExternalTextureHandle, ImageDescriptor};
@@ -388,6 +388,7 @@ impl wr::GpuBackend for RenderDevice {
     }
     fn delete_program(&mut self, mut program: Program) {
         let result = self.programs.delete(&mut program);
+        self.textures.clear_composite_cache();
         self.record_result(result);
         program.id = 0;
     }
@@ -816,6 +817,7 @@ impl wr::GpuBackend for RenderDevice {
         }
         self.pass = None;
         self.last_bindings = None;
+        self.textures.clear_composite_cache();
         self.skipped_pass = false;
         if self.failure.get().is_none() {
             let result = self.submit().and_then(|index| {

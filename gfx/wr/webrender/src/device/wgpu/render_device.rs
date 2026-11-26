@@ -131,11 +131,33 @@ impl InstanceArena {
     }
 }
 
-struct DrawBindings {
+pub(super) struct DrawBindings {
     pipeline: Arc<DrawPipeline>,
     projection: Option<Arc<core::resource::Buffer>>,
     textures: Vec<(Arc<core::resource::TextureView>, TextureFilter)>,
     raw: Arc<core::binding_model::BindGroup>,
+}
+
+impl DrawBindings {
+    fn matches(
+        &self,
+        pipeline: &Arc<DrawPipeline>,
+        uniform: &Option<Arc<core::resource::Buffer>>,
+        textures: &[(Arc<core::resource::TextureView>, TextureFilter)],
+    ) -> bool {
+        Arc::ptr_eq(&self.pipeline, pipeline)
+            && match (&self.projection, uniform) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+            && self.textures.len() == textures.len()
+            && self
+                .textures
+                .iter()
+                .zip(textures)
+                .all(|((a, af), (b, bf))| Arc::ptr_eq(a, b) && af == bf)
+    }
 }
 
 struct Pass {
@@ -317,6 +339,7 @@ impl RenderDevice {
                 let _ = self.failure.set(error);
                 self.pass = None;
                 self.last_bindings = None;
+                self.textures.clear_composite_cache();
                 self.ordered_commands.clear();
                 self.instances = InstanceArena::default();
                 #[cfg(target_os = "linux")]
@@ -936,26 +959,27 @@ impl RenderDevice {
         } else {
             None
         };
-        let bindings = if let Some(cached) = self.last_bindings.as_ref().filter(|cached| {
-            Arc::ptr_eq(&cached.pipeline, &pipeline)
-                && match (&cached.projection, &uniform) {
-                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                    (None, None) => true,
-                    _ => false,
-                }
-                && cached.textures.len() == textures.len()
-                && cached
-                    .textures
-                    .iter()
-                    .zip(&textures)
-                    .all(|((a, af), (b, bf))| Arc::ptr_eq(a, b) && af == bf)
-        }) {
+        let owned = if program.shader.name == "composite" && textures.len() == 1 {
+            self.textures.composite_bindings(program.slots[0])
+        } else {
+            None
+        };
+        let cache = if let Some(owned) = owned {
+            self.last_bindings = None;
+            owned
+        } else {
+            &mut self.last_bindings
+        };
+        let bindings = if let Some(cached) = cache
+            .as_ref()
+            .filter(|cached| cached.matches(&pipeline, &uniform, &textures))
+        {
             cached.raw.clone()
         } else {
             let raw = pipeline
                 .create_bindings(uniform.clone(), &textures, &[], &self.samplers)
                 .map_err(|e| e.to_string())?;
-            self.last_bindings = Some(DrawBindings {
+            *cache = Some(DrawBindings {
                 pipeline: pipeline.clone(),
                 projection: uniform,
                 textures,

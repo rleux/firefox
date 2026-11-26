@@ -5,7 +5,7 @@
 use super::images::Image as Texture;
 use super::transfer::texture_format;
 
-use super::{wgt, Device, TextureFilter};
+use super::{render_device::DrawBindings, wgt, Device, TextureFilter};
 use crate::device::{
     DrawTarget, GpuFrameId, ReadTarget, Texture as TextureHandle, TextureFlags, TextureId,
     TextureSlot,
@@ -43,6 +43,7 @@ enum Binding {
 pub(super) struct TextureStore {
     owner: Arc<Device>,
     entries: FastHashMap<u32, Entry>,
+    composite_bindings: [(u32, Option<DrawBindings>); 32],
     depth_targets: FastHashMap<DeviceIntSize, SharedDepthTarget>,
 
     last_id: u32,
@@ -58,6 +59,7 @@ impl TextureStore {
         Self {
             owner: owner.clone(),
             entries: FastHashMap::default(),
+            composite_bindings: std::array::from_fn(|_| (0, None)),
             depth_targets: FastHashMap::default(),
 
             last_id: 0,
@@ -319,6 +321,37 @@ impl TextureStore {
         })
     }
 
+    // Keep descriptor-heap slots bounded, including scenes with many live textures.
+    pub fn composite_bindings(&mut self, slot: usize) -> Option<&mut Option<DrawBindings>> {
+        let Binding::Owned(id) = self.bound.get(slot)?.as_ref()? else {
+            return None;
+        };
+        if !matches!(
+            self.entries.get(id)?.color.format(),
+            wgt::TextureFormat::Rgba8Unorm | wgt::TextureFormat::Bgra8Unorm
+        ) {
+            return None;
+        }
+        let cached = &mut self.composite_bindings[*id as usize % 32];
+        if cached.0 != *id {
+            *cached = (*id, None);
+        }
+        Some(&mut cached.1)
+    }
+
+    pub fn clear_composite_cache(&mut self) {
+        for (_, bindings) in &mut self.composite_bindings {
+            *bindings = None;
+        }
+    }
+
+    fn clear_composite_bindings(&mut self, id: u32) {
+        let cached = &mut self.composite_bindings[id as usize % 32];
+        if cached.0 == id {
+            cached.1 = None;
+        }
+    }
+
     pub fn render_target(
         &self,
         id: TextureId,
@@ -393,6 +426,7 @@ impl TextureStore {
             self.entries.get_mut(&handle.id).unwrap().depth = None;
             self.release_depth_target(handle.size);
         }
+        self.clear_composite_bindings(handle.id);
         handle.render_target = Some(info);
         handle.last_frame_used = self.frame;
         Ok(())
@@ -404,6 +438,7 @@ impl TextureStore {
         }
         self.entry(handle)?;
         self.unbind_texture(handle.id);
+        self.clear_composite_bindings(handle.id);
         let entry = self.entries.remove(&handle.id).unwrap();
         if entry.depth.is_some() {
             self.release_depth_target(handle.size);
