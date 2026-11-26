@@ -22,6 +22,7 @@ pub struct NativeContext {
     pub queue: Arc<core::device::queue::Queue>,
     failed: AtomicBool,
     generation: u64,
+    wr_descriptor_heap: bool,
 }
 
 impl NativeContext {
@@ -38,7 +39,22 @@ impl NativeContext {
             queue,
             failed: AtomicBool::new(false),
             generation: GENERATION.fetch_add(1, Ordering::Relaxed),
+            wr_descriptor_heap: false,
         }
+    }
+
+    /// # Safety
+    /// The native device must have been opened with the WR descriptor-heap feature callback.
+    /// The source core device remains ordinary; only explicitly opened WR wrappers opt in.
+    pub unsafe fn new_with_wr_descriptor_heap(
+        instance: Arc<core::instance::Instance>,
+        adapter: Arc<core::instance::Adapter>,
+        device: Arc<core::device::Device>,
+        queue: Arc<core::device::queue::Queue>,
+    ) -> Self {
+        let mut context = Self::new(instance, adapter, device, queue);
+        context.wr_descriptor_heap = true;
+        context
     }
 
     pub fn generation(&self) -> u64 {
@@ -119,6 +135,33 @@ impl NativeContext {
         }
         open_device(adapter, &self.device, &self.queue, descriptor)
     }
+
+    /// Open a renderer wrapper, optionally using private descriptor-heap layouts.
+    ///
+    /// # Safety
+    /// When requesting heaps, the caller must restrict heap-only bind groups to
+    /// compatible single-group WR render pipelines with passthrough shaders,
+    /// no dynamic offsets or immediates, and no compute or bundle use.
+    pub unsafe fn open_for_webrender(
+        &self,
+        adapter: &Arc<core::instance::Adapter>,
+        descriptor: &core::device::DeviceDescriptor,
+        descriptor_heap: bool,
+    ) -> Result<
+        (Arc<core::device::Device>, Arc<core::device::queue::Queue>),
+        core::instance::RequestDeviceError,
+    > {
+        if !self.is_valid() {
+            return Err(core::device::DeviceError::Lost.into());
+        }
+        open_device_inner(
+            adapter,
+            &self.device,
+            &self.queue,
+            descriptor,
+            descriptor_heap && self.wr_descriptor_heap,
+        )
+    }
 }
 
 pub fn open_device(
@@ -126,6 +169,19 @@ pub fn open_device(
     source: &Arc<core::device::Device>,
     source_queue: &Arc<core::device::queue::Queue>,
     descriptor: &core::device::DeviceDescriptor,
+) -> Result<
+    (Arc<core::device::Device>, Arc<core::device::queue::Queue>),
+    core::instance::RequestDeviceError,
+> {
+    open_device_inner(adapter, source, source_queue, descriptor, false)
+}
+
+fn open_device_inner(
+    adapter: &Arc<core::instance::Adapter>,
+    source: &Arc<core::device::Device>,
+    source_queue: &Arc<core::device::queue::Queue>,
+    descriptor: &core::device::DeviceDescriptor,
+    descriptor_heap: bool,
 ) -> Result<
     (Arc<core::device::Device>, Arc<core::device::queue::Queue>),
     core::instance::RequestDeviceError,
@@ -156,6 +212,11 @@ pub fn open_device(
         )
     }
     .map_err(DeviceError::from_hal)?;
+    if descriptor_heap {
+        // The private context capability proves feature initialization. Activate before core
+        // creates Queue::PendingWrites, whose encoder is later recycled into user rendering.
+        unsafe { open.device.enable_wr_descriptor_heap() }.map_err(DeviceError::from_hal)?;
+    }
     // HAL checked native identity, enabled features and limits; core keeps an independent device identity.
     unsafe { adapter.create_device_and_queue_from_hal(open.into(), &descriptor) }
 }

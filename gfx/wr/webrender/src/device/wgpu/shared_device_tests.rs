@@ -156,7 +156,7 @@ fn shared_context_stops_admitting_devices_after_loss() {
     owner.check().unwrap();
 }
 
-fn round_trip(
+pub(super) fn round_trip(
     device: &Arc<core::device::Device>,
     queue: &Arc<core::device::queue::Queue>,
     seed: u8,
@@ -439,4 +439,109 @@ fn native_device_loss_stops_shared_context_admission() {
     assert!(wgpu_shared::NativeContext::active().is_none());
     assert!(context.open(&second.adapter, &Default::default()).is_err());
     assert!(second.check().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Requires descriptor heaps and Khronos synchronization validation"]
+fn shared_webgpu_keeps_heap_eligibility_private_to_renderer_wrappers() {
+    tests::validation_logging();
+    let errors = tests::VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let options = Options {
+        validation: true,
+        shared_webgpu: true,
+        descriptor_heap: true,
+        ..Default::default()
+    };
+    let first = Device::new(&options).unwrap();
+    let context = first
+        .shared
+        .as_ref()
+        .expect("Sharing must activate")
+        .clone();
+    let second = Device::new(&options).unwrap();
+    assert!(Arc::ptr_eq(&context, second.shared.as_ref().unwrap()));
+    assert!(first.descriptor_heap_enabled());
+    assert!(second.descriptor_heap_enabled());
+    let (producer, queue) = context
+        .open(
+            &first.adapter,
+            &core::device::DeviceDescriptor {
+                required_limits: first.adapter.limits(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!producer
+        .features()
+        .contains(wgt::Features::PASSTHROUGH_SHADERS));
+    for device in [&context.device, &producer] {
+        let raw = unsafe { device.clone().as_hal::<hal::api::Vulkan>() }.unwrap();
+        assert!(!raw.wr_descriptor_heap_enabled());
+        assert_eq!(
+            raw.raw_device().handle(),
+            first.raw_device().raw_device().handle()
+        );
+        assert_eq!(raw.raw_queue(), first.raw_device().raw_queue());
+    }
+    round_trip(&producer, &queue, 91);
+    let texture = producer
+        .create_texture_with_internal_sampling(&core::resource::TextureDescriptor {
+            label: Some("shared canvas on a heap-enabled native device".into()),
+            size: wgt::Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgt::TextureDimension::D2,
+            format: wgt::TextureFormat::Rgba8Unorm,
+            usage: wgt::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: vec![],
+        })
+        .unwrap();
+    let publication =
+        unsafe { CanvasPublication::seal(&context, &texture, &queue, 97, 101) }.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while unsafe { publication.poll_producer_on_owner_thread() } {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let consumer = publication.wrap(&first.device).unwrap().unwrap();
+    assert!(publication.matches_texture(&consumer));
+    consumer.destroy();
+    drop(first);
+    round_trip(&producer, &queue, 111);
+    second.check().unwrap();
+    assert_eq!(tests::VALIDATION_ERRORS.load(Ordering::Relaxed), errors);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Requires Vulkan and Khronos synchronization validation"]
+fn existing_shared_context_without_heap_features_keeps_sharing() {
+    tests::validation_logging();
+    let errors = tests::VALIDATION_ERRORS.load(Ordering::Relaxed);
+    let first = Device::new(&Options {
+        validation: true,
+        shared_webgpu: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = first.shared.as_ref().unwrap();
+    let second = Device::new(&Options {
+        validation: true,
+        shared_webgpu: true,
+        descriptor_heap: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(Arc::ptr_eq(context, second.shared.as_ref().unwrap()));
+    assert!(!first.descriptor_heap_enabled());
+    assert!(!second.descriptor_heap_enabled());
+    assert!(context.matches_device(&second.device));
+    round_trip(&second.device, &second.queue, 121);
+    first.check().unwrap();
+    assert_eq!(tests::VALIDATION_ERRORS.load(Ordering::Relaxed), errors);
 }

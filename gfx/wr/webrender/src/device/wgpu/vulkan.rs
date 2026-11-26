@@ -138,11 +138,6 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
     if descriptor_heap && !cfg!(target_os = "linux") {
         return Err("WR descriptor heap prototype currently supports Linux only".into());
     }
-    if descriptor_heap && options.shared_webgpu {
-        return Err(
-            "WR descriptor heaps require a dedicated device; shared WebGPU is unsupported".into(),
-        );
-    }
     let mut desc = core::device::DeviceDescriptor {
         label: Some("WebRender Vulkan".into()),
         required_features: adapter.features()
@@ -166,7 +161,10 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
         .map_err(|error| format!("Validating Vulkan device: {error}"))?;
     #[cfg(feature = "shared-webgpu")]
     if let Some(shared) = shared {
-        let (device, queue) = shared.open(&adapter, &desc).map_err(|e| e.to_string())?;
+        // SAFETY: Only WR records commands on this wrapper. Its heap path uses
+        // the private single-group render layouts and precompiled shader catalog.
+        let (device, queue) = unsafe { shared.open_for_webrender(&adapter, &desc, descriptor_heap) }
+            .map_err(|e| e.to_string())?;
         return Ok(Opened {
             instance,
             surface,
@@ -214,7 +212,7 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
         )
     }
     .map_err(|error| format!("Opening Vulkan device: {error}"))?;
-    if descriptor_heap {
+    if descriptor_heap && !(options.shared_webgpu && cfg!(feature = "shared-webgpu")) {
         unsafe { open.device.enable_wr_descriptor_heap() }
             .map_err(|error| format!("Enabling WR descriptor heap: {error}"))?;
         log::info!("Private WR descriptor heap prototype enabled");
@@ -224,13 +222,23 @@ pub(super) fn open(options: &Options) -> Result<Opened, String> {
     drop(raw_adapter);
     #[cfg(feature = "shared-webgpu")]
     if options.shared_webgpu {
-        let context = Arc::new(wgpu_shared::NativeContext::new(
-            instance.clone(),
-            adapter.clone(),
-            device,
-            queue,
-        ));
-        let (device, queue) = context.open(&adapter, &desc).map_err(|e| e.to_string())?;
+        let context = Arc::new(if descriptor_heap {
+            // The native device was opened with DeviceFeatures::callback above.
+            unsafe {
+                wgpu_shared::NativeContext::new_with_wr_descriptor_heap(
+                    instance.clone(),
+                    adapter.clone(),
+                    device,
+                    queue,
+                )
+            }
+        } else {
+            wgpu_shared::NativeContext::new(instance.clone(), adapter.clone(), device, queue)
+        });
+        // SAFETY: Only WR records commands on this wrapper. Its heap path uses
+        // the private single-group render layouts and precompiled shader catalog.
+        let (device, queue) = unsafe { context.open_for_webrender(&adapter, &desc, descriptor_heap) }
+            .map_err(|e| e.to_string())?;
         context.publish().map_err(str::to_owned)?;
         log::info!(
             "Shared Vulkan native context active on {}",

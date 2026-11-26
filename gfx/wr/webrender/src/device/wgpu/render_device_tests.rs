@@ -1205,18 +1205,25 @@ fn native_backend_poll_drives_completion_and_mapping_with_or_without_registry() 
 #[test]
 #[ignore = "Requires Vulkan and Khronos synchronization validation"]
 fn native_backend_descriptor_heap_mixed_mode_pixels_off() {
-    check_descriptor_heap_mixed_mode_pixels(false);
+    check_descriptor_heap_mixed_mode_pixels(false, false);
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "Requires descriptor heaps, diagnostics, and Khronos synchronization validation"]
 fn native_backend_descriptor_heap_mixed_mode_pixels_on() {
-    check_descriptor_heap_mixed_mode_pixels(true);
+    check_descriptor_heap_mixed_mode_pixels(true, false);
+}
+
+#[cfg(all(target_os = "linux", feature = "shared-webgpu"))]
+#[test]
+#[ignore = "Requires descriptor heaps, shared WebGPU and Khronos synchronization validation"]
+fn native_backend_descriptor_heap_mixed_mode_pixels_shared() {
+    check_descriptor_heap_mixed_mode_pixels(true, true);
 }
 
 #[cfg(target_os = "linux")]
-fn check_descriptor_heap_mixed_mode_pixels(descriptor_heap: bool) {
+fn check_descriptor_heap_mixed_mode_pixels(descriptor_heap: bool, shared_webgpu: bool) {
     use super::super::shader::{PreparedShader, ShaderLayouts};
     super::super::tests::validation_logging();
     let before = VALIDATION_ERRORS.load(Ordering::Relaxed);
@@ -1224,11 +1231,20 @@ fn check_descriptor_heap_mixed_mode_pixels(descriptor_heap: bool) {
         Device::new(&super::super::Options {
             validation: true,
             descriptor_heap,
+            shared_webgpu,
             ..Default::default()
         })
         .unwrap(),
     );
     assert_eq!(owner.descriptor_heap_enabled(), descriptor_heap);
+    #[cfg(feature = "shared-webgpu")]
+    assert_eq!(owner.shared.is_some(), shared_webgpu);
+    #[cfg(feature = "shared-webgpu")]
+    if shared_webgpu {
+        // Submit and retire pending writes before drawing, so the encoder pool
+        // can hand the renderer an encoder created during core queue startup.
+        super::super::shared_device_tests::round_trip(&owner.device, &owner.queue, 23);
+    }
     let mut native = RenderDevice::new(owner.clone()).unwrap();
     let size = DeviceIntSize::new(8, 1);
     let shader = select_draw_shader("cs_scale", &["TEXTURE_2D"], false).unwrap();

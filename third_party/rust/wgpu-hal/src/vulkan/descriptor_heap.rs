@@ -945,9 +945,10 @@ impl Drop for HeapDevice {
     }
 }
 impl super::Device {
-    /// Enable only on a fresh, dedicated trusted-WR device opened using DeviceFeatures::callback.
+    /// Enable only on a fresh trusted-WR HAL wrapper of a device opened using DeviceFeatures::callback.
     /// Heap-only layouts must use one group, passthrough shaders, zero dynamic offsets and no immediates.
-    /// The device must not be shared with WebGPU or use render bundles/compute with heap-only layouts.
+    /// Other wrappers of the native device must retain their own disabled heap state.
+    /// Heap-only layouts must not be used with render bundles or compute.
     pub unsafe fn enable_wr_descriptor_heap(&self) -> Result<(), crate::DeviceError> {
         if !self.shared.enabled_extensions.contains(&NAME) {
             return Err(crate::DeviceError::Unexpected);
