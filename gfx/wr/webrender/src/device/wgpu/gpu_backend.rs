@@ -834,6 +834,7 @@ impl wr::GpuBackend for RenderDevice {
         }
         self.encoder = None;
         self.ordered_commands.clear();
+        self.instances = InstanceArena::default();
         #[cfg(target_os = "linux")]
         if let Some(native) = &self.external_images {
             native.retire();

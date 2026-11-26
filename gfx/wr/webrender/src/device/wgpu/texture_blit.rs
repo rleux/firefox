@@ -230,7 +230,6 @@ impl RenderDevice {
                 depth_load: LoadOp::Load,
             },
             pending: vec![draw],
-            instances: InstanceArena::default(),
         });
         let result = self.flush_pass(StoreOp::Store);
         self.pass = previous;

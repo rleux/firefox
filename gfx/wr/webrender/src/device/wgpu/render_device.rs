@@ -45,7 +45,7 @@ struct InstanceSlice {
 }
 
 #[derive(Default)]
-// Pages stay mapped only while their draws are pending; sealed bytes are never reused.
+// Pages stay mapped while the encoder records its passes and are sealed before finish.
 struct InstanceArena {
     pages: Vec<Arc<core::resource::Buffer>>,
     used: u64,
@@ -148,7 +148,6 @@ struct Pass {
     scissor: Option<DeviceIntRect>,
     started: bool,
     pending: Vec<Draw>,
-    instances: InstanceArena,
 }
 
 pub(in crate::device) struct RenderDevice {
@@ -160,6 +159,7 @@ pub(in crate::device) struct RenderDevice {
     uploads: UploadBuffers,
     encoder: Option<Arc<core::command::CommandEncoder>>,
     ordered_commands: Vec<Arc<core::command::CommandBuffer>>,
+    instances: InstanceArena,
     #[cfg(target_os = "linux")]
     external_images: Option<std::rc::Rc<super::ExternalTextureRegistry>>,
     pass: Option<Pass>,
@@ -244,6 +244,7 @@ impl RenderDevice {
             uploads: UploadBuffers::default(),
             encoder: None,
             ordered_commands: Vec::new(),
+            instances: InstanceArena::default(),
             #[cfg(target_os = "linux")]
             external_images: super::ExternalTextureRegistry::new(&owner).ok(),
             pass: None,
@@ -317,6 +318,7 @@ impl RenderDevice {
                 self.pass = None;
                 self.last_bindings = None;
                 self.ordered_commands.clear();
+                self.instances = InstanceArena::default();
                 #[cfg(target_os = "linux")]
                 if let Some(native) = &self.external_images {
                     native.abort();
@@ -370,15 +372,21 @@ impl RenderDevice {
         }
         Ok(self.encoder.as_ref().unwrap().clone())
     }
+    fn finish_encoder(&mut self) -> Result<Option<Arc<core::command::CommandBuffer>>> {
+        let Some(encoder) = self.encoder.take() else {
+            return Ok(None);
+        };
+        self.instances.seal(&self.owner)?;
+        Ok(Some(encoder.finish(&wgt::CommandBufferDescriptor::default())))
+    }
     fn collect_native_commands(&mut self) -> Result<()> {
         #[cfg(target_os = "linux")]
         if let Some(native) = &self.external_images {
             let commands = native.take_commands();
             if !commands.is_empty() {
                 self.flush_pass(StoreOp::Store)?;
-                if let Some(encoder) = self.encoder.take() {
-                    self.ordered_commands
-                        .push(encoder.finish(&wgt::CommandBufferDescriptor::default()));
+                if let Some(commands) = self.finish_encoder()? {
+                    self.ordered_commands.push(commands);
                 }
                 self.ordered_commands.extend(commands);
             }
@@ -424,8 +432,8 @@ impl RenderDevice {
         }
         self.collect_native_commands()?;
         let mut commands = std::mem::take(&mut self.ordered_commands);
-        if let Some(encoder) = self.encoder.take() {
-            commands.push(encoder.finish(&wgt::CommandBufferDescriptor::default()));
+        if let Some(buffer) = self.finish_encoder()? {
+            commands.push(buffer);
         }
         #[cfg(target_os = "linux")]
         let index = if let Some(native) = &self.external_images {
@@ -581,7 +589,6 @@ impl RenderDevice {
             scissor: None,
             started: false,
             pending: Vec::new(),
-            instances: InstanceArena::default(),
         });
         Ok(())
     }
@@ -635,7 +642,6 @@ impl RenderDevice {
                 pass.pending.insert(0, clear);
             }
         }
-        pass.instances.seal(&self.owner)?;
         let encoder = self.commands()?;
         let mut native = encoder.begin_render_pass(core::command::ResolvedRenderPassDescriptor {
             label: Some("WR render pass".into()),
@@ -1004,12 +1010,7 @@ impl RenderDevice {
                         ..usize::try_from(end).map_err(|e| e.to_string())?,
                 )
                 .ok_or("Vulkan draw exceeds instance data")?;
-            let instance_buffer = self
-                .pass
-                .as_mut()
-                .unwrap()
-                .instances
-                .append(&self.owner, bytes)?;
+            let instance_buffer = self.instances.append(&self.owner, bytes)?;
             (
                 self.quad.clone(),
                 Some(instance_buffer),
