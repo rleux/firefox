@@ -249,7 +249,8 @@ pub extern "C" fn wr_vulkan_process_native_work(
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     {
         let mut pending = webrender::wgpu::poll_retired_native_images();
-        if let Some(images) = images {
+        // The global pass already visited every attached registry on this thread.
+        if let Some(images) = images.filter(|images| !images.registry.is_attached()) {
             let _ = images.registry.flush_idle();
             let _ = images.registry.poll();
             pending |= images.registry.pending_work();

@@ -295,8 +295,13 @@ void RenderCompositorVulkan::UnlockExternalImage(RenderTextureHost* aHost) {
   }
 }
 void RenderCompositorVulkan::AfterRender(bool) {
-  wr_vulkan_process_native_work(mExternalImages.get(), nullptr);
-  RenderThread::Get()->NativeImages().Schedule();
+  bool progress = false;
+  if (wr_vulkan_process_native_work(mExternalImages.get(), &progress)) {
+    RenderThread::Get()->NativeImages().Schedule();
+  }
+  if (progress) {
+    RenderThread::Get()->WakePendingNativeImages();
+  }
 }
 
 bool RenderCompositorVulkan::SetSurface(const WrVulkanConfig* aConfig) {

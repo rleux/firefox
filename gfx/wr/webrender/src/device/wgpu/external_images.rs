@@ -266,7 +266,7 @@ pub fn poll_retired_native_images() -> bool {
         active.borrow_mut().retain(|weak| weak.strong_count() != 0);
         live
     });
-    for context in &live {
+    for context in live.iter().filter(|context| context.pending_work()) {
         let _ = context.flush_idle();
         let _ = context.poll();
     }
