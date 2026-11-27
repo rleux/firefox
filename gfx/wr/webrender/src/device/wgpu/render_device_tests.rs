@@ -214,7 +214,14 @@ fn check_streamed_instances(primary_mapping: Option<bool>) {
             slice.size,
         )
     };
-    let mut recorded: Vec<_> = native.pass.as_ref().unwrap().pending.iter().map(capture).collect();
+    let mut recorded: Vec<_> = native
+        .pass
+        .as_ref()
+        .unwrap()
+        .pending
+        .iter()
+        .map(capture)
+        .collect();
     native.end_render_pass(StoreOp::Store).unwrap();
     assert!(recorded[0].1.get_mapped_range(0, Some(32)).is_ok());
     native
@@ -1737,7 +1744,14 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
         .collect();
     let mut previous: Vec<Arc<core::binding_model::BindGroup>> = Vec::new();
     let mut collisions = Vec::new();
+    let mut previous_geometry: Vec<InstanceSlice> = Vec::new();
     for frame in 0..6 {
+        if frame == 1 {
+            // A pending/resource-only frame must not evict reusable compositor data.
+            native.begin_frame().unwrap();
+            native.end_frame().unwrap();
+            assert!(native.composite_geometry.entries[0].is_some());
+        }
         native.begin_frame().unwrap();
         if frame == 5 {
             for _ in 0..31 {
@@ -1776,10 +1790,18 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
             &Transform3D::ortho(0., if frame < 3 { 4. } else { 8. }, 0., 1., -1., 1.),
         );
         let mut current = Vec::new();
+        let mut current_geometry = Vec::new();
         for (index, source) in sources.iter().enumerate() {
             GpuBackend::bind_texture(&mut native, TextureSlot(0), source, Swizzle::default());
             let rect = DeviceRect::new(
-                DevicePoint::new(index as f32 * 2., 0.),
+                DevicePoint::new(
+                    if frame == 2 && index == 0 {
+                        1.
+                    } else {
+                        index as f32 * 2.
+                    },
+                    0.,
+                ),
                 DevicePoint::new(index as f32 * 2. + 2., 1.),
             );
             let data = [CompositeInstance::new(
@@ -1804,6 +1826,19 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
             let bindings = native.pass.as_ref().unwrap().pending[index]
                 .bindings
                 .clone();
+            let geometry = native.pass.as_ref().unwrap().pending[index]
+                .instances
+                .as_ref()
+                .unwrap()
+                .clone();
+            if let Some(old) = previous_geometry.get(index) {
+                let hit = index == 1 || frame == 1 || frame >= 4;
+                assert_eq!(
+                    Arc::ptr_eq(&old.buffer, &geometry.buffer) && old.offset == geometry.offset,
+                    hit
+                );
+            }
+            current_geometry.push(geometry);
             if !previous.is_empty() {
                 assert_eq!(
                     Arc::ptr_eq(&bindings, &previous[index]),
@@ -1835,8 +1870,24 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
             ));
             current.push(bindings);
         }
+        if frame == 1 || frame >= 4 {
+            assert!(
+                native.instances.pages.is_empty(),
+                "Hits must not allocate/map an arena page"
+            );
+        } else {
+            let entry = native.composite_geometry.entries[0].as_ref().unwrap();
+            assert!(
+                native.composite_geometry.get(0, &entry.bytes).is_none(),
+                "Do not reuse mapped pages"
+            );
+        }
         native.end_render_pass(StoreOp::Store).unwrap();
         native.end_frame().unwrap();
+        for entry in native.composite_geometry.entries.iter().flatten() {
+            assert!(entry.bytes.len() <= CompositeGeometry::MAX_BYTES);
+            assert!(entry.slice.buffer.size() <= InstanceArena::PAGE_SIZE);
+        }
         let image = native.textures.read_target(ReadTarget::Default).unwrap();
         let mut pixels = [0; 16];
         native
@@ -1849,7 +1900,11 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
             .unwrap();
         assert_eq!(
             pixels,
-            if frame < 3 {
+            if frame == 2 {
+                [
+                    0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
+                ]
+            } else if frame < 3 {
                 [
                     255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
                 ]
@@ -1860,7 +1915,10 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
             }
         );
         previous = current;
+        previous_geometry = current_geometry;
     }
+    let geometry_released = Arc::downgrade(&previous_geometry[0].buffer);
+    previous_geometry.clear();
     let released = [Arc::downgrade(&previous[0]), Arc::downgrade(&previous[1])];
     previous.clear();
     owner.wait_for(native.submitted).unwrap();
@@ -1904,5 +1962,20 @@ fn native_backend_caches_owned_composite_bindings_at_texture_lifetime() {
     GpuBackend::delete_buffer(&mut native, vertices);
     GpuBackend::delete_buffer(&mut native, instances);
     GpuBackend::deinit(&mut native);
+    assert!(geometry_released.upgrade().is_none());
     assert_eq!(VALIDATION_ERRORS.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn composite_geometry_limits_count_oversize_draws_in_the_ordinal() {
+    let mut cache = CompositeGeometry::default();
+    assert_eq!(cache.next_slot(CompositeGeometry::MAX_BYTES), Some(0));
+    assert_eq!(cache.next_slot(CompositeGeometry::MAX_BYTES + 1), None);
+    assert_eq!(cache.next_slot(0), None);
+    for index in 3..32 {
+        assert_eq!(cache.next_slot(1), Some(index));
+    }
+    assert_eq!(cache.next_slot(1), None);
+    cache.next = 0;
+    assert_eq!(cache.next_slot(1), Some(0));
 }

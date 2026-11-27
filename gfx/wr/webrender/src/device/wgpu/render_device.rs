@@ -38,10 +38,78 @@ struct Draw {
     depth: std::ops::Range<f32>,
 }
 
+#[derive(Clone)]
 struct InstanceSlice {
     buffer: Arc<core::resource::Buffer>,
     offset: u64,
     size: u64,
+}
+
+struct CompositeGeometryEntry {
+    bytes: Vec<u8>,
+    slice: InstanceSlice,
+    generation: u64,
+}
+
+struct CompositeGeometry {
+    entries: [Option<CompositeGeometryEntry>; 32],
+    next: usize,
+    generation: u64,
+}
+impl Default for CompositeGeometry {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            next: 0,
+            generation: 0,
+        }
+    }
+}
+impl CompositeGeometry {
+    const MAX_BYTES: usize = 4 * 1024;
+
+    fn next_slot(&mut self, length: usize) -> Option<usize> {
+        if self.next == self.entries.len() {
+            return None;
+        }
+        let index = self.next;
+        self.next += 1;
+        if length == 0 || length > Self::MAX_BYTES {
+            self.entries[index] = None;
+            return None;
+        }
+        Some(index)
+    }
+    fn get(&self, index: usize, bytes: &[u8]) -> Option<InstanceSlice> {
+        self.entries[index]
+            .as_ref()
+            .filter(|entry| entry.generation != self.generation && entry.bytes == bytes)
+            .map(|entry| entry.slice.clone())
+    }
+    fn remember(&mut self, index: usize, bytes: &[u8], slice: &InstanceSlice) {
+        // Retain only small arena pages. Cache allocation failure must not fail a draw.
+        if slice.buffer.size() > InstanceArena::PAGE_SIZE {
+            self.entries[index] = None;
+            return;
+        }
+        let mut key = self.entries[index]
+            .take()
+            .map_or_else(Vec::new, |entry| entry.bytes);
+        key.clear();
+        if key.try_reserve(bytes.len()).is_err() {
+            return;
+        }
+        key.extend_from_slice(bytes);
+        self.entries[index] = Some(CompositeGeometryEntry {
+            bytes: key,
+            slice: slice.clone(),
+            generation: self.generation,
+        });
+    }
+    fn seal(&mut self) {
+        // A wrap can only turn an ancient sealed entry into a miss.
+        self.generation = self.generation.wrapping_add(1);
+    }
 }
 
 #[derive(Default)]
@@ -182,6 +250,7 @@ pub(in crate::device) struct RenderDevice {
     encoder: Option<Arc<core::command::CommandEncoder>>,
     ordered_commands: Vec<Arc<core::command::CommandBuffer>>,
     instances: InstanceArena,
+    composite_geometry: CompositeGeometry,
     #[cfg(target_os = "linux")]
     external_images: Option<std::rc::Rc<super::ExternalTextureRegistry>>,
     pass: Option<Pass>,
@@ -267,6 +336,7 @@ impl RenderDevice {
             encoder: None,
             ordered_commands: Vec::new(),
             instances: InstanceArena::default(),
+            composite_geometry: CompositeGeometry::default(),
             #[cfg(target_os = "linux")]
             external_images: super::ExternalTextureRegistry::new(&owner).ok(),
             pass: None,
@@ -342,6 +412,7 @@ impl RenderDevice {
                 self.textures.clear_composite_cache();
                 self.ordered_commands.clear();
                 self.instances = InstanceArena::default();
+                self.composite_geometry = CompositeGeometry::default();
                 #[cfg(target_os = "linux")]
                 if let Some(native) = &self.external_images {
                     native.abort();
@@ -400,7 +471,10 @@ impl RenderDevice {
             return Ok(None);
         };
         self.instances.seal(&self.owner)?;
-        Ok(Some(encoder.finish(&wgt::CommandBufferDescriptor::default())))
+        self.composite_geometry.seal();
+        Ok(Some(
+            encoder.finish(&wgt::CommandBufferDescriptor::default()),
+        ))
     }
     fn collect_native_commands(&mut self) -> Result<()> {
         #[cfg(target_os = "linux")]
@@ -517,6 +591,7 @@ impl RenderDevice {
                 .ok_or("Vulkan frame identifiers exhausted")?,
         );
         self.inside_frame = true;
+        self.composite_geometry.next = 0;
         self.capture_this_frame = std::mem::take(&mut self.capture_pending);
         #[cfg(target_os = "linux")]
         if let Some(native) = &self.external_images {
@@ -1034,7 +1109,24 @@ impl RenderDevice {
                         ..usize::try_from(end).map_err(|e| e.to_string())?,
                 )
                 .ok_or("Vulkan draw exceeds instance data")?;
-            let instance_buffer = self.instances.append(&self.owner, bytes)?;
+            // Ordinal is only a lookup hint; exact bytes prove reusable geometry.
+            let slot = if program.shader.name == "composite" {
+                self.composite_geometry.next_slot(bytes.len())
+            } else {
+                None
+            };
+            let instance_buffer = if let Some(slice) =
+                slot.and_then(|index| self.composite_geometry.get(index, bytes))
+            {
+                self.owner.check().map_err(|e| e.to_string())?;
+                slice
+            } else {
+                let slice = self.instances.append(&self.owner, bytes)?;
+                if let Some(index) = slot {
+                    self.composite_geometry.remember(index, bytes, &slice);
+                }
+                slice
+            };
             (
                 self.quad.clone(),
                 Some(instance_buffer),
